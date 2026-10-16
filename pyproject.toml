@@ -1,0 +1,20 @@
+# Виртуальный корень uv workspace: сам не пакет и без секции [project].
+# Так `uv sync` и `uv run` из корня ставят все пакеты workspace (engine и server);
+# с [project] и package = false они бы ставили только зависимости корня.
+[tool.uv.workspace]
+members = ["services/engine", "services/server"]
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.7"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+extend-exclude = ["services/webapp", "loop-engineering"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["services/engine/tests", "services/server/tests"]

@@ -1,0 +1,31 @@
+[project]
+name = "dnd-server"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "dnd-engine",
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy[asyncio]>=2",
+    "aiosqlite",
+    "alembic",
+    "pydantic-settings",
+    "aiogram>=3",
+    "anthropic",
+    "openai",
+    "mcp>=2",
+    "httpx",
+    "itsdangerous",
+    "pyyaml",
+]
+
+[project.scripts]
+dnd-server = "dnd_server.__main__:main"
+dnd-generate = "dnd_server.authoring.cli:main"
+
+[tool.uv.sources]
+dnd-engine = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.9,<1"]
+build-backend = "uv_build"

@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "types": ["node", "vitest/globals"],
+    "skipLibCheck": true,
+
+    /* Модули как в Node (nodenext) */
+    "module": "nodenext",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Строгие проверки */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  /* Код, который работает в Node: конфиг Vite и тест этого конфига. Тест лежит */
+  /* здесь, а не в src, чтобы типы Node не попали в браузерный tsconfig.app.json. */
+  "include": ["vite.config.ts", "vite-config.test.ts"]
+}
