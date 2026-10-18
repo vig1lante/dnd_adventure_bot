@@ -1,0 +1,31 @@
+- id: fire_bolt
+  name: Огненный снаряд
+  name_en: Fire Bolt
+  level: 0
+  casting_time: action
+  range: far
+  concentration: false
+  duration_rounds: null
+  classes: [wizard]
+  effect:
+    kind: attack
+    attack: ranged
+    damage: 1d10
+    damage_type: fire
+  summary: Бросок атаки заклинанием, урон огнём.
+- id: magic_missile
+  name: Волшебная стрела
+  name_en: Magic Missile
+  level: 1
+  casting_time: action
+  range: far
+  concentration: false
+  duration_rounds: null
+  classes: [wizard]
+  effect:
+    kind: auto
+    damage: 1d4+1
+    damage_type: force
+    repeats: 3
+  upcast: 1d4+1
+  summary: Три дротика силового урона, попадают без броска атаки.

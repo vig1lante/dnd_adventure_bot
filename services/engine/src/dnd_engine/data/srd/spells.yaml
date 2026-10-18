@@ -1,0 +1,345 @@
+# Заклинания SRD 5.2.1 (CC BY 4.0) для жреца, волшебника и следопыта: заговоры и уровни 1–2.
+# Краткий пересказ своими словами, не копия текста.
+#
+# Соглашения:
+# - classes — только классы среза (cleric, wizard, ranger) из списков заклинаний SRD.
+# - range: self, touch; near — до 60 футов (рядом); far — дальше 60 футов (далеко).
+# - duration_rounds — длительность в раундах по 6 секунд (минута — 10, час — 600); null —
+#   мгновенное заклинание. У заклинаний с концентрацией длительность обязательна.
+# - effect.kind: attack — бросок атаки заклинанием; save — спасбросок цели; auto — урон без броска;
+#   heal — лечение; buff — ActiveBuff с id из effect.buff; condition — ActiveCondition;
+#   utility — только событие для рассказа (или эффект, который движок не считает полями).
+#   У kind: attack/save поле buff или condition — дополнительный эффект при попадании или
+#   провале спасброска. Лечение (cure_wounds, healing_word) SRD дополняет модификатором
+#   заклинательной характеристики: движок прибавляет его сам.
+# - targets — наибольшее число целей; у заклинаний по площади (конус, куб, сфера) это 6, предел
+#   по числу участников. repeats — число бросков (дротиков, лучей).
+# - upcast — добавка кубов или чисел за каждый уровень ячейки выше уровня заклинания; если
+#   за ячейку растёт что-то иное (число целей, дротиков, время), оно описано в summary.
+#   Исключение — заклинания с repeats (magic_missile, scorching_ray): их upcast равен урону
+#   одного дополнительного дротика или луча (repeats растёт на 1 за уровень ячейки), а не добавке
+#   к каждому из уже существующих; урон прежних дротиков и лучей не меняется.
+
+# --- заговоры ---
+- id: sacred_flame
+  name: Священное пламя
+  name_en: Sacred Flame
+  level: 0
+  casting_time: action
+  range: near
+  concentration: false
+  duration_rounds: null
+  classes: [cleric]
+  effect: {kind: save, save: dex, damage: 1d8, damage_type: radiant}
+  summary: "Цель в 60 футах делает спасбросок Ловкости, при провале получает 1к8 урона излучением. Укрытие ей не помогает."
+- id: guidance
+  name: Указание
+  name_en: Guidance
+  level: 0
+  casting_time: action
+  range: touch
+  concentration: true
+  duration_rounds: 10
+  classes: [cleric]
+  effect: {kind: buff, buff: guidance}
+  summary: "Согласное существо добавляет 1к4 к проверкам выбранного навыка. Концентрация, до минуты."
+- id: spare_the_dying
+  name: Уход за умирающим
+  name_en: Spare the Dying
+  level: 0
+  casting_time: action
+  range: near
+  concentration: false
+  duration_rounds: null
+  classes: [cleric]
+  effect: {kind: utility}
+  summary: "Существо с 0 HP в пределах 15 футов становится стабильным. Это эффект на id заклинания: полями он не описан."
+- id: fire_bolt
+  name: Огненный снаряд
+  name_en: Fire Bolt
+  level: 0
+  casting_time: action
+  range: far
+  concentration: false
+  duration_rounds: null
+  classes: [wizard]
+  effect: {kind: attack, attack: ranged, damage: 1d10, damage_type: fire}
+  summary: "Дальнобойная атака заклинанием на 120 футов: 1к10 урона огнём."
+- id: ray_of_frost
+  name: Луч холода
+  name_en: Ray of Frost
+  level: 0
+  casting_time: action
+  range: near
+  concentration: false
+  duration_rounds: null
+  classes: [wizard]
+  effect: {kind: attack, attack: ranged, damage: 1d8, damage_type: cold}
+  summary: "Дальнобойная атака заклинанием на 60 футов: 1к8 урона холодом, скорость цели падает на 10 футов до начала вашего следующего хода."
+- id: shocking_grasp
+  name: Электрошок
+  name_en: Shocking Grasp
+  level: 0
+  casting_time: action
+  range: touch
+  concentration: false
+  duration_rounds: null
+  classes: [wizard]
+  effect: {kind: attack, attack: melee, damage: 1d8, damage_type: lightning}
+  summary: "Рукопашная атака заклинанием: 1к8 урона электричеством; цель не может совершать атаки по возможности до начала своего следующего хода."
+- id: mage_hand
+  name: Волшебная рука
+  name_en: Mage Hand
+  level: 0
+  casting_time: action
+  range: near
+  concentration: false
+  duration_rounds: 10
+  classes: [wizard]
+  effect: {kind: utility}
+  summary: "Призрачная рука на минуту двигает предметы, открывает незапертое и достаёт вещи на расстоянии до 30 футов; атаковать ей нельзя."
+- id: light
+  name: Свет
+  name_en: Light
+  level: 0
+  casting_time: action
+  range: touch
+  concentration: false
+  duration_rounds: 600
+  classes: [cleric, wizard]
+  effect: {kind: utility}
+  summary: "Предмет на час светится ярким светом на 20 футов и тусклым ещё на 20."
+
+# --- 1-й уровень ---
+- id: magic_missile
+  name: Волшебная стрела
+  name_en: Magic Missile
+  level: 1
+  casting_time: action
+  range: far
+  concentration: false
+  duration_rounds: null
+  classes: [wizard]
+  effect: {kind: auto, damage: 1d4+1, damage_type: force, targets: 3, repeats: 3}
+  upcast: 1d4+1
+  summary: "Три дротика силы по 1к4 + 1 урона без броска атаки; их можно направить в разные цели. Каждый уровень ячейки выше первого добавляет дротик."
+- id: sleep
+  name: Усыпление
+  name_en: Sleep
+  level: 1
+  casting_time: action
+  range: near
+  concentration: true
+  duration_rounds: 10
+  classes: [wizard]
+  effect: {kind: condition, save: wis, condition: incapacitated, targets: 6}
+  summary: "Существа в сфере радиусом 5 футов делают спасбросок Мудрости: при провале они недееспособны, потом повторяют его и при втором провале теряют сознание. Эльфы и не спящие существа проходят его сами. Концентрация."
+- id: burning_hands
+  name: Огненные ладони
+  name_en: Burning Hands
+  level: 1
+  casting_time: action
+  range: self
+  concentration: false
+  duration_rounds: null
+  classes: [wizard]
+  effect: {kind: save, save: dex, damage: 3d6, damage_type: fire, half_on_save: true, targets: 6}
+  upcast: 1d6
+  summary: "Конус огня 15 футов: спасбросок Ловкости, при провале 3к6 урона огнём, при успехе половина. Каждый уровень ячейки выше первого добавляет 1к6."
+- id: thunderwave
+  name: Волна грома
+  name_en: Thunderwave
+  level: 1
+  casting_time: action
+  range: self
+  concentration: false
+  duration_rounds: null
+  classes: [wizard]
+  effect: {kind: save, save: con, damage: 2d8, damage_type: thunder, half_on_save: true, targets: 6}
+  upcast: 1d8
+  summary: "Куб 15 футов от вас: спасбросок Телосложения, при провале 2к8 урона звуком и отталкивание на 10 футов, при успехе половина урона. Каждый уровень выше первого добавляет 1к8."
+- id: mage_armor
+  name: Доспехи мага
+  name_en: Mage Armor
+  level: 1
+  casting_time: action
+  range: touch
+  concentration: false
+  duration_rounds: 4800
+  classes: [wizard]
+  effect: {kind: buff, buff: mage_armor}
+  summary: "Существо без доспехов на 8 часов получает базовый КД 13 + Лов. Заклинание кончается, если надеть доспех."
+- id: cure_wounds
+  name: Лечение ран
+  name_en: Cure Wounds
+  level: 1
+  casting_time: action
+  range: touch
+  concentration: false
+  duration_rounds: null
+  classes: [cleric, ranger]
+  effect: {kind: heal, heal: 2d8}
+  upcast: 2d8
+  summary: "Существо, которого вы касаетесь, восстанавливает 2к8 + модификатор заклинательной характеристики HP. Каждый уровень ячейки выше первого добавляет 2к8."
+- id: healing_word
+  name: Лечащее слово
+  name_en: Healing Word
+  level: 1
+  casting_time: bonus_action
+  range: near
+  concentration: false
+  duration_rounds: null
+  classes: [cleric]
+  effect: {kind: heal, heal: 2d4}
+  upcast: 2d4
+  summary: "Бонусным действием: существо в 60 футах восстанавливает 2к4 + модификатор заклинательной характеристики HP. Каждый уровень ячейки выше первого добавляет 2к4."
+- id: bless
+  name: Благословение
+  name_en: Bless
+  level: 1
+  casting_time: action
+  range: near
+  concentration: true
+  duration_rounds: 10
+  classes: [cleric]
+  effect: {kind: buff, buff: bless, targets: 3}
+  summary: "До трёх существ добавляют 1к4 к броскам атаки и спасброскам. Концентрация, до минуты. Каждый уровень ячейки выше первого добавляет одну цель."
+- id: guiding_bolt
+  name: Направленный снаряд
+  name_en: Guiding Bolt
+  level: 1
+  casting_time: action
+  range: far
+  concentration: false
+  duration_rounds: 1
+  classes: [cleric]
+  effect: {kind: attack, attack: ranged, damage: 4d6, damage_type: radiant, buff: guiding_bolt}
+  upcast: 1d6
+  summary: "Дальнобойная атака заклинанием: 4к6 урона излучением, а следующая атака по цели до конца вашего следующего хода идёт с преимуществом. Каждый уровень выше первого добавляет 1к6."
+- id: inflict_wounds
+  name: Нанесение ран
+  name_en: Inflict Wounds
+  level: 1
+  casting_time: action
+  range: touch
+  concentration: false
+  duration_rounds: null
+  classes: [cleric]
+  effect: {kind: save, save: con, damage: 2d10, damage_type: necrotic, half_on_save: true}
+  upcast: 1d10
+  summary: "Касание: спасбросок Телосложения, при провале 2к10 урона некротической энергией, при успехе половина. Каждый уровень ячейки выше первого добавляет 1к10."
+- id: hunters_mark
+  name: Метка охотника
+  name_en: Hunter's Mark
+  level: 1
+  casting_time: bonus_action
+  range: far
+  concentration: true
+  duration_rounds: 600
+  classes: [ranger]
+  effect: {kind: buff, buff: hunters_mark}
+  summary: "Бонусным действием помечает существо в 90 футах: каждое попадание по нему наносит ещё 1к6 урона силовым полем. Концентрация, до часа."
+- id: goodberry
+  name: Чудо-ягоды
+  name_en: Goodberry
+  level: 1
+  casting_time: action
+  range: self
+  concentration: false
+  duration_rounds: 14400
+  classes: [ranger]
+  effect: {kind: utility}
+  summary: "Десять волшебных ягод на сутки. Съесть ягоду — бонусное действие: возвращает 1 HP и кормит на день."
+- id: fog_cloud
+  name: Туманное облако
+  name_en: Fog Cloud
+  level: 1
+  casting_time: action
+  range: far
+  concentration: true
+  duration_rounds: 600
+  classes: [ranger, wizard]
+  effect: {kind: utility}
+  summary: "Сфера тумана радиусом 20 футов, внутри которой всё сильно заслонено. Концентрация, до часа."
+- id: detect_magic
+  name: Обнаружение магии
+  name_en: Detect Magic
+  level: 1
+  casting_time: action
+  range: self
+  concentration: true
+  duration_rounds: 100
+  classes: [cleric, ranger, wizard]
+  effect: {kind: utility}
+  summary: "Чувствует магические эффекты в 30 футах; можно разглядеть ауры и узнать школу магии. Стены и свинец мешают. Концентрация, до 10 минут."
+
+# --- 2-й уровень ---
+- id: scorching_ray
+  name: Палящий луч
+  name_en: Scorching Ray
+  level: 2
+  casting_time: action
+  range: far
+  concentration: false
+  duration_rounds: null
+  classes: [wizard]
+  effect: {kind: attack, attack: ranged, damage: 2d6, damage_type: fire, targets: 3, repeats: 3}
+  upcast: 2d6
+  summary: "Три огненных луча в одну или несколько целей, на каждый своя дальнобойная атака заклинанием: 2к6 урона огнём. Каждый уровень ячейки выше второго добавляет луч."
+- id: misty_step
+  name: Туманный шаг
+  name_en: Misty Step
+  level: 2
+  casting_time: bonus_action
+  range: self
+  concentration: false
+  duration_rounds: null
+  classes: [wizard]
+  effect: {kind: utility}
+  summary: "Бонусным действием: телепортация на 30 футов в видимое свободное место."
+- id: hold_person
+  name: Удержание личности
+  name_en: Hold Person
+  level: 2
+  casting_time: action
+  range: near
+  concentration: true
+  duration_rounds: 10
+  classes: [cleric, wizard]
+  effect: {kind: condition, save: wis, condition: paralyzed}
+  summary: "Гуманоид делает спасбросок Мудрости, при провале он парализован и повторяет спасбросок в конце каждого своего хода. Концентрация, до минуты. Каждый уровень выше второго добавляет одну цель."
+- id: aid
+  name: Подмога
+  name_en: Aid
+  level: 2
+  casting_time: action
+  range: near
+  concentration: false
+  duration_rounds: 4800
+  classes: [cleric, ranger]
+  effect: {kind: buff, buff: aid, targets: 3}
+  upcast: "5"
+  summary: "До трёх существ на 8 часов получают +5 к максимуму и текущим HP. Каждый уровень ячейки выше второго добавляет ещё +5."
+- id: lesser_restoration
+  name: Малое восстановление
+  name_en: Lesser Restoration
+  level: 2
+  casting_time: bonus_action
+  range: touch
+  concentration: false
+  duration_rounds: null
+  classes: [cleric, ranger]
+  effect: {kind: utility}
+  summary: "Касанием снимает с существа одно состояние: ослеплён, оглушён, парализован или отравлен. Выбор состояния — на id заклинания: полями он не описан."
+- id: prayer_of_healing
+  name: Молитва исцеления
+  name_en: Prayer of Healing
+  level: 2
+  casting_time: action
+  range: near
+  concentration: false
+  duration_rounds: null
+  classes: [cleric]
+  effect: {kind: heal, heal: 2d8, targets: 5}
+  upcast: 1d8
+  summary: "Сотворяется 10 минут, поэтому только вне боя. До пяти существ получают эффект короткого отдыха и восстанавливают 2к8 HP, без модификатора. Каждый уровень выше второго добавляет 1к8."

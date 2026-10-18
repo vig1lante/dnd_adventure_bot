@@ -1,0 +1,459 @@
+import shutil
+from pathlib import Path
+from typing import get_args
+
+import pytest
+from pydantic import ValidationError
+
+import dnd_engine
+from dnd_engine import content
+from dnd_engine.abilities import Ability, Skill
+from dnd_engine.content import (
+    ContentError,
+    MonsterAction,
+    SpellDef,
+    SpellEffect,
+    SrdContent,
+    WeaponProps,
+    load_srd,
+)
+
+FIXTURES = Path(__file__).parent / "fixtures" / "srd_min"
+TABLES = ("classes", "species", "backgrounds", "feats", "spells", "items", "monsters", "conditions")
+
+
+@pytest.fixture
+def srd_dir(tmp_path: Path) -> Path:
+    # Копия минимального набора: тест портит её, а не общие фикстуры.
+    target = tmp_path / "srd"
+    shutil.copytree(FIXTURES, target)
+    return target
+
+
+def edit(srd_dir: Path, table: str, old: str, new: str) -> None:
+    """Заменяет ровно одно вхождение `old` в файле таблицы (иначе тест пустой или неоднозначный)."""
+    path = srd_dir / f"{table}.yaml"
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) == 1, f"{old!r} должно встречаться в {table}.yaml ровно один раз"
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+def load_problems(srd_dir: Path) -> list[str]:
+    with pytest.raises(ContentError) as caught:
+        load_srd(srd_dir)
+    return caught.value.problems
+
+
+# --- корректный набор ---
+
+
+def test_fixture_has_all_eight_files():
+    assert {p.stem for p in FIXTURES.glob("*.yaml")} == set(TABLES)
+
+
+def test_minimal_set_loads():
+    srd = load_srd(FIXTURES)
+
+    assert isinstance(srd, SrdContent)
+    assert set(srd.classes) == {"fighter", "wizard"}
+    assert set(srd.items) == {"dagger", "leather_armor", "healing_potion"}
+    assert set(srd.monsters) == {"goblin_warrior", "bandit_captain"}
+
+
+def test_dictionary_keys_are_ids():
+    srd = load_srd(FIXTURES)
+
+    for table in TABLES:
+        for key, record in getattr(srd, table).items():
+            assert record.id == key
+
+
+def test_values_become_typed_models():
+    srd = load_srd(FIXTURES)
+
+    wizard = srd.classes["wizard"]
+    assert wizard.ability_priority[0] is Ability.INT
+    assert wizard.default_skills == (Skill.ARCANA, Skill.HISTORY)
+    assert wizard.spellcasting is not None
+    assert wizard.spellcasting.slots[3] == {1: 4, 2: 2}
+    assert wizard.resources == {"arcane_recovery": {1: 1}}
+    assert srd.monsters["bandit_captain"].saves == {Ability.STR: 4, Ability.DEX: 5, Ability.WIS: 2}
+    assert srd.items["dagger"].weapon is not None
+    assert srd.items["dagger"].weapon.properties == ("finesse", "light", "thrown")
+
+
+def test_models_are_frozen():
+    srd = load_srd(FIXTURES)
+
+    with pytest.raises(ValidationError):
+        srd.items["dagger"].name = "Другой кинжал"
+
+
+# --- лишние поля и неверные значения ---
+
+
+@pytest.mark.parametrize(
+    ("table", "old", "new", "field"),
+    [
+        ("classes", "  hit_die: 6\n", "  hit_die: 6\n  luck: 7\n", "luck"),
+        (
+            "classes",
+            "      mechanical: true\n  subclass_id: evoker",
+            "      mechanical: true\n      cost: 1\n  subclass_id: evoker",
+            "cost",
+        ),
+        ("items", "    range: melee\n", "    range: melee\n    weight: 1\n", "weight"),
+        (
+            "monsters",
+            "      damage_type: piercing\n",
+            "      damage_type: piercing\n      aura: 1\n",
+            "aura",
+        ),
+    ],
+    ids=["class", "nested-feature", "nested-weapon", "nested-action"],
+)
+def test_extra_field_is_error(srd_dir, table, old, new, field):
+    edit(srd_dir, table, old, new)
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert field in problems[0]
+    assert f"{table}.yaml" in problems[0]
+
+
+@pytest.mark.parametrize(
+    ("table", "old", "new"),
+    [
+        ("items", "kind: potion", "kind: scroll"),
+        ("classes", "saving_throws: [int, wis]", "saving_throws: [int, wisdom]"),
+        ("monsters", "scores: {str: 15,", "scores: {strength: 15,"),
+        ("classes", "hit_die: 6", "hit_die: много"),
+    ],
+    ids=["literal", "enum-tuple", "enum-key", "number"],
+)
+def test_wrong_value_is_error(srd_dir, table, old, new):
+    edit(srd_dir, table, old, new)
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert f"{table}.yaml" in problems[0]
+
+
+def test_problem_names_record_id(srd_dir):
+    edit(srd_dir, "classes", "  hit_die: 6\n", "  hit_die: 6\n  luck: 7\n")
+
+    assert "wizard" in load_problems(srd_dir)[0]
+
+
+# --- дубликаты, формат файлов ---
+
+
+def test_duplicate_id_is_error(srd_dir):
+    with (srd_dir / "conditions.yaml").open("a", encoding="utf-8") as file:
+        file.write("- id: prone\n  name: Ещё раз\n  summary: Дубликат.\n")
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert "conditions.yaml" in problems[0]
+    assert "prone" in problems[0]
+
+
+def test_missing_file_is_error(srd_dir):
+    (srd_dir / "spells.yaml").unlink()
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert "spells.yaml" in problems[0]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["id: prone\nname: Сбит с ног\n", "", "[prone", "- 5\n", "- name: без id\n", "- id: no\n"],
+    ids=["mapping", "empty", "syntax", "not-object", "no-id", "boolean-id"],
+)
+def test_broken_conditions_file_is_reported_once(srd_dir, text):
+    (srd_dir / "conditions.yaml").write_text(text, encoding="utf-8")
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert "conditions.yaml" in problems[0]
+
+
+def test_missing_directory_reports_every_table_as_missing(tmp_path):
+    with pytest.raises(ContentError) as caught:
+        load_srd(tmp_path / "нет-такой-папки")
+
+    problems = caught.value.problems
+    assert len(problems) == len(TABLES)
+    assert all("файл не найден" in problem for problem in problems)
+    assert {problem.split(".yaml")[0] for problem in problems} == set(TABLES)
+
+
+def test_yaml_syntax_error_names_the_line_where_it_was_found(srd_dir):
+    (srd_dir / "conditions.yaml").write_text(
+        "- id: prone\n  name: A\n\tsummary: s\n", encoding="utf-8"
+    )
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert problems[0].startswith("conditions.yaml: некорректный YAML (строка 3): ")
+    assert "\n" not in problems[0]  # причина и место, без многострочного дампа ошибки
+    assert "column" not in problems[0]  # строка уже указана в сообщении, дубль места не нужен
+
+
+def test_invalid_utf8_is_a_content_problem_with_a_readable_reason(srd_dir):
+    (srd_dir / "conditions.yaml").write_bytes(b"- id: prone\n  name: \xff\xfe\n")
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert "conditions.yaml" in problems[0]
+    assert "invalid start byte" in problems[0]
+
+
+def test_record_numbers_in_problems_count_from_one(srd_dir):
+    (srd_dir / "conditions.yaml").write_text(
+        "- id: prone\n  name: A\n  summary: s\n- 5\n", encoding="utf-8"
+    )
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert "запись 2" in problems[0]
+
+
+def test_optional_fields_default_to_neutral_values():
+    effect = SpellEffect(kind="utility")
+    action = MonsterAction(id="slam", name="Удар", kind="other")
+
+    assert (effect.targets, effect.repeats, effect.half_on_save) == (1, 1, False)
+    assert (effect.attack, effect.save, effect.damage, effect.heal) == (None, None, None, None)
+    assert (effect.damage_type, effect.condition, effect.buff) == (None, None, None)
+    assert (action.range, action.half_on_save, action.multiattack) == ("melee", False, ())
+    assert (action.attack_bonus, action.damage, action.save, action.dc) == (None, None, None, None)
+
+
+# --- безопасность YAML ---
+
+
+def test_python_tag_is_rejected_and_not_executed(srd_dir, tmp_path):
+    marker = tmp_path / "executed"
+    payload = f'- !!python/object/apply:os.mkdir ["{marker.as_posix()}"]\n'
+    (srd_dir / "conditions.yaml").write_text(payload, encoding="utf-8")
+
+    problems = load_problems(srd_dir)
+
+    assert not marker.exists()
+    assert len(problems) == 1
+    assert "conditions.yaml" in problems[0]
+
+
+# --- перекрёстные ссылки ---
+
+
+@pytest.mark.parametrize(
+    ("table", "old", "new", "expected"),
+    [
+        (
+            "classes",
+            "starting_equipment: [dagger]",
+            "starting_equipment: [dagger, ghost_item]",
+            ("wizard", "starting_equipment ссылается на несуществующий id 'ghost_item'"),
+        ),
+        (
+            "classes",
+            "starting_equipment: [leather_armor, healing_potion]\n  default_background: sage",
+            "starting_equipment: [leather_armor, healing_potion]\n  default_background: hermit",
+            ("fighter", "default_background ссылается на несуществующий id 'hermit'"),
+        ),
+        (
+            "backgrounds",
+            "equipment: [dagger]",
+            "equipment: [dagger, lost_book]",
+            ("sage", "equipment ссылается на несуществующий id 'lost_book'"),
+        ),
+        (
+            "backgrounds",
+            "feat: magic_initiate",
+            "feat: lucky",
+            ("sage", "feat ссылается на несуществующий id 'lucky'"),
+        ),
+        (
+            "spells",
+            "classes: [wizard]\n  effect:\n    kind: attack",
+            "classes: [wizard, sorcerer]\n  effect:\n    kind: attack",
+            ("fire_bolt", "classes ссылается на несуществующий id 'sorcerer'"),
+        ),
+        (
+            "classes",
+            "default_spells: [fire_bolt, magic_missile]",
+            "default_spells: [fire_bolt, magic_missile, wish]",
+            ("wizard", "default_spells ссылается на несуществующий id 'wish'"),
+        ),
+        (
+            "classes",
+            "  fighting_styles: [archery, defense]\n",
+            "  fighting_styles: [archery, defense]\n  default_spells: [fire_bolt]\n",
+            ("fighter", "default_spells содержит 'fire_bolt' не из списка класса"),
+        ),
+        (
+            "monsters",
+            "multiattack: [scimitar, scimitar]",
+            "multiattack: [scimitar, shortbow]",
+            ("bandit_captain", "multiattack ссылается на несуществующий id 'shortbow'"),
+        ),
+    ],
+    ids=[
+        "starting-item",
+        "default-background",
+        "background-item",
+        "background-feat",
+        "spell-class",
+        "default-spell-unknown",
+        "default-spell-without-spellcasting",
+        "multiattack-of-other-monster",
+    ],
+)
+def test_dangling_reference_is_error(srd_dir, table, old, new, expected):
+    edit(srd_dir, table, old, new)
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert all(fragment in problems[0] for fragment in expected), problems[0]
+
+
+def test_default_spell_from_other_class_list_is_error(srd_dir):
+    # Заклинание существует, но в списке волшебника его нет.
+    edit(
+        srd_dir,
+        "spells",
+        "classes: [wizard]\n  effect:\n    kind: auto",
+        "classes: []\n  effect:\n    kind: auto",
+    )
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert "wizard" in problems[0]
+    assert "magic_missile" in problems[0]
+
+
+# --- все проблемы сразу ---
+
+
+def test_all_reference_problems_are_collected_at_once(srd_dir):
+    edit(srd_dir, "classes", "starting_equipment: [dagger]", "starting_equipment: [ghost_item]")
+    edit(srd_dir, "backgrounds", "feat: magic_initiate", "feat: lucky")
+    edit(srd_dir, "monsters", "multiattack: [scimitar, scimitar]", "multiattack: [shortbow]")
+    edit(
+        srd_dir,
+        "spells",
+        "classes: [wizard]\n  effect:\n    kind: attack",
+        "classes: [bard]\n  effect:\n    kind: attack",
+    )
+
+    caught = load_problems(srd_dir)
+
+    assert len(caught) == 5  # плюс default_spells волшебника: fire_bolt больше не в его списке
+    for fragment in ("ghost_item", "lucky", "shortbow", "bard", "fire_bolt"):
+        assert any(fragment in problem for problem in caught), fragment
+
+
+def test_structure_problems_from_different_files_are_collected_at_once(srd_dir):
+    edit(srd_dir, "classes", "  hit_die: 6\n", "  hit_die: 6\n  luck: 7\n")
+    (srd_dir / "feats.yaml").write_text(
+        "- id: alert\n  name: A\n  summary: s\n  mechanical: true\n"
+        "- id: alert\n  name: B\n  summary: s\n  mechanical: true\n",
+        encoding="utf-8",
+    )
+    (srd_dir / "monsters.yaml").unlink()
+    (srd_dir / "species.yaml").write_text("[broken", encoding="utf-8")
+
+    caught = load_problems(srd_dir)
+
+    assert len(caught) == 4
+    for fragment in ("luck", "alert", "monsters.yaml", "species.yaml"):
+        assert any(fragment in problem for problem in caught), fragment
+
+
+def test_references_are_not_checked_while_structure_is_broken(srd_dir):
+    # Предмет не прошёл проверку формы, поэтому его нет в таблице; но «ссылка в никуда»
+    # на него была бы ложной жалобой — сообщается только настоящая проблема.
+    edit(srd_dir, "items", "    range: melee\n", "    range: melee\n    weight: 1\n")
+
+    caught = load_problems(srd_dir)
+
+    assert len(caught) == 1
+    assert "weight" in caught[0]
+
+
+def test_error_text_lists_every_problem(srd_dir):
+    edit(srd_dir, "classes", "starting_equipment: [dagger]", "starting_equipment: [ghost_item]")
+    edit(srd_dir, "backgrounds", "feat: magic_initiate", "feat: lucky")
+
+    with pytest.raises(ContentError) as caught:
+        load_srd(srd_dir)
+
+    text = str(caught.value)
+    assert all(problem in text for problem in caught.value.problems)
+    assert len(caught.value.problems) == 2
+
+
+# --- путь по умолчанию и кеш ---
+
+
+def test_explicit_path_is_not_cached(srd_dir):
+    assert isinstance(load_srd(srd_dir), SrdContent)
+    edit(srd_dir, "classes", "starting_equipment: [dagger]", "starting_equipment: [ghost_item]")
+
+    with pytest.raises(ContentError):
+        load_srd(srd_dir)
+
+
+def test_builtin_data_lives_next_to_the_package_code():
+    expected = Path(dnd_engine.__file__).parent / "data" / "srd"
+
+    assert Path(str(content._builtin_srd_dir())) == expected
+
+
+@pytest.fixture
+def builtin_is_fixture(monkeypatch):
+    # Подменяем папку встроенных данных, чтобы тест не зависел от того, есть ли они в пакете.
+    monkeypatch.setattr(content, "_builtin_srd_dir", lambda: FIXTURES)
+    content._load_builtin_srd.cache_clear()
+    yield
+    content._load_builtin_srd.cache_clear()
+
+
+def test_load_without_path_reads_builtin_data(builtin_is_fixture):
+    assert load_srd() == load_srd(FIXTURES)
+
+
+def test_load_without_path_is_cached(builtin_is_fixture):
+    assert load_srd() is load_srd()
+
+
+def test_error_message_is_a_header_with_one_line_per_problem():
+    error = ContentError(["первая проблема", "вторая проблема"])
+
+    assert str(error).splitlines() == [
+        "Данные SRD некорректны:",
+        "- первая проблема",
+        "- вторая проблема",
+    ]
+    assert error.problems == ["первая проблема", "вторая проблема"]
+
+
+def test_spell_range_vocabulary_covers_self_touch_and_the_three_weapon_ranges():
+    spell_ranges = set(get_args(SpellDef.model_fields["range"].annotation))
+    weapon_ranges = set(get_args(WeaponProps.model_fields["range"].annotation))
+
+    assert spell_ranges == {"self", "touch", "engaged", "near", "far"}
+    assert weapon_ranges == {"melee", "near", "far"}

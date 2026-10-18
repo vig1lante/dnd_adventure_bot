@@ -1,0 +1,8 @@
+- id: alert
+  name: Бдительный
+  summary: К инициативе добавляется бонус мастерства.
+  mechanical: true
+- id: magic_initiate
+  name: Посвящённый в магию
+  summary: Даёт заговоры из выбранного списка.
+  mechanical: true

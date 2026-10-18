@@ -1,0 +1,183 @@
+# Девять видов SRD 5.2.1 (CC BY 4.0). Краткий пересказ своими словами, не копия текста.
+# Механические черты (mechanical: true) считает движок; остальные — текст для мастера.
+# Черты, которые действуют только с 5-го уровня (Драконий полёт, Большая форма), в срез не входят.
+# Выбор наследия (предок дракона, линия эльфа и т. п.) в создании персонажа не моделируется.
+# Размер у человека и тифлинга в SRD выбирается; в данных указан medium.
+- id: dragonborn
+  name: Драконорождённый
+  name_en: Dragonborn
+  size: medium
+  speed: 30
+  traits:
+    - id: draconic_ancestry
+      name: Драконье происхождение
+      summary: "Выбирается дракон-предок. От него зависит тип урона дыхания и сопротивления: кислота, молния, огонь, яд или холод."
+      mechanical: false
+    - id: breath_weapon
+      name: Дыхание
+      summary: "Вместо одной атаки: конус 15 футов или линия 30 футов. Спасбросок Ловкости, Сл 8 + Тел + БМ; 1к10 урона типа предка, половина при успехе. Столько раз, каков бонус мастерства, до длинного отдыха."
+      mechanical: true
+    - id: damage_resistance
+      name: Сопротивление урону
+      summary: "Сопротивление типу урона, определённому драконом-предком."
+      mechanical: true
+    - id: darkvision
+      name: Тёмное зрение
+      summary: "Видит в темноте на 60 футов."
+      mechanical: false
+- id: dwarf
+  name: Дварф
+  name_en: Dwarf
+  size: medium
+  speed: 30
+  traits:
+    - id: darkvision
+      name: Тёмное зрение
+      summary: "Видит в темноте на 120 футов."
+      mechanical: false
+    - id: dwarven_resilience
+      name: Дварфийская стойкость
+      summary: "Сопротивление урону ядом и преимущество на спасброски, чтобы избежать или прекратить состояние «Отравлен»."
+      mechanical: true
+    - id: dwarven_toughness
+      name: Дварфийская выносливость
+      summary: "Максимум HP растёт на 1 и ещё на 1 с каждым уровнем; на 3-м уровне это +3."
+      mechanical: true
+    - id: stonecunning
+      name: Знание камня
+      summary: "Бонусным действием даёт чувство вибрации на 60 футов на 10 минут, пока дварф стоит на камне или касается его. Раз за бонус мастерства до длинного отдыха."
+      mechanical: false
+- id: elf
+  name: Эльф
+  name_en: Elf
+  size: medium
+  speed: 30
+  traits:
+    - id: darkvision
+      name: Тёмное зрение
+      summary: "Видит в темноте на 60 футов."
+      mechanical: false
+    - id: elven_lineage
+      name: Эльфийское наследие
+      summary: "Наследие на выбор: дроу, высший эльф или лесной эльф. Даёт заговор, особенность вроде зрения или скорости и заклинание, доступное с 3-го уровня."
+      mechanical: false
+    - id: fey_ancestry
+      name: Наследие фей
+      summary: "Преимущество на спасброски, чтобы избежать или прекратить состояние «Очарован»."
+      mechanical: false
+    - id: keen_senses
+      name: Острые чувства
+      summary: "Владение одним навыком из Проницательности, Внимательности и Выживания. В срезе всегда выдаётся Внимательность."
+      mechanical: true
+    - id: trance
+      name: Транс
+      summary: "Не нуждается во сне, магия не усыпляет эльфа. Длинный отдых занимает 4 часа медитации."
+      mechanical: false
+- id: gnome
+  name: Гном
+  name_en: Gnome
+  size: small
+  speed: 30
+  traits:
+    - id: darkvision
+      name: Тёмное зрение
+      summary: "Видит в темноте на 60 футов."
+      mechanical: false
+    - id: gnomish_cunning
+      name: Гномья хитрость
+      summary: "Преимущество на спасброски Интеллекта, Мудрости и Харизмы."
+      mechanical: true
+    - id: gnomish_lineage
+      name: Гномье наследие
+      summary: "Наследие на выбор: лесной гном (малая иллюзия, разговор с животными) или скальный гном (починка, фокусы, маленькие заводные устройства)."
+      mechanical: false
+- id: goliath
+  name: Голиаф
+  name_en: Goliath
+  size: medium
+  speed: 35
+  traits:
+    - id: giant_ancestry
+      name: Происхождение от великанов
+      summary: "Один дар великана на выбор, использовать его можно столько раз, каков бонус мастерства, до длинного отдыха: прыжок-телепорт, лишний урон огнём или холодом, сбивание с ног, снижение урона, ответный удар громом."
+      mechanical: false
+    - id: powerful_build
+      name: Могучее телосложение
+      summary: "Преимущество на проверки, чтобы вырваться из захвата. Для переносимого груза считается на размер больше."
+      mechanical: false
+- id: halfling
+  name: Полурослик
+  name_en: Halfling
+  size: small
+  speed: 30
+  traits:
+    - id: brave
+      name: Храбрость
+      summary: "Преимущество на спасброски, чтобы избежать или прекратить состояние «Напуган»."
+      mechanical: false
+    - id: halfling_nimbleness
+      name: Проворство полуросликов
+      summary: "Может проходить через пространство существа крупнее себя, но не может в нём остановиться."
+      mechanical: false
+    - id: luck
+      name: Удача
+      summary: "Если на к20 проверки, атаки или спасброска выпала 1, кость можно перебросить и принять новый результат."
+      mechanical: true
+    - id: naturally_stealthy
+      name: Природная скрытность
+      summary: "Может прятаться, даже если его заслоняет лишь существо хотя бы на размер крупнее."
+      mechanical: false
+- id: human
+  name: Человек
+  name_en: Human
+  size: medium
+  speed: 30
+  traits:
+    - id: resourceful
+      name: Находчивость
+      summary: "После каждого длинного отдыха человек получает вдохновение."
+      mechanical: true
+    - id: skillful
+      name: Умелость
+      summary: "Владение одним навыком на выбор."
+      mechanical: true
+    - id: versatile
+      name: Разносторонность
+      summary: "Одна черта происхождения на выбор."
+      mechanical: false
+- id: orc
+  name: Орк
+  name_en: Orc
+  size: medium
+  speed: 30
+  traits:
+    - id: adrenaline_rush
+      name: Выброс адреналина
+      summary: "Рывок бонусным действием; при этом даёт временные HP, равные бонусу мастерства. Столько раз, каков бонус мастерства, между отдыхами."
+      mechanical: false
+    - id: darkvision
+      name: Тёмное зрение
+      summary: "Видит в темноте на 120 футов."
+      mechanical: false
+    - id: relentless_endurance
+      name: Неутомимость
+      summary: "Если орка опустили до 0 HP, но не убили на месте, он остаётся с 1 HP. Раз за длинный отдых."
+      mechanical: true
+- id: tiefling
+  name: Тифлинг
+  name_en: Tiefling
+  size: medium
+  speed: 30
+  traits:
+    - id: darkvision
+      name: Тёмное зрение
+      summary: "Видит в темноте на 60 футов."
+      mechanical: false
+    - id: fiendish_legacy
+      name: Наследие исчадий
+      summary: "Наследие на выбор: бездны, преисподней или хтоническое. Даёт сопротивление яду, огню или некротическому урону, заговор и заклинания с 3-го уровня."
+      mechanical: false
+    - id: otherworldly_presence
+      name: Потустороннее присутствие
+      summary: "Знает заговор «Чудотворство»."
+      mechanical: false

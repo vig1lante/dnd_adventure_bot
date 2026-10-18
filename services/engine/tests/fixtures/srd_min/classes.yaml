@@ -1,0 +1,57 @@
+# Минимальный набор для тестов загрузчика: не настоящие данные SRD.
+- id: fighter
+  name: Воин
+  name_en: Fighter
+  hit_die: 10
+  ability_priority: [str, con, dex, wis, int, cha]
+  saving_throws: [str, con]
+  armor: [light, medium, heavy, shield]
+  weapons: [simple, martial]
+  skill_choices: 2
+  skill_options: [athletics, acrobatics, perception, survival]
+  default_skills: [athletics, perception]
+  starting_equipment: [leather_armor, healing_potion]
+  default_background: sage
+  fighting_styles: [archery, defense]
+  features:
+    - id: second_wind
+      level: 1
+      name: Второе дыхание
+      summary: Бонусным действием восстановить часть здоровья.
+      mechanical: true
+  subclass_id: champion
+  subclass_name: Чемпион
+  resources:
+    second_wind: {1: 2, 3: 2}
+- id: wizard
+  name: Волшебник
+  name_en: Wizard
+  hit_die: 6
+  ability_priority: [int, con, dex, wis, cha, str]
+  saving_throws: [int, wis]
+  armor: []
+  weapons: [simple]
+  skill_choices: 2
+  skill_options: [arcana, history, investigation]
+  default_skills: [arcana, history]
+  starting_equipment: [dagger]
+  default_background: sage
+  default_spells: [fire_bolt, magic_missile]
+  features:
+    - id: arcane_recovery
+      level: 1
+      name: Магическое восстановление
+      summary: Раз в день восстановить ячейки заклинаний на коротком отдыхе.
+      mechanical: true
+  subclass_id: evoker
+  subclass_name: Эвокатор
+  spellcasting:
+    ability: int
+    slots:
+      1: {1: 2}
+      3: {1: 4, 2: 2}
+    cantrips_known: {1: 3, 3: 3}
+    prepared: {1: 4, 3: 6}
+    spell_list: wizard
+  resources:
+    arcane_recovery: {1: 1}

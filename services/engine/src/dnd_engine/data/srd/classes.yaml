@@ -1,0 +1,387 @@
+# Шесть классов SRD 5.2.1 (CC BY 4.0), уровни 1–3, по одному подклассу. Краткий пересказ своими
+# словами, не копия текста. Механические особенности (mechanical: true) считает движок;
+# остальные — текст для мастера.
+#
+# Соглашения:
+# - starting_equipment — по одной единице предмета из набора А SRD, только из поднабора среза;
+#   первым стоит основной доспех, затем щит, затем основное оружие. Пакеты, стрелы, колчаны,
+#   одежда и монеты не переносятся. Первый боевой стиль в списке — стиль быстрого режима.
+# - default_spells — заклинания быстрого режима: заговоры и подготовленные вместе (их число равно
+#   cantrips_known + prepared на 3-м уровне). Всегда подготовленные заклинания (Метка охотника,
+#   заклинания Домена жизни) входят в этот список как обычные подготовленные.
+# - таблицы колдовства и ресурсов заполнены для каждого уровня 1–3, где они действуют.
+- id: barbarian
+  name: Варвар
+  name_en: Barbarian
+  hit_die: 12
+  ability_priority: [str, con, dex, wis, cha, int]
+  saving_throws: [str, con]
+  armor: [light, medium, shield]
+  weapons: [simple, martial]
+  skill_choices: 2
+  skill_options: [animal_handling, athletics, intimidation, nature, perception, survival]
+  default_skills: [perception, survival]
+  starting_equipment: [greataxe, handaxe]
+  default_background: soldier
+  features:
+    - id: rage
+      level: 1
+      name: Ярость
+      summary: "Бонусным действием: сопротивление дробящему, колющему и рубящему урону, бонус к урону атак Силой, преимущество на проверки и спасброски Силы; нельзя колдовать и держать концентрацию. Использований: 2, на 3-м уровне 3."
+      mechanical: true
+    - id: unarmored_defense
+      level: 1
+      name: Защита без доспехов
+      summary: "Без доспеха КД равен 10 + Лов + Тел; щит использовать можно."
+      mechanical: true
+    - id: weapon_mastery
+      level: 1
+      name: Мастерство оружия
+      summary: "Умеет применять особые свойства мастерства двух видов оружия ближнего боя."
+      mechanical: false
+    - id: danger_sense
+      level: 2
+      name: Чувство опасности
+      summary: "Преимущество на спасброски Ловкости, пока варвар не недееспособен."
+      mechanical: false
+    - id: reckless_attack
+      level: 2
+      name: Безрассудная атака
+      summary: "Первой атакой в свой ход можно напасть безрассудно: преимущество на атаки Силой до начала следующего хода, но и атаки по варвару идут с преимуществом."
+      mechanical: true
+    - id: primal_knowledge
+      level: 3
+      name: Первобытные знания
+      summary: "Ещё один навык из списка варвара. В ярости проверки некоторых навыков (Акробатика, Запугивание, Внимательность, Скрытность, Выживание) можно делать Силой."
+      mechanical: false
+    - id: frenzy
+      level: 3
+      name: Бешенство
+      summary: "Если в ярости использована Безрассудная атака, первая попавшая атака Силой за ход наносит лишние кости к6 по числу бонуса урона ярости; на 3-м уровне это 2к6."
+      mechanical: true
+  subclass_id: path_of_the_berserker
+  subclass_name: Путь берсерка
+  resources:
+    rage: {1: 2, 2: 2, 3: 3}
+- id: fighter
+  name: Воин
+  name_en: Fighter
+  hit_die: 10
+  ability_priority: [str, con, dex, wis, cha, int]
+  saving_throws: [str, con]
+  armor: [light, medium, heavy, shield]
+  weapons: [simple, martial]
+  skill_choices: 2
+  skill_options:
+    [acrobatics, animal_handling, athletics, history, insight, intimidation, persuasion, perception, survival]
+  default_skills: [acrobatics, perception]
+  starting_equipment: [chain_mail, greatsword, javelin]
+  default_background: soldier
+  fighting_styles: [defense, archery, dueling]
+  features:
+    - id: fighting_style
+      level: 1
+      name: Боевой стиль
+      summary: "Один стиль на выбор: Стрельба (+2 к атакам дальнобойным оружием), Оборона (+1 к КД в доспехах) или Дуэлянт (+2 к урону одноручным оружием ближнего боя при свободной второй руке)."
+      mechanical: true
+    - id: second_wind
+      level: 1
+      name: Второе дыхание
+      summary: "Бонусным действием восстанавливает 1к10 + уровень воина HP. Два использования: одно возвращается после короткого отдыха, все — после длинного."
+      mechanical: true
+    - id: weapon_mastery
+      level: 1
+      name: Мастерство оружия
+      summary: "Умеет применять особые свойства мастерства трёх видов оружия."
+      mechanical: false
+    - id: action_surge
+      level: 2
+      name: Всплеск действий
+      summary: "В свой ход можно совершить одно дополнительное действие, кроме действия Магия. Возвращается после короткого или длинного отдыха."
+      mechanical: true
+    - id: tactical_mind
+      level: 2
+      name: Тактический ум
+      summary: "Провалив проверку характеристики, можно потратить Второе дыхание и добавить к проверке 1к10 вместо лечения."
+      mechanical: false
+    - id: improved_critical
+      level: 3
+      name: Улучшенный критический удар
+      summary: "Атаки оружием и безоружные атаки дают критическое попадание при 19 или 20 на к20."
+      mechanical: true
+    - id: remarkable_athlete
+      level: 3
+      name: Выдающийся атлет
+      summary: "Преимущество на инициативу и проверки Силы (Атлетика). После критического попадания можно сдвинуться на половину скорости без провоцирования атак."
+      mechanical: false
+  subclass_id: champion
+  subclass_name: Чемпион
+  resources:
+    second_wind: {1: 2, 2: 2, 3: 2}
+    action_surge: {2: 1, 3: 1}
+- id: rogue
+  name: Плут
+  name_en: Rogue
+  hit_die: 8
+  ability_priority: [dex, con, wis, int, cha, str]
+  saving_throws: [dex, int]
+  armor: [light]
+  # SRD: из воинского оружия плут владеет только лёгким и фехтовальным; модель этого не выражает.
+  weapons: [simple, martial]
+  skill_choices: 4
+  skill_options:
+    [acrobatics, athletics, deception, insight, intimidation, investigation, perception, persuasion, sleight_of_hand, stealth]
+  default_skills: [perception, acrobatics, investigation, deception]
+  starting_equipment: [leather_armor, shortsword, dagger, shortbow, thieves_tools]
+  default_background: criminal
+  features:
+    - id: expertise
+      level: 1
+      name: Компетентность
+      summary: "Удвоенный бонус мастерства в двух навыках, которыми плут владеет."
+      mechanical: true
+    - id: sneak_attack
+      level: 1
+      name: Скрытая атака
+      summary: "Раз за ход +1к6 урона по существу, в которое попала атака, если у плута преимущество (финесное или дальнобойное оружие) либо рядом с целью союзник. На 3-м уровне 2к6."
+      mechanical: true
+    - id: thieves_cant
+      level: 1
+      name: Воровской жаргон
+      summary: "Знает тайный воровской жаргон и ещё один язык."
+      mechanical: false
+    - id: weapon_mastery
+      level: 1
+      name: Мастерство оружия
+      summary: "Умеет применять особые свойства мастерства двух видов оружия."
+      mechanical: false
+    - id: cunning_action
+      level: 2
+      name: Хитрое действие
+      summary: "Бонусным действием можно совершить Рывок, Отход или Спрятаться."
+      mechanical: true
+    - id: steady_aim
+      level: 3
+      name: Точное прицеливание
+      summary: "Бонусным действием даёт преимущество на следующую атаку в этот ход, если плут не двигался; до конца хода его скорость равна 0."
+      mechanical: true
+    - id: fast_hands
+      level: 3
+      name: Быстрые руки
+      summary: "Бонусным действием: проверка Ловкости (Ловкость рук) для замка, ловушки или кармана с воровскими инструментами либо действие «Использовать предмет»."
+      mechanical: false
+    - id: second_story_work
+      level: 3
+      name: Работа на высоте
+      summary: "Скорость лазания равна обычной скорости; дальность прыжка считается по Ловкости."
+      mechanical: false
+  subclass_id: thief
+  subclass_name: Вор
+- id: ranger
+  name: Следопыт
+  name_en: Ranger
+  hit_die: 10
+  ability_priority: [dex, wis, con, str, int, cha]
+  saving_throws: [str, dex]
+  armor: [light, medium, shield]
+  weapons: [simple, martial]
+  skill_choices: 3
+  skill_options: [animal_handling, athletics, insight, investigation, nature, perception, stealth, survival]
+  default_skills: [perception, stealth, survival]
+  starting_equipment: [studded_leather_armor, longbow, scimitar, shortsword]
+  default_background: soldier
+  default_spells: [hunters_mark, cure_wounds, goodberry, fog_cloud]
+  fighting_styles: [archery, defense, dueling]
+  features:
+    - id: spellcasting
+      level: 1
+      name: Колдовство
+      summary: "Характеристика заклинаний — Мудрость. Заклинания готовятся из списка следопыта, заговоров нет. Ячеек 1-го уровня: 2, 2, 3 на уровнях 1–3; подготовлено 2, 3, 4."
+      mechanical: true
+    - id: favored_enemy
+      level: 1
+      name: Избранный враг
+      summary: "Заклинание «Метка охотника» всегда подготовлено. Его можно сотворить без ячейки 2 раза за длинный отдых."
+      mechanical: true
+    - id: weapon_mastery
+      level: 1
+      name: Мастерство оружия
+      summary: "Умеет применять особые свойства мастерства двух видов оружия."
+      mechanical: false
+    - id: deft_explorer
+      level: 2
+      name: Ловкий исследователь
+      summary: "Компетентность в одном навыке и два языка на выбор."
+      mechanical: false
+    - id: fighting_style
+      level: 2
+      name: Боевой стиль
+      summary: "Один стиль на выбор: Стрельба (+2 к атакам дальнобойным оружием), Оборона (+1 к КД в доспехах) или Дуэлянт (+2 к урону одноручным оружием ближнего боя при свободной второй руке)."
+      mechanical: true
+    - id: hunters_lore
+      level: 3
+      name: Знания охотника
+      summary: "Пока цель отмечена «Меткой охотника», следопыт знает её иммунитеты, сопротивления и уязвимости."
+      mechanical: false
+    - id: colossus_slayer
+      level: 3
+      name: Убийца колоссов
+      summary: "Добыча охотника: раз за ход попадание оружием по существу, потерявшему часть HP, наносит ещё 1к8 урона. Вариант «Истребитель орд» в срезе не используется."
+      mechanical: true
+  subclass_id: hunter
+  subclass_name: Охотник
+  spellcasting:
+    ability: wis
+    slots:
+      1: {1: 2}
+      2: {1: 2}
+      3: {1: 3}
+    cantrips_known: {1: 0, 2: 0, 3: 0}
+    prepared: {1: 2, 2: 3, 3: 4}
+    spell_list: ranger
+  resources:
+    hunters_mark: {1: 2, 2: 2, 3: 2}
+- id: cleric
+  name: Жрец
+  name_en: Cleric
+  hit_die: 8
+  ability_priority: [wis, con, str, dex, cha, int]
+  saving_throws: [wis, cha]
+  armor: [light, medium, shield]
+  weapons: [simple]
+  skill_choices: 2
+  skill_options: [history, insight, medicine, persuasion, religion]
+  default_skills: [medicine, persuasion]
+  starting_equipment: [chain_shirt, shield, mace, holy_symbol]
+  default_background: acolyte
+  default_spells:
+    - sacred_flame
+    - guidance
+    - spare_the_dying
+    - bless
+    - cure_wounds
+    - healing_word
+    - guiding_bolt
+    - aid
+    - lesser_restoration
+  features:
+    - id: spellcasting
+      level: 1
+      name: Колдовство
+      summary: "Характеристика заклинаний — Мудрость, фокус — священный символ. Заговоров 3. Подготовлено 4, 5, 6 заклинаний из списка жреца; ячейки: 2, 3, а на 3-м уровне 4 первого и 2 второго."
+      mechanical: true
+    - id: divine_order
+      level: 1
+      name: Божественный порядок
+      summary: "Роль на выбор: Защитник (воинское оружие и тяжёлые доспехи) или Чудотворец (лишний заговор и бонус к проверкам Магии и Религии). В срезе не моделируется."
+      mechanical: false
+    - id: channel_divinity
+      level: 2
+      name: Божественный канал
+      summary: "Два использования; одно возвращается после короткого отдыха, все — после длинного. Каждый раз выбирается эффект: Божественная искра, Изгнание нежити или Сохранение жизни."
+      mechanical: true
+    - id: divine_spark
+      level: 2
+      name: Божественная искра
+      summary: "Магическим действием на существо в 30 футах: бросок 1к8 + Мдр. Цель либо восстанавливает столько HP, либо делает спасбросок Телосложения и получает столько урона некротической энергией или излучением (половина при успехе)."
+      mechanical: true
+    - id: turn_undead
+      level: 2
+      name: Изгнание нежити
+      summary: "Магическим действием: нежить в 30 футах делает спасбросок Мудрости; провалившая становится напуганной и недееспособной на 1 минуту."
+      mechanical: false
+    - id: disciple_of_life
+      level: 3
+      name: Ученик жизни
+      summary: "Лечащее заклинание, сотворённое ячейкой, лечит ещё на 2 + уровень ячейки HP."
+      mechanical: true
+    - id: life_domain_spells
+      level: 3
+      name: Заклинания домена жизни
+      summary: "Подмога, Благословение, Лечение ран и Малое восстановление всегда подготовлены. В срезе их выбирают среди подготовленных заклинаний при создании персонажа."
+      mechanical: false
+    - id: preserve_life
+      level: 3
+      name: Сохранение жизни
+      summary: "Тратит использование Божественного канала: магическим действием делит 5 × уровень жреца HP (15 на 3-м уровне) между существами в 30 футах, у которых не больше половины HP; выше половины максимума никого не поднять."
+      mechanical: true
+  subclass_id: life_domain
+  subclass_name: Домен жизни
+  spellcasting:
+    ability: wis
+    slots:
+      1: {1: 2}
+      2: {1: 3}
+      3: {1: 4, 2: 2}
+    cantrips_known: {1: 3, 2: 3, 3: 3}
+    prepared: {1: 4, 2: 5, 3: 6}
+    spell_list: cleric
+  resources:
+    channel_divinity: {2: 2, 3: 2}
+- id: wizard
+  name: Волшебник
+  name_en: Wizard
+  hit_die: 6
+  ability_priority: [int, con, dex, wis, cha, str]
+  saving_throws: [int, wis]
+  armor: []
+  weapons: [simple]
+  skill_choices: 2
+  skill_options: [arcana, history, insight, investigation, medicine, nature, religion]
+  default_skills: [investigation, insight]
+  starting_equipment: [quarterstaff, dagger, arcane_focus, spellbook]
+  default_background: sage
+  default_spells:
+    - fire_bolt
+    - ray_of_frost
+    - mage_hand
+    - magic_missile
+    - mage_armor
+    - burning_hands
+    - thunderwave
+    - scorching_ray
+    - misty_step
+  features:
+    - id: spellcasting
+      level: 1
+      name: Колдовство
+      summary: "Характеристика заклинаний — Интеллект, фокус — магическая фокусировка или книга заклинаний. Заговоров 3. Подготовлено 4, 5, 6 заклинаний из книги; ячейки: 2, 3, а на 3-м уровне 4 первого и 2 второго."
+      mechanical: true
+    - id: ritual_adept
+      level: 1
+      name: Мастер ритуалов
+      summary: "Заклинания с пометкой «ритуал» из книги можно творить как ритуалы, не подготавливая их."
+      mechanical: false
+    - id: arcane_recovery
+      level: 1
+      name: Магическое восстановление
+      summary: "После короткого отдыха один раз до длинного можно вернуть ячейки суммарным уровнем до половины уровня волшебника (с округлением вверх); ячейки не выше 5-го уровня."
+      mechanical: true
+    - id: scholar
+      level: 2
+      name: Учёный
+      summary: "Компетентность в одном из навыков, которыми владеет волшебник: Магия, История, Анализ, Медицина, Природа, Религия."
+      mechanical: false
+    - id: evocation_savant
+      level: 3
+      name: Знаток воплощения
+      summary: "Две бесплатные записи в книгу: заклинания школы воплощения не выше 2-го уровня. Новые заклинания воплощения добавляются бесплатно с каждым новым уровнем ячеек."
+      mechanical: false
+    - id: potent_cantrip
+      level: 3
+      name: Мощный заговор
+      summary: "Если атака заговора промахнулась или цель успешно прошла спасбросок против заговора, она всё равно получает половину его урона, но без дополнительных эффектов."
+      mechanical: true
+  subclass_id: evoker
+  subclass_name: Эвокатор
+  spellcasting:
+    ability: int
+    slots:
+      1: {1: 2}
+      2: {1: 3}
+      3: {1: 4, 2: 2}
+    cantrips_known: {1: 3, 2: 3, 3: 3}
+    prepared: {1: 4, 2: 5, 3: 6}
+    spell_list: wizard
+  resources:
+    arcane_recovery: {1: 1, 2: 1, 3: 1}

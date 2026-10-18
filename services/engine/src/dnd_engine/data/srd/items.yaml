@@ -1,0 +1,335 @@
+# Предметы SRD 5.2.1 (CC BY 4.0): оружие и доспехи стартовых наборов и монстров, зелья лечения
+# и снаряжение. Краткий пересказ своими словами, не копия текста.
+#
+# Соглашения:
+# - Оружие. Урон записан для одной руки; двуручный хват универсального оружия (versatile)
+#   описан в summary. Метательное и универсальное оружие ближнего боя имеет range: melee и
+#   свойство thrown; луки и арбалеты — range: far. Свойства: finesse, light, thrown, two_handed,
+#   versatile, heavy, reach, ammunition (заряжание и свойства мастерства оружия не переносятся).
+# - Доспехи. base_ac — КД в доспехе; к нему прибавляется модификатор Ловкости, но не больше
+#   dex_cap (null — без предела, 0 — Ловкость не прибавляется: тяжёлый доспех). У щита base_ac —
+#   бонус к КД. Требование Силы кольчуги (13) движок не учитывает.
+# - Зелья лечения пьются бонусным действием: своё или существа в пределах 5 футов.
+# - Предметы без механики (kind: gear, focus) нужны для инвентаря и рассказа мастера.
+
+# --- простое оружие ближнего боя ---
+- id: club
+  name: Дубинка
+  name_en: Club
+  kind: weapon
+  weapon:
+    category: simple
+    damage: 1d4
+    damage_type: bludgeoning
+    properties: [light]
+    range: melee
+  summary: "Лёгкая деревянная дубинка."
+- id: dagger
+  name: Кинжал
+  name_en: Dagger
+  kind: weapon
+  weapon:
+    category: simple
+    damage: 1d4
+    damage_type: piercing
+    properties: [finesse, light, thrown]
+    range: melee
+  summary: "Лёгкий фехтовальный клинок; его можно метнуть на 20/60 футов."
+- id: quarterstaff
+  name: Боевой посох
+  name_en: Quarterstaff
+  kind: weapon
+  weapon:
+    category: simple
+    damage: 1d6
+    damage_type: bludgeoning
+    properties: [versatile]
+    range: melee
+  summary: "Длинный шест. Двумя руками наносит 1к8 урона."
+- id: mace
+  name: Булава
+  name_en: Mace
+  kind: weapon
+  weapon:
+    category: simple
+    damage: 1d6
+    damage_type: bludgeoning
+    properties: []
+    range: melee
+  summary: "Тяжёлая дробящая булава, оружие жрецов."
+- id: spear
+  name: Копьё
+  name_en: Spear
+  kind: weapon
+  weapon:
+    category: simple
+    damage: 1d6
+    damage_type: piercing
+    properties: [thrown, versatile]
+    range: melee
+  summary: "Метательное копьё (20/60 футов). Двумя руками наносит 1к8 урона."
+- id: handaxe
+  name: Ручной топор
+  name_en: Handaxe
+  kind: weapon
+  weapon:
+    category: simple
+    damage: 1d6
+    damage_type: slashing
+    properties: [light, thrown]
+    range: melee
+  summary: "Лёгкий топорик; его можно метнуть на 20/60 футов."
+- id: javelin
+  name: Метательное копьё
+  name_en: Javelin
+  kind: weapon
+  weapon:
+    category: simple
+    damage: 1d6
+    damage_type: piercing
+    properties: [thrown]
+    range: melee
+  summary: "Копьё для метания на 30/120 футов, в ближнем бою тоже годится."
+
+# --- простое дальнобойное оружие ---
+- id: light_crossbow
+  name: Лёгкий арбалет
+  name_en: Light Crossbow
+  kind: weapon
+  weapon:
+    category: simple
+    damage: 1d8
+    damage_type: piercing
+    properties: [ammunition, two_handed]
+    range: far
+  summary: "Арбалет с болтами, дальность 80/320 футов."
+- id: shortbow
+  name: Короткий лук
+  name_en: Shortbow
+  kind: weapon
+  weapon:
+    category: simple
+    damage: 1d6
+    damage_type: piercing
+    properties: [ammunition, two_handed]
+    range: far
+  summary: "Лук со стрелами, дальность 80/320 футов."
+
+# --- воинское оружие ближнего боя ---
+- id: shortsword
+  name: Короткий меч
+  name_en: Shortsword
+  kind: weapon
+  weapon:
+    category: martial
+    damage: 1d6
+    damage_type: piercing
+    properties: [finesse, light]
+    range: melee
+  summary: "Лёгкий колющий меч, оружие плутов."
+- id: rapier
+  name: Рапира
+  name_en: Rapier
+  kind: weapon
+  weapon:
+    category: martial
+    damage: 1d8
+    damage_type: piercing
+    properties: [finesse]
+    range: melee
+  summary: "Тонкий колющий клинок для ловких бойцов."
+- id: scimitar
+  name: Скимитар
+  name_en: Scimitar
+  kind: weapon
+  weapon:
+    category: martial
+    damage: 1d6
+    damage_type: slashing
+    properties: [finesse, light]
+    range: melee
+  summary: "Изогнутый лёгкий клинок."
+- id: longsword
+  name: Длинный меч
+  name_en: Longsword
+  kind: weapon
+  weapon:
+    category: martial
+    damage: 1d8
+    damage_type: slashing
+    properties: [versatile]
+    range: melee
+  summary: "Классический меч. Двумя руками наносит 1к10 урона."
+- id: battleaxe
+  name: Боевой топор
+  name_en: Battleaxe
+  kind: weapon
+  weapon:
+    category: martial
+    damage: 1d8
+    damage_type: slashing
+    properties: [versatile]
+    range: melee
+  summary: "Одноручный боевой топор. Двумя руками наносит 1к10 урона."
+- id: greataxe
+  name: Секира
+  name_en: Greataxe
+  kind: weapon
+  weapon:
+    category: martial
+    damage: 1d12
+    damage_type: slashing
+    properties: [heavy, two_handed]
+    range: melee
+  summary: "Огромный двуручный топор, оружие варваров."
+- id: greatsword
+  name: Двуручный меч
+  name_en: Greatsword
+  kind: weapon
+  weapon:
+    category: martial
+    damage: 2d6
+    damage_type: slashing
+    properties: [heavy, two_handed]
+    range: melee
+  summary: "Тяжёлый двуручный меч."
+- id: warhammer
+  name: Боевой молот
+  name_en: Warhammer
+  kind: weapon
+  weapon:
+    category: martial
+    damage: 1d8
+    damage_type: bludgeoning
+    properties: [versatile]
+    range: melee
+  summary: "Дробящий молот. Двумя руками наносит 1к10 урона."
+
+# --- воинское дальнобойное оружие ---
+- id: longbow
+  name: Длинный лук
+  name_en: Longbow
+  kind: weapon
+  weapon:
+    category: martial
+    damage: 1d8
+    damage_type: piercing
+    properties: [ammunition, heavy, two_handed]
+    range: far
+  summary: "Тяжёлый лук со стрелами, дальность 150/600 футов."
+
+# --- доспехи и щит ---
+- id: leather_armor
+  name: Кожаный доспех
+  name_en: Leather Armor
+  kind: armor
+  armor:
+    kind: light
+    base_ac: 11
+    dex_cap: null
+  summary: "Лёгкий доспех: КД 11 + Лов."
+- id: studded_leather_armor
+  name: Проклёпанный кожаный доспех
+  name_en: Studded Leather Armor
+  kind: armor
+  armor:
+    kind: light
+    base_ac: 12
+    dex_cap: null
+  summary: "Лёгкий доспех: КД 12 + Лов."
+- id: chain_shirt
+  name: Кольчужная рубаха
+  name_en: Chain Shirt
+  kind: armor
+  armor:
+    kind: medium
+    base_ac: 13
+    dex_cap: 2
+  summary: "Средний доспех: КД 13 + Лов (не больше +2)."
+- id: scale_mail
+  name: Чешуйчатый доспех
+  name_en: Scale Mail
+  kind: armor
+  armor:
+    kind: medium
+    base_ac: 14
+    dex_cap: 2
+    stealth_disadvantage: true
+  summary: "Средний доспех: КД 14 + Лов (не больше +2); помеха на проверки Скрытности."
+- id: chain_mail
+  name: Кольчуга
+  name_en: Chain Mail
+  kind: armor
+  armor:
+    kind: heavy
+    base_ac: 16
+    dex_cap: 0
+    stealth_disadvantage: true
+  summary: "Тяжёлый доспех: КД 16, Ловкость не прибавляется; помеха на проверки Скрытности."
+- id: shield
+  name: Щит
+  name_en: Shield
+  kind: armor
+  armor:
+    kind: shield
+    base_ac: 2
+    dex_cap: null
+  summary: "Даёт +2 к КД; надевается и снимается действием «Использовать»."
+
+# --- зелья лечения ---
+- id: potion_of_healing
+  name: Зелье лечения
+  name_en: Potion of Healing
+  kind: potion
+  heal: 2d4+2
+  summary: "Красное зелье: возвращает 2к4 + 2 HP. Выпить можно бонусным действием."
+- id: potion_of_greater_healing
+  name: Зелье большого лечения
+  name_en: Potion of Greater Healing
+  kind: potion
+  heal: 4d4+4
+  summary: "Красное зелье: возвращает 4к4 + 4 HP. Выпить можно бонусным действием."
+
+# --- снаряжение ---
+- id: rope
+  name: Верёвка
+  name_en: Rope
+  kind: gear
+  summary: "Пеньковая верёвка. Узел вяжется проверкой Ловкости (Ловкость рук) Сл 10; порвать её можно проверкой Силы (Атлетика) Сл 20."
+- id: torch
+  name: Факел
+  name_en: Torch
+  kind: gear
+  summary: "Горит час: яркий свет на 20 футов и тусклый ещё на 20. Им можно ударить как простым оружием, цель получит 1 урона огнём."
+- id: thieves_tools
+  name: Воровские инструменты
+  name_en: Thieves' Tools
+  kind: gear
+  summary: "Набор отмычек и щупов: открыть замок или обезвредить ловушку (Ловкость, Сл 15)."
+- id: healers_kit
+  name: Набор целителя
+  name_en: Healer's Kit
+  kind: gear
+  summary: "Десять использований. Одно использование стабилизирует существо без сознания и с 0 HP без проверки Мудрости (Медицина)."
+- id: spellbook
+  name: Книга заклинаний
+  name_en: Spellbook
+  kind: gear
+  summary: "Книга, в которую волшебник записывает свои заклинания."
+- id: rations
+  name: Рационы
+  name_en: Rations
+  kind: gear
+  summary: "Дорожная еда на день: вяленое мясо, сухофрукты, сухари, орехи."
+
+# --- фокусировки ---
+- id: holy_symbol
+  name: Священный символ
+  name_en: Holy Symbol
+  kind: focus
+  summary: "Эмблема божества: жрец использует её как фокусировку для заклинаний."
+- id: arcane_focus
+  name: Магическая фокусировка
+  name_en: Arcane Focus
+  kind: focus
+  summary: "Кристалл, жезл или иной предмет, через который волшебник направляет заклинания."

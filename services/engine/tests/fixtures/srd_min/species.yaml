@@ -1,0 +1,14 @@
+- id: human
+  name: Человек
+  name_en: Human
+  size: medium
+  speed: 30
+  traits:
+    - id: resourceful
+      name: Находчивость
+      summary: После длинного отдыха получает вдохновение.
+      mechanical: true
+    - id: versatile
+      name: Разносторонность
+      summary: Свободная черта на выбор.
+      mechanical: false

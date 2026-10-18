@@ -1,0 +1,23 @@
+- id: dagger
+  name: Кинжал
+  name_en: Dagger
+  kind: weapon
+  weapon:
+    category: simple
+    damage: 1d4
+    damage_type: piercing
+    properties: [finesse, light, thrown]
+    range: melee
+- id: leather_armor
+  name: Кожаный доспех
+  name_en: Leather Armor
+  kind: armor
+  armor:
+    kind: light
+    base_ac: 11
+    dex_cap: null
+- id: healing_potion
+  name: Зелье лечения
+  name_en: Potion of Healing
+  kind: potion
+  heal: 2d4+2

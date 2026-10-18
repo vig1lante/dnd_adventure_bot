@@ -1,0 +1,47 @@
+# Четыре предыстории SRD 5.2.1 (CC BY 4.0).
+# equipment — только предметы из поднабора среза; книги, одежда, мелочи и деньги не переносятся.
+# inspiration_triggers — 2–3 повода отыгрыша для вдохновения (модуль bg3_flavor); это не текст SRD.
+- id: acolyte
+  name: Прислужник
+  name_en: Acolyte
+  ability_options: [int, wis, cha]
+  skills: [insight, religion]
+  feat: magic_initiate
+  equipment: [holy_symbol]
+  inspiration_triggers:
+    - помолиться или провести обряд в трудную минуту
+    - защитить святыню или чужую веру от осквернения
+    - принести утешение или исцеление тому, кто в беде
+- id: criminal
+  name: Преступник
+  name_en: Criminal
+  ability_options: [dex, con, int]
+  skills: [sleight_of_hand, stealth]
+  feat: alert
+  equipment: [dagger, thieves_tools]
+  inspiration_triggers:
+    - обойти замок, засов или ловушку хитростью вместо силы
+    - выбрать скрытность там, где проще было бы драться
+    - обмануть или запутать врага ради общего дела
+- id: sage
+  name: Мудрец
+  name_en: Sage
+  ability_options: [con, int, wis]
+  skills: [arcana, history]
+  feat: magic_initiate
+  equipment: [quarterstaff]
+  inspiration_triggers:
+    - найти ответ в старой надписи, книге или легенде
+    - пожертвовать безопасностью ради новой тайны
+    - объяснить друзьям странное явление, опираясь на знания
+- id: soldier
+  name: Солдат
+  name_en: Soldier
+  ability_options: [str, dex, con]
+  skills: [athletics, intimidation]
+  feat: savage_attacker
+  equipment: [spear, shortbow, healers_kit]
+  inspiration_triggers:
+    - взять на себя команду в опасности
+    - защитить слабого ценой риска
+    - выполнить приказ или данное слово вопреки соблазну

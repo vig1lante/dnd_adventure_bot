@@ -1,0 +1,10 @@
+- id: sage
+  name: Мудрец
+  name_en: Sage
+  ability_options: [con, int, wis]
+  skills: [arcana, history]
+  feat: magic_initiate
+  equipment: [dagger]
+  inspiration_triggers:
+    - разгадать загадку, опираясь на знания
+    - рискнуть ради новой тайны

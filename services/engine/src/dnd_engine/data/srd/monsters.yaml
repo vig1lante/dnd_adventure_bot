@@ -1,0 +1,594 @@
+# Монстры SRD 5.2.1 (CC BY 4.0) с ПО не выше 3. Краткий пересказ своими словами, не копия текста.
+#
+# Соглашения:
+# - hp — среднее значение из статблока, hp_dice — его запись костей; speed — скорость ходьбы
+#   в футах; saves — итоговые бонусы спасбросков только там, где они отличаются от
+#   модификатора характеристики; skills — итоговые бонусы навыков.
+# - resistances — типы урона; immunities — типы урона и состояния вместе (иммунитет к истощению
+#   не записан: в срезе его нет). Уязвимости модель не выражает: они описаны в traits.
+# - actions: attack — атака с бонусом attack_bonus, damage и damage_type. Если у удара несколько
+#   видов урона, damage хранит сумму кубов, а damage_type — основной тип (остальное в summary).
+#   У attack поле condition без save означает состояние при попадании; condition вместе с save и
+#   dc — состояние при провале спасброска после попадания. save — спасбросок цели без броска
+#   атаки; multiattack перечисляет действия, которые монстр делает подряд; other — только
+#   событие для рассказа (бонусные действия, реакции, колдовство).
+# - range: melee — вплотную; near — метание и дальность до 60 футов; far — луки и арбалеты.
+#   Оружие «ближнего или дальнего боя» записано двумя действиями (суффикс _thrown).
+# - traits — особенности без механики в полях, текстом для мастера.
+- id: goblin_warrior
+  name: Воин-гоблин
+  name_en: Goblin Warrior
+  cr: 0.25
+  xp: 50
+  ac: 15
+  hp: 10
+  hp_dice: 3d6
+  speed: 30
+  scores: {str: 8, dex: 15, con: 10, int: 10, wis: 8, cha: 8}
+  skills: {stealth: 6}
+  actions:
+    - id: scimitar
+      name: Скимитар
+      kind: attack
+      attack_bonus: 4
+      damage: 1d6+2
+      damage_type: slashing
+      summary: "Рукопашная атака. Если бросок атаки был с преимуществом, добавьте 1к4 урона того же типа."
+    - id: shortbow
+      name: Короткий лук
+      kind: attack
+      attack_bonus: 4
+      damage: 1d6+2
+      damage_type: piercing
+      range: far
+      summary: "Дальнобойная атака на 80/320 футов. Если бросок атаки был с преимуществом, добавьте 1к4 урона."
+    - id: nimble_escape
+      name: Ловкий уход
+      kind: other
+      summary: "Бонусным действием гоблин совершает Отход или прячется."
+  tags: [fey, goblinoid]
+- id: goblin_boss
+  name: Гоблин-босс
+  name_en: Goblin Boss
+  cr: 1
+  xp: 200
+  ac: 17
+  hp: 21
+  hp_dice: 6d6
+  speed: 30
+  scores: {str: 10, dex: 15, con: 10, int: 10, wis: 8, cha: 10}
+  skills: {stealth: 6}
+  actions:
+    - id: multiattack
+      name: Мультиатака
+      kind: multiattack
+      multiattack: [scimitar, scimitar]
+      summary: "Две атаки скимитаром или коротким луком в любом сочетании; в данных — две атаки скимитаром."
+    - id: scimitar
+      name: Скимитар
+      kind: attack
+      attack_bonus: 4
+      damage: 1d6+2
+      damage_type: slashing
+      summary: "Рукопашная атака. Если бросок атаки был с преимуществом, добавьте 1к4 урона того же типа."
+    - id: shortbow
+      name: Короткий лук
+      kind: attack
+      attack_bonus: 4
+      damage: 1d6+2
+      damage_type: piercing
+      range: far
+      summary: "Дальнобойная атака на 80/320 футов. Если бросок атаки был с преимуществом, добавьте 1к4 урона."
+    - id: nimble_escape
+      name: Ловкий уход
+      kind: other
+      summary: "Бонусным действием босс совершает Отход или прячется."
+    - id: redirect_attack
+      name: Перенаправление атаки
+      kind: other
+      summary: "Реакция: когда по гоблину бросают атаку, он меняется местами с союзником (Малым или Средним) в пределах 5 футов, и тот становится целью."
+  tags: [fey, goblinoid]
+- id: skeleton
+  name: Скелет
+  name_en: Skeleton
+  cr: 0.25
+  xp: 50
+  ac: 14
+  hp: 13
+  hp_dice: 2d8+4
+  speed: 30
+  scores: {str: 10, dex: 16, con: 15, int: 6, wis: 8, cha: 5}
+  immunities: [poison, poisoned]
+  actions:
+    - id: shortsword
+      name: Короткий меч
+      kind: attack
+      attack_bonus: 5
+      damage: 1d6+3
+      damage_type: piercing
+      summary: "Рукопашная атака."
+    - id: shortbow
+      name: Короткий лук
+      kind: attack
+      attack_bonus: 5
+      damage: 1d6+3
+      damage_type: piercing
+      range: far
+      summary: "Дальнобойная атака на 80/320 футов."
+  traits:
+    - "Уязвимость к дробящему урону: от дробящего урона скелет получает двойной урон."
+  tags: [undead]
+- id: zombie
+  name: Зомби
+  name_en: Zombie
+  cr: 0.25
+  xp: 50
+  ac: 8
+  hp: 15
+  hp_dice: 2d8+6
+  speed: 20
+  scores: {str: 13, dex: 6, con: 16, int: 3, wis: 6, cha: 5}
+  saves: {wis: 0}
+  immunities: [poison, poisoned]
+  actions:
+    - id: slam
+      name: Удар
+      kind: attack
+      attack_bonus: 3
+      damage: 1d8+1
+      damage_type: bludgeoning
+      summary: "Рукопашная атака."
+  traits:
+    - "Стойкость нежити: если урон опускает зомби до 0 HP, он делает спасбросок Телосложения (Сл 5 + полученный урон) и при успехе остаётся с 1 HP; не работает против урона излучением и критических попаданий."
+  tags: [undead]
+- id: ghoul
+  name: Гуль
+  name_en: Ghoul
+  cr: 1
+  xp: 200
+  ac: 12
+  hp: 22
+  hp_dice: 5d8
+  speed: 30
+  scores: {str: 13, dex: 15, con: 10, int: 7, wis: 10, cha: 6}
+  immunities: [poison, charmed, poisoned]
+  actions:
+    - id: multiattack
+      name: Мультиатака
+      kind: multiattack
+      multiattack: [bite, bite]
+      summary: "Два укуса."
+    - id: bite
+      name: Укус
+      kind: attack
+      attack_bonus: 4
+      damage: 1d6+1d6+2
+      damage_type: piercing
+      summary: "Колющий урон 1к6 + 2 и ещё 1к6 некротического; в данных урон суммирован."
+    - id: claw
+      name: Когти
+      kind: attack
+      attack_bonus: 4
+      damage: 1d4+2
+      damage_type: slashing
+      save: con
+      dc: 10
+      condition: paralyzed
+      summary: "После попадания цель (кроме нежити и эльфов) делает спасбросок Телосложения и при провале парализована до конца своего следующего хода."
+  tags: [undead]
+- id: wolf
+  name: Волк
+  name_en: Wolf
+  cr: 0.25
+  xp: 50
+  ac: 12
+  hp: 11
+  hp_dice: 2d8+2
+  speed: 40
+  scores: {str: 14, dex: 15, con: 12, int: 3, wis: 12, cha: 6}
+  skills: {perception: 5, stealth: 4}
+  actions:
+    - id: bite
+      name: Укус
+      kind: attack
+      attack_bonus: 4
+      damage: 1d6+2
+      damage_type: piercing
+      condition: prone
+      summary: "Цель размером не больше Среднего сбивается с ног."
+  traits:
+    - "Тактика стаи: преимущество на атаку по существу, если рядом с ним (до 5 футов) стоит союзник волка, не недееспособный."
+  tags: [beast]
+- id: dire_wolf
+  name: Лютоволк
+  name_en: Dire Wolf
+  cr: 1
+  xp: 200
+  ac: 14
+  hp: 22
+  hp_dice: 3d10+6
+  speed: 50
+  scores: {str: 17, dex: 15, con: 15, int: 3, wis: 12, cha: 7}
+  skills: {perception: 5, stealth: 4}
+  actions:
+    - id: bite
+      name: Укус
+      kind: attack
+      attack_bonus: 5
+      damage: 1d10+3
+      damage_type: piercing
+      condition: prone
+      summary: "Цель размером не больше Большого сбивается с ног."
+  traits:
+    - "Тактика стаи: преимущество на атаку по существу, если рядом с ним (до 5 футов) стоит союзник лютоволка, не недееспособный."
+  tags: [beast]
+- id: giant_rat
+  name: Гигантская крыса
+  name_en: Giant Rat
+  cr: 0.125
+  xp: 25
+  ac: 13
+  hp: 7
+  hp_dice: 2d6
+  speed: 30
+  scores: {str: 7, dex: 16, con: 11, int: 2, wis: 10, cha: 4}
+  saves: {dex: 5}
+  skills: {perception: 2}
+  actions:
+    - id: bite
+      name: Укус
+      kind: attack
+      attack_bonus: 5
+      damage: 1d4+3
+      damage_type: piercing
+      summary: "Рукопашная атака."
+  traits:
+    - "Тактика стаи: преимущество на атаку по существу, если рядом с ним (до 5 футов) стоит союзник крысы, не недееспособный."
+  tags: [beast]
+- id: giant_spider
+  name: Гигантский паук
+  name_en: Giant Spider
+  cr: 1
+  xp: 200
+  ac: 14
+  hp: 26
+  hp_dice: 4d10+4
+  speed: 30
+  scores: {str: 14, dex: 16, con: 12, int: 2, wis: 11, cha: 4}
+  skills: {perception: 4, stealth: 7}
+  actions:
+    - id: bite
+      name: Укус
+      kind: attack
+      attack_bonus: 5
+      damage: 1d8+2d6+3
+      damage_type: piercing
+      summary: "Колющий урон 1к8 + 3 и ещё 2к6 урона ядом; в данных урон суммирован."
+    - id: web
+      name: Паутина (перезарядка 5–6)
+      kind: save
+      save: dex
+      dc: 13
+      range: near
+      condition: restrained
+      summary: "Существо в 60 футах делает спасбросок Ловкости, при провале оно опутано, пока паутину не разрушат (КД 10, 5 HP, уязвима к огню, неуязвима к яду и психической энергии). Перезарядка не моделируется: паук использует паутину, когда решит мастер."
+  traits:
+    - "Паучье лазание: ходит по любым поверхностям, в том числе по потолку, без проверок."
+    - "Паутинный ход: не стеснён паутиной и знает, где находятся существа, касающиеся той же паутины."
+  tags: [beast]
+- id: bandit
+  name: Бандит
+  name_en: Bandit
+  cr: 0.125
+  xp: 25
+  ac: 12
+  hp: 11
+  hp_dice: 2d8+2
+  speed: 30
+  scores: {str: 11, dex: 12, con: 12, int: 10, wis: 10, cha: 10}
+  actions:
+    - id: scimitar
+      name: Скимитар
+      kind: attack
+      attack_bonus: 3
+      damage: 1d6+1
+      damage_type: slashing
+      summary: "Рукопашная атака."
+    - id: light_crossbow
+      name: Лёгкий арбалет
+      kind: attack
+      attack_bonus: 3
+      damage: 1d8+1
+      damage_type: piercing
+      range: far
+      summary: "Дальнобойная атака на 80/320 футов."
+  tags: [humanoid]
+- id: bandit_captain
+  name: Капитан бандитов
+  name_en: Bandit Captain
+  cr: 2
+  xp: 450
+  ac: 15
+  hp: 52
+  hp_dice: 8d8+16
+  speed: 30
+  scores: {str: 15, dex: 16, con: 14, int: 14, wis: 11, cha: 14}
+  saves: {str: 4, dex: 5, wis: 2}
+  skills: {athletics: 4, deception: 4}
+  actions:
+    - id: multiattack
+      name: Мультиатака
+      kind: multiattack
+      multiattack: [scimitar, scimitar]
+      summary: "Две атаки скимитаром или пистолетом в любом сочетании; в данных — две атаки скимитаром."
+    - id: scimitar
+      name: Скимитар
+      kind: attack
+      attack_bonus: 5
+      damage: 1d6+3
+      damage_type: slashing
+      summary: "Рукопашная атака."
+    - id: pistol
+      name: Пистолет
+      kind: attack
+      attack_bonus: 5
+      damage: 1d10+3
+      damage_type: piercing
+      range: near
+      summary: "Дальнобойная атака на 30/90 футов."
+    - id: parry
+      name: Парирование
+      kind: other
+      summary: "Реакция: когда по капитану попадают рукопашной атакой, а он держит оружие, он добавляет 2 к КД против этой атаки."
+  tags: [humanoid]
+- id: cultist
+  name: Культист
+  name_en: Cultist
+  cr: 0.125
+  xp: 25
+  ac: 12
+  hp: 9
+  hp_dice: 2d8
+  speed: 30
+  scores: {str: 11, dex: 12, con: 10, int: 10, wis: 11, cha: 10}
+  saves: {wis: 2}
+  skills: {deception: 2, religion: 2}
+  actions:
+    - id: ritual_sickle
+      name: Ритуальный серп
+      kind: attack
+      attack_bonus: 3
+      damage: 1d4+2
+      damage_type: slashing
+      summary: "Рубящий урон 1к4 + 1 и ещё 1 некротического; в данных урон суммирован."
+  tags: [humanoid]
+- id: cultist_fanatic
+  name: Фанатик культа
+  name_en: Cultist Fanatic
+  cr: 2
+  xp: 450
+  ac: 13
+  hp: 44
+  hp_dice: 8d8+8
+  speed: 30
+  scores: {str: 11, dex: 14, con: 12, int: 10, wis: 14, cha: 13}
+  saves: {wis: 4}
+  skills: {deception: 3, persuasion: 3, religion: 2}
+  actions:
+    - id: pact_blade
+      name: Клинок договора
+      kind: attack
+      attack_bonus: 4
+      damage: 1d8+2d6+2
+      damage_type: slashing
+      summary: "Рубящий урон 1к8 + 2 и ещё 2к6 некротического; в данных урон суммирован."
+    - id: spellcasting
+      name: Колдовство
+      kind: other
+      summary: "Мудрость, Сл 12, +4 к атакам заклинаниями. Без ограничений: Свет и Чудотворство; 2 раза в день: Приказ; 1 раз в день: Удержание личности; бонусным действием 2 раза в день: Духовное оружие. Заклинания разыгрывает мастер."
+  tags: [humanoid]
+- id: guard
+  name: Стражник
+  name_en: Guard
+  cr: 0.125
+  xp: 25
+  ac: 16
+  hp: 11
+  hp_dice: 2d8+2
+  speed: 30
+  scores: {str: 13, dex: 12, con: 12, int: 10, wis: 11, cha: 10}
+  skills: {perception: 2}
+  actions:
+    - id: spear
+      name: Копьё
+      kind: attack
+      attack_bonus: 3
+      damage: 1d6+1
+      damage_type: piercing
+      summary: "Рукопашная атака."
+    - id: spear_thrown
+      name: Бросок копья
+      kind: attack
+      attack_bonus: 3
+      damage: 1d6+1
+      damage_type: piercing
+      range: near
+      summary: "Метание на 20/60 футов."
+  tags: [humanoid]
+- id: bugbear_warrior
+  name: Воин-багбир
+  name_en: Bugbear Warrior
+  cr: 1
+  xp: 200
+  ac: 14
+  hp: 33
+  hp_dice: 6d8+6
+  speed: 30
+  scores: {str: 15, dex: 14, con: 13, int: 8, wis: 11, cha: 9}
+  skills: {stealth: 6, survival: 2}
+  actions:
+    - id: grab
+      name: Захват
+      kind: attack
+      attack_bonus: 4
+      damage: 2d6+2
+      damage_type: bludgeoning
+      condition: grappled
+      summary: "Досягаемость 10 футов. Цель размером не больше Среднего схвачена (Сл побега 12)."
+    - id: light_hammer
+      name: Лёгкий молот
+      kind: attack
+      attack_bonus: 4
+      damage: 3d4+2
+      damage_type: bludgeoning
+      summary: "Досягаемость 10 футов. Атака с преимуществом, если цель схвачена этим багбиром."
+    - id: light_hammer_thrown
+      name: Бросок лёгкого молота
+      kind: attack
+      attack_bonus: 4
+      damage: 3d4+2
+      damage_type: bludgeoning
+      range: near
+      summary: "Метание на 20/60 футов; с преимуществом, если цель схвачена этим багбиром."
+  traits:
+    - "Похищение: багбир не тратит лишнее движение, таща схваченное им существо."
+  tags: [fey, goblinoid]
+- id: ogre
+  name: Огр
+  name_en: Ogre
+  cr: 2
+  xp: 450
+  ac: 11
+  hp: 68
+  hp_dice: 8d10+24
+  speed: 40
+  scores: {str: 19, dex: 8, con: 16, int: 5, wis: 7, cha: 7}
+  actions:
+    - id: greatclub
+      name: Дубина
+      kind: attack
+      attack_bonus: 6
+      damage: 2d8+4
+      damage_type: bludgeoning
+      summary: "Рукопашная атака."
+    - id: javelin
+      name: Метательное копьё
+      kind: attack
+      attack_bonus: 6
+      damage: 2d6+4
+      damage_type: piercing
+      summary: "Рукопашная атака копьём."
+    - id: javelin_thrown
+      name: Бросок копья
+      kind: attack
+      attack_bonus: 6
+      damage: 2d6+4
+      damage_type: piercing
+      range: near
+      summary: "Метание на 30/120 футов."
+  tags: [giant]
+- id: shadow
+  name: Тень
+  name_en: Shadow
+  cr: 0.5
+  xp: 100
+  ac: 12
+  hp: 27
+  hp_dice: 5d8+5
+  speed: 40
+  scores: {str: 6, dex: 14, con: 13, int: 6, wis: 10, cha: 8}
+  skills: {stealth: 6}
+  resistances: [acid, cold, fire, lightning, thunder]
+  immunities:
+    [necrotic, poison, frightened, grappled, paralyzed, petrified, poisoned, prone, restrained, unconscious]
+  actions:
+    - id: draining_swipe
+      name: Высасывающий взмах
+      kind: attack
+      attack_bonus: 4
+      damage: 1d6+2
+      damage_type: necrotic
+      summary: "Цель теряет 1к4 Силы (умирает, если Сила упала до 0). Убитый гуманоид через 1к4 часа восстаёт новой тенью."
+    - id: shadow_stealth
+      name: Теневая скрытность
+      kind: other
+      summary: "Бонусным действием тень прячется, находясь в тусклом свете или темноте."
+  traits:
+    - "Уязвимость к излучению: от урона излучением тень получает двойной урон."
+    - "Бесформенность: протискивается в щель шириной в дюйм без лишнего движения."
+    - "Слабость к солнцу: на солнечном свету помеха на все проверки к20."
+  tags: [undead]
+- id: animated_armor
+  name: Оживлённый доспех
+  name_en: Animated Armor
+  cr: 1
+  xp: 200
+  ac: 18
+  hp: 33
+  hp_dice: 6d8+6
+  speed: 25
+  scores: {str: 14, dex: 11, con: 13, int: 1, wis: 3, cha: 1}
+  immunities: [poison, psychic, charmed, deafened, frightened, paralyzed, petrified, poisoned]
+  actions:
+    - id: multiattack
+      name: Мультиатака
+      kind: multiattack
+      multiattack: [slam, slam]
+      summary: "Две атаки Ударом."
+    - id: slam
+      name: Удар
+      kind: attack
+      attack_bonus: 4
+      damage: 1d6+2
+      damage_type: bludgeoning
+      summary: "Рукопашная атака."
+  tags: [construct]
+- id: swarm_of_rats
+  name: Рой крыс
+  name_en: Swarm of Rats
+  cr: 0.25
+  xp: 50
+  ac: 10
+  hp: 14
+  hp_dice: 4d8-4
+  speed: 30
+  scores: {str: 9, dex: 11, con: 9, int: 2, wis: 10, cha: 3}
+  saves: {dex: 2}
+  resistances: [bludgeoning, piercing, slashing]
+  immunities: [charmed, frightened, grappled, paralyzed, petrified, prone, restrained, stunned]
+  actions:
+    - id: bites
+      name: Укусы
+      kind: attack
+      attack_bonus: 2
+      damage: 2d4
+      damage_type: piercing
+      summary: "Когда у роя осталась половина HP или меньше, урон 1к4 вместо 2к4."
+  traits:
+    - "Рой: может занимать пространство другого существа и наоборот, проходит в любую щель, подходящую крысе. Не восстанавливает HP и не получает временные HP."
+  tags: [beast, swarm]
+- id: owlbear
+  name: Совомедведь
+  name_en: Owlbear
+  cr: 3
+  xp: 700
+  ac: 13
+  hp: 59
+  hp_dice: 7d10+21
+  speed: 40
+  scores: {str: 20, dex: 12, con: 17, int: 3, wis: 12, cha: 7}
+  skills: {perception: 5}
+  actions:
+    - id: multiattack
+      name: Мультиатака
+      kind: multiattack
+      multiattack: [rend, rend]
+      summary: "Две атаки Рвать."
+    - id: rend
+      name: Рвать
+      kind: attack
+      attack_bonus: 7
+      damage: 2d8+5
+      damage_type: slashing
+      summary: "Рукопашная атака."
+  tags: [monstrosity]
