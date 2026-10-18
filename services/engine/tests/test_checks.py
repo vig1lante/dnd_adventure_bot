@@ -5,6 +5,7 @@ import pytest
 from dnd_engine.abilities import Ability, Skill
 from dnd_engine.character import ActiveBuff, ActiveCondition, Character
 from dnd_engine.checks import (
+    BLESS_BUFF,
     CHECK_DISADVANTAGE_CONDITIONS,
     CHECK_TRAIT_BY_SPECIES,
     DC_TABLE,
@@ -15,12 +16,18 @@ from dnd_engine.checks import (
     CheckResult,
     ContestResult,
     ContestSide,
+    GUIDANCE_BUFF,
     ability_check,
+    apply_bless,
+    apply_luck,
+    combine_advantage,
     contest,
+    engine_saving_throw,
+    monster_saving_throw,
     saving_throw,
 )
 from dnd_engine.content import SrdContent, load_srd
-from dnd_engine.dice import Advantage, parse
+from dnd_engine.dice import Advantage, parse, roll
 from dnd_engine.rng import ScriptedRng
 
 STR, DEX, CON, INT, WIS, CHA = Ability
@@ -82,6 +89,10 @@ def bless() -> ActiveBuff:
     return ActiveBuff(id="bless", rounds_left=10, source_id="cleric-1")
 
 
+def guidance() -> ActiveBuff:
+    return ActiveBuff(id="guidance", rounds_left=10, source_id="cleric-1")
+
+
 # --- таблица Сл ---
 
 
@@ -130,6 +141,210 @@ def test_save_rejects_dc_outside_the_table_without_rolling(make_character, dc):
         )
 
     assert rng.randint(1, 20) == 10
+
+
+# --- Сл, рассчитанная движком ---
+
+
+def engine_save(
+    c: Character,
+    values: list[int],
+    *,
+    ability: Ability = CON,
+    dc: int = 12,
+    advantage: Advantage = NONE,
+) -> CheckResult:
+    return engine_saving_throw(
+        c,
+        ability,
+        dc=dc,
+        advantage=advantage,
+        rng=ScriptedRng(values),
+        reason="тест",
+    )
+
+
+@pytest.mark.parametrize("dc", [1, 8, 10, 12, 17, 31])
+def test_engine_computed_dc_is_not_limited_to_the_table(make_character, dc):
+    result = engine_save(make_character(), [10], dc=dc)
+
+    assert result.dc == dc
+    assert result.success == (10 >= dc)
+
+
+def test_engine_save_rolls_like_a_normal_save(make_character):
+    c = make_character(species="gnome", scores={WIS: 14}, save_proficiencies=[WIS], buffs=[bless()])
+
+    result = engine_save(c, [4, 16, 3], ability=WIS, dc=12)
+
+    # мастерство 2 + Мдр +2; Гномья хитрость даёт преимущество; благословение — отдельная кость
+    assert (result.kind, result.bonus) == (CheckKind.SAVE, 4)
+    assert (result.roll.advantage, result.roll.natural, result.roll.rolls) == (
+        ADVANTAGE,
+        16,
+        [4, 16, 3],
+    )
+    assert result.total == 16 + 4 + 3
+
+
+def test_engine_save_honours_the_poison_tag_of_dwarves(make_character):
+    result = engine_saving_throw(
+        make_character(species="dwarf"),
+        CON,
+        dc=12,
+        advantage=NONE,
+        rng=ScriptedRng([4, 16]),
+        reason="тест",
+        against="poison",
+    )
+
+    assert (result.roll.advantage, result.roll.natural) == (ADVANTAGE, 16)
+
+
+def test_master_save_still_refuses_a_dc_outside_the_table_when_engine_save_accepts_it(
+    make_character,
+):
+    c = make_character()
+
+    assert engine_save(c, [10], dc=12).dc == 12
+    with pytest.raises(ValueError, match="Сл"):
+        save(c, [10], dc=12)
+
+
+# --- автопровал спасбросков ---
+
+AUTO_FAIL_CONDITIONS = ["paralyzed", "petrified", "stunned", "unconscious"]
+
+
+@pytest.mark.parametrize("condition_id", AUTO_FAIL_CONDITIONS)
+@pytest.mark.parametrize("ability", [STR, DEX])
+def test_some_conditions_fail_strength_and_dexterity_saves_without_a_roll(
+    make_character, condition_id, ability
+):
+    c = make_character(conditions=[ActiveCondition(id=condition_id)], scores={DEX: 20, STR: 20})
+    rng = ScriptedRng([])  # любой бросок упал бы ошибкой
+
+    master = saving_throw(c, ability, dc=5, advantage=NONE, rng=rng, reason="тест")
+    engine = engine_saving_throw(c, ability, dc=3, advantage=NONE, rng=rng, reason="тест")
+
+    for result in (master, engine):
+        assert (result.success, result.auto, result.condition) == (False, "condition", condition_id)
+        assert (result.roll.rolls, result.roll.natural, result.total) == ([], None, 0)
+        assert result.kind == CheckKind.SAVE
+
+
+@pytest.mark.parametrize("ability", [CON, INT, WIS, CHA])
+def test_auto_fail_does_not_touch_other_abilities(make_character, ability):
+    c = make_character(conditions=[ActiveCondition(id="paralyzed")])
+
+    result = save(c, [15], ability=ability)
+
+    assert (result.success, result.auto, result.condition) == (True, None, None)
+
+
+@pytest.mark.parametrize("condition_id", ["restrained", "prone", "blinded", "incapacitated"])
+def test_other_conditions_do_not_fail_saves_automatically(make_character, condition_id):
+    c = make_character(conditions=[ActiveCondition(id=condition_id)])
+
+    result = save(c, [15, 15], ability=STR)
+
+    assert result.auto is None and result.condition is None
+
+
+def test_auto_fail_applies_to_saves_only_not_to_ability_checks(make_character):
+    c = make_character(conditions=[ActiveCondition(id="paralyzed")])
+
+    result = check(c, [15], ability=STR)
+
+    assert (result.success, result.auto) == (True, None)
+
+
+def test_auto_fail_names_the_first_blocking_condition(make_character):
+    c = make_character(conditions=[ActiveCondition(id="poisoned"), ActiveCondition(id="stunned")])
+
+    assert save(c, [], ability=DEX).condition == "stunned"
+
+
+def test_dc_table_is_checked_before_auto_fail(make_character):
+    c = make_character(conditions=[ActiveCondition(id="paralyzed")])
+
+    with pytest.raises(ValueError, match="Сл"):
+        save(c, [], ability=STR, dc=12)
+
+
+def test_auto_fail_result_survives_json_round_trip(make_character):
+    c = make_character(conditions=[ActiveCondition(id="unconscious")])
+    result = save(c, [], ability=DEX)
+
+    assert CheckResult.model_validate_json(result.model_dump_json()) == result
+
+
+# --- спасброски монстров ---
+
+
+def monster_save(
+    srd: SrdContent,
+    monster_id: str,
+    values: list[int],
+    *,
+    ability: Ability = WIS,
+    dc: int = 12,
+    advantage: Advantage = NONE,
+    conditions=(),
+) -> CheckResult:
+    return monster_saving_throw(
+        srd.monsters[monster_id],
+        f"{monster_id}-1",
+        list(conditions),
+        ability,
+        dc=dc,
+        advantage=advantage,
+        rng=ScriptedRng(values),
+        reason="тест",
+    )
+
+
+def test_monster_save_uses_the_statblock_bonus_when_it_differs_from_the_modifier(srd):
+    # Зомби: Мудрость 6 даёт −2, но в статблоке спасбросок Мудрости +0.
+    result = monster_save(srd, "zombie", [12], ability=WIS, dc=12)
+
+    assert (result.bonus, result.total, result.success) == (0, 12, True)
+    assert (result.actor_id, result.kind, result.ability) == ("zombie-1", CheckKind.SAVE, WIS)
+
+
+def test_monster_save_falls_back_to_the_ability_modifier(srd):
+    # Огр: Сила 19 — +4, спасброски в статблоке не записаны.
+    result = monster_save(srd, "ogre", [7], ability=STR, dc=12)
+
+    assert (result.bonus, result.total, result.success) == (4, 11, False)
+
+
+def test_monster_save_follows_conditions_like_characters(srd):
+    restrained = [ActiveCondition(id="restrained")]
+
+    dex_save = monster_save(srd, "ogre", [4, 16], ability=DEX, conditions=restrained)
+    wis_save = monster_save(srd, "ogre", [4], ability=WIS, conditions=restrained)
+
+    assert (dex_save.roll.advantage, dex_save.roll.natural) == (DISADVANTAGE, 4)
+    assert wis_save.roll.advantage == NONE
+
+
+def test_monster_save_fails_without_a_roll_when_stunned(srd):
+    result = monster_save(srd, "ogre", [], ability=STR, conditions=[ActiveCondition(id="stunned")])
+
+    assert (result.success, result.auto, result.condition) == (False, "condition", "stunned")
+
+
+def test_monster_save_takes_the_advantage_parameter(srd):
+    result = monster_save(srd, "ogre", [4, 16], ability=CON, advantage=ADVANTAGE)
+
+    assert (result.roll.advantage, result.roll.natural) == (ADVANTAGE, 16)
+
+
+def test_combine_advantage_cancels_any_number_of_opposite_sources():
+    assert combine_advantage(ADVANTAGE, ADVANTAGE, DISADVANTAGE) == NONE
+    assert combine_advantage(NONE, DISADVANTAGE, DISADVANTAGE) == DISADVANTAGE
+    assert combine_advantage() == NONE
 
 
 # --- проверка характеристики и навыка ---
@@ -677,3 +892,121 @@ def test_roll_expression_shows_the_blessing_die_next_to_the_d20(make_character):
     assert [(term.count, term.sides) for term in terms] == [(1, 20), (1, 4)]
     assert parse(blessed.roll.expr).modifier == blessed.bonus == 2
     assert len(blessed.roll.rolls) == sum(term.count for term in terms)
+
+
+# --- указание: +1к4 к проверкам (не к спасброскам) ---
+
+
+def test_guidance_buff_id_matches_the_spell_data(srd):
+    assert srd.spells["guidance"].effect.buff == GUIDANCE_BUFF == "guidance"
+    assert srd.spells["bless"].effect.buff == BLESS_BUFF == "bless"
+
+
+def test_guidance_adds_a_separate_d4_to_ability_checks(make_character):
+    c = make_character(scores={DEX: 14}, buffs=[guidance()])  # бонус +2
+
+    result = check(c, [10, 3], dc=15)
+
+    assert result.roll.rolls == [10, 3]
+    assert result.roll.natural == 10  # натуральное значение — по к20, не по кости указания
+    assert result.bonus == 2
+    assert (result.total, result.roll.total) == (15, 15)
+    assert result.success is True
+    assert result.roll.expr == "1d20+2+1d4"
+
+
+def test_guidance_adds_a_d4_to_skill_checks(make_character):
+    c = make_character(scores={DEX: 14}, buffs=[guidance()])
+
+    result = check(c, [10, 3], skill=Skill.STEALTH)
+
+    assert result.kind == CheckKind.SKILL
+    assert result.roll.rolls == [10, 3]
+
+
+def test_guidance_does_not_apply_to_saving_throws(make_character):
+    c = make_character(buffs=[guidance()])
+
+    assert save(c, [10]).roll.rolls == [10]
+    rng = ScriptedRng([10])
+    engine = engine_saving_throw(
+        c, WIS, dc=13, advantage=NONE, rng=rng, reason="тест"
+    )  # Сл движка — тот же путь
+    assert engine.roll.rolls == [10]
+
+
+def test_guidance_with_advantage_keeps_all_dice_visible(make_character):
+    result = check(make_character(buffs=[guidance()]), [4, 16, 2], advantage=ADVANTAGE)
+
+    assert result.roll.rolls == [4, 16, 2]
+    assert (result.roll.kept, result.total) == ([16, 2], 18)
+
+
+def test_guidance_comes_after_halfling_luck(make_character):
+    c = make_character(species="halfling", buffs=[guidance()])
+
+    result = check(c, [1, 15, 3])
+
+    assert result.roll.rolls == [1, 15, 3]
+    assert (result.roll.natural, result.total) == (15, 18)
+
+
+def test_guidance_and_bless_do_not_mix_up(make_character):
+    c = make_character(buffs=[bless(), guidance()])
+
+    assert check(c, [10, 2]).roll.rolls == [10, 2]  # проверка: только указание
+    assert save(c, [10, 2]).roll.rolls == [10, 2]  # спасбросок: только благословение
+
+
+# --- удача и благословение для других бросков к20 (атака, спасбросок от смерти, инициатива) ---
+
+
+def d20(values: list[int], modifier: int = 3, advantage: Advantage = NONE):
+    rng = ScriptedRng(values)
+    return roll(f"1d20{modifier:+d}", rng=rng, advantage=advantage, reason="атака"), rng
+
+
+def test_apply_luck_rerolls_a_natural_one_for_a_halfling(make_character):
+    first, _ = d20([1])
+
+    result = apply_luck(make_character(species="halfling"), first, rng=ScriptedRng([14]))
+
+    assert (result.natural, result.total, result.rolls) == (14, 17, [1, 14])
+    assert first.natural == 1  # исходный бросок не изменился
+
+
+def test_apply_luck_ignores_other_species_and_other_values(make_character):
+    first, _ = d20([1])
+    other, _ = d20([2])
+    halfling = make_character(species="halfling")
+
+    unchanged = apply_luck(make_character(species="human"), first, rng=ScriptedRng([]))
+    two = apply_luck(halfling, other, rng=ScriptedRng([]))
+
+    assert unchanged == first
+    assert two == other  # кубы не бросались: ScriptedRng пуст
+
+
+def test_apply_bless_adds_a_d4_only_when_the_buff_is_present(make_character):
+    first, _ = d20([12])
+
+    blessed = apply_bless(make_character(buffs=[bless()]), first, rng=ScriptedRng([3]))
+    plain = apply_bless(make_character(), first, rng=ScriptedRng([]))
+
+    assert (blessed.rolls, blessed.total, blessed.natural) == ([12, 3], 18, 12)
+    assert blessed.expr == "1d20+3+1d4"
+    assert plain == first
+
+
+def test_the_same_effect_from_two_casters_adds_only_one_die(make_character):
+    def twice(buff_id: str) -> list[ActiveBuff]:
+        return [ActiveBuff(id=buff_id, rounds_left=10, source_id=f"cleric-{n}") for n in (1, 2)]
+
+    blessed = make_character(buffs=twice("bless"))
+    guided = make_character(buffs=twice("guidance"))
+    first, _ = d20([12])
+
+    # Третье значение очереди остаётся нетронутым: кость добавлена одна, а не по одной на жреца.
+    assert apply_bless(blessed, first, rng=ScriptedRng([3, 4])).rolls == [12, 3]
+    assert save(blessed, [10, 2, 4]).roll.rolls == [10, 2]
+    assert check(guided, [10, 2, 4]).roll.rolls == [10, 2]

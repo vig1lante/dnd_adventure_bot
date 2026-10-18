@@ -1,4 +1,7 @@
+import copy
+import operator
 import shutil
+from contextlib import suppress
 from pathlib import Path
 from typing import get_args
 
@@ -11,6 +14,7 @@ from dnd_engine.abilities import Ability, Skill
 from dnd_engine.content import (
     ContentError,
     MonsterAction,
+    MonsterDef,
     SpellDef,
     SpellEffect,
     SrdContent,
@@ -239,6 +243,170 @@ def test_optional_fields_default_to_neutral_values():
     assert (action.attack_bonus, action.damage, action.save, action.dc) == (None, None, None, None)
 
 
+# --- лечение с модификатором и заклинания только вне боя ---
+
+
+def spell_with(**fields) -> SpellDef:
+    base = {
+        "id": "test_spell",
+        "name": "Тест",
+        "name_en": "Test",
+        "level": 1,
+        "casting_time": "action",
+        "range": "near",
+        "concentration": False,
+        "duration_rounds": None,
+        "classes": ("cleric",),
+        "effect": SpellEffect(kind="heal", heal="2d4"),
+        "summary": "s",
+    }
+    return SpellDef(**(base | fields))
+
+
+def test_healing_modifier_and_out_of_combat_only_are_off_by_default():
+    assert SpellEffect(kind="heal", heal="2d4").heal_modifier is False
+    assert spell_with().out_of_combat_only is False
+
+
+def test_heal_modifier_and_out_of_combat_only_are_accepted():
+    effect = SpellEffect(kind="heal", heal="2d8", heal_modifier=True)
+
+    assert effect.heal_modifier is True
+    assert spell_with(out_of_combat_only=True).out_of_combat_only is True
+
+
+def test_spell_flags_are_read_from_yaml(srd_dir):
+    edit(
+        srd_dir,
+        "spells",
+        "    damage: 1d4+1\n    damage_type: force\n    repeats: 3\n  upcast: 1d4+1\n",
+        "    damage: 1d4+1\n    damage_type: force\n    repeats: 3\n    heal_modifier: true\n"
+        "  upcast: 1d4+1\n  out_of_combat_only: true\n",
+    )
+
+    missile = load_srd(srd_dir).spells["magic_missile"]
+
+    assert missile.effect.heal_modifier is True
+    assert missile.out_of_combat_only is True
+
+
+# --- защиты и вторичный урон монстров ---
+
+
+def rat_statblock(**overrides) -> MonsterDef:
+    fields = {
+        "id": "rat",
+        "name": "Крыса",
+        "name_en": "Rat",
+        "cr": 0,
+        "xp": 10,
+        "ac": 10,
+        "hp": 1,
+        "hp_dice": "1d4",
+        "speed": 20,
+        "scores": dict.fromkeys(Ability, 10),
+        "actions": (),
+    }
+    return MonsterDef(**(fields | overrides))
+
+
+def test_monster_has_no_vulnerabilities_and_action_no_secondary_damage_by_default():
+    action = MonsterAction(id="bite", name="Укус", kind="attack")
+
+    assert rat_statblock().vulnerabilities == ()
+    assert (action.secondary_damage, action.secondary_damage_type) == (None, None)
+    assert action.reach is False
+
+
+def test_vulnerabilities_are_a_tuple_of_damage_types():
+    monster = rat_statblock(vulnerabilities=["bludgeoning"])
+
+    assert monster.vulnerabilities == ("bludgeoning",)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"secondary_damage": "1d6"}, {"secondary_damage_type": "necrotic"}],
+    ids=["кости без типа", "тип без костей"],
+)
+def test_secondary_damage_needs_both_dice_and_type(extra):
+    with pytest.raises(ValidationError, match="вторичн"):
+        MonsterAction(id="bite", name="Укус", kind="attack", **extra)
+
+
+def test_secondary_damage_with_dice_and_type_is_accepted():
+    action = MonsterAction(
+        id="bite", name="Укус", kind="attack", secondary_damage="1d6", secondary_damage_type="fire"
+    )
+
+    assert (action.secondary_damage, action.secondary_damage_type) == ("1d6", "fire")
+
+
+def test_new_monster_fields_are_read_from_yaml(srd_dir):
+    edit(
+        srd_dir,
+        "monsters",
+        "  scores: {str: 8, dex: 15, con: 10, int: 10, wis: 8, cha: 8}\n",
+        "  scores: {str: 8, dex: 15, con: 10, int: 10, wis: 8, cha: 8}\n"
+        "  vulnerabilities: [fire]\n",
+    )
+    edit(
+        srd_dir,
+        "monsters",
+        "      damage_type: slashing\n    - id: shortbow",
+        "      damage_type: slashing\n      secondary_damage: 1d4\n"
+        "      secondary_damage_type: cold\n      reach: true\n    - id: shortbow",
+    )
+
+    goblin = load_srd(srd_dir).monsters["goblin_warrior"]
+
+    scimitar = goblin.actions[0]
+    assert goblin.vulnerabilities == ("fire",)
+    assert (scimitar.secondary_damage, scimitar.secondary_damage_type) == ("1d4", "cold")
+    assert scimitar.reach is True
+
+
+def test_a_monster_action_hits_one_target_unless_the_data_says_otherwise():
+    assert MonsterAction(id="web", name="Паутина", kind="save").targets == 1
+    assert MonsterAction(id="breath", name="Дыхание", kind="save", targets=6).targets == 6
+
+
+@pytest.mark.parametrize("targets", [0, -1])
+def test_a_monster_action_cannot_have_fewer_than_one_target(targets):
+    with pytest.raises(ValidationError, match="targets"):
+        MonsterAction(id="breath", name="Дыхание", kind="save", targets=targets)
+
+
+def test_the_number_of_targets_is_read_from_yaml(srd_dir):
+    edit(
+        srd_dir,
+        "monsters",
+        "      damage_type: slashing\n    - id: shortbow",
+        "      damage_type: slashing\n    - id: breath\n      name: Дыхание\n      kind: save\n"
+        "      save: dex\n      dc: 11\n      targets: 4\n    - id: shortbow",
+    )
+
+    breath = next(
+        a for a in load_srd(srd_dir).monsters["goblin_warrior"].actions if a.id == "breath"
+    )
+
+    assert breath.targets == 4
+
+
+def test_yaml_with_secondary_dice_but_no_type_is_a_content_error(srd_dir):
+    edit(
+        srd_dir,
+        "monsters",
+        "      damage_type: slashing\n    - id: shortbow",
+        "      damage_type: slashing\n      secondary_damage: 1d4\n    - id: shortbow",
+    )
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert "monsters.yaml" in problems[0] and "вторичн" in problems[0]
+
+
 # --- безопасность YAML ---
 
 
@@ -457,3 +625,84 @@ def test_spell_range_vocabulary_covers_self_touch_and_the_three_weapon_ranges():
 
     assert spell_ranges == {"self", "touch", "engaged", "near", "far"}
     assert weapon_ranges == {"melee", "near", "far"}
+
+
+# --- данные только для чтения ---
+
+# Попытки изменить данные SRD: кеш `load_srd()` общий, поэтому любая удавшаяся правка
+# испортила бы правила для всех игр процесса.
+MUTATIONS = {
+    "добавить запись в таблицу": lambda srd: srd.classes.__setitem__(
+        "ghost", srd.classes["fighter"]
+    ),
+    "дополнить таблицу через |=": lambda srd: operator.ior(srd.items, {}),
+    "вложенная таблица ячеек": lambda srd: (
+        srd.classes["wizard"].spellcasting.slots[3].update({1: 99})
+    ),
+    "характеристики монстра": lambda srd: srd.monsters["goblin_warrior"].scores.__setitem__(
+        Ability.DEX, 30
+    ),
+    "ресурсы класса": lambda srd: srd.classes["fighter"].resources.clear(),
+    # Разрушающие правки идут последними: иначе следующие падали бы KeyError, а не проверкой.
+    "удалить запись из таблицы": lambda srd: srd.items.__delitem__("dagger"),
+    "очистить таблицу": lambda srd: srd.monsters.clear(),
+}
+
+
+@pytest.mark.parametrize("mutate", MUTATIONS.values(), ids=MUTATIONS.keys())
+def test_srd_data_rejects_every_mutation(mutate):
+    srd = load_srd(FIXTURES)
+
+    with pytest.raises(TypeError):
+        mutate(srd)
+
+
+def test_dict_fields_with_defaults_are_read_only_too():
+    scores = dict.fromkeys(Ability, 10)
+    monster = MonsterDef(
+        id="rat",
+        name="Крыса",
+        name_en="Rat",
+        cr=0,
+        xp=10,
+        ac=10,
+        hp=1,
+        hp_dice="1d4",
+        speed=20,
+        scores=scores,
+        actions=(),
+    )
+
+    with pytest.raises(TypeError):
+        monster.saves[Ability.STR] = 5  # значение по умолчанию тоже защищено
+    scores[Ability.STR] = 20  # словарь вызывающего кода не должен просочиться в модель
+    assert monster.scores[Ability.STR] == 10
+
+
+def test_cached_srd_equals_a_fresh_load_after_mutation_attempts(builtin_is_fixture):
+    shared = load_srd()
+
+    for mutate in MUTATIONS.values():
+        with suppress(TypeError):
+            mutate(shared)
+
+    fresh = load_srd(FIXTURES)
+    assert load_srd() == fresh
+    assert load_srd().model_dump_json() == fresh.model_dump_json()
+
+
+def test_copies_of_srd_data_equal_the_original_and_stay_read_only():
+    srd = load_srd(FIXTURES)
+
+    for clone in (copy.deepcopy(srd), srd.model_copy(deep=True)):
+        assert clone == srd
+        with pytest.raises(TypeError):
+            clone.classes.clear()
+
+
+def test_dumping_srd_data_gives_plain_dicts_that_callers_may_change():
+    dumped = load_srd(FIXTURES).model_dump()
+
+    assert type(dumped["classes"]) is dict
+    assert type(dumped["classes"]["wizard"]["spellcasting"]["slots"][3]) is dict
+    dumped["classes"].clear()  # копия для вызывающего кода, данные SRD это не затрагивает

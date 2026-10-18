@@ -10,8 +10,10 @@
 #   heal — лечение; buff — ActiveBuff с id из effect.buff; condition — ActiveCondition;
 #   utility — только событие для рассказа (или эффект, который движок не считает полями).
 #   У kind: attack/save поле buff или condition — дополнительный эффект при попадании или
-#   провале спасброска. Лечение (cure_wounds, healing_word) SRD дополняет модификатором
-#   заклинательной характеристики: движок прибавляет его сам.
+#   провале спасброска. heal_modifier: true — к лечению (cure_wounds, healing_word)
+#   прибавляется модификатор заклинательной характеристики, как в SRD; движок берёт его по полю.
+# - out_of_combat_only: true — заклинание сотворяется минутами (prayer_of_healing), в бою его
+#   нельзя сотворить; время сотворения полями не выражено, casting_time у него остаётся action.
 # - targets — наибольшее число целей; у заклинаний по площади (конус, куб, сфера) это 6, предел
 #   по числу участников. repeats — число бросков (дротиков, лучей).
 # - upcast — добавка кубов или чисел за каждый уровень ячейки выше уровня заклинания; если
@@ -178,7 +180,7 @@
   concentration: false
   duration_rounds: null
   classes: [cleric, ranger]
-  effect: {kind: heal, heal: 2d8}
+  effect: {kind: heal, heal: 2d8, heal_modifier: true}
   upcast: 2d8
   summary: "Существо, которого вы касаетесь, восстанавливает 2к8 + модификатор заклинательной характеристики HP. Каждый уровень ячейки выше первого добавляет 2к8."
 - id: healing_word
@@ -190,7 +192,7 @@
   concentration: false
   duration_rounds: null
   classes: [cleric]
-  effect: {kind: heal, heal: 2d4}
+  effect: {kind: heal, heal: 2d4, heal_modifier: true}
   upcast: 2d4
   summary: "Бонусным действием: существо в 60 футах восстанавливает 2к4 + модификатор заклинательной характеристики HP. Каждый уровень ячейки выше первого добавляет 2к4."
 - id: bless
@@ -342,4 +344,5 @@
   classes: [cleric]
   effect: {kind: heal, heal: 2d8, targets: 5}
   upcast: 1d8
+  out_of_combat_only: true
   summary: "Сотворяется 10 минут, поэтому только вне боя. До пяти существ получают эффект короткого отдыха и восстанавливают 2к8 HP, без модификатора. Каждый уровень выше второго добавляет 1к8."

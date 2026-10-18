@@ -320,8 +320,8 @@ SPELL_EFFECTS = {
         "targets": 6,
     },
     "mage_armor": {"kind": "buff", "buff": "mage_armor"},
-    "cure_wounds": {"kind": "heal", "heal": "2d8"},
-    "healing_word": {"kind": "heal", "heal": "2d4"},
+    "cure_wounds": {"kind": "heal", "heal": "2d8", "heal_modifier": True},
+    "healing_word": {"kind": "heal", "heal": "2d4", "heal_modifier": True},
     "bless": {"kind": "buff", "buff": "bless", "targets": 3},
     "guiding_bolt": {
         "kind": "attack",
@@ -493,6 +493,11 @@ MONSTER_DEFENSES = {
         },
     ),
 }
+# id монстра -> уязвимости (типы урона). У остальных монстров среза уязвимостей нет.
+MONSTER_VULNERABILITIES = {
+    "skeleton": {"bludgeoning"},
+    "shadow": {"radiant"},
+}
 # id монстра -> {id действия: поля MonsterAction, отличные от значений по умолчанию}.
 # У kind: attack поля save/dc/condition вместе означают: при попадании цель делает спасбросок и
 # при провале получает состояние; condition без save — состояние при попадании без спасброска.
@@ -534,14 +539,18 @@ MONSTER_ACTIONS = {
     "zombie": {"slam": attack(3, "1d8+1", "bludgeoning")},
     "ghoul": {
         "multiattack": multiattack("bite", "bite"),
-        "bite": attack(4, "1d6+1d6+2", "piercing"),
+        "bite": attack(
+            4, "1d6+2", "piercing", secondary_damage="1d6", secondary_damage_type="necrotic"
+        ),
         "claw": attack(4, "1d4+2", "slashing", save="con", dc=10, condition="paralyzed"),
     },
     "wolf": {"bite": attack(4, "1d6+2", "piercing", condition="prone")},
     "dire_wolf": {"bite": attack(5, "1d10+3", "piercing", condition="prone")},
     "giant_rat": {"bite": attack(5, "1d4+3", "piercing")},
     "giant_spider": {
-        "bite": attack(5, "1d8+2d6+3", "piercing"),
+        "bite": attack(
+            5, "1d8+3", "piercing", secondary_damage="2d6", secondary_damage_type="poison"
+        ),
         "web": {
             "kind": "save",
             "save": "dex",
@@ -560,9 +569,15 @@ MONSTER_ACTIONS = {
         "pistol": attack(5, "1d10+3", "piercing", range="near"),
         "parry": OTHER,
     },
-    "cultist": {"ritual_sickle": attack(3, "1d4+2", "slashing")},
+    "cultist": {
+        "ritual_sickle": attack(
+            3, "1d4+1", "slashing", secondary_damage="1", secondary_damage_type="necrotic"
+        )
+    },
     "cultist_fanatic": {
-        "pact_blade": attack(4, "1d8+2d6+2", "slashing"),
+        "pact_blade": attack(
+            4, "1d8+2", "slashing", secondary_damage="2d6", secondary_damage_type="necrotic"
+        ),
         "spellcasting": OTHER,
     },
     "guard": {
@@ -570,8 +585,8 @@ MONSTER_ACTIONS = {
         "spear_thrown": attack(3, "1d6+1", "piercing", range="near"),
     },
     "bugbear_warrior": {
-        "grab": attack(4, "2d6+2", "bludgeoning", condition="grappled"),
-        "light_hammer": attack(4, "3d4+2", "bludgeoning"),
+        "grab": attack(4, "2d6+2", "bludgeoning", condition="grappled", reach=True),
+        "light_hammer": attack(4, "3d4+2", "bludgeoning", reach=True),
         "light_hammer_thrown": attack(4, "3d4+2", "bludgeoning", range="near"),
     },
     "ogre": {
@@ -991,6 +1006,17 @@ def test_healing_potions_heal_by_srd_dice(items):
     assert parse(items["potion_of_greater_healing"].heal) == parse("4d4+4")
 
 
+@pytest.mark.parametrize("potion_id", POTION_IDS)
+def test_potion_summary_says_what_the_engine_spends(items, potion_id):
+    # Текст идёт мастеру: без модуля «Специи BG3» зелье тратит действие, бонусное — только с ним.
+    summary = items[potion_id].summary
+
+    assert (
+        "выпить или дать союзнику рядом — действием (с модулем «Специи BG3» — бонусным)" in summary
+    )
+    assert "Выпить можно бонусным действием" not in summary
+
+
 @pytest.mark.parametrize("class_id", CLASS_IDS)
 def test_starting_equipment_exists_and_suits_class(srd, class_id):
     cls = srd.classes[class_id]
@@ -1043,6 +1069,25 @@ def test_spell_effect_matches_srd(spells, spell_id):
         assert parse(spell.upcast) == parse(SPELL_UPCASTS[spell_id])
     else:
         assert spell.upcast is None
+
+
+# Лечащие заклинания, к которым SRD добавляет модификатор заклинательной характеристики.
+HEALING_WITH_MODIFIER = {"cure_wounds", "healing_word"}
+# Сотворяются 10 минут, поэтому в бою недоступны.
+OUT_OF_COMBAT_ONLY = {"prayer_of_healing"}
+
+
+def test_healing_modifier_is_a_field_of_exactly_the_srd_healing_spells(spells):
+    flagged = {sid for sid, spell in spells.items() if spell.effect.heal_modifier}
+
+    assert flagged == HEALING_WITH_MODIFIER
+    assert all(spells[sid].effect.kind == "heal" for sid in flagged)
+
+
+def test_only_long_casting_spells_are_out_of_combat_only(spells):
+    flagged = {sid for sid, spell in spells.items() if spell.out_of_combat_only}
+
+    assert flagged == OUT_OF_COMBAT_ONLY
 
 
 def test_spell_attack_and_save_effects_are_complete(spells):
@@ -1127,6 +1172,7 @@ def test_monster_stat_block_matches_srd(monsters, monster_id):
     resistances, immunities = MONSTER_DEFENSES.get(monster_id, ((), ()))
     assert set(monster.resistances) == set(resistances)
     assert set(monster.immunities) == set(immunities)
+    assert set(monster.vulnerabilities) == MONSTER_VULNERABILITIES.get(monster_id, set())
 
 
 @pytest.mark.parametrize("monster_id", MONSTER_IDS)
@@ -1141,6 +1187,13 @@ def test_monster_actions_match_srd(monsters, monster_id):
         for text_field in ("id", "name", "summary"):
             dumped.pop(text_field, None)
         assert dumped == fields, f"{monster_id}.{action_id}"
+
+
+def test_the_giant_spider_web_restrains_one_creature(monsters):
+    # SRD 5.2.1: паутина действует на одно существо; значение по умолчанию (1) и есть эта правда.
+    web = next(a for a in monsters["giant_spider"].actions if a.id == "web")
+
+    assert web.kind == "save" and web.targets == 1
 
 
 def test_monster_actions_are_complete(monsters):
@@ -1158,6 +1211,32 @@ def test_monster_actions_are_complete(monsters):
                 assert not action.multiattack, owner
             if action.dc is not None:
                 assert action.save is not None, owner
+
+
+def test_secondary_damage_is_a_second_damage_type_of_the_same_hit(monsters):
+    with_secondary = {
+        (monster.id, action.id)
+        for monster in monsters.values()
+        for action in monster.actions
+        if action.secondary_damage
+    }
+
+    assert with_secondary == {
+        ("ghoul", "bite"),
+        ("giant_spider", "bite"),
+        ("cultist", "ritual_sickle"),
+        ("cultist_fanatic", "pact_blade"),
+    }
+    for monster in monsters.values():
+        for action in monster.actions:
+            if action.secondary_damage:
+                assert action.secondary_damage_type in DAMAGE_TYPES, (monster.id, action.id)
+                assert action.secondary_damage_type != action.damage_type, (monster.id, action.id)
+
+
+def test_vulnerabilities_are_fields_not_text_in_traits(monsters):
+    for monster_id in MONSTER_VULNERABILITIES:
+        assert not [t for t in monsters[monster_id].traits if "Уязвимость" in t], monster_id
 
 
 def test_monster_tags_describe_creature_type(monsters):
@@ -1195,6 +1274,7 @@ def test_condition_references_point_to_known_conditions(spells, monsters):
 def test_monster_defenses_use_known_names(monsters):
     for monster in monsters.values():
         assert set(monster.resistances) <= DAMAGE_TYPES, monster.id
+        assert set(monster.vulnerabilities) <= DAMAGE_TYPES, monster.id
         assert set(monster.immunities) <= DAMAGE_TYPES | CONDITION_IDS, monster.id
 
 
@@ -1221,6 +1301,11 @@ def dice_expressions(items, spells, monsters) -> list[tuple[str, str]]:
             (f"monster {monster.id}.{action.id}.damage", action.damage)
             for action in monster.actions
             if action.damage
+        ]
+        found += [
+            (f"monster {monster.id}.{action.id}.secondary_damage", action.secondary_damage)
+            for action in monster.actions
+            if action.secondary_damage
         ]
     return found
 

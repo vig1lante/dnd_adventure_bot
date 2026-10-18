@@ -2,8 +2,18 @@ import pytest
 
 from dnd_engine.abilities import Ability
 from dnd_engine.character import ActiveBuff, ActiveCondition, Character, DeathSaves
+from dnd_engine.conditions import ZERO_HP_SOURCE
 from dnd_engine.content import SrdContent, load_srd
-from dnd_engine.rest import RestOutcome, long_rest, short_rest
+from dnd_engine.rest import (
+    AID_BUFF,
+    BREATH_WEAPON_TRAIT,
+    RELENTLESS_ENDURANCE_TRAIT,
+    RestOutcome,
+    arcane_recovery,
+    end_buffs,
+    long_rest,
+    short_rest,
+)
 from dnd_engine.rng import ScriptedRng
 
 CON = Ability.CON
@@ -303,6 +313,139 @@ def test_long_rest_of_a_rested_character_restores_nothing(make_character, srd):
     )
 
 
+# --- смерть и «без сознания» от 0 HP ---
+
+
+def knocked_out(make_character, **overrides) -> Character:
+    """Персонаж на 0 HP: без сознания от нуля хитов, идёт череда спасбросков от смерти."""
+    fields = {
+        "hp": 0,
+        "conditions": [ActiveCondition(id="unconscious", source=ZERO_HP_SOURCE)],
+        "death_saves": DeathSaves(successes=1, failures=2),
+    }
+    return make_character(**(fields | overrides))
+
+
+def dead(make_character, **overrides) -> Character:
+    return knocked_out(make_character, death_saves=DeathSaves(failures=3), **overrides)
+
+
+def test_long_rest_wakes_up_a_character_who_was_knocked_out_by_zero_hit_points(make_character, srd):
+    c = knocked_out(make_character, hp_max=20)
+
+    rested, _ = long_rest(c, srd)
+
+    assert rested.hp == 20
+    assert rested.conditions == []
+    assert rested.death_saves == DeathSaves()
+
+
+def test_long_rest_keeps_unconsciousness_that_came_from_something_else(make_character, srd):
+    spell_sleep = ActiveCondition(id="unconscious", source="sleep")
+    c = knocked_out(make_character, conditions=[spell_sleep])
+
+    rested, _ = long_rest(c, srd)
+
+    assert rested.conditions == [spell_sleep]  # снимается только «без сознания» от нуля хитов
+
+
+def test_short_rest_hit_dice_wake_up_a_character_at_zero_hit_points(make_character, srd):
+    c = knocked_out(make_character, hp_max=20, hit_dice=2)
+
+    rested, outcome = short_rest(c, spend_hit_dice=1, rng=ScriptedRng([5]), content=srd)
+
+    assert (rested.hp, outcome.hp_gained) == (5, 5)
+    assert rested.conditions == []
+    assert rested.death_saves == DeathSaves()
+
+
+def test_short_rest_without_healing_leaves_a_character_at_zero_hit_points_unconscious(
+    make_character, srd
+):
+    c = knocked_out(make_character, hit_dice=2)
+
+    rested, _ = short_rest(c, spend_hit_dice=0, rng=ScriptedRng([]), content=srd)
+
+    assert rested == c
+
+
+def test_long_rest_gives_a_dead_character_nothing(make_character, srd):
+    c = dead(make_character, hp_max=20, spell_slots_max={1: 2}, spell_slots={1: 0})
+
+    rested, outcome = long_rest(c, srd)
+
+    assert rested == c and rested is not c
+    assert outcome == RestOutcome(
+        character_id="pc-1", hp_gained=0, hit_dice_spent=0, rolls=[], restored=[]
+    )
+
+
+def test_short_rest_gives_a_dead_character_nothing_and_rolls_no_dice(make_character, srd):
+    c = dead(make_character, hp_max=20, hit_dice=3, resources={"second_wind": 0})
+
+    rested, outcome = short_rest(c, spend_hit_dice=2, rng=ScriptedRng([]), content=srd)
+
+    assert rested == c and rested is not c
+    assert (outcome.hp_gained, outcome.hit_dice_spent, outcome.rolls) == (0, 0, [])
+    assert outcome.restored == []
+
+
+def test_short_rest_of_a_dead_character_still_rejects_an_impossible_dice_count(make_character, srd):
+    c = dead(make_character, hit_dice=1)
+
+    with pytest.raises(ValueError, match="костей хитов"):
+        short_rest(c, spend_hit_dice=2, rng=ScriptedRng([]), content=srd)
+
+
+def test_a_character_with_two_failures_is_still_alive_for_rests(make_character, srd):
+    c = knocked_out(make_character, hp_max=20)  # две неудачи из трёх
+
+    rested, outcome = long_rest(c, srd)
+
+    assert (rested.hp, outcome.hp_gained) == (20, 20)
+
+
+# --- Неутомимость орка ---
+
+
+def test_long_rest_restores_relentless_endurance_of_an_orc(make_character, srd):
+    orc = make_character(species="orc", resources={"relentless_endurance": 0})
+
+    rested, outcome = long_rest(orc, srd)
+
+    assert rested.resources == {"relentless_endurance": 1}
+    assert outcome.restored == ["relentless_endurance"]
+
+
+def test_long_rest_does_not_invent_a_relentless_endurance_resource(make_character, srd):
+    orc = make_character(species="orc", resources={})
+
+    rested, outcome = long_rest(orc, srd)
+
+    # Нет записи — значит, неиспользовано: отдых ничего не меняет.
+    assert rested.resources == {} and outcome.restored == []
+
+
+def test_short_rest_does_not_restore_relentless_endurance(make_character, srd):
+    orc = make_character(species="orc", resources={"relentless_endurance": 0})
+
+    rested, outcome = short_rest(orc, spend_hit_dice=0, rng=ScriptedRng([]), content=srd)
+
+    assert rested.resources == {"relentless_endurance": 0} and outcome.restored == []
+
+
+def test_only_orcs_restore_relentless_endurance(make_character, srd):
+    human = make_character(species="dwarf", resources={"relentless_endurance": 0})
+
+    rested, _ = long_rest(human, srd)
+
+    assert rested.resources == {"relentless_endurance": 0}
+
+
+def test_orc_species_has_the_relentless_endurance_trait_the_rest_code_uses(srd):
+    assert RELENTLESS_ENDURANCE_TRAIT in {t.id for t in srd.species["orc"].traits}
+
+
 # --- чистота функций ---
 
 
@@ -383,3 +526,256 @@ def test_rested_characters_survive_json_round_trip(make_character, srd):
     for rested in (short, long):
         assert Character.model_validate_json(rested.model_dump_json()) == rested
     assert [x.id for x in long.conditions] == ["prone"]  # бессрочное состояние остаётся
+
+
+# --- «Подмога»: максимум HP растёт и откатывается, когда эффект кончается ---
+
+
+def aided(make_character, bonus: int = 5, **overrides) -> Character:
+    """Персонаж под «Подмогой»: максимум и текущие HP уже увеличены на `bonus`."""
+    fields = {
+        "hp_max": 20 + bonus,
+        "hp": 20 + bonus,
+        "buffs": [ActiveBuff(id=AID_BUFF, rounds_left=4800, source_id="pc-2", data={"hp": bonus})],
+    }
+    return make_character(**(fields | overrides))
+
+
+def test_ending_aid_returns_the_hit_point_maximum_and_caps_current_hit_points(make_character):
+    c = aided(make_character)
+
+    ended = end_buffs(c, lambda buff: buff.id == AID_BUFF)
+
+    assert [b.id for b in ended] == [AID_BUFF]
+    assert (c.hp_max, c.hp, c.buffs) == (20, 20, [])
+
+
+def test_ending_aid_keeps_current_hit_points_that_are_below_the_old_maximum(make_character):
+    c = aided(make_character, hp=7)
+
+    end_buffs(c, lambda buff: buff.id == AID_BUFF)
+
+    assert (c.hp_max, c.hp) == (20, 7)
+
+
+def test_ending_aid_works_for_a_higher_slot_bonus(make_character):
+    c = aided(make_character, bonus=10)
+
+    end_buffs(c, lambda buff: buff.id == AID_BUFF)
+
+    assert (c.hp_max, c.hp) == (20, 20)
+
+
+def test_end_buffs_leaves_the_buffs_that_do_not_match(make_character):
+    c = aided(make_character, buffs=[bless_buff(), aid_buff(5)])
+
+    ended = end_buffs(c, lambda buff: buff.id == "bless")
+
+    assert [b.id for b in ended] == ["bless"]
+    assert [b.id for b in c.buffs] == [AID_BUFF]
+    assert c.hp_max == 25  # Подмога не кончилась: максимум прежний
+
+
+def bless_buff() -> ActiveBuff:
+    return ActiveBuff(id="bless", rounds_left=7, source_id="pc-2")
+
+
+def aid_buff(bonus: int) -> ActiveBuff:
+    return ActiveBuff(id=AID_BUFF, rounds_left=4800, source_id="pc-2", data={"hp": bonus})
+
+
+def test_long_rest_ends_aid_and_heals_to_the_normal_maximum(make_character, srd):
+    c = aided(make_character, hp=3)
+
+    rested, outcome = long_rest(c, srd)
+
+    assert (rested.hp_max, rested.hp, rested.buffs) == (20, 20, [])
+    assert outcome.hp_gained == 17  # с 3 до обычного максимума 20, а не до 25
+
+
+def test_long_rest_ends_aid_even_when_the_character_is_at_full_boosted_health(make_character, srd):
+    c = aided(make_character)
+
+    rested, outcome = long_rest(c, srd)
+
+    assert (rested.hp_max, rested.hp) == (20, 20)
+    assert outcome.hp_gained == 0
+
+
+def test_short_rest_keeps_aid(make_character, srd):
+    c = aided(make_character, hp=10)
+
+    rested, _ = short_rest(c, spend_hit_dice=0, rng=ScriptedRng([]), content=srd)
+
+    assert (rested.hp_max, [b.id for b in rested.buffs]) == (25, [AID_BUFF])
+
+
+# --- дыхание драконорождённого возвращается длинным отдыхом ---
+
+
+def test_long_rest_restores_breath_weapon_uses_of_a_dragonborn(make_character, srd):
+    c = make_character(species="dragonborn", resources={BREATH_WEAPON_TRAIT: 0})
+
+    rested, outcome = long_rest(c, srd)
+
+    assert rested.resources[BREATH_WEAPON_TRAIT] == 2  # бонус мастерства 3-го уровня
+    assert BREATH_WEAPON_TRAIT in outcome.restored
+
+
+def test_short_rest_does_not_restore_breath_weapon(make_character, srd):
+    c = make_character(species="dragonborn", resources={BREATH_WEAPON_TRAIT: 0})
+
+    rested, outcome = short_rest(c, spend_hit_dice=0, rng=ScriptedRng([]), content=srd)
+
+    assert rested.resources[BREATH_WEAPON_TRAIT] == 0
+    assert outcome.restored == []
+
+
+def test_long_rest_without_a_breath_weapon_record_changes_nothing(make_character, srd):
+    c = make_character(species="dragonborn", resources={})
+
+    rested, outcome = long_rest(c, srd)
+
+    assert rested.resources == {}  # нет записи — все использования целы
+    assert BREATH_WEAPON_TRAIT not in outcome.restored
+
+
+# --- Магическое восстановление волшебника ---
+
+
+def depleted_wizard(make_character, **overrides) -> Character:
+    fields = {
+        "class_id": "wizard",
+        "spell_slots_max": {1: 4, 2: 2},
+        "spell_slots": {1: 0, 2: 0},
+        "resources": {"arcane_recovery": 1},
+    }
+    return make_character(**(fields | overrides))
+
+
+def test_arcane_recovery_returns_slots_and_spends_the_use(make_character, srd):
+    c = depleted_wizard(make_character)  # 3-й уровень: сумма уровней до 2
+
+    recovered, outcome = arcane_recovery(c, [2], srd)
+
+    assert recovered.spell_slots == {1: 0, 2: 1}
+    assert recovered.resources["arcane_recovery"] == 0
+    assert (outcome.character_id, outcome.hp_gained, outcome.hit_dice_spent) == ("pc-1", 0, 0)
+    assert (outcome.rolls, outcome.restored) == ([], ["spell_slots"])
+
+
+def test_arcane_recovery_can_return_several_small_slots(make_character, srd):
+    recovered, _ = arcane_recovery(depleted_wizard(make_character), [1, 1], srd)
+
+    assert recovered.spell_slots == {1: 2, 2: 0}
+
+
+def wizard_srd(srd: SrdContent, level: int) -> SrdContent:
+    """Данные SRD, где у волшебника этого уровня есть использование Магического восстановления."""
+    wizard = srd.classes["wizard"]
+    table = {**wizard.resources, "arcane_recovery": {level: 1}}
+    changed = wizard.model_copy(update={"resources": table})
+    return srd.model_copy(update={"classes": {**srd.classes, "wizard": changed}})
+
+
+@pytest.mark.parametrize(
+    ("level", "levels"),
+    [(1, [1]), (2, [1]), (3, [2]), (3, [1, 1]), (4, [2]), (5, [3]), (5, [2, 1]), (11, [5, 1])],
+)
+def test_arcane_recovery_allows_up_to_half_the_wizard_level_rounded_up(
+    make_character, srd, level, levels
+):
+    # Волшебник уровня L возвращает ячейки суммарным уровнем до ceil(L / 2).
+    c = depleted_wizard(
+        make_character, level=level, spell_slots_max=dict.fromkeys(range(1, 6), 3), spell_slots={}
+    )
+
+    recovered, _ = arcane_recovery(c, levels, wizard_srd(srd, level))
+
+    assert sum(lvl * n for lvl, n in recovered.spell_slots.items()) == sum(levels)
+
+
+@pytest.mark.parametrize(
+    ("level", "levels"),
+    [(1, [2]), (2, [2]), (3, [1, 1, 1]), (3, [2, 1]), (4, [3]), (5, [3, 1]), (11, [5, 2])],
+)
+def test_arcane_recovery_refuses_more_than_half_the_level_without_changes(
+    make_character, srd, level, levels
+):
+    c = depleted_wizard(
+        make_character, level=level, spell_slots_max=dict.fromkeys(range(1, 6), 3), spell_slots={}
+    )
+    snapshot = c.model_copy(deep=True)
+
+    with pytest.raises(ValueError, match="суммарный уровень"):
+        arcane_recovery(c, levels, wizard_srd(srd, level))
+
+    assert c == snapshot
+
+
+def test_arcane_recovery_never_returns_slots_of_the_sixth_level_or_higher(make_character, srd):
+    c = depleted_wizard(make_character, level=12, spell_slots_max={6: 1}, spell_slots={6: 0})
+
+    with pytest.raises(ValueError, match="6-го уровня"):
+        arcane_recovery(c, [6], wizard_srd(srd, 12))  # сумма 6 допустима для 12-го уровня
+
+
+def test_arcane_recovery_works_once_until_a_long_rest(make_character, srd):
+    first, _ = arcane_recovery(depleted_wizard(make_character), [2], srd)
+
+    with pytest.raises(ValueError, match="уже использовано"):
+        arcane_recovery(first, [1], srd)
+
+    rested, _ = long_rest(first, srd)
+    assert rested.resources["arcane_recovery"] == 1
+
+
+def test_arcane_recovery_is_only_for_classes_that_have_it(make_character, srd):
+    cleric = make_character(class_id="cleric", spell_slots_max={1: 4}, spell_slots={1: 0})
+
+    with pytest.raises(ValueError, match="Магического восстановления"):
+        arcane_recovery(cleric, [1], srd)
+
+
+def test_arcane_recovery_cannot_exceed_the_slot_maximum(make_character, srd):
+    c = depleted_wizard(make_character, spell_slots={1: 3, 2: 2})
+
+    with pytest.raises(ValueError, match="максимум"):
+        arcane_recovery(c, [1, 1], srd)  # второй раз ячейка 1-го уровня уже не помещается
+    with pytest.raises(ValueError, match="максимум"):
+        arcane_recovery(c, [2], srd)
+
+
+def test_arcane_recovery_refuses_slot_levels_the_wizard_does_not_have(make_character, srd):
+    with pytest.raises(ValueError, match="нет ячеек"):
+        arcane_recovery(depleted_wizard(make_character), [3], srd)
+
+
+@pytest.mark.parametrize("levels", [[], [0], [-1]])
+def test_arcane_recovery_needs_at_least_one_real_slot_level(make_character, srd, levels):
+    with pytest.raises(ValueError, match="ячейк"):
+        arcane_recovery(depleted_wizard(make_character), levels, srd)
+
+
+def test_arcane_recovery_does_not_change_the_original(make_character, srd):
+    c = depleted_wizard(make_character)
+    snapshot = c.model_copy(deep=True)
+
+    arcane_recovery(c, [2], srd)
+
+    assert c == snapshot
+
+
+def test_arcane_recovery_of_a_dead_wizard_changes_nothing(make_character, srd):
+    c = dead(
+        make_character,
+        class_id="wizard",
+        spell_slots_max={2: 2},
+        spell_slots={2: 0},
+        resources={"arcane_recovery": 1},
+    )
+
+    recovered, outcome = arcane_recovery(c, [2], srd)
+
+    assert recovered == c
+    assert outcome.restored == []

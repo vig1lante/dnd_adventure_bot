@@ -10,18 +10,50 @@ from functools import cache
 from importlib.resources import files
 from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Never, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_core import ErrorDetails
 
 from dnd_engine.abilities import Ability, Skill
 
 
+class _ReadOnlyDict(dict):
+    """Словарь, который нельзя изменить: кеш `load_srd()` общий для всех игр процесса.
+
+    Остаётся подклассом `dict`: pydantic сериализует его как обычный словарь, а сравнение
+    с `dict` работает без обёрток.
+    """
+
+    def _refuse(self, *args: Any, **kwargs: Any) -> Never:
+        raise TypeError("данные SRD только для чтения")
+
+    __setitem__ = __delitem__ = __ior__ = _refuse
+    clear = pop = popitem = setdefault = update = _refuse
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        # Без этого copy.deepcopy и pickle собирали бы словарь заново через __setitem__.
+        return (type(self), (dict(self),))
+
+
+def _freeze(value: Any) -> Any:
+    """Заменяет словари (в том числе вложенные) на `_ReadOnlyDict`; значения копируются."""
+    if isinstance(value, dict):
+        return _ReadOnlyDict({key: _freeze(item) for key, item in value.items()})
+    return value
+
+
 class _SrdModel(BaseModel):
     # Строгие неизменяемые модели: опечатка в данных ловится при загрузке, а не посреди игры.
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    # `frozen` защищает только поля, но не содержимое словарей, поэтому словари замораживает
+    # валидатор ниже (и для значений по умолчанию тоже).
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    @field_validator("*", mode="after")
+    @classmethod
+    def _freeze_dicts(cls, value: Any) -> Any:
+        return _freeze(value)
 
 
 class FeatureDef(_SrdModel):
@@ -98,6 +130,7 @@ class SpellEffect(_SrdModel):
     damage_type: str | None = None
     half_on_save: bool = False
     heal: str | None = None
+    heal_modifier: bool = False  # к лечению прибавляется модификатор заклинательной характеристики
     condition: str | None = None
     buff: str | None = None  # id эффекта: "bless", "mage_armor", "aid", ...
     targets: int = 1
@@ -116,6 +149,9 @@ class SpellDef(_SrdModel):
     classes: tuple[str, ...]
     effect: SpellEffect
     upcast: str | None = None  # добавка костей за уровень ячейки
+    # Сотворяется минуты, а не действие: в бою заклинание недоступно (время сотворения полями
+    # не выражено, поэтому casting_time остаётся "action").
+    out_of_combat_only: bool = False
     summary: str
 
 
@@ -157,9 +193,23 @@ class MonsterAction(_SrdModel):
     save: Ability | None = None
     dc: int | None = None
     half_on_save: bool = False
+    # Сколько разных существ захватывает действие со спасброском (как `SpellEffect.targets`);
+    # площадь — явное большее число в данных. У атак цель одна, у мультиатаки — по числу атак.
+    targets: int = Field(default=1, ge=1)
     condition: str | None = None
     multiattack: tuple[str, ...] = ()
     summary: str = ""
+    reach: bool = False  # досягаемость 10 футов: бьёт и невовлечённого врага из своей зоны
+    # Урон второго типа при том же попадании (например, некротический к колющему): сопротивления
+    # и уязвимости цели применяются к каждому типу отдельно, поэтому типы не суммируются в `damage`.
+    secondary_damage: str | None = None  # запись костей
+    secondary_damage_type: str | None = None
+
+    @model_validator(mode="after")
+    def _secondary_damage_comes_with_its_type(self) -> Self:
+        if (self.secondary_damage is None) != (self.secondary_damage_type is None):
+            raise ValueError("вторичный урон задаётся вместе: secondary_damage и его тип")
+        return self
 
 
 class MonsterDef(_SrdModel):
@@ -176,6 +226,7 @@ class MonsterDef(_SrdModel):
     saves: dict[Ability, int] = {}
     skills: dict[Skill, int] = {}
     resistances: tuple[str, ...] = ()
+    vulnerabilities: tuple[str, ...] = ()  # типы урона: против них урон удваивается
     immunities: tuple[str, ...] = ()
     actions: tuple[MonsterAction, ...]
     traits: tuple[str, ...] = ()

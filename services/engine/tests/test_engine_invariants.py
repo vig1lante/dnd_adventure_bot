@@ -1,8 +1,9 @@
 """Инварианты движка, которые должны держаться во всех модулях сразу.
 
-Проверяются границы пакета (нет сети, БД, чужих генераторов случайных чисел), честность
-расхода костей (бросок только через переданный `Rng` и без лишних значений), чистота функций
-(вход и общие данные SRD не меняются) и воспроизводимость сценария по seed.
+Проверяются границы пакета (только разрешённые импорты, нет динамического кода и произвольного
+чтения файлов, нет чужих генераторов случайных чисел), честность расхода костей (бросок только
+через переданный `Rng` и без лишних значений), чистота функций (вход и общие данные SRD не
+меняются) и воспроизводимость сценария по seed.
 """
 
 import ast
@@ -13,11 +14,14 @@ import pytest
 
 import dnd_engine
 from dnd_engine.abilities import Ability, Skill
+from dnd_engine.character import ActiveCondition
 from dnd_engine.checks import (
     VALID_DCS,
     ContestSide,
     ability_check,
     contest,
+    engine_saving_throw,
+    monster_saving_throw,
     saving_throw,
 )
 from dnd_engine.content import SrdContent, load_srd
@@ -32,24 +36,47 @@ NONE = Advantage.NONE
 PACKAGE_DIR = Path(dnd_engine.__file__).parent
 MODULE_FILES = sorted(PACKAGE_DIR.rglob("*.py"))
 
-# Движок — чистый Python: сеть, БД, процессы и клиенты моделей ему недоступны.
-FORBIDDEN_IMPORTS = {
-    "socket",
-    "ssl",
-    "http",
-    "urllib",
-    "requests",
-    "httpx",
-    "aiohttp",
-    "sqlite3",
-    "sqlalchemy",
-    "subprocess",
-    "anthropic",
-    "openai",
+# Допустимые корневые импорты движка (allowlist): только то, что ему реально нужно. Любой другой
+# корень — сеть, БД, процессы, клиенты моделей, `os`, `sys`, `io`, `pickle` — тест отклонит.
+# Новый корень — осознанное решение: добавьте его сюда вместе с обоснованием и, если он нужен
+# одному модулю, ограничьте файлом в `IMPORT_ONLY_IN`.
+ALLOWED_IMPORTS: dict[str, str] = {
+    "dnd_engine": "собственный пакет",
+    "typing": "аннотации типов",
+    "enum": "StrEnum: Ability, Skill, Advantage, CheckKind, SceneType",
+    "dataclasses": "неизменяемые описания разобранного удара, части урона и участника боя",
+    "collections": "Counter, deque (очередь ScriptedRng) и collections.abc для аннотаций",
+    "types": "MappingProxyType: таблицы правил и модулей только для чтения",
+    "functools": "cache: общий разобранный набор SRD (`load_srd`)",
+    "re": "разбор записи костей вида 2d6+3 (dice.py)",
+    "pydantic": "модели данных: проверка и (де)сериализация состояния игры в JSON",
+    "pydantic_core": "ErrorDetails: описание проблем при чтении данных SRD (content.py)",
+    "yaml": "safe_load данных SRD из YAML (content.py)",
+    "importlib": "importlib.resources.files: данные SRD лежат внутри пакета (content.py)",
+    "pathlib": "Path: необязательная папка с данными в `load_srd(path)` (content.py)",
+    "random": "SeededRng: воспроизводимый генератор для тестов (rng.py)",
+    "secrets": "SystemRng: криптостойкий генератор для игры (rng.py)",
 }
+# Корни, которым место только в одном модуле: остальным они не нужны, а появление там — сигнал.
+IMPORT_ONLY_IN: dict[str, set[str]] = {
+    "random": {"rng.py"},
+    "secrets": {"rng.py"},
+    "re": {"dice.py"},
+    "yaml": {"content.py"},
+    "importlib": {"content.py"},
+    "pathlib": {"content.py"},
+    "pydantic_core": {"content.py"},
+}
+# Динамический код и произвольный доступ к файлам. Имена встроенных функций ловятся по любому
+# упоминанию (в том числе `f = open`), атрибуты — по любому обращению (`path.open()`).
+FORBIDDEN_NAMES = {"open", "eval", "exec", "compile", "__import__", "__builtins__"}
+FORBIDDEN_ATTRIBUTES = {"open", "read_text", "write_text", "write_bytes", "import_module"}
+# Единственное обоснованное чтение файлов: данные SRD читает `Traversable.read_bytes()` загрузчика
+# (`content._read_entries`) — `open` там не вызывается, путь идёт из `importlib.resources`.
+FILE_READS_ONLY_IN: dict[str, set[str]] = {"read_bytes": {"content.py"}}
+ENVIRONMENT_ATTRIBUTES = {"environ", "getenv"}
 # Генераторы случайных чисел разрешены только в `rng.py`; остальной код бросает через `Rng`.
 RANDOMNESS_IMPORTS = {"random", "secrets"}
-ENVIRONMENT_ATTRIBUTES = {"environ", "getenv"}
 
 
 class CountingRng:
@@ -77,28 +104,116 @@ def srd() -> SrdContent:
 # --- границы пакета ---
 
 
-def imported_roots(path: Path) -> set[str]:
-    imports: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+def roots_of_imports(source: str) -> set[str]:
+    """Корни всех импортов кода, в том числе внутри функций; относительные импорты — свои."""
+    roots: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
-            imports |= {alias.name.split(".")[0] for alias in node.names}
+            roots |= {alias.name.split(".")[0] for alias in node.names}
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            imports.add(node.module.split(".")[0])
-    return imports
+            roots.add(node.module.split(".")[0])
+    return roots
+
+
+def imported_roots(path: Path) -> set[str]:
+    return roots_of_imports(path.read_text(encoding="utf-8"))
+
+
+def imports_outside_allowlist(source: str) -> set[str]:
+    return roots_of_imports(source) - ALLOWED_IMPORTS.keys()
+
+
+def imports_outside_their_module(source: str, file_name: str) -> set[str]:
+    """Корни из `IMPORT_ONLY_IN`, которые импортирует не тот файл."""
+    return {
+        root
+        for root in roots_of_imports(source) & IMPORT_ONLY_IN.keys()
+        if file_name not in IMPORT_ONLY_IN[root]
+    }
+
+
+def forbidden_constructs(source: str, file_name: str) -> list[str]:
+    """Динамический код и обращения к файлам: `open`, `eval`, `exec`, `__import__` и им подобное."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
+            found.append(f"{node.id} (строка {node.lineno})")
+        elif isinstance(node, ast.Attribute):
+            only_in = FILE_READS_ONLY_IN.get(node.attr)
+            if node.attr in FORBIDDEN_ATTRIBUTES or (only_in and file_name not in only_in):
+                found.append(f".{node.attr} (строка {node.lineno})")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"getattr", "setattr"}
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in FORBIDDEN_NAMES | FORBIDDEN_ATTRIBUTES
+        ):
+            found.append(f"{node.func.id}(..., {node.args[1].value!r}) (строка {node.lineno})")
+    return found
 
 
 def test_package_files_are_found():
     names = {path.name for path in MODULE_FILES}
 
     assert {"rng.py", "dice.py", "creation.py", "checks.py", "rest.py"} <= names
+    # Новые модули блока B3 тоже под проверкой: иначе границы держались бы только на старых файлах.
+    assert {"events.py", "state.py", "conditions.py", "engine.py", "model.py"} <= names
+    assert {"base.py", "bg3_flavor.py", "campfire.py"} <= names
 
 
 @pytest.mark.parametrize("path", MODULE_FILES, ids=lambda p: p.relative_to(PACKAGE_DIR).as_posix())
-def test_engine_module_has_no_network_database_or_environment_access(path):
+def test_engine_module_imports_only_what_the_allowlist_permits(path):
+    outside = imports_outside_allowlist(path.read_text(encoding="utf-8"))
+
+    assert not outside, f"корни {sorted(outside)} не из ALLOWED_IMPORTS: сеть, БД или лишнее"
+
+
+@pytest.mark.parametrize("path", MODULE_FILES, ids=lambda p: p.relative_to(PACKAGE_DIR).as_posix())
+def test_restricted_imports_stay_in_their_own_module(path):
+    misplaced = imports_outside_their_module(path.read_text(encoding="utf-8"), path.name)
+
+    assert not misplaced, f"{sorted(misplaced)} разрешены только в {IMPORT_ONLY_IN}"
+
+
+def test_the_allowlist_has_no_unused_entries():
+    used = set().union(*(imported_roots(path) for path in MODULE_FILES))
+
+    assert set(ALLOWED_IMPORTS) == used  # лишняя запись молча расширяла бы допустимое
+    assert IMPORT_ONLY_IN.keys() <= ALLOWED_IMPORTS.keys()
+    for root, files in IMPORT_ONLY_IN.items():
+        assert files == {p.name for p in MODULE_FILES if root in imported_roots(p)}, root
+
+
+@pytest.mark.parametrize("path", MODULE_FILES, ids=lambda p: p.relative_to(PACKAGE_DIR).as_posix())
+def test_engine_module_has_no_dynamic_code_or_arbitrary_file_access(path):
+    found = forbidden_constructs(path.read_text(encoding="utf-8"), path.name)
+
+    assert not found, found
+
+
+def test_the_only_file_read_is_the_srd_loader_through_importlib_resources():
+    readers = {
+        path.name
+        for path in MODULE_FILES
+        if any(
+            isinstance(node, ast.Attribute) and node.attr == "read_bytes"
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        )
+    }
+
+    # `open` движок не вызывает нигде: данные SRD читает `Traversable.read_bytes()` загрузчика,
+    # а путь к ним даёт `importlib.resources.files("dnd_engine")`.
+    assert readers == FILE_READS_ONLY_IN["read_bytes"] == {"content.py"}
+    assert "importlib" in imported_roots(PACKAGE_DIR / "content.py")
+
+
+@pytest.mark.parametrize("path", MODULE_FILES, ids=lambda p: p.relative_to(PACKAGE_DIR).as_posix())
+def test_engine_module_does_not_read_the_environment(path):
     tree = ast.parse(path.read_text(encoding="utf-8"))
     attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
 
-    assert not imported_roots(path) & FORBIDDEN_IMPORTS
     assert not attributes & ENVIRONMENT_ATTRIBUTES
 
 
@@ -108,6 +223,85 @@ def test_only_rng_module_imports_random_generators(path):
         assert imported_roots(path) & RANDOMNESS_IMPORTS
     else:
         assert not imported_roots(path) & RANDOMNESS_IMPORTS
+
+
+# Сами проверки границ тоже проверяются: иначе они могли бы молча перестать что-либо ловить.
+
+
+@pytest.mark.parametrize(
+    ("source", "outside"),
+    [
+        ("import socket", {"socket"}),
+        ("import os.path", {"os"}),
+        ("from subprocess import run", {"subprocess"}),
+        ("from sqlalchemy.orm import Session", {"sqlalchemy"}),
+        ("import httpx, yaml", {"httpx"}),
+        ("def f():\n    import anthropic\n", {"anthropic"}),
+        ("try:\n    import numpy\nexcept ImportError:\n    pass\n", {"numpy"}),
+        ("import io", {"io"}),
+        ("import pickle", {"pickle"}),
+        ("import builtins", {"builtins"}),
+    ],
+)
+def test_the_allowlist_check_catches_imports_of_the_outside_world(source, outside):
+    assert imports_outside_allowlist(source) == outside
+
+
+def test_the_allowlist_check_accepts_allowed_and_relative_imports():
+    source = "import re\nfrom pydantic import BaseModel\nfrom . import x\nfrom .y import z\n"
+
+    assert imports_outside_allowlist(source) == set()
+
+
+def test_the_restricted_import_check_catches_a_root_in_the_wrong_file():
+    assert imports_outside_their_module("import yaml", "checks.py") == {"yaml"}
+    assert imports_outside_their_module("import yaml", "content.py") == set()
+    assert imports_outside_their_module("import secrets", "dice.py") == {"secrets"}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "open('data.yaml')",
+        "eval('1 + 1')",
+        "exec('x = 1')",
+        "compile('1', 'f', 'eval')",
+        "__import__('os')",
+        "reader = open",
+        "path.open()",
+        "path.read_text()",
+        "path.write_text('x')",
+        "path.write_bytes(b'x')",
+        "importlib.import_module('os')",
+        "getattr(obj, 'open')",
+        "getattr(__builtins__, 'eval')",
+        "__builtins__['exec']",
+        "files('dnd_engine').read_bytes()",  # вне загрузчика данных SRD
+    ],
+)
+def test_the_dynamic_code_check_catches_every_form(source):
+    assert forbidden_constructs(source, "checks.py")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "re.compile('[0-9]+')",  # метод модуля re, а не встроенная compile
+        "getattr(target, 'temp_hp', 0)",
+        "opened = True\nopen_slots = []",
+        "def reopen(): ...",
+        "x = obj.opened",
+    ],
+)
+def test_the_dynamic_code_check_leaves_ordinary_code_alone(source):
+    assert forbidden_constructs(source, "checks.py") == []
+
+
+def test_the_srd_loader_may_read_bytes_but_other_files_may_not():
+    source = "data = source.read_bytes()"
+
+    assert forbidden_constructs(source, "content.py") == []
+    assert forbidden_constructs(source, "rest.py")
 
 
 # --- расход костей: только через переданный Rng и без лишнего ---
@@ -176,6 +370,54 @@ def test_only_table_dcs_are_rolled_for_and_nothing_else_is_spent(srd, dc):
         with pytest.raises(ValueError, match="Сл"):
             saving_throw(hero, STR, dc=dc, advantage=NONE, rng=rng, reason="т")
         assert rng.calls == 0
+
+
+@pytest.mark.parametrize("dc", range(-5, 40))
+def test_dcs_computed_by_the_engine_are_rolled_for_whatever_their_value(srd, dc):
+    hero = quick_character("fighter", "human", srd, name="Т", concept="т", character_id="pc-1")
+    rng = constant_dice()
+
+    # Концентрация, Сл заклинаний и статблоков не из таблицы мастера: путь движка её не проверяет.
+    result = engine_saving_throw(hero, CON, dc=dc, advantage=NONE, rng=rng, reason="т")
+
+    assert result.dc == dc
+    assert rng.calls == 1
+
+
+@pytest.mark.parametrize("condition_id", ["paralyzed", "petrified", "stunned", "unconscious"])
+@pytest.mark.parametrize("ability", [STR, DEX])
+def test_automatic_save_failure_spends_no_dice_on_any_path(srd, condition_id, ability):
+    hero = quick_character("fighter", "human", srd, name="Т", concept="т", character_id="pc-1")
+    hero.conditions.append(ActiveCondition(id=condition_id))
+    rng = constant_dice()
+
+    saving_throw(hero, ability, dc=15, advantage=NONE, rng=rng, reason="т")
+    engine_saving_throw(hero, ability, dc=12, advantage=NONE, rng=rng, reason="т")
+    monster_saving_throw(
+        srd.monsters["ogre"],
+        "ogre-1",
+        hero.conditions,
+        ability,
+        dc=12,
+        advantage=NONE,
+        rng=rng,
+        reason="т",
+    )
+
+    assert rng.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("advantage", "expected"), [(NONE, 1), (Advantage.ADVANTAGE, 2), (Advantage.DISADVANTAGE, 2)]
+)
+def test_monster_save_dice_count_follows_the_advantage_mode(srd, advantage, expected):
+    rng = constant_dice()
+
+    monster_saving_throw(
+        srd.monsters["ogre"], "ogre-1", [], CON, dc=13, advantage=advantage, rng=rng, reason="т"
+    )
+
+    assert rng.calls == expected
 
 
 @pytest.mark.parametrize("dc", [True, "15", None, 15.5, 7.5])
@@ -304,6 +546,7 @@ def test_checks_and_rests_leave_their_input_untouched_for_many_characters(srd):
 
         ability_check(hero, DEX, skill=Skill.STEALTH, dc=15, advantage=NONE, rng=rng, reason="т")
         saving_throw(hero, WIS, dc=15, advantage=NONE, rng=rng, reason="т", against="poison")
+        engine_saving_throw(hero, CON, dc=12, advantage=NONE, rng=rng, reason="т")
         short_rest(hero, spend_hit_dice=2, rng=rng, content=srd)
         long_rest(hero, srd)
 

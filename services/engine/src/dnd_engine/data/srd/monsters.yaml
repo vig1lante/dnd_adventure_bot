@@ -4,14 +4,21 @@
 # - hp — среднее значение из статблока, hp_dice — его запись костей; speed — скорость ходьбы
 #   в футах; saves — итоговые бонусы спасбросков только там, где они отличаются от
 #   модификатора характеристики; skills — итоговые бонусы навыков.
-# - resistances — типы урона; immunities — типы урона и состояния вместе (иммунитет к истощению
-#   не записан: в срезе его нет). Уязвимости модель не выражает: они описаны в traits.
-# - actions: attack — атака с бонусом attack_bonus, damage и damage_type. Если у удара несколько
-#   видов урона, damage хранит сумму кубов, а damage_type — основной тип (остальное в summary).
+# - resistances и vulnerabilities — типы урона; immunities — типы урона и состояния вместе
+#   (иммунитет к истощению не записан: в срезе его нет).
+# - actions: attack — атака с бонусом attack_bonus, damage и damage_type. Если у удара два вида
+#   урона, второй записан отдельно: secondary_damage (кости) и secondary_damage_type, потому что
+#   сопротивления и уязвимости цели применяются к каждому типу отдельно. reach: true —
+#   досягаемость 10 футов (бьёт и невовлечённого врага в своей зоне). Дополнительный урон «при
+#   преимуществе» (гоблины) не моделируется, он описан в summary.
 #   У attack поле condition без save означает состояние при попадании; condition вместе с save и
 #   dc — состояние при провале спасброска после попадания. save — спасбросок цели без броска
 #   атаки; multiattack перечисляет действия, которые монстр делает подряд; other — только
 #   событие для рассказа (бонусные действия, реакции, колдовство).
+# - targets — сколько разных существ захватывает действие со спасброском (save). По умолчанию
+#   одно, как у паутины; для области (дыхание, волна) число записывается явно. Движок отказывает,
+#   если мастер назвал больше целей. У attack цель одна, а multiattack бьёт не больше целей,
+#   чем в нём атак.
 # - range: melee — вплотную; near — метание и дальность до 60 футов; far — луки и арбалеты.
 #   Оружие «ближнего или дальнего боя» записано двумя действиями (суффикс _thrown).
 # - traits — особенности без механики в полях, текстом для мастера.
@@ -99,6 +106,7 @@
   speed: 30
   scores: {str: 10, dex: 16, con: 15, int: 6, wis: 8, cha: 5}
   immunities: [poison, poisoned]
+  vulnerabilities: [bludgeoning]
   actions:
     - id: shortsword
       name: Короткий меч
@@ -115,8 +123,6 @@
       damage_type: piercing
       range: far
       summary: "Дальнобойная атака на 80/320 футов."
-  traits:
-    - "Уязвимость к дробящему урону: от дробящего урона скелет получает двойной урон."
   tags: [undead]
 - id: zombie
   name: Зомби
@@ -162,9 +168,11 @@
       name: Укус
       kind: attack
       attack_bonus: 4
-      damage: 1d6+1d6+2
+      damage: 1d6+2
       damage_type: piercing
-      summary: "Колющий урон 1к6 + 2 и ещё 1к6 некротического; в данных урон суммирован."
+      secondary_damage: 1d6
+      secondary_damage_type: necrotic
+      summary: "Колющий урон 1к6 + 2 и ещё 1к6 некротического."
     - id: claw
       name: Когти
       kind: attack
@@ -261,9 +269,11 @@
       name: Укус
       kind: attack
       attack_bonus: 5
-      damage: 1d8+2d6+3
+      damage: 1d8+3
       damage_type: piercing
-      summary: "Колющий урон 1к8 + 3 и ещё 2к6 урона ядом; в данных урон суммирован."
+      secondary_damage: 2d6
+      secondary_damage_type: poison
+      summary: "Колющий урон 1к8 + 3 и ещё 2к6 урона ядом."
     - id: web
       name: Паутина (перезарядка 5–6)
       kind: save
@@ -358,9 +368,11 @@
       name: Ритуальный серп
       kind: attack
       attack_bonus: 3
-      damage: 1d4+2
+      damage: 1d4+1
       damage_type: slashing
-      summary: "Рубящий урон 1к4 + 1 и ещё 1 некротического; в данных урон суммирован."
+      secondary_damage: "1"
+      secondary_damage_type: necrotic
+      summary: "Рубящий урон 1к4 + 1 и ещё 1 некротического."
   tags: [humanoid]
 - id: cultist_fanatic
   name: Фанатик культа
@@ -379,9 +391,11 @@
       name: Клинок договора
       kind: attack
       attack_bonus: 4
-      damage: 1d8+2d6+2
+      damage: 1d8+2
       damage_type: slashing
-      summary: "Рубящий урон 1к8 + 2 и ещё 2к6 некротического; в данных урон суммирован."
+      secondary_damage: 2d6
+      secondary_damage_type: necrotic
+      summary: "Рубящий урон 1к8 + 2 и ещё 2к6 некротического."
     - id: spellcasting
       name: Колдовство
       kind: other
@@ -434,6 +448,7 @@
       damage: 2d6+2
       damage_type: bludgeoning
       condition: grappled
+      reach: true
       summary: "Досягаемость 10 футов. Цель размером не больше Среднего схвачена (Сл побега 12)."
     - id: light_hammer
       name: Лёгкий молот
@@ -441,6 +456,7 @@
       attack_bonus: 4
       damage: 3d4+2
       damage_type: bludgeoning
+      reach: true
       summary: "Досягаемость 10 футов. Атака с преимуществом, если цель схвачена этим багбиром."
     - id: light_hammer_thrown
       name: Бросок лёгкого молота
@@ -499,6 +515,7 @@
   scores: {str: 6, dex: 14, con: 13, int: 6, wis: 10, cha: 8}
   skills: {stealth: 6}
   resistances: [acid, cold, fire, lightning, thunder]
+  vulnerabilities: [radiant]
   immunities:
     [necrotic, poison, frightened, grappled, paralyzed, petrified, poisoned, prone, restrained, unconscious]
   actions:
@@ -514,7 +531,6 @@
       kind: other
       summary: "Бонусным действием тень прячется, находясь в тусклом свете или темноте."
   traits:
-    - "Уязвимость к излучению: от урона излучением тень получает двойной урон."
     - "Бесформенность: протискивается в щель шириной в дюйм без лишнего движения."
     - "Слабость к солнцу: на солнечном свету помеха на все проверки к20."
   tags: [undead]

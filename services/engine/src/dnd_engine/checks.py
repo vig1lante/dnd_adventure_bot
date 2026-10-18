@@ -1,10 +1,16 @@
 """Проверки характеристик и навыков, спасброски и состязания.
 
-Сложность Сл берётся только из таблицы 5/10/15/20/25/30. Все броски идут через
-`dice.roll` с переданным `Rng`; итог считает движок. Источники преимущества и помехи
-(параметр вызова, черты вида, состояния) собираются в один режим по правилу 5e:
-преимущество и помеха из любых источников гасят друг друга. Функции чистые: персонаж
-не меняется, результат — новый объект.
+Сл, которую передаёт мастер (`ability_check`, `saving_throw`), берётся только из таблицы
+5/10/15/20/25/30. Сл, которую считает сам движок (концентрация, заклинания, статблоки,
+повторные спасброски состояний), идёт отдельным путём — `engine_saving_throw` и
+`monster_saving_throw`: она не округлена до таблицы, и мастер на неё не влияет.
+Все броски идут через `dice.roll` с переданным `Rng`; итог считает движок. Удача полурослика и
+Благословение вынесены в `apply_luck` и `apply_bless`: их применяют и проверки, и бой (атака,
+заклинательная атака, спасбросок от смерти, инициатива), чтобы к20-бросок везде вёл себя
+одинаково; Указание добавляет 1к4 к проверкам характеристик и навыков. Источники преимущества
+и помехи (параметр вызова, черты вида, состояния) собираются в один режим по правилу 5e:
+преимущество и помеха из любых источников гасят друг друга. Функции чистые:
+персонаж не меняется, результат — новый объект.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -14,8 +20,10 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from dnd_engine.abilities import SKILL_ABILITY, Ability, Skill
-from dnd_engine.character import Character, ability_mod, save_bonus, skill_bonus
+from dnd_engine.abilities import SKILL_ABILITY, Ability, Skill, modifier
+from dnd_engine.character import ActiveCondition, Character, ability_mod, save_bonus, skill_bonus
+from dnd_engine.conditions import auto_fail_condition
+from dnd_engine.content import MonsterDef
 from dnd_engine.dice import Advantage, RollResult, roll
 from dnd_engine.rng import Rng
 
@@ -57,7 +65,8 @@ SAVE_DISADVANTAGE_CONDITIONS: Mapping[str, frozenset[Ability]] = MappingProxyTyp
     {"restrained": frozenset({Ability.DEX})}
 )
 
-BLESS_BUFF = "bless"  # +1d4 к спасброскам
+BLESS_BUFF = "bless"  # +1d4 к броскам атаки и спасброскам
+GUIDANCE_BUFF = "guidance"  # +1d4 к проверкам характеристик и навыков
 
 
 class CheckKind(StrEnum):
@@ -76,7 +85,10 @@ class CheckResult(BaseModel):
     roll: RollResult
     total: int
     success: bool
-    auto: Literal["nat20", "nat1"] | None = None
+    # nat20/nat1 — исход задал хук модуля правил. condition — спасбросок провален без броска
+    # из-за состояния (Парализован и т. п.): кости не бросались, `condition` называет состояние.
+    auto: Literal["nat20", "nat1", "condition"] | None = None
+    condition: str | None = None
 
 
 # Хук получает итог проверки и возвращает (возможно изменённый) итог.
@@ -100,7 +112,7 @@ class ContestResult(BaseModel):
 # --- источники преимущества и помехи ---
 
 
-def _combine_advantage(*modes: Advantage) -> Advantage:
+def combine_advantage(*modes: Advantage) -> Advantage:
     """Преимущество и помеха из любых источников гасят друг друга, их число не важно."""
     modes = tuple(Advantage(mode) for mode in modes)
     has_advantage = Advantage.ADVANTAGE in modes
@@ -122,9 +134,11 @@ def _species_advantage(
     return Advantage.ADVANTAGE if gnomish or dwarven else Advantage.NONE
 
 
-def _condition_advantage(c: Character, kind: CheckKind, ability: Ability) -> Advantage:
-    """Помеха от состояний персонажа по таблицам выше."""
-    for condition in c.conditions:
+def _condition_advantage(
+    conditions: Sequence[ActiveCondition], kind: CheckKind, ability: Ability
+) -> Advantage:
+    """Помеха от состояний по таблицам выше."""
+    for condition in conditions:
         if kind != CheckKind.SAVE and condition.id in CHECK_DISADVANTAGE_CONDITIONS:
             return Advantage.DISADVANTAGE
         if kind == CheckKind.SAVE and ability in SAVE_DISADVANTAGE_CONDITIONS.get(condition.id, ()):
@@ -168,9 +182,61 @@ def _reroll_natural_one(first: RollResult, *, rng: Rng) -> RollResult:
     )
 
 
+def _has_buff(c: Character, buff_id: str) -> bool:
+    return any(buff.id == buff_id for buff in c.buffs)
+
+
+def apply_luck(c: Character, d20: RollResult, *, rng: Rng) -> RollResult:
+    """Удача полурослика для любого броска к20 (проверка, спасбросок, атака, инициатива).
+
+    Если выпала 1 и у персонажа черта Удача, к20 перебрасывается; иначе возвращается тот же
+    бросок. Общий механизм для всех мест движка, где персонаж бросает к20."""
+    if d20.natural == 1 and CHECK_TRAIT_BY_SPECIES.get(c.species) == LUCK_TRAIT:
+        return _reroll_natural_one(d20, rng=rng)
+    return d20
+
+
+def apply_bless(c: Character, d20: RollResult, *, rng: Rng) -> RollResult:
+    """Благословение для броска атаки или спасброска: отдельная кость 1к4 рядом с к20.
+
+    Без эффекта «Благословение» на персонаже возвращается тот же бросок."""
+    if not _has_buff(c, BLESS_BUFF):
+        return d20
+    return _add_roll(d20, roll("1d4", rng=rng, reason=f"{d20.reason} (Благословение)"))
+
+
 def _check_dc(dc: int) -> None:
     if dc not in VALID_DCS:
         raise ValueError(f"Сл {dc} не из таблицы, допустимы {sorted(VALID_DCS)}")
+
+
+def _auto_fail(
+    actor_id: str, ability: Ability, bonus: int, dc: int, condition_id: str, reason: str
+) -> CheckResult:
+    """Спасбросок, проваленный состоянием без броска: кубы не бросаются, итог 0."""
+    no_dice = RollResult(
+        expr="auto_fail",
+        rolls=[],
+        kept=[],
+        modifier=0,
+        total=0,
+        natural=None,
+        advantage=Advantage.NONE,
+        reason=reason,
+    )
+    return CheckResult(
+        actor_id=actor_id,
+        kind=CheckKind.SAVE,
+        ability=ability,
+        skill=None,
+        dc=dc,
+        bonus=bonus,
+        roll=no_dice,
+        total=0,
+        success=False,
+        auto="condition",
+        condition=condition_id,
+    )
 
 
 def _d20_test(
@@ -187,18 +253,21 @@ def _d20_test(
     reason: str,
     hooks: Sequence[CheckHook],
 ) -> CheckResult:
-    """Общий ход проверки и спасброска: режим броска, к20, Удача, благословение, хуки."""
-    _check_dc(dc)
-    mode = _combine_advantage(
+    """Общий ход проверки и спасброска: режим броска, к20, Удача, благословение, хуки.
+
+    Сл здесь не проверяется: таблицу сверяют входы для мастера, а Сл движка ей не подчиняется."""
+    if kind == CheckKind.SAVE and (blocking := auto_fail_condition(c.conditions, ability)):
+        return _auto_fail(c.id, ability, bonus, dc, blocking, reason)
+    mode = combine_advantage(
         advantage,
         _species_advantage(c, kind, ability, against),
-        _condition_advantage(c, kind, ability),
+        _condition_advantage(c.conditions, kind, ability),
     )
-    d20 = roll(f"1d20{bonus:+d}", rng=rng, advantage=mode, reason=reason)
-    if d20.natural == 1 and CHECK_TRAIT_BY_SPECIES.get(c.species) == LUCK_TRAIT:
-        d20 = _reroll_natural_one(d20, rng=rng)
-    if kind == CheckKind.SAVE and any(buff.id == BLESS_BUFF for buff in c.buffs):
-        d20 = _add_roll(d20, roll("1d4", rng=rng, reason=f"{reason} (Благословение)"))
+    d20 = apply_luck(c, roll(f"1d20{bonus:+d}", rng=rng, advantage=mode, reason=reason), rng=rng)
+    if kind == CheckKind.SAVE:
+        d20 = apply_bless(c, d20, rng=rng)
+    elif _has_buff(c, GUIDANCE_BUFF):
+        d20 = _add_roll(d20, roll("1d4", rng=rng, reason=f"{reason} (Указание)"))
 
     result = CheckResult(
         actor_id=c.id,
@@ -231,6 +300,7 @@ def ability_check(
 
     Навык можно применить к нестандартной характеристике («Сила (Запугивание)»):
     берётся модификатор указанной характеристики и мастерство навыка."""
+    _check_dc(dc)
     if skill is None:
         kind, bonus = CheckKind.ABILITY, ability_mod(c, ability)
     else:
@@ -269,6 +339,7 @@ def saving_throw(
 
     `against` — явная метка угрозы («poison», «poisoned»): по ней дварфийская стойкость
     даёт преимущество. Метка надёжнее разбора текста `reason`, который пишет мастер."""
+    _check_dc(dc)
     return _d20_test(
         c,
         CheckKind.SAVE,
@@ -281,6 +352,70 @@ def saving_throw(
         rng=rng,
         reason=reason,
         hooks=hooks,
+    )
+
+
+def engine_saving_throw(
+    c: Character,
+    ability: Ability,
+    *,
+    dc: int,
+    advantage: Advantage,
+    rng: Rng,
+    reason: str,
+    against: str | None = None,
+) -> CheckResult:
+    """Спасбросок персонажа против Сл, которую посчитал движок (не мастер).
+
+    Концентрация (max(10, урон // 2)), Сл заклинаний `8 + БМ + мод.` и повторные спасброски
+    состояний не совпадают с таблицей мастера, поэтому таблица здесь не проверяется. Остальное
+    — как в `saving_throw`: черты вида, состояния, благословение, автопровал."""
+    return _d20_test(
+        c,
+        CheckKind.SAVE,
+        ability,
+        None,
+        bonus=save_bonus(c, ability),
+        dc=dc,
+        advantage=advantage,
+        against=against,
+        rng=rng,
+        reason=reason,
+        hooks=(),
+    )
+
+
+def monster_saving_throw(
+    monster: MonsterDef,
+    fighter_id: str,
+    conditions: Sequence[ActiveCondition],
+    ability: Ability,
+    *,
+    dc: int,
+    advantage: Advantage,
+    rng: Rng,
+    reason: str,
+) -> CheckResult:
+    """Спасбросок монстра против Сл, которую посчитал движок.
+
+    У монстра нет `Character`: бонус — из статблока (`saves` хранит итоговый бонус, иначе берётся
+    модификатор характеристики), состояния приходят списком. Черт вида и благословения у
+    статблока нет."""
+    bonus = monster.saves.get(ability, modifier(monster.scores[ability]))
+    if blocking := auto_fail_condition(conditions, ability):
+        return _auto_fail(fighter_id, ability, bonus, dc, blocking, reason)
+    mode = combine_advantage(advantage, _condition_advantage(conditions, CheckKind.SAVE, ability))
+    d20 = roll(f"1d20{bonus:+d}", rng=rng, advantage=mode, reason=reason)
+    return CheckResult(
+        actor_id=fighter_id,
+        kind=CheckKind.SAVE,
+        ability=ability,
+        skill=None,
+        dc=dc,
+        bonus=bonus,
+        roll=d20,
+        total=d20.total,
+        success=d20.total >= dc,
     )
 
 
