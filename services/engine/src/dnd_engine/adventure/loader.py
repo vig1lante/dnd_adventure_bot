@@ -8,8 +8,11 @@
 - `seeds.yaml` — необязательный список id сущностей, заданных автором вручную.
 
 Загрузка читает только `yaml.safe_load` и собирает ошибки по всем файлам сразу, с путями
-относительно папки приключения. Запись проверяет имена файлов до первой записи: id становится
-именем файла, и сюда он попадает от модели-генератора.
+относительно папки приключения. В папках сущностей читаются только `*.yaml`: любой другой файл или
+подпапка — проблема с путём, а не молчаливый пропуск (сущность из `crypt.yml` пропала бы без
+следа). Исключение — скрытые файлы и папки (имя с точки: `.DS_Store`, `._crypt.yaml` от
+архиваторов, `.#crypt.yaml` от редакторов): они служебные, автор их не писал. Запись проверяет
+имена файлов до первой записи: id становится именем файла, и сюда он попадает от модели-генератора.
 """
 
 from pathlib import Path
@@ -66,16 +69,32 @@ def _read_yaml(file: Path, name: str, kind: type, problems: list[str]) -> Any | 
     Любая проблема (нет файла, битый YAML, не тот тип) пишется в `problems`, результат — `None`.
     """
     try:
-        # Только safe_load: тег вроде `!!python/object/apply` не выполнит код, а даст YAMLError.
-        data = yaml.safe_load(file.read_bytes())
+        raw = file.read_bytes()
     except FileNotFoundError:
         problems.append(f"{name}: файл не найден")
         return None
     except OSError as exc:
         problems.append(f"{name}: не удалось прочитать файл ({exc.strerror})")
         return None
+    try:
+        # Только safe_load: тег вроде `!!python/object/apply` не выполнит код, а даст YAMLError.
+        data = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
         problems.append(f"{name}: {_describe_yaml_error(exc)}")
+        return None
+    except RecursionError:
+        problems.append(f"{name}: слишком глубокая вложенность")
+        return None
+    except Exception:
+        # Конструкторы значений PyYAML на чужом вводе бросают что угодно, а не только YAMLError:
+        # `!!int ""` — IndexError, `!!bool x` — KeyError, `!!timestamp x` — AttributeError, длинное
+        # число или несуществующая дата — ValueError. Перечень не закрыт, поэтому ловим всё, но
+        # строго вокруг `safe_load`. Тип и текст исключения в сообщение не идут: по ним причину не
+        # назвать, а текст содержит значение из файла.
+        problems.append(
+            f"{name}: значение не построить (тег или литерал): слишком длинное число, "
+            "несуществующая дата или неверное значение под тегом"
+        )
         return None
     if not isinstance(data, kind):
         expected = "объект (словарь)" if kind is dict else "список"
@@ -84,11 +103,29 @@ def _read_yaml(file: Path, name: str, kind: type, problems: list[str]) -> Any | 
     return data
 
 
+def _entity_files(root: Path, folder: str, problems: list[str]) -> list[Path]:
+    """Файлы `<folder>/*.yaml` по порядку имён. Скрытые пропускаются, всё остальное, что не
+    `*.yaml` (в том числе подпапка), — проблема с путём. Нет папки — нет и файлов."""
+    files: list[Path] = []
+    for entry in sorted((root / folder).glob("*")):
+        name = f"{folder}/{entry.name}"
+        if entry.name.startswith("."):
+            continue
+        # Папка с именем `*.yaml` тоже идёт на чтение: оно скажет «Is a directory».
+        if entry.suffix == ".yaml":
+            files.append(entry)
+        elif entry.is_dir():
+            problems.append(f"{name}: вложенные папки не читаются, файлы лежат прямо в {folder}/")
+        else:
+            problems.append(f"{name}: не читается, сущности лежат только в файлах *.yaml")
+    return files
+
+
 def _load_entities(root: Path, folder: str, problems: list[str]) -> dict[str, BaseModel]:
     """Читает `<folder>/*.yaml`; имя файла (без `.yaml`) обязано совпадать с `id` внутри."""
     model = ENTITY_FOLDERS[folder]
     entities: dict[str, BaseModel] = {}
-    for file in sorted((root / folder).glob("*.yaml")):
+    for file in _entity_files(root, folder, problems):
         name = f"{folder}/{file.name}"
         raw = _read_yaml(file, name, dict, problems)
         if raw is None:

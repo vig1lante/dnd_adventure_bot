@@ -25,6 +25,13 @@ def test_main_runs_app_factory_on_localhost_port_8000(monkeypatch):
     assert options["port"] == 8000
 
 
+def test_main_turns_the_access_log_off_because_internal_paths_carry_the_turn_token(monkeypatch):
+    _, options = run_main_with_fake_uvicorn(monkeypatch)
+
+    # Путь /internal/dm-tools/<токен>/… нельзя писать в журнал доступа: токен хода — секрет.
+    assert options["access_log"] is False
+
+
 async def test_main_app_path_builds_app_from_environment(monkeypatch):
     # Стык main() -> uvicorn -> create_app() -> get_settings(): uvicorn собирает
     # приложение по строке-импорту и фабрике без аргументов, как при настоящем запуске.

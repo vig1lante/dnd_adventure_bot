@@ -1,0 +1,11 @@
+# Базовый сценарий FakeProvider: один ход мастера (бросок, летопись, рассказ) и один JSON-ответ.
+# $pc1…$pc6 — id персонажей по порядку входа, их подставляет сервер при создании провайдера.
+turns:
+  - steps:
+      - tool: request_check
+        args: {character_id: "$pc1", ability: dex, skill: stealth, dc: 15, reason: "крадётся"}
+      - tool: chronicle
+        args: {entry: "Отряд прокрался к склепу."}
+      - text: "Тени скрывают вас…"
+json:
+  weaving: {hooks: []}

@@ -413,6 +413,170 @@ def test_empty_seeds_list_is_fine(folder: Path):
     assert load_adventure(folder).seeds == ()
 
 
+# --- значения, которые YAML не может построить ---
+# `yaml.safe_load` бросает не только `YAMLError`: конструкторы значений на чужом вводе падают чем
+# попало. Целое длиннее 4300 цифр, несуществующая дата, `!!int abc` и смещение пояса вне суток дают
+# `ValueError`; `!!int ""` — `IndexError`; `!!bool maybe` — `KeyError`; `!!timestamp abc` —
+# `AttributeError`; слишком глубокая вложенность — `RecursionError`. Файл портит владелец или
+# модель, а вызывающий должен получить отчёт с путём файла, а не необработанное исключение.
+
+UNBUILDABLE_VALUES = {
+    "число-длиннее-4300-цифр": "9" * 4301,
+    "несуществующая-дата": "2023-02-30",
+    "несуществующее-время": "2023-02-28 25:61:00",
+    "int-пустая-строка": '!!int ""',
+    "float-пустая-строка": '!!float ""',
+    "bool-не-литерал": "!!bool maybe",
+    "timestamp-не-дата": "!!timestamp abc",
+    "int-не-число": "!!int abc",
+    "float-не-число": "!!float abc",
+    "смещение-пояса-вне-суток": "2001-12-14t21:59:43.10+99:00",
+}
+ENTITY_FOLDERS = ["locations", "npcs", "items", "encounters", "monsters"]
+
+
+def write_file_with(folder: Path, name: str, value: str) -> None:
+    """Файл `name` с одним значением `value`, формой подходящий своему месту в папке."""
+    is_list = name in ("revelations.yaml", "seeds.yaml")
+    content = f"- {value}\n" if is_list else f"id: x\nattitude: {value}\n"
+    (folder / name).write_text(content, encoding="utf-8")
+
+
+@pytest.mark.parametrize("value", UNBUILDABLE_VALUES.values(), ids=UNBUILDABLE_VALUES.keys())
+@pytest.mark.parametrize(
+    "name", ["adventure.yaml", "npcs/marta.yaml", "revelations.yaml", "seeds.yaml"]
+)
+def test_a_value_yaml_cannot_build_is_reported_with_the_file_path(
+    folder: Path, name: str, value: str
+):
+    write_file_with(folder, name, value)
+
+    problems = problems_of(folder)
+
+    # Сообщение общее для любой причины (она зависит от парсера): без значения из файла.
+    assert len(problems) == 1 and problems[0].startswith(f"{name}: значение не построить")
+    assert len(problems[0]) < 300 and value not in problems[0]
+
+
+@pytest.mark.parametrize(
+    "name", ["adventure.yaml", "npcs/marta.yaml", "revelations.yaml", "seeds.yaml"]
+)
+def test_too_deep_nesting_is_reported_with_the_file_path(folder: Path, name: str):
+    (folder / name).write_text("[" * 5000 + "]" * 5000, encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].startswith(f"{name}:")
+
+
+# --- файлы в папках сущностей, которые загрузчик не читает ---
+# Читаются только `*.yaml`. Файл с другим именем (`crypt.yml`, `marta.json`) молча терял бы
+# сущность, у которой нет ссылок на неё, поэтому он — проблема с путём. Скрытые файлы служебные
+# (`.DS_Store` macOS, `._crypt.yaml` от архиваторов, `.#crypt.yaml` от редакторов) и игнорируются.
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["locations/crypt.yml", "npcs/marta.json", "items/key.yaml.bak", "encounters/notes.txt"]
+    + ["monsters/crypt-bones.yaml~", "locations/README"],
+)
+def test_a_file_that_is_not_yaml_in_an_entity_folder_is_reported_with_its_path(
+    folder: Path, name: str
+):
+    (folder / name).write_text("id: x\n", encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].startswith(f"{name}:")
+    assert ".yaml" in problems[0]
+
+
+@pytest.mark.parametrize("subfolder", ENTITY_FOLDERS)
+def test_an_upper_case_extension_is_an_unread_file_not_a_hidden_entity(
+    folder: Path, subfolder: str
+):
+    # `crypt.YAML` читают не все файловые системы одинаково: загрузчик не угадывает, а называет
+    # файл. Имя без пары среди настоящих файлов, чтобы тест не зависел от регистра файловой системы.
+    name = f"{subfolder}/extra-entity.YAML"
+    (folder / name).write_text("id: extra-entity\n", encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].startswith(f"{name}:")
+
+
+def test_a_renamed_entity_file_is_reported_instead_of_vanishing_silently(folder: Path):
+    # Сценарий ручной проверки: `crypt.yaml` → `crypt.yml`. Загрузчик не видит склеп, а валидатор
+    # заметит его только через ссылки; сущность без ссылок пропала бы без следа.
+    (folder / "locations" / "crypt.yaml").rename(folder / "locations" / "crypt.yml")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].startswith("locations/crypt.yml:")
+
+
+def test_every_unread_file_is_reported_at_once_with_the_other_problems(folder: Path):
+    (folder / "locations" / "crypt.yml").write_text("id: crypt\n", encoding="utf-8")
+    (folder / "npcs" / "marta.json").write_text("{}", encoding="utf-8")
+    (folder / "items" / "key.yaml").write_text("id: [", encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert sorted(problem.partition(":")[0] for problem in problems) == [
+        "items/key.yaml",
+        "locations/crypt.yml",
+        "npcs/marta.json",
+    ]
+
+
+@pytest.mark.parametrize("name", [".DS_Store", "._crypt.yaml", ".#crypt.yaml", ".gitkeep"])
+@pytest.mark.parametrize("subfolder", ENTITY_FOLDERS)
+def test_hidden_files_in_entity_folders_are_ignored(
+    folder: Path, adventure: Adventure, subfolder: str, name: str
+):
+    (folder / subfolder / name).write_bytes(b"\x00\x05\x16\x07 \xff\xfe not yaml")
+
+    assert load_adventure(folder) == adventure
+
+
+def test_a_hidden_folder_in_an_entity_folder_is_ignored(folder: Path, adventure: Adventure):
+    (folder / "locations" / ".cache").mkdir()
+    (folder / "locations" / ".cache" / "crypt.yaml").write_text("id: [", encoding="utf-8")
+
+    assert load_adventure(folder) == adventure
+
+
+def test_a_subfolder_in_an_entity_folder_is_reported_with_its_path(folder: Path):
+    (folder / "locations" / "old").mkdir()
+    (folder / "locations" / "old" / "crypt.yaml").write_text("id: crypt\n", encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].startswith("locations/old:")
+    assert "папк" in problems[0]
+
+
+def test_a_folder_named_like_a_yaml_file_is_still_a_read_error(folder: Path):
+    (folder / "locations" / "village.yaml").unlink()
+    (folder / "locations" / "village.yaml").mkdir()
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].startswith("locations/village.yaml:")
+
+
+def test_a_missing_or_empty_entity_folder_is_still_fine(folder: Path, adventure: Adventure):
+    for file in (folder / "monsters").iterdir():
+        file.unlink()
+    (folder / "monsters").rmdir()
+    (folder / "encounters" / "bones.yaml").unlink()
+
+    loaded = load_adventure(folder)
+
+    assert loaded.monsters == {} and loaded.encounters == {}
+    assert loaded.locations == adventure.locations
+
+
 # --- безопасность загрузки ---
 
 

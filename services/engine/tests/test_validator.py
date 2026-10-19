@@ -550,6 +550,68 @@ def test_the_dice_message_names_the_reason_the_engine_gives(srd):
     assert "от 1 до 100" in issue.message
 
 
+# `dice.parse` принимает целое до 4300 цифр: итог такой записи не сериализуется (журнал хода, ответ
+# модели), а модификатор в десятки цифр — нелепый урон. Пределы статблока с запасом покрывают SRD
+# (потолок +24 у 8d10+24, один терм с костями) и не зависят от `parse`.
+
+TOO_BIG_DICE = [
+    pytest.param("1d6+" + "9" * 4300, id="modifier-4300-digits"),
+    pytest.param("1d6+" + "9" * 20, id="modifier-20-digits"),
+    pytest.param("1d6+101", id="modifier-101"),
+    pytest.param("1d6-101", id="modifier-minus-101"),
+    pytest.param("1d6+60+60", id="modifiers-add-up"),
+    pytest.param("1d4+1d6+1d8+1d10+1d12", id="five-dice-terms"),
+    pytest.param("1d6" + "+1-1" * 20, id="long-record-of-flat-terms"),
+]
+FITTING_DICE = [
+    pytest.param("8d10+24", id="srd-ogre"),
+    pytest.param("1d6+100", id="modifier-100"),
+    pytest.param("1d6-100", id="modifier-minus-100"),
+    pytest.param("1d4+1d6+1d8+1d10", id="four-dice-terms"),
+    pytest.param("1d6" + "+0" * 18, id="forty-characters-or-less"),
+]
+
+
+@pytest.mark.parametrize("expr", TOO_BIG_DICE)
+def test_hit_dice_beyond_the_limits_are_a_schema_error(srd, expr):
+    issue = only_issue(validate(adventure_with_rat(hp_dice=expr), srd))
+
+    assert (issue.code, issue.severity, issue.ref) == ("schema", "error", "monster:crypt-rat")
+    assert issue.message.startswith("hp_dice:") and len(issue.message) < 300
+
+
+@pytest.mark.parametrize(
+    ("field", "with_type"),
+    [("damage", {}), ("secondary_damage", {"secondary_damage_type": "necrotic"})],
+)
+@pytest.mark.parametrize("expr", TOO_BIG_DICE)
+def test_action_damage_beyond_the_limits_is_a_schema_error(srd, field, with_type, expr):
+    actions = rat_actions(0, **{field: expr}, **with_type)
+    issue = only_issue(validate(adventure_with_rat(actions=actions), srd))
+
+    assert (issue.code, issue.severity, issue.ref) == ("schema", "error", BITE_REF)
+    assert issue.message.startswith(f"{field}:") and len(issue.message) < 300
+
+
+@pytest.mark.parametrize("expr", FITTING_DICE)
+def test_dice_within_the_limits_pass_in_hit_dice_and_damage(srd, expr):
+    actions = rat_actions(0, damage=expr, secondary_damage=expr, secondary_damage_type="necrotic")
+
+    assert validate(adventure_with_rat(hp_dice=expr, actions=actions), srd).issues == []
+
+
+def test_a_dice_record_of_exactly_forty_characters_fits_and_forty_one_does_not(srd):
+    # Длина проверяется до разбора, поэтому граница проходит по числу знаков записи, а не термов.
+    fits = "1d10" + "+0" * 18
+    too_long = "1d100" + "+0" * 18
+    assert (len(fits), len(too_long)) == (40, 41)
+
+    assert validate(adventure_with_rat(hp_dice=fits), srd).issues == []
+    issue = only_issue(validate(adventure_with_rat(hp_dice=too_long), srd))
+    assert (issue.code, issue.ref) == ("schema", "monster:crypt-rat")
+    assert issue.message.startswith("hp_dice:") and "40" in issue.message
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -851,6 +913,101 @@ def test_the_encounter_of_its_own_location_is_fine(srd):
     assert validate(make_adventure(), srd).issues == []  # кладбище и бой «bones»
 
 
+# Обратное направление: `get_location` показывает бой только по `encounter_id` локации, а
+# `start_combat` берёт id боя оттуда же. Бой, на который его локация не ссылается, в игре не
+# появится, хотя оценка времени его уже посчитала.
+
+
+def add_rats_encounter(data: dict[str, Any], location_id: str) -> None:
+    """Второй бой в приключении: оценка времени растёт до 116 мин, цель подгоняем под неё."""
+    data["encounters"]["rats"] = dict(
+        data["encounters"]["bones"], id="rats", location_id=location_id
+    )
+    data["target_hours"] = 2
+
+
+def unlinked_encounter_after_clearing_the_location(data: dict[str, Any]) -> None:
+    data["locations"]["cemetery"]["encounter_id"] = None
+
+
+def second_encounter_in_a_linked_location(data: dict[str, Any]) -> None:
+    add_rats_encounter(data, "cemetery")
+
+
+def encounter_in_a_location_without_one(data: dict[str, Any]) -> None:
+    add_rats_encounter(data, "village")
+
+
+def encounter_that_the_location_swapped_for_another(data: dict[str, Any]) -> None:
+    add_rats_encounter(data, "cemetery")
+    data["locations"]["cemetery"]["encounter_id"] = "rats"
+
+
+@pytest.mark.parametrize(
+    ("edit", "ref", "location_id"),
+    [
+        pytest.param(
+            unlinked_encounter_after_clearing_the_location,
+            "encounter:bones",
+            "cemetery",
+            id="location-lost-its-encounter_id",
+        ),
+        pytest.param(
+            second_encounter_in_a_linked_location,
+            "encounter:rats",
+            "cemetery",
+            id="second-encounter-in-one-location",
+        ),
+        pytest.param(
+            encounter_in_a_location_without_one,
+            "encounter:rats",
+            "village",
+            id="location-never-had-an-encounter_id",
+        ),
+        pytest.param(
+            encounter_that_the_location_swapped_for_another,
+            "encounter:bones",
+            "cemetery",
+            id="location-points-to-another-encounter",
+        ),
+    ],
+)
+def test_an_encounter_its_location_does_not_point_to_is_a_dangling_ref(srd, edit, ref, location_id):
+    issue = only_issue(validate(edited(edit), srd))
+
+    assert (issue.code, issue.severity, issue.ref) == ("dangling_ref", "error", ref)
+    assert location_id in issue.message and "get_location" in issue.message
+
+
+def test_an_encounter_of_a_missing_location_is_reported_once(srd):
+    # Несуществующую локацию боя называет проверка ссылок; «не привязан» к ней — не вторая проблема.
+    adventure = with_value(("encounters", "bones", "location_id"), "nowhere")
+
+    issue = only_issue(validate(adventure, srd))
+
+    assert (issue.code, issue.ref) == ("dangling_ref", "encounter:bones")
+    assert "location_id" in issue.message and "nowhere" in issue.message
+
+
+def test_a_location_pointing_into_the_void_does_not_orphan_its_encounter_twice(srd):
+    # Опечатка в `encounter_id` кладбища: бой «bones» остался без ссылки, но причина одна, и её
+    # называет проверка ссылок. Правка опечатки чинит обе стороны, второй ошибки не нужно.
+    adventure = with_value(("locations", "cemetery", "encounter_id"), "bone")
+
+    issue = only_issue(validate(adventure, srd))
+
+    assert (issue.code, issue.ref) == ("dangling_ref", "location:cemetery")
+    assert "encounter_id" in issue.message and "bone" in issue.message
+
+
+def test_every_location_with_its_own_encounter_is_fine(srd):
+    def a_fight_in_the_village_too(data: dict[str, Any]) -> None:
+        add_rats_encounter(data, "village")
+        data["locations"]["village"]["encounter_id"] = "rats"
+
+    assert validate(edited(a_fight_in_the_village_too), srd).issues == []
+
+
 def test_a_custom_statblock_must_not_repeat_the_id_of_its_action(srd):
     actions = rat_actions(0) + [custom_monster_data()["actions"][0]]
 
@@ -1120,6 +1277,50 @@ def test_a_finding_may_set_a_story_flag(srd, name):
     assert validate(reveals_flag(name), srd).issues == []
 
 
+# Замок-флаг открывается любым непустым значением, а флаг `encounter:<id>` движок выставляет уже при
+# начале боя (`active`): дверь «после боя» открылась бы в его начале. Такие замки запрещены, как и
+# выставление этих флагов находкой.
+
+LOCKS_OF_THE_CRYPT = [
+    pytest.param(("locations", "crypt", "exits", 0, "locked_by"), "exit:to-cemetery", id="exit"),
+    pytest.param(
+        ("locations", "crypt", "features", 0, "locked_by"), "feature:ledger", id="feature"
+    ),
+]
+
+
+@pytest.mark.parametrize("name", ["encounter:bones", "encounter:", "encounter:no-such-fight"])
+@pytest.mark.parametrize(("path", "place"), LOCKS_OF_THE_CRYPT)
+def test_a_lock_must_not_wait_for_a_flag_the_engine_owns(srd, path, place, name):
+    issue = only_issue(validate(with_value(path, f"flag:{name}"), srd))
+
+    assert (issue.code, issue.severity) == ("schema", "error")
+    assert issue.ref == f"location:crypt/{place}"
+    assert "encounter:" in issue.message and "locked_by" in issue.message
+
+
+@pytest.mark.parametrize("name", ["ledger-read", "encounters", "met:encounter:bones"])
+@pytest.mark.parametrize(("path", "place"), LOCKS_OF_THE_CRYPT)
+def test_a_lock_may_wait_for_a_story_flag(srd, path, place, name):
+    assert validate(with_value(path, f"flag:{name}"), srd).issues == []
+
+
+# --- id предметов приключения и SRD ---
+# Бой считает предметом приключения любой `item_id` из `adventure.items`: предмет с id предмета SRD
+# закрыл бы герою его собственное зелье (`use_item` отказал бы).
+
+
+@pytest.mark.parametrize("srd_id", sorted(load_srd().items))
+def test_an_adventure_item_must_not_take_the_id_of_an_srd_item(srd, srd_id):
+    data = adventure_data()
+    data["items"][srd_id] = dict(data["items"]["potion"], id=srd_id)
+
+    issue = only_issue(validate(Adventure.model_validate(data), srd))
+
+    assert (issue.code, issue.severity, issue.ref) == ("schema", "error", f"item:{srd_id}")
+    assert srd_id in issue.message and "SRD" in issue.message
+
+
 # --- предметы, которые находка кладёт в руки ---
 # Предмет из `Feature.reveals` лежит «внутри» места, пока оно не раскрыто: инструменты ищут такое
 # место в локации держателя предмета. Если держатель в другой локации или предмет назван у двух
@@ -1256,6 +1457,294 @@ def test_no_path_to_the_finale_is_an_error_together_with_its_unreachable_locatio
     finale = next(i for i in report.issues if i.code == "no_path_to_finale")
     assert (finale.severity, finale.ref) == ("error", "location:crypt")
     assert report.blocking is True
+
+
+# --- достижимость ключа замка-предмета ---
+# Запертые выходы для `unreachable_location` и `no_path_to_finale` — пути, но замок-предмет открыт,
+# только пока предмет у отряда. Ключ, которого не достать (ушёл из игры или лежит за собственным
+# замком), оставляет замок закрытым навсегда. Ошибка, если замок отрезает локацию без другого
+# пути или находки места; предупреждение, если закрыта лишняя дверь или пустое место.
+
+LOCK_REF = "location:cemetery/exit:to-crypt"  # люк в склеп, заперт ключом `key`
+DEAD_KEY = {"id": "chest-key", "name": "Ключ", "description": "Маленький ключ.", "holder": "gone"}
+
+
+def with_key_at(holder: str) -> Adventure:
+    return with_value(("items", "key", "holder"), holder)
+
+
+def board_locked_by(lock: str) -> Callable[[dict[str, Any]], None]:
+    """Доска объявлений в деревне заперта замком `lock`."""
+
+    def edit(data: dict[str, Any]) -> None:
+        data["locations"]["village"]["features"][0]["locked_by"] = lock
+
+    return edit
+
+
+def key_inside_the_board(data: dict[str, Any]) -> None:
+    """Ключ лежит внутри доски объявлений (деревня), а доска заперта этим же ключом."""
+    board = data["locations"]["village"]["features"][0]
+    board["locked_by"] = "item:key"
+    board["reveals"] = [{"kind": "item", "id": "key"}]
+
+
+@pytest.mark.parametrize("holder", ["location:village", "location:cemetery", "npc:marta"])
+def test_a_key_the_party_can_pick_up_before_the_lock_is_clean(srd, holder):
+    assert validate(with_key_at(holder), srd).issues == []
+
+
+@pytest.mark.parametrize(
+    "holder",
+    ["gone", "location:crypt", "npc:fabian"],
+    ids=["ушёл-из-игры", "за-своим-люком", "у-NPC-за-своим-люком"],
+)
+def test_a_key_nobody_can_get_to_leaves_the_lock_closed_for_ever(srd, holder):
+    report = validate(with_key_at(holder), srd)
+
+    issue = only_issue(report)
+    assert (issue.code, issue.severity, issue.ref) == ("unreachable_key", "error", LOCK_REF)
+    assert "key" in issue.message
+    assert report.blocking is True
+
+
+def test_a_key_inside_the_place_it_locks_is_lost_with_every_lock_it_should_open(srd):
+    report = validate(edited(key_inside_the_board), srd)
+
+    assert sorted((i.code, i.severity, i.ref) for i in report.issues) == [
+        ("unreachable_key", "error", LOCK_REF),
+        ("unreachable_key", "error", "location:village/feature:board"),
+    ]
+
+
+def test_a_key_inside_its_own_place_is_an_error_for_a_place_with_a_finding(srd):
+    def edit(data: dict[str, Any]) -> None:
+        key_inside_the_board(data)
+        data["locations"]["cemetery"]["exits"][1]["locked_by"] = None  # люк без замка
+
+    issue = only_issue(validate(edited(edit), srd))
+
+    assert (issue.code, issue.severity) == ("unreachable_key", "error")
+    assert issue.ref == "location:village/feature:board"
+
+
+def test_a_key_inside_a_place_opened_by_another_reachable_key_is_clean(srd):
+    def edit(data: dict[str, Any]) -> None:
+        key_inside_the_board(data)
+        data["items"]["chest-key"] = DEAD_KEY | {"holder": "npc:marta"}
+        board_locked_by("item:chest-key")(data)
+
+    assert validate(edited(edit), srd).issues == []
+
+
+def test_a_key_inside_a_place_opened_by_a_lost_key_is_lost_too(srd):
+    def edit(data: dict[str, Any]) -> None:
+        key_inside_the_board(data)
+        data["items"]["chest-key"] = DEAD_KEY
+        board_locked_by("item:chest-key")(data)
+
+    report = validate(edited(edit), srd)
+
+    assert sorted(i.ref for i in report.issues) == [LOCK_REF, "location:village/feature:board"]
+    assert {i.severity for i in report.issues} == {"error"}
+
+
+def test_a_key_in_a_place_without_a_lock_is_clean(srd):
+    def edit(data: dict[str, Any]) -> None:
+        board = data["locations"]["village"]["features"][0]
+        board["reveals"] = [{"kind": "item", "id": "key"}]
+
+    assert validate(edited(edit), srd).issues == []
+
+
+def test_a_lock_behind_a_lost_lock_is_not_reported_on_its_own(srd):
+    # Склеп недостижим из-за люка; замок на выходе из склепа — следствие, а не вторая причина.
+    def edit(data: dict[str, Any]) -> None:
+        data["items"]["key"]["holder"] = "gone"
+        data["items"]["chest-key"] = DEAD_KEY
+        data["locations"]["crypt"]["exits"][0]["locked_by"] = "item:chest-key"
+
+    issue = only_issue(validate(edited(edit), srd))
+
+    assert (issue.code, issue.ref) == ("unreachable_key", LOCK_REF)
+
+
+def test_a_lost_lock_with_another_way_round_is_only_a_warning(srd):
+    # Люк заперт навсегда, но в склеп можно спуститься и по лестнице из деревни.
+    def edit(data: dict[str, Any]) -> None:
+        data["items"]["key"]["holder"] = "gone"
+        data["locations"]["village"]["exits"].append(
+            {"id": "stairs", "to": "crypt", "direction": "вниз", "description": "Лестница."}
+        )
+
+    report = validate(edited(edit), srd)
+
+    issue = only_issue(report)
+    assert (issue.code, issue.severity, issue.ref) == ("unreachable_key", "warning", LOCK_REF)
+    assert report.blocking is False
+
+
+def test_a_lost_lock_on_a_place_with_nothing_in_it_is_only_a_warning(srd):
+    def edit(data: dict[str, Any]) -> None:
+        data["items"]["chest-key"] = DEAD_KEY
+        board_locked_by("item:chest-key")(data)
+
+    report = validate(edited(edit), srd)
+
+    issue = only_issue(report)
+    assert issue.code == "unreachable_key" and issue.severity == "warning"
+    assert issue.ref == "location:village/feature:board"
+    assert report.blocking is False
+
+
+def test_a_lost_lock_on_a_place_that_reveals_something_is_an_error(srd):
+    def edit(data: dict[str, Any]) -> None:
+        data["items"]["chest-key"] = DEAD_KEY
+        data["locations"]["crypt"]["features"][0]["locked_by"] = "item:chest-key"  # улика книги
+
+    issue = only_issue(validate(edited(edit), srd))
+
+    assert (issue.code, issue.severity) == ("unreachable_key", "error")
+    assert issue.ref == "location:crypt/feature:ledger"
+
+
+def test_a_lost_lock_on_a_place_where_a_clue_lies_is_an_error(srd):
+    def edit(data: dict[str, Any]) -> None:
+        data["items"]["chest-key"] = DEAD_KEY
+        board_locked_by("item:chest-key")(data)
+        data["revelations"]["kidnapper"]["clues"][1]["where"] = "feature:board"
+
+    issue = only_issue(validate(edited(edit), srd))
+
+    assert (issue.code, issue.severity) == ("unreachable_key", "error")
+    assert issue.ref == "location:village/feature:board"
+
+
+def keys_that_lock_each_other(data: dict[str, Any]) -> None:
+    """Ключ люка лежит на полке, запертой ключом сундука, а тот — в доске, запертой ключом люка."""
+    village = data["locations"]["village"]
+    village["features"][0] |= {
+        "locked_by": "item:key",
+        "reveals": [{"kind": "item", "id": "chest-key"}],
+    }
+    village["features"].append(
+        {
+            "id": "shelf",
+            "name": "Полка",
+            "description": "Пыльная полка.",
+            "locked_by": "item:chest-key",
+            "reveals": [{"kind": "item", "id": "key"}],
+        }
+    )
+    data["items"]["chest-key"] = DEAD_KEY | {"holder": "location:village"}
+    data["items"]["key"]["holder"] = "location:village"
+
+
+def test_two_keys_each_locked_in_a_place_the_other_opens_are_both_lost(srd):
+    # Замкнутый круг не открывается: ни один из ключей не получить первым. Круги «пройти честно»
+    # начинаются с пустых рук, а не с «все предметы у отряда».
+    report = validate(edited(keys_that_lock_each_other), srd)
+
+    assert sorted((i.code, i.severity, i.ref) for i in report.issues) == [
+        ("unreachable_key", "error", LOCK_REF),
+        ("unreachable_key", "error", "location:village/feature:board"),
+        ("unreachable_key", "error", "location:village/feature:shelf"),
+    ]
+
+
+def test_a_chain_of_three_keys_that_open_each_other_in_turn_is_clean(srd):
+    # Ключ деревни открывает полку, на полке лежит ключ сундука, он открывает доску, а в доске —
+    # ключ люка: чтобы дойти до склепа, нужно три круга «получил предмет — открыл замок».
+    def edit(data: dict[str, Any]) -> None:
+        village = data["locations"]["village"]
+        village["features"][0] |= {
+            "locked_by": "item:chest-key",
+            "reveals": [{"kind": "item", "id": "key"}],
+        }
+        village["features"].append(
+            {
+                "id": "shelf",
+                "name": "Полка",
+                "description": "Пыльная полка.",
+                "locked_by": "item:first-key",
+                "reveals": [{"kind": "item", "id": "chest-key"}],
+            }
+        )
+        data["items"]["first-key"] = DEAD_KEY | {"id": "first-key", "holder": "npc:marta"}
+        data["items"]["chest-key"] = DEAD_KEY | {"holder": "location:village"}
+        data["items"]["key"]["holder"] = "location:village"
+
+    assert validate(edited(edit), srd).issues == []
+
+
+# Текст ошибки уходит автору и в круг исправления генератора, поэтому называет настоящую причину:
+# ключ ушёл, лежит там, куда не попасть, или заперт внутри места, а не просто «где-то далеко».
+
+
+def message_at(report: Report, ref: str) -> str:
+    return next(issue.message for issue in report.issues if issue.ref == ref)
+
+
+def key_in_a_box_locked_by_a_gone_key(data: dict[str, Any]) -> None:
+    """Ключ люка лежит в ящике стартовой деревни, а ящик заперт ушедшим из игры ключом."""
+    data["locations"]["village"]["features"].append(
+        {
+            "id": "box",
+            "name": "Ящик",
+            "description": "Тяжёлый ящик.",
+            "locked_by": "item:old-key",
+            "reveals": [{"kind": "item", "id": "key"}],
+        }
+    )
+    data["items"]["key"]["holder"] = "location:village"
+    data["items"]["old-key"] = DEAD_KEY | {"id": "old-key"}
+
+
+def test_a_key_inside_a_locked_place_of_a_reachable_location_names_the_place_and_its_lock(srd):
+    report = validate(edited(key_in_a_box_locked_by_a_gone_key), srd)
+
+    assert sorted((i.code, i.severity, i.ref) for i in report.issues) == [
+        ("unreachable_key", "error", LOCK_REF),
+        ("unreachable_key", "error", "location:village/feature:box"),
+    ]
+    message = message_at(report, LOCK_REF)
+    # Деревня достижима: «куда не попасть» было бы неправдой, и генератор унёс бы ключ в другую
+    # локацию.
+    assert "'key'" in message and "внутри места 'box' (location:village)" in message
+    assert "заперто недоступным ключом 'old-key'" in message
+    assert "куда отряд не попадёт" not in message
+    assert "ушёл из игры" in message_at(report, "location:village/feature:box")
+
+
+@pytest.mark.parametrize(
+    ("holder", "reason"),
+    [
+        ("gone", "ушёл из игры"),
+        ("location:crypt", "лежит у 'location:crypt', куда отряд не попадёт"),
+        ("npc:fabian", "лежит у 'npc:fabian', куда отряд не попадёт"),
+    ],
+    ids=["ушёл-из-игры", "за-своим-люком", "у-NPC-за-своим-люком"],
+)
+def test_a_key_that_is_not_inside_a_locked_place_says_where_it_lies_or_that_it_is_gone(
+    srd, holder, reason
+):
+    message = message_at(validate(with_key_at(holder), srd), LOCK_REF)
+
+    assert reason in message
+    assert "внутри места" not in message
+
+
+def test_a_key_in_an_unlocked_place_of_an_unreachable_location_is_not_called_locked(srd):
+    # Место в склепе называет ключ в `reveals`, но не заперто: ключ потерян, потому что в склеп не
+    # попасть, а не из-за замка места.
+    def edit(data: dict[str, Any]) -> None:
+        data["items"]["key"]["holder"] = "location:crypt"
+        data["locations"]["crypt"]["features"][0]["reveals"].append({"kind": "item", "id": "key"})
+
+    message = message_at(validate(edited(edit), srd), LOCK_REF)
+
+    assert "лежит у 'location:crypt', куда отряд не попадёт" in message
+    assert "внутри места" not in message and "заперто" not in message
 
 
 # --- открытия и улики ---

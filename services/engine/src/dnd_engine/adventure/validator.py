@@ -1,10 +1,11 @@
 """Валидатор приключения (спека §6.2): блокирующие ошибки, предупреждения, балл и оценка времени.
 
 Схема (`schema`) проверяет форму данных, а этот модуль — смысл: ссылки между сущностями,
-уникальность id вложенных сущностей (места, улики, выходы, зоны), держателей предметов, которые
-кладут находки, достижимость локаций, улики открытий, кастомные статблоки (всё, что бой читает из
-них: числа, записи костей, обязательные поля действий, типы урона и состояния SRD) и сложность
-боёв. Это чистая функция:
+уникальность id вложенных сущностей (места, улики, выходы, зоны) и предметов (свои не совпадают с
+предметами SRD), держателей предметов, которые кладут находки, достижимость локаций и ключей
+замков-предметов, улики открытий, кастомные статблоки (всё, что бой читает из них: числа, записи
+костей в пределах, обязательные поля действий, типы урона и состояния SRD) и сложность боёв. Это
+чистая функция:
 она читает приключение и данные SRD, ничего не меняет, не касается файлов и сети и не бросает
 исключений на корректно собранном `Adventure`. Тексты приключения для неё — данные: в сообщения
 они попадают только как обрезанные id.
@@ -23,7 +24,7 @@ from dnd_engine.adventure.budget import (
     encounter_xp,
     find_monster,
 )
-from dnd_engine.adventure.schema import COLLECTIONS, Adventure, Clue
+from dnd_engine.adventure.schema import COLLECTIONS, Adventure, Clue, Feature, Item
 from dnd_engine.content import MonsterAction, MonsterDef, SrdContent, _unknown_ids
 from dnd_engine.dice import DiceSyntaxError, parse
 from dnd_engine.modules import MODULES
@@ -43,6 +44,14 @@ AC_LIMITS = (1, 30)
 ABILITY_SCORE_LIMITS = (1, 30)
 BONUS_LIMITS = (-5, 20)  # бонус атаки, спасброска и навыка
 SAVE_DC_LIMITS = (5, 30)
+# Пределы записи костей статблока (`hp_dice`, урон). `dice.parse` принимает любое целое до 4300
+# цифр, а итог такой записи не сериализуется в журнал хода; модификатор в десятки цифр — нелепый
+# урон. Потолок SRD — +24 (8d10+24) и один терм с костями. Длина проверяется до разбора: запись
+# в мегабайт не тратит время, а плоские числа (`+1-1+1…`), которые `parse` не считает термами с
+# костями, тоже ограничены.
+MAX_DICE_CHARS = 40
+MAX_DICE_TERMS = 4  # термов с костями
+MAX_DICE_MODIFIER = 100  # |итоговый плоский модификатор|
 # Целей одного действия не больше, чем модель может назвать в вызове `monster_action`.
 MAX_ACTION_TARGETS = 8
 TARGETS_LIMITS = (1, MAX_ACTION_TARGETS)
@@ -155,12 +164,20 @@ def _check_settings(adventure: Adventure) -> list[Issue]:
 
 
 def _dice_problems(field: str, expr: str) -> list[str]:
-    """Запись костей читает тот же `dice.parse`, что и бой: что он отверг, в бою упало бы."""
+    """Запись костей читает тот же `dice.parse`, что и бой: что он отверг, в бою упало бы. Сверх
+    разбора — пределы `MAX_DICE_*`: число в тысячи цифр разбор принимает, а бой не сериализует."""
+    if len(expr) > MAX_DICE_CHARS:
+        return [f"{field}: запись костей длиннее {MAX_DICE_CHARS} символов"]
     try:
-        parse(expr)
+        parsed = parse(expr)
     except DiceSyntaxError as exc:
         return [f"{field}: {exc}"]
-    return []
+    problems: list[str] = []
+    if len(parsed.terms) > MAX_DICE_TERMS:
+        problems.append(f"{field}: термов с костями больше {MAX_DICE_TERMS}")
+    if abs(parsed.modifier) > MAX_DICE_MODIFIER:
+        problems.append(f"{field}: модификатор по модулю больше {MAX_DICE_MODIFIER}")
+    return problems
 
 
 def _number_problems(monster: MonsterDef) -> list[str]:
@@ -432,6 +449,27 @@ def _check_location_encounters(adventure: Adventure) -> list[Issue]:
     ]
 
 
+def _check_unlinked_encounters(adventure: Adventure) -> list[Issue]:
+    """Обратное направление: бой, на который его локация не ссылается через `encounter_id`.
+
+    Мастер узнаёт бой только из `get_location`, а `start_combat` берёт его id оттуда же; бой без
+    ссылки из локации в игре не появится, хотя оценка времени его уже посчитала. Заодно это
+    ловит второй бой в одной локации: у неё один `encounter_id`."""
+    return [
+        _error(
+            "dangling_ref",
+            f"encounter:{encounter.id}",
+            f"бой не привязан к локации {encounter.location_id!r}: get_location его не покажет",
+        )
+        for encounter in adventure.encounters.values()
+        # нет локации боя — её уже нашёл `_check_references`
+        if (location := adventure.locations.get(encounter.location_id)) is not None
+        and location.encounter_id != encounter.id
+        # `encounter_id` локации ведёт в пустоту — это та же причина, её уже нашёл он же
+        and (location.encounter_id is None or location.encounter_id in adventure.encounters)
+    ]
+
+
 def _check_seeds(adventure: Adventure) -> list[Issue]:
     """`seeds` — id сущностей, заданных автором: каждый должен лежать в одной из коллекций."""
     known = {key for name in COLLECTIONS for key in getattr(adventure, name)}
@@ -442,9 +480,17 @@ def _check_seeds(adventure: Adventure) -> list[Issue]:
     ]
 
 
+def _waits_for_engine_flag(locked_by: str | None) -> bool:
+    """Замок `flag:<имя>`, где имя — флаг движка."""
+    kind, _, name = (locked_by or "").partition(":")
+    return kind == "flag" and name.startswith(ENGINE_FLAG_PREFIXES)
+
+
 def _check_engine_flags(adventure: Adventure) -> list[Issue]:
-    """Находка не может выставить флаг, который ведёт движок: `set_flag` их тоже запрещает."""
-    return [
+    """Флаги, которые ведёт движок, автор не трогает: находка не может их выставить (`set_flag`
+    тоже запрещает), а замок на таком флаге открылся бы в начале боя (флаг `active` уже непустой),
+    а не после него."""
+    issues = [
         _error(
             "schema",
             f"location:{location.id}/feature:{feature.id}",
@@ -455,6 +501,38 @@ def _check_engine_flags(adventure: Adventure) -> list[Issue]:
         for feature in location.features
         for reveal in feature.reveals
         if reveal.kind == "flag" and reveal.id.startswith(ENGINE_FLAG_PREFIXES)
+    ]
+    locks = (  # выходы и места: у обоих есть `id` и `locked_by`
+        (f"location:{location.id}/{kind}:{place.id}", place.locked_by)
+        for location in adventure.locations.values()
+        for kind, places in (("exit", location.exits), ("feature", location.features))
+        for place in places
+    )
+    issues += [
+        _error(
+            "schema",
+            ref,
+            f"locked_by: замок {locked_by!r} ждёт флаг, который ведёт движок "
+            f"(префиксы {', '.join(ENGINE_FLAG_PREFIXES)}): он открылся бы в начале боя",
+        )
+        for ref, locked_by in locks
+        if _waits_for_engine_flag(locked_by)
+    ]
+    return issues
+
+
+def _check_srd_item_ids(adventure: Adventure, content: SrdContent) -> list[Issue]:
+    """Предмет приключения не берёт id предмета SRD: бой считает предметом приключения любой
+    `item_id` из `adventure.items`, и герою отказали бы в его собственном зелье SRD."""
+    return [
+        _error(
+            "schema",
+            f"item:{item.id}",
+            f"id: предмет приключения {item.id!r} совпадает с предметом SRD; бой принял бы "
+            "предмет SRD героя за предмет приключения, выберите другой id",
+        )
+        for item in adventure.items.values()
+        if item.id in content.items
     ]
 
 
@@ -568,9 +646,19 @@ def _check_hidden_exit_ids(adventure: Adventure) -> list[Issue]:
 # --- достижимость ---
 
 
-def _reachable_locations(adventure: Adventure) -> set[str]:
-    """Локации, до которых можно дойти от старта по выходам; скрытые и запертые выходы считаются
-    путями: как игроки их откроют, валидатор не судит."""
+def _lock_key(locked_by: str | None, adventure: Adventure) -> str | None:
+    """id ключа замка `item:<id>`. Замок-флаг (имена флагов придумывает автор) и ссылка на
+    несуществующий предмет (её уже нашёл `_check_references`) ключа не имеют."""
+    kind, _, name = (locked_by or "").partition(":")
+    return name if kind == "item" and name in adventure.items else None
+
+
+def _reachable_locations(adventure: Adventure, keys: Container[str]) -> set[str]:
+    """Локации, до которых можно дойти от старта по выходам, имея предметы `keys`.
+
+    Скрытые выходы и замки-флаги считаются путями: как игроки их откроют, валидатор не судит.
+    Замок-предмет проходим, только если его ключ в `keys`: с ключами «все предметы приключения»
+    получается граф как нарисован, с пустым множеством — путь без единого ключа."""
     seen = {adventure.start_location}
     queue = deque(seen)
     while queue:
@@ -578,7 +666,8 @@ def _reachable_locations(adventure: Adventure) -> set[str]:
         if location is None:
             continue  # ссылка в пустоту: `dangling_ref` уже есть
         for exit_ in location.exits:
-            if exit_.to not in seen:
+            key = _lock_key(exit_.locked_by, adventure)
+            if exit_.to not in seen and (key is None or key in keys):
                 seen.add(exit_.to)
                 queue.append(exit_.to)
     return seen
@@ -587,7 +676,7 @@ def _reachable_locations(adventure: Adventure) -> set[str]:
 def _check_reachability(adventure: Adventure) -> list[Issue]:
     if adventure.start_location not in adventure.locations:
         return []  # без старта нечего обходить; об этом уже сказал `dangling_ref`
-    reached = _reachable_locations(adventure)
+    reached = _reachable_locations(adventure, adventure.items.keys())
     issues = [
         _error(
             "unreachable_location", f"location:{location_id}", "до локации нельзя дойти от старта"
@@ -661,6 +750,133 @@ def _check_revelations(adventure: Adventure) -> list[Issue]:
                     "все улики лежат в одном месте: не дойдя туда, игроки не найдут ни одной",
                 )
             )
+    return issues
+
+
+# --- ключи замков ---
+# `_check_reachability` считает запертые выходы путями, но замок-предмет открыт, только пока
+# предмет у отряда (`tools.lore.is_locked`). Ключ, которого не достать, оставляет замок закрытым
+# навсегда, и финал недостижим без единого замечания. Поэтому здесь отряд проходит приключение
+# «по-настоящему»: ключ сначала нужно получить.
+
+
+def _closed_place(item: Item, adventure: Adventure) -> Feature | None:
+    """Место, внутри которого лежит предмет: в локации-держателе есть место, чьи `reveals` его
+    называют. Так же ищет закрытое место `tools.lore.closed_place_with_item`; у NPC предмет не
+    «внутри»."""
+    kind, _, location_id = item.holder.partition(":")
+    location = adventure.locations.get(location_id) if kind == "location" else None
+    if location is None:
+        return None
+    return next(
+        (
+            feature
+            for feature in location.features
+            if any(reveal.kind == "item" and reveal.id == item.id for reveal in feature.reveals)
+        ),
+        None,
+    )
+
+
+def _unopened_place(item: Item, adventure: Adventure, owned: Container[str]) -> Feature | None:
+    """Место, внутри которого лежит предмет и которое заперто ключом, ещё не полученным (`owned`).
+    Нет такого места (предмет лежит открыто, замка нет или он флаговый, ключ уже есть) — `None`."""
+    closed = _closed_place(item, adventure)
+    inner_key = None if closed is None else _lock_key(closed.locked_by, adventure)
+    return closed if inner_key is not None and inner_key not in owned else None
+
+
+def _obtainable_items(
+    adventure: Adventure, reached: Container[str], owned: Container[str]
+) -> set[str]:
+    """Предметы, которые отряд получит, побывав в `reached` и имея `owned`: предмет лежит в такой
+    локации (сам или у NPC) и не заперт внутри места, ключ которого ещё не получен. Ушедший из игры
+    (`gone`) предмет не достать никогда. Держатель в пустоту (его уже нашёл `_check_references`)
+    не судим: предмет считается доступным, чтобы одна ошибка не плодила вторую."""
+    found: set[str] = set()
+    for item in adventure.items.values():
+        if item.holder == "gone":
+            continue
+        place = _holder_location(item.holder, adventure)
+        if place is None or place not in adventure.locations:
+            found.add(item.id)
+            continue
+        if place in reached and _unopened_place(item, adventure, owned) is None:
+            found.add(item.id)
+    return found
+
+
+def _playthrough(adventure: Adventure) -> tuple[set[str], set[str]]:
+    """Что отряд пройдёт и получит от старта: (локации, предметы). Круг за кругом: полученные
+    предметы открывают замки, новые локации дают новые предметы, пока что-то прибавляется."""
+    owned: set[str] = set()
+    while True:
+        reached = _reachable_locations(adventure, owned)
+        found = _obtainable_items(adventure, reached, owned)
+        if found <= owned:
+            return reached, owned
+        owned |= found
+
+
+def _lost_key(locked_by: str | None, adventure: Adventure, owned: Container[str]) -> Item | None:
+    """Ключ замка, которого отряд не получит; без замка-предмета или с доступным ключом — `None`."""
+    key = _lock_key(locked_by, adventure)
+    return None if key is None or key in owned else adventure.items[key]
+
+
+def _lost_key_issue(
+    severity: Literal["error", "warning"],
+    ref: str,
+    key: Item,
+    adventure: Adventure,
+    owned: Container[str],
+) -> Issue:
+    """Проблема `unreachable_key` с настоящей причиной: ключ ушёл из игры, заперт внутри места или
+    лежит там, куда отряд не попадёт. Если верны две последние, называется место: его замок
+    исправляется первым, а недоступность локации покажут другие проблемы."""
+    locked_place = _unopened_place(key, adventure, owned)
+    if key.holder == "gone":
+        reason = "ушёл из игры (holder 'gone')"
+    elif locked_place is not None:
+        lock = _lock_key(locked_place.locked_by, adventure)
+        reason = (
+            f"лежит внутри места {locked_place.id!r} ({key.holder}), "
+            f"которое заперто недоступным ключом {lock!r}"
+        )
+    else:
+        reason = (
+            f"лежит у {key.holder!r}, "
+            "куда отряд не попадёт без него самого или другого такого ключа"
+        )
+    return _issue(severity, "unreachable_key", ref, f"locked_by: ключ {key.id!r} {reason}")
+
+
+def _check_lock_keys(adventure: Adventure) -> list[Issue]:
+    """Замок-предмет с недостижимым ключом (`unreachable_key`) не откроется никогда.
+
+    Ошибка, если замок отрезает то, что нужно игре: выход, за которым локация без другого пути, или
+    место с находками (`reveals`, улика лежит в нём). Иначе предупреждение: закрыта лишняя дверь
+    или пустое место. Замки в локациях, куда отряд не попадёт, не судим: это следствие другого
+    замка (его покажет он сам) или `unreachable_location`."""
+    if adventure.start_location not in adventure.locations:
+        return []  # без старта нечего проходить; об этом уже сказал `dangling_ref`
+    reached, owned = _playthrough(adventure)
+    clue_places = {clue.where for rev in adventure.revelations.values() for clue in rev.clues}
+    issues: list[Issue] = []
+    for location in adventure.locations.values():
+        if location.id not in reached:
+            continue
+        for exit_ in location.exits:
+            if key := _lost_key(exit_.locked_by, adventure, owned):
+                severity = "warning" if exit_.to in reached else "error"
+                ref = f"location:{location.id}/exit:{exit_.id}"
+                issues.append(_lost_key_issue(severity, ref, key, adventure, owned))
+        for feature in location.features:
+            if key := _lost_key(feature.locked_by, adventure, owned):
+                holds_findings = bool(feature.reveals) or f"feature:{feature.id}" in clue_places
+                severity = "error" if holds_findings else "warning"
+                ref = f"location:{location.id}/feature:{feature.id}"
+                issues.append(_lost_key_issue(severity, ref, key, adventure, owned))
     return issues
 
 
@@ -777,10 +993,13 @@ def validate(adventure: Adventure, content: SrdContent) -> Report:
         *_check_references(adventure, content),
         *_check_zones(adventure),
         *_check_location_encounters(adventure),
+        *_check_unlinked_encounters(adventure),
         *_check_seeds(adventure),
         *_check_engine_flags(adventure),
+        *_check_srd_item_ids(adventure, content),
         *_check_revealed_items(adventure),
         *_check_reachability(adventure),
+        *_check_lock_keys(adventure),
         *_check_revelations(adventure),
         *_check_encounters(adventure, content),
         *_check_locations(adventure),

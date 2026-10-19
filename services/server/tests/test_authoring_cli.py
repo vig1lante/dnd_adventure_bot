@@ -1,36 +1,741 @@
+"""Тесты CLI `dnd-generate` (план B5.6, спека §6.3).
+
+Провайдер всегда `FakeProvider` по сценарию `generator_demo.yaml`: ключей, сети и живых моделей
+нет. Фабрика провайдеров подменяется шпионом там, где нужно доказать, что модель не вызывалась
+или что в фабрику дошли `--provider` и `--model`. Проверки модели запросов (`--model` против
+`LLM_CHEAP_MODEL`) идут через настоящие клиенты SDK с `MockTransport` вместо сети.
+"""
+
+import asyncio
+import json
 import subprocess
 import sysconfig
+import traceback
 from importlib.metadata import entry_points
 from pathlib import Path
+from typing import Any
 
+import anthropic
+import httpx2
+import openai
 import pytest
+import yaml
 
-from dnd_server.authoring.cli import main
+from dnd_engine.adventure.loader import load_adventure
+from dnd_engine.adventure.validator import Issue, Report, validate
+from dnd_engine.content import load_srd
+from dnd_server.authoring import cli
+from dnd_server.authoring.cli import format_report, main
+from dnd_server.llm.base import MAX_LOC_PART_CHARS, ProviderError
+from dnd_server.llm.fake import FakeProvider, load_scenario
 
-STUB_MESSAGE = "генератор появится в B5.6"
+# Конфтест сервера переходит во временную папку, поэтому путь считаем от файла теста.
+DEMO_SCENARIO = Path(__file__).resolve().parent / "scenarios" / "generator_demo.yaml"
+
+BASE_ARGS = [
+    "--pitch",
+    "Колокол в часовне звонит сам по ночам.",
+    "--hours",
+    "1",
+    "--players",
+    "6",
+    "--level",
+    "3",
+    "--modules",
+    "bg3_flavor,campfire",
+]
+
+# Имена лишних ключей из находки X1 security review: запись в буфер обмена (OSC 52) и стирание
+# строки возвратом каретки. Ответ модели или файл сидов выбирают их сами.
+HOSTILE_KEYS = {
+    "osc52-буфер-обмена": "\x1b]52;c;ZWNobyBwd25lZA==\x07",
+    "стирание-строки": "\x1b[2K\rПриключение записано",
+}
 
 
-def test_stub_prints_message_and_returns_failure_code(capsys):
-    assert main() == 1
+@pytest.fixture
+def demo_env(monkeypatch):
+    """Настройки dev-прогона без модели: провайдер fake и сценарий генератора."""
+    monkeypatch.setenv("FAKE_LLM_SCENARIO", str(DEMO_SCENARIO))
 
-    assert STUB_MESSAGE in capsys.readouterr().out
+
+@pytest.fixture
+def model_calls(monkeypatch):
+    """Шпион на фабрику провайдеров: запоминает вызовы и отдаёт настоящий `FakeProvider`."""
+    calls: list[dict[str, Any]] = []
+
+    def spy(settings, **kwargs):
+        calls.append(kwargs)
+        return FakeProvider(load_scenario(DEMO_SCENARIO))
+
+    monkeypatch.setattr(cli, "make_provider", spy)
+    return calls
 
 
-def test_dnd_generate_console_script_points_to_stub():
+def generate_into(out: Path, *extra: str) -> int:
+    return main([*BASE_ARGS, *extra, "--out", str(out)])
+
+
+def write_scenario(path: Path, change) -> Path:
+    """Копия демо-сценария с правкой: ответы шагов правит `change(json_answers)`."""
+    scenario = yaml.safe_load(DEMO_SCENARIO.read_text(encoding="utf-8"))
+    change(scenario["json"])
+    path.write_text(yaml.safe_dump(scenario, allow_unicode=True), encoding="utf-8")
+    return path
+
+
+# --- команда и справка ---
+
+
+def test_dnd_generate_console_script_points_to_main():
     [script] = entry_points(group="console_scripts", name="dnd-generate")
 
     assert script.value == "dnd_server.authoring.cli:main"
     assert script.load() is main
 
 
-@pytest.mark.parametrize("arguments", [[], ["--help"]])
-def test_installed_dnd_generate_exits_with_code_1(arguments):
-    # README: заглушка завершается с кодом 1, и `--help` этого не меняет.
+def test_installed_dnd_generate_prints_help_with_every_option():
     script = Path(sysconfig.get_path("scripts")) / "dnd-generate"
 
     result = subprocess.run(
-        [str(script), *arguments], capture_output=True, text=True, encoding="utf-8", timeout=60
+        [str(script), "--help"], capture_output=True, text=True, encoding="utf-8", timeout=60
     )
 
-    assert result.returncode == 1
-    assert STUB_MESSAGE in result.stdout
+    assert result.returncode == 0
+    for option in (
+        "--pitch",
+        "--hours",
+        "--players",
+        "--level",
+        "--seeds",
+        "--modules",
+        "--out",
+        "--provider",
+        "--model",
+    ):
+        assert option in result.stdout
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        [],
+        ["--hours", "1", "--out", "x"],
+        ["--pitch", "p", "--out", "x"],
+        ["--pitch", "p", "--hours", "1"],
+        ["--pitch", "p", "--hours", "0", "--out", "x"],
+        ["--pitch", "p", "--hours", "-1", "--out", "x"],
+        ["--pitch", "p", "--hours", "nan", "--out", "x"],
+        ["--pitch", "p", "--hours", "inf", "--out", "x"],
+        ["--pitch", "p", "--hours", "1", "--players", "0", "--out", "x"],
+        ["--pitch", "p", "--hours", "1", "--players", "7", "--out", "x"],
+        ["--pitch", "p", "--hours", "1", "--level", "0", "--out", "x"],
+        ["--pitch", "p", "--hours", "1", "--level", "6", "--out", "x"],
+        ["--pitch", "p", "--hours", "1", "--modules", "no_such_module", "--out", "x"],
+    ],
+)
+def test_bad_arguments_exit_with_code_2_before_any_model_call(arguments, model_calls):
+    with pytest.raises(SystemExit) as stop:
+        main(arguments)
+
+    assert stop.value.code == 2
+    assert model_calls == []
+
+
+# --- успешный проход ---
+
+
+def test_manual_command_writes_a_valid_adventure_and_exits_with_0(demo_env, tmp_path, capsys):
+    out = tmp_path / "chapel-whispers"
+
+    code = generate_into(out)
+
+    assert code == 0
+    printed = capsys.readouterr().out
+    assert "Балл: 100" in printed
+    assert "Ошибок: 0" in printed
+    assert "круг исправления 1" in printed.lower()  # демо-сценарий проходит один круг
+    adventure = load_adventure(out)  # файлы на диске читаются загрузчиком без ошибок
+    assert not validate(adventure, load_srd()).blocking
+    assert adventure.rules.modules == ["bg3_flavor", "campfire"]
+    assert (out / "adventure.yaml").is_file()
+    assert sorted(path.name for path in (out / "locations").iterdir()) == [
+        "chapel.yaml",
+        "undercroft.yaml",
+    ]
+
+
+def test_empty_existing_out_folder_is_accepted(demo_env, tmp_path):
+    out = tmp_path / "empty"
+    out.mkdir()
+
+    assert generate_into(out) == 0
+    assert (out / "adventure.yaml").is_file()
+
+
+@pytest.mark.parametrize("hidden", [".DS_Store", "._crypt.yaml", ".git"])
+def test_out_folder_with_only_hidden_entries_counts_as_empty(demo_env, tmp_path, hidden):
+    # Скрытое (Finder, архиваторы, git) загрузчик движка игнорирует, значит, папка свободна.
+    out = tmp_path / "finder"
+    out.mkdir()
+    (out / hidden).write_text("служебное", encoding="utf-8")
+
+    assert generate_into(out) == 0
+    assert (out / "adventure.yaml").is_file()
+    assert (out / hidden).read_text(encoding="utf-8") == "служебное"
+
+
+def test_provider_and_model_options_reach_the_factory(model_calls, tmp_path):
+    code = generate_into(tmp_path / "out", "--provider", "anthropic_api", "--model", "cheap-x")
+
+    assert code == 0
+    assert model_calls[0]["provider"] == "anthropic_api"
+    assert model_calls[0]["model"] == "cheap-x"
+
+
+def test_provider_options_default_to_settings(model_calls, tmp_path):
+    generate_into(tmp_path / "out")
+
+    assert model_calls[0]["provider"] is None
+    assert model_calls[0]["model"] is None
+
+
+# Шаги генератора идут с признаком «дешёвая модель»; явный --model побеждает LLM_CHEAP_MODEL.
+EXPLICIT_MODEL = "explicit-strong"
+CHEAP_MODEL = "env-cheap"
+COMPAT_MODEL = "env-compat"
+
+
+@pytest.fixture
+def requested_models(monkeypatch):
+    """Модели из тел запросов, ушедших к SDK: HTTP-слой Anthropic и OpenAI заменён заглушкой.
+
+    Заглушка отвечает текстом не по схеме, поэтому генератор повторяет запрос и останавливается
+    с отказом провайдера: этого хватает, чтобы увидеть, с какой моделью ушли все его запросы."""
+    models: list[str] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        models.append(json.loads(request.content)["model"])
+        if request.url.path.endswith("/messages"):
+            return httpx2.Response(
+                200,
+                json={
+                    "id": "msg_01Test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "any",
+                    "content": [{"type": "text", "text": "не JSON"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            )
+        message = {"role": "assistant", "content": "не JSON", "refusal": None}
+        return httpx2.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 1_700_000_000,
+                "model": "any",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    transport = httpx2.MockTransport(handle)
+    real_anthropic, real_openai = anthropic.AsyncAnthropic, openai.AsyncOpenAI
+    monkeypatch.setattr(
+        "dnd_server.llm.factory.AsyncAnthropic",
+        lambda **options: real_anthropic(
+            **options, http_client=anthropic.DefaultAsyncHttpxClient(transport=transport)
+        ),
+    )
+    monkeypatch.setattr(
+        "dnd_server.llm.factory.AsyncOpenAI",
+        lambda **options: real_openai(
+            **options, http_client=openai.DefaultAsyncHttpxClient(transport=transport)
+        ),
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("LLM_CHEAP_MODEL", CHEAP_MODEL)
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://llm.test/v1")
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", COMPAT_MODEL)
+    return models
+
+
+@pytest.mark.parametrize("provider", ["anthropic_api", "openai_compatible"])
+def test_explicit_model_wins_over_the_cheap_model_in_every_step(
+    provider, requested_models, tmp_path
+):
+    code = generate_into(tmp_path / "out", "--provider", provider, "--model", EXPLICIT_MODEL)
+
+    assert code == 2  # заглушка отвечает не JSON, генерация останавливается на первом шаге
+    assert requested_models
+    assert set(requested_models) == {EXPLICIT_MODEL}
+
+
+@pytest.mark.parametrize(
+    ("provider", "configured_model"),
+    [("anthropic_api", CHEAP_MODEL), ("openai_compatible", COMPAT_MODEL)],
+)
+def test_without_model_option_the_steps_use_the_configured_model(
+    provider, configured_model, requested_models, tmp_path
+):
+    code = generate_into(tmp_path / "out", "--provider", provider)
+
+    assert code == 2
+    assert requested_models
+    assert set(requested_models) == {configured_model}
+
+
+# --- сиды ---
+
+
+def test_seeds_option_keeps_seed_ids_and_writes_seeds_yaml(demo_env, tmp_path):
+    seeds = tmp_path / "seeds.yaml"
+    seeds.write_text(
+        yaml.safe_dump(
+            {
+                "npcs": [
+                    {
+                        "id": "warden",
+                        "name": "Смотритель",
+                        "role": "сторож",
+                        "appearance": "Седой.",
+                        "manner": "Молчалив.",
+                        "motive": "Сберечь покой мёртвых.",
+                        "location_id": "chapel",
+                    }
+                ]
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+
+    code = generate_into(out, "--seeds", str(seeds))
+
+    assert code == 0
+    assert yaml.safe_load((out / "seeds.yaml").read_text(encoding="utf-8")) == ["warden"]
+    assert load_adventure(out).npcs["warden"].name == "Смотритель"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "monsters: []",  # неизвестный раздел
+        "npcs: [{id: warden}]",  # неполная сущность
+        "npcs: что-то не то",
+        "[1, 2",  # битый YAML
+        "- 1",  # корень не словарь
+    ],
+)
+def test_broken_seeds_exit_with_2_before_any_model_call(content, model_calls, tmp_path, capsys):
+    seeds = tmp_path / "seeds.yaml"
+    seeds.write_text(content, encoding="utf-8")
+
+    code = generate_into(tmp_path / "out", "--seeds", str(seeds))
+
+    assert code == 2
+    assert model_calls == []
+    assert "seeds.yaml" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[sk-LEAK-seeds",  # битый YAML, секрет у ошибки
+        "!sk-LEAK-seeds 1",  # секрет в имени тега
+        "&sk-LEAK-seeds [*sk-LEAK-other]",  # секрет в имени якоря и ссылки
+        "npcs: sk-LEAK-seeds",  # секрет вместо списка
+    ],
+)
+def test_seeds_errors_never_quote_the_seeds_file(content, model_calls, tmp_path, capsys):
+    # --seeds мог по ошибке указать на файл с секретами: его содержимое не попадает в сообщение.
+    seeds = tmp_path / "seeds.yaml"
+    seeds.write_text(content, encoding="utf-8")
+
+    code = generate_into(tmp_path / "out", "--seeds", str(seeds))
+
+    error = capsys.readouterr().err
+    assert code == 2
+    assert "seeds.yaml" in error
+    assert "sk-LEAK" not in error
+
+
+@pytest.mark.parametrize("key", HOSTILE_KEYS.values(), ids=HOSTILE_KEYS.keys())
+def test_seeds_with_an_extra_key_of_terminal_escapes_print_it_escaped(
+    key, model_calls, tmp_path, capsys
+):
+    # Файл сидов может прислать чужой: имя лишнего раздела не должно управлять терминалом.
+    seeds = tmp_path / "seeds.yaml"
+    seeds.write_text(yaml.safe_dump({key: []}, allow_unicode=True), encoding="utf-8")
+
+    code = generate_into(tmp_path / "out", "--seeds", str(seeds))
+
+    printed = capsys.readouterr()
+    assert code == 2
+    assert model_calls == []
+    assert printed.out == ""
+    assert printed.err.strip().isprintable()  # одна строка без ESC, BEL и возврата каретки
+    assert "\\x1b" in printed.err
+
+
+def test_seeds_error_clips_a_long_field_name(model_calls, tmp_path, capsys):
+    seeds = tmp_path / "seeds.yaml"
+    seeds.write_text(yaml.safe_dump({"к" * 5000: []}, allow_unicode=True), encoding="utf-8")
+
+    code = generate_into(tmp_path / "out", "--seeds", str(seeds))
+
+    error = capsys.readouterr().err
+    assert code == 2
+    assert "к" * MAX_LOC_PART_CHARS not in error
+    assert "к" * (MAX_LOC_PART_CHARS - 1) + "…" in error
+
+
+# Конструкторы значений PyYAML на чужом вводе бросают не только `YAMLError`: `!!int ""` даёт
+# `IndexError`, `!!bool x` — `KeyError`, `!!timestamp x` — `AttributeError`, длинное число и
+# несуществующая дата — `ValueError`; в тексте последних значение из файла (секрет в маркере).
+# Файл портит владелец или чужая выгрузка, а команда обязана ответить строкой «Ошибка: …» и кодом 2.
+UNBUILDABLE_VALUES = {
+    "число-длиннее-4300-цифр": "9" * 4301,
+    "несуществующая-дата": "2023-02-30",
+    "несуществующее-время": "2023-02-28 25:61:00",
+    "int-пустая-строка": '!!int ""',
+    "float-пустая-строка": '!!float ""',
+    "bool-не-литерал": "!!bool sk-LEAK-bool",
+    "timestamp-не-дата": "!!timestamp sk-LEAK-time",
+    "int-не-число": "!!int sk-LEAK-int",
+    "float-не-число": "!!float sk-LEAK-float",
+    "смещение-пояса-вне-суток": "2001-12-14t21:59:43.10+99:00",
+    "глубокая-вложенность": "[" * 5000 + "]" * 5000,
+}
+
+
+def write_seeds_with(tmp_path: Path, value: str) -> Path:
+    seeds = tmp_path / "seeds.yaml"
+    seeds.write_text(f"npcs: {value}\n", encoding="utf-8")
+    return seeds
+
+
+@pytest.mark.parametrize("value", UNBUILDABLE_VALUES.values(), ids=UNBUILDABLE_VALUES.keys())
+def test_seeds_with_a_value_yaml_cannot_build_exit_with_2_and_one_error_line(
+    value, model_calls, tmp_path, capsys
+):
+    seeds = write_seeds_with(tmp_path, value)
+
+    code = generate_into(tmp_path / "out", "--seeds", str(seeds))
+
+    printed = capsys.readouterr()
+    lines = printed.err.splitlines()
+    assert code == 2
+    assert model_calls == []
+    assert printed.out == ""
+    assert len(lines) == 1 and lines[0].startswith("Ошибка: файл сидов ")
+    assert "seeds.yaml" in lines[0] and "Traceback" not in printed.err
+    assert "sk-leak" not in printed.err.lower()
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("value", UNBUILDABLE_VALUES.values(), ids=UNBUILDABLE_VALUES.keys())
+def test_seeds_error_keeps_neither_the_cause_nor_the_context(value, tmp_path):
+    # Исходное исключение парсера несёт значение из файла: в цепочке ошибки его быть не должно.
+    seeds = write_seeds_with(tmp_path, value)
+
+    with pytest.raises(cli.CliError) as error:
+        cli._load_seeds(seeds)
+
+    story = "".join(traceback.format_exception(error.value))
+    assert "sk-leak" not in story.lower()
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+def test_missing_seeds_file_exits_with_2_before_any_model_call(model_calls, tmp_path, capsys):
+    code = generate_into(tmp_path / "out", "--seeds", str(tmp_path / "nope.yaml"))
+
+    assert code == 2
+    assert model_calls == []
+    assert "nope.yaml" in capsys.readouterr().err
+
+
+# --- папка вывода ---
+
+
+def test_non_empty_out_exits_with_2_before_any_model_call(model_calls, tmp_path, capsys):
+    out = tmp_path / "busy"
+    out.mkdir()
+    (out / "old.txt").write_text("не трогать", encoding="utf-8")
+
+    code = generate_into(out)
+
+    assert code == 2
+    assert model_calls == []
+    assert "не пуста" in capsys.readouterr().err
+    assert [path.name for path in out.iterdir()] == ["old.txt"]
+
+
+def test_hidden_entry_does_not_hide_other_files_in_out_folder(model_calls, tmp_path, capsys):
+    out = tmp_path / "busy"
+    out.mkdir()
+    (out / ".DS_Store").write_text("служебное", encoding="utf-8")
+    (out / "old.txt").write_text("не трогать", encoding="utf-8")
+
+    code = generate_into(out)
+
+    assert code == 2
+    assert model_calls == []
+    assert "не пуста" in capsys.readouterr().err
+
+
+def test_out_that_is_a_file_exits_with_2_before_any_model_call(model_calls, tmp_path, capsys):
+    out = tmp_path / "file"
+    out.write_text("файл", encoding="utf-8")
+
+    code = generate_into(out)
+
+    assert code == 2
+    assert model_calls == []
+    assert "file" in capsys.readouterr().err
+
+
+# --- ошибки настройки и провайдера ---
+
+
+def test_missing_scenario_is_a_config_error_with_exit_code_2(tmp_path, capsys):
+    out = tmp_path / "out"
+
+    code = generate_into(out)
+
+    assert code == 2
+    assert "FAKE_LLM_SCENARIO" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_claude_code_cli_outside_dev_exits_with_2_without_starting_a_process(
+    monkeypatch, tmp_path, capsys
+):
+    def refuse(*args, **kwargs):
+        raise AssertionError("процесс claude запущен")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", refuse)
+
+    code = generate_into(tmp_path / "out", "--provider", "claude_code_cli")
+
+    assert code == 2
+    assert "только в dev-режиме" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+def test_claude_code_cli_gets_the_bridge_arguments_the_factory_requires(model_calls, tmp_path):
+    code = generate_into(tmp_path / "out", "--provider", "claude_code_cli")
+
+    # Генератор вызывает только complete_json, но фабрика требует реестр токенов и адрес моста MCP.
+    assert code == 0
+    assert model_calls[0]["provider"] == "claude_code_cli"
+    assert model_calls[0]["turn_tokens"] is not None
+    assert model_calls[0]["internal_url"]
+
+
+def test_provider_error_exits_with_2_and_prints_the_reason(tmp_path, monkeypatch, capsys):
+    scenario = write_scenario(tmp_path / "broken.yaml", lambda a: a.pop("generator.world"))
+    monkeypatch.setenv("FAKE_LLM_SCENARIO", str(scenario))
+    out = tmp_path / "out"
+
+    code = generate_into(out)
+
+    assert code == 2
+    assert "generator.world" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_provider_error_text_does_not_leak_secrets(monkeypatch, tmp_path, capsys):
+    secret = "sk-ant-api03-cli-secret"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
+
+    class Failing:
+        name = "failing"
+
+        async def complete_json(self, req, schema):
+            raise ProviderError("сервер отказал")
+
+    monkeypatch.setattr(cli, "make_provider", lambda settings, **kwargs: Failing())
+
+    code = generate_into(tmp_path / "out", "--provider", "anthropic_api")
+
+    printed = capsys.readouterr()
+    assert code == 2
+    assert "сервер отказал" in printed.err
+    assert secret not in printed.out + printed.err
+
+
+@pytest.mark.parametrize("key", HOSTILE_KEYS.values(), ids=HOSTILE_KEYS.keys())
+def test_extra_key_of_a_model_answer_with_terminal_escapes_is_printed_escaped(
+    key, tmp_path, monkeypatch, capsys
+):
+    scenario = write_scenario(
+        tmp_path / "hostile.yaml", lambda a: a["generator.concept"].update({key: 1})
+    )
+    monkeypatch.setenv("FAKE_LLM_SCENARIO", str(scenario))
+    out = tmp_path / "out"
+
+    code = generate_into(out)
+
+    printed = capsys.readouterr()
+    assert code == 2
+    assert "generator.concept" in printed.err
+    assert printed.err.strip().isprintable()  # одна строка без ESC, BEL и возврата каретки
+    assert "\\x1b" in printed.err
+    assert not out.exists()
+
+
+# Любой текст `ProviderError` до стока проходит через общий барьер: в него попадают куски ответа
+# модели (отказ, вывод и stderr CLI), которые адаптеры вставляют в сообщение как есть.
+HOSTILE_PROVIDER_ERRORS = {
+    "osc52": "claude вернул ошибку (error): \x1b]52;c;ZWNobyBwd25lZA==\x07",
+    "стирание-строки": "модель отказалась отвечать: \x1b[2K\rПриключение записано",
+    "csi-одним-байтом": "не удалось разобрать ответ claude: \x9b2J\x9d0;заголовок\x07",
+    "смена-заголовка": "claude завершился с кодом 1: \x1b]0;подмена\x07",
+}
+
+
+@pytest.mark.parametrize(
+    "message", HOSTILE_PROVIDER_ERRORS.values(), ids=HOSTILE_PROVIDER_ERRORS.keys()
+)
+def test_provider_error_text_never_carries_terminal_controls_to_stderr(
+    message, monkeypatch, tmp_path, capsys
+):
+    class Failing:
+        name = "failing"
+
+        async def complete_json(self, req, schema):
+            raise ProviderError(message)
+
+    monkeypatch.setattr(cli, "make_provider", lambda settings, **kwargs: Failing())
+
+    code = generate_into(tmp_path / "out")
+
+    printed = capsys.readouterr()
+    assert code == 2
+    assert printed.err.startswith("Ошибка: провайдер модели: ")
+    assert printed.err.strip().isprintable()
+    assert "\\x" in printed.err  # от текста осталась видимая запись
+
+
+def test_error_line_keeps_the_line_breaks_of_a_multi_line_message(monkeypatch, tmp_path, capsys):
+    # Хвост stderr CLI многострочный: барьер экранирует управляющие символы, но не строки.
+    class Failing:
+        name = "failing"
+
+        async def complete_json(self, req, schema):
+            raise ProviderError("claude завершился с кодом 1: первая строка\nвторая строка")
+
+    monkeypatch.setattr(cli, "make_provider", lambda settings, **kwargs: Failing())
+
+    generate_into(tmp_path / "out")
+
+    assert "первая строка\nвторая строка" in capsys.readouterr().err
+
+
+def test_texts_from_the_model_in_a_successful_run_never_carry_terminal_controls(
+    tmp_path, monkeypatch, capsys
+):
+    # Прогресс и отчёт валидатора печатают только id, коды и числа: свободный текст ответа
+    # модели (заголовок, рассказ) в терминал не идёт, а попадает лишь в файлы приключения.
+    def hostile_texts(answers):
+        answers["generator.concept"]["title"] = "Шёпот\x1b]52;c;ZWNobyBwd25lZA==\x07"
+        answers["generator.concept"]["pitch"] = "Завязка\x1b[2K\rПриключение записано"
+        for detail in answers["generator.location_detail"]:
+            detail["read_aloud"] = "Ветер\x1b[31mсвистит"
+
+    scenario = write_scenario(tmp_path / "hostile-texts.yaml", hostile_texts)
+    monkeypatch.setenv("FAKE_LLM_SCENARIO", str(scenario))
+
+    code = generate_into(tmp_path / "out")
+
+    printed = capsys.readouterr()
+    assert code == 0
+    for stream in (printed.out, printed.err):
+        assert not {"\x1b", "\x07", "\r"} & set(stream)
+
+
+def test_texts_from_the_seeds_file_in_a_successful_run_never_carry_terminal_controls(
+    demo_env, tmp_path, capsys
+):
+    # Свободный текст сидов, как и текст ответа модели, попадает только в файлы приключения.
+    seeds = tmp_path / "seeds.yaml"
+    npc = {
+        "id": "warden",
+        "name": "Смотритель\x1b]0;подмена\x07",
+        "role": "сторож",
+        "appearance": "Седой.\x1b[2K\rПриключение записано",
+        "manner": "Молчалив.",
+        "motive": "Сберечь покой мёртвых.",
+        "location_id": "chapel",
+    }
+    seeds.write_text(yaml.safe_dump({"npcs": [npc]}, allow_unicode=True), encoding="utf-8")
+
+    code = generate_into(tmp_path / "out", "--seeds", str(seeds))
+
+    printed = capsys.readouterr()
+    assert code == 0
+    for stream in (printed.out, printed.err):
+        assert not {"\x1b", "\x07", "\r"} & set(stream)
+
+
+# --- блокирующие ошибки ---
+
+
+def test_three_failed_rounds_exit_with_2_print_the_report_and_keep_the_folder(
+    tmp_path, monkeypatch, capsys
+):
+    def always_two_clues(answers):
+        bad = answers["generator.clues"][0]
+        answers["generator.clues"] = [bad] * 4
+
+    scenario = write_scenario(tmp_path / "stubborn.yaml", always_two_clues)
+    monkeypatch.setenv("FAKE_LLM_SCENARIO", str(scenario))
+    out = tmp_path / "out"
+
+    code = generate_into(out)
+
+    printed = capsys.readouterr().out
+    assert code == 2
+    assert "круг исправления 3" in printed.lower()
+    assert "круг исправления 4" not in printed.lower()
+    assert "[ошибка] too_few_clues revelation:bell-truth" in printed
+    assert "Ошибок: 1" in printed
+    # Папка записана, чтобы доделать приключение вручную; создавать игру на нём нельзя.
+    assert validate(load_adventure(out), load_srd()).blocking
+
+
+# --- отчёт валидатора ---
+
+
+def test_format_report_lists_issues_by_severity_with_score_and_time():
+    report = Report(
+        issues=[
+            Issue(code="too_few_clues", severity="error", ref="revelation:r", message="улик 2"),
+            Issue(code="no_features", severity="warning", ref="location:a", message="пусто"),
+        ],
+        score=87,
+        estimated_minutes=74,
+    )
+
+    text = format_report(report, target_hours=1)
+
+    assert "[ошибка] too_few_clues revelation:r: улик 2" in text
+    assert "[предупреждение] no_features location:a: пусто" in text
+    assert "Балл: 87" in text
+    assert "Оценка времени игры: 74 мин (цель: 1 ч)" in text
+    assert "Ошибок: 1, предупреждений: 1" in text
+
+
+def test_format_report_without_issues_says_so():
+    text = format_report(Report(issues=[], score=100, estimated_minutes=60), target_hours=1)
+
+    assert "Замечаний нет" in text
+    assert "Ошибок: 0, предупреждений: 0" in text
