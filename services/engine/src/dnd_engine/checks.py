@@ -7,7 +7,9 @@
 Все броски идут через `dice.roll` с переданным `Rng`; итог считает движок. Удача полурослика и
 Благословение вынесены в `apply_luck` и `apply_bless`: их применяют и проверки, и бой (атака,
 заклинательная атака, спасбросок от смерти, инициатива), чтобы к20-бросок везде вёл себя
-одинаково; Указание добавляет 1к4 к проверкам характеристик и навыков. Источники преимущества
+одинаково; Указание добавляет 1к4 к проверкам характеристик и навыков. Сторона состязания
+не знает персонажа, но несёт его эффекты флагами (`ContestSide`), которые выставляют
+`character_contest_side` и `monster_contest_side`. Источники преимущества
 и помехи (параметр вызова, черты вида, состояния) собираются в один режим по правилу 5e:
 преимущество и помеха из любых источников гасят друг друга. Функции чистые:
 персонаж не меняется, результат — новый объект.
@@ -20,7 +22,14 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from dnd_engine.abilities import SKILL_ABILITY, Ability, Skill, modifier
+from dnd_engine.abilities import (
+    ABILITY_NAMES_RU,
+    SKILL_ABILITY,
+    SKILL_NAMES_RU,
+    Ability,
+    Skill,
+    modifier,
+)
 from dnd_engine.character import ActiveCondition, Character, ability_mod, save_bonus, skill_bonus
 from dnd_engine.conditions import auto_fail_condition
 from dnd_engine.content import MonsterDef
@@ -96,9 +105,18 @@ CheckHook = Callable[[CheckResult], CheckResult]
 
 
 class ContestSide(BaseModel):
+    """Сторона состязания: всё, что влияет на её к20. Персонажа в ней нет.
+
+    Эффекты персонажа лежат флагами, чтобы сторона оставалась простыми данными (журнал, JSON) и
+    собиралась одинаково из персонажа и из статблока: `character_contest_side` и
+    `monster_contest_side`. Значения по умолчанию — обычный бросок без эффектов."""
+
     actor_id: str
     label: str
     bonus: int
+    advantage: Advantage = Advantage.NONE  # общий режим к20: вдохновение, помехи состояний
+    luck: bool = False  # Удача полурослика: единицу на к20 можно перебросить
+    guidance: bool = False  # Указание: к броску добавляется 1к4
 
 
 class ContestResult(BaseModel):
@@ -186,14 +204,28 @@ def _has_buff(c: Character, buff_id: str) -> bool:
     return any(buff.id == buff_id for buff in c.buffs)
 
 
+def _has_luck(c: Character) -> bool:
+    return CHECK_TRAIT_BY_SPECIES.get(c.species) == LUCK_TRAIT
+
+
+def _reroll_if_lucky(lucky: bool, d20: RollResult, *, rng: Rng) -> RollResult:
+    """Правило Удачи в одном месте: для персонажа (`apply_luck`) и для стороны состязания."""
+    if lucky and d20.natural == 1:
+        return _reroll_natural_one(d20, rng=rng)
+    return d20
+
+
 def apply_luck(c: Character, d20: RollResult, *, rng: Rng) -> RollResult:
     """Удача полурослика для любого броска к20 (проверка, спасбросок, атака, инициатива).
 
     Если выпала 1 и у персонажа черта Удача, к20 перебрасывается; иначе возвращается тот же
     бросок. Общий механизм для всех мест движка, где персонаж бросает к20."""
-    if d20.natural == 1 and CHECK_TRAIT_BY_SPECIES.get(c.species) == LUCK_TRAIT:
-        return _reroll_natural_one(d20, rng=rng)
-    return d20
+    return _reroll_if_lucky(_has_luck(c), d20, rng=rng)
+
+
+def _add_guidance(d20: RollResult, *, rng: Rng) -> RollResult:
+    """Указание: отдельная кость 1к4 рядом с к20 (для проверок и состязаний, не для спасбросков)."""
+    return _add_roll(d20, roll("1d4", rng=rng, reason=f"{d20.reason} (Указание)"))
 
 
 def apply_bless(c: Character, d20: RollResult, *, rng: Rng) -> RollResult:
@@ -267,7 +299,7 @@ def _d20_test(
     if kind == CheckKind.SAVE:
         d20 = apply_bless(c, d20, rng=rng)
     elif _has_buff(c, GUIDANCE_BUFF):
-        d20 = _add_roll(d20, roll("1d4", rng=rng, reason=f"{reason} (Указание)"))
+        d20 = _add_guidance(d20, rng=rng)
 
     result = CheckResult(
         actor_id=c.id,
@@ -419,9 +451,77 @@ def monster_saving_throw(
     )
 
 
+def check_label(ability: Ability, skill: Skill | None = None) -> str:
+    """Название проверки для рассказа и событий: «Ловкость (Скрытность)» или просто «Сила»."""
+    name = ABILITY_NAMES_RU[ability]
+    return name if skill is None else f"{name} ({SKILL_NAMES_RU[skill]})"
+
+
+def _stat_parts(stat: Skill | Ability) -> tuple[Ability, Skill | None]:
+    """Навык ведёт к своей характеристике; голая характеристика — проверка без навыка."""
+    if isinstance(stat, Skill):
+        return SKILL_ABILITY[stat], stat
+    return stat, None
+
+
+def character_contest_side(
+    c: Character, stat: Skill | Ability, *, advantage: Advantage = Advantage.NONE
+) -> ContestSide:
+    """Сторона состязания персонажа: бонус навыка (или модификатор), Удача, Указание, помехи.
+
+    `advantage` — преимущество из вдохновения; помеха от состояний (Отравлен, Испуган)
+    добавляется здесь, как в `ability_check`. Бонус считает движок по персонажу."""
+    ability, skill = _stat_parts(stat)
+    kind = CheckKind.ABILITY if skill is None else CheckKind.SKILL
+    return ContestSide(
+        actor_id=c.id,
+        label=check_label(ability, skill),
+        bonus=ability_mod(c, ability) if skill is None else skill_bonus(c, skill),
+        advantage=combine_advantage(advantage, _condition_advantage(c.conditions, kind, ability)),
+        luck=_has_luck(c),
+        guidance=_has_buff(c, GUIDANCE_BUFF),
+    )
+
+
+def monster_contest_side(
+    monster: MonsterDef,
+    fighter_id: str,
+    stat: Skill | Ability,
+    *,
+    conditions: Sequence[ActiveCondition] = (),
+) -> ContestSide:
+    """Сторона состязания монстра или NPC со статблоком.
+
+    Навык в статблоке записан итоговым бонусом (как `saves`); без записи берётся модификатор
+    характеристики. Удачи и Указания у статблока нет. `conditions` — состояния бойца в бою."""
+    ability, skill = _stat_parts(stat)
+    ability_bonus = modifier(monster.scores[ability])
+    kind = CheckKind.ABILITY if skill is None else CheckKind.SKILL
+    return ContestSide(
+        actor_id=fighter_id,
+        label=check_label(ability, skill),
+        bonus=ability_bonus if skill is None else monster.skills.get(skill, ability_bonus),
+        advantage=_condition_advantage(conditions, kind, ability),
+    )
+
+
+def _roll_side(side: ContestSide, *, rng: Rng, reason: str) -> RollResult:
+    """К20 стороны: режим, затем Удача, затем Указание — тот же порядок, что у проверки."""
+    d20 = roll(
+        f"1d20{side.bonus:+d}",
+        rng=rng,
+        advantage=side.advantage,
+        reason=f"{reason}: {side.label}",
+    )
+    d20 = _reroll_if_lucky(side.luck, d20, rng=rng)
+    return _add_guidance(d20, rng=rng) if side.guidance else d20
+
+
 def contest(a: ContestSide, b: ContestSide, *, rng: Rng, reason: str) -> ContestResult:
-    """Состязание: каждая сторона бросает к20 с бонусом; ничья — в пользу b."""
-    a_roll = roll(f"1d20{a.bonus:+d}", rng=rng, reason=f"{reason}: {a.label}")
-    b_roll = roll(f"1d20{b.bonus:+d}", rng=rng, reason=f"{reason}: {b.label}")
+    """Состязание: каждая сторона бросает к20 с бонусом и своими эффектами; ничья — в пользу b.
+
+    Порядок бросков: все кости стороны a, затем все кости стороны b."""
+    a_roll = _roll_side(a, rng=rng, reason=reason)
+    b_roll = _roll_side(b, rng=rng, reason=reason)
     winner = "a" if a_roll.total > b_roll.total else "b"
     return ContestResult(a=a, b=b, a_roll=a_roll, b_roll=b_roll, winner=winner)

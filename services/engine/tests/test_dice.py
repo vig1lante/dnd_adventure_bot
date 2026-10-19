@@ -3,6 +3,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from dnd_engine import dice as dice_module
 from dnd_engine.dice import (
     Advantage,
     DiceSyntaxError,
@@ -513,3 +514,56 @@ def test_advantage_given_as_plain_string_becomes_the_enum_value(text, expected, 
     result = roll("d20", rng=rng, advantage=text, reason="x")  # type: ignore[arg-type]
 
     assert (result.natural, result.advantage) == (expected, mode)
+
+
+# --- пределы записи костей, которую прислала модель (heal/damage, B4.7) ---
+
+
+@pytest.mark.parametrize(
+    "good",
+    ["2d6", "1d8+3", " 4d6 + 2 ", "20d6", "1d10-1d4", "1d4+30", "1d4-30", "4d6kh3", "d20"],
+)
+def test_model_dice_accepts_ordinary_dice_within_limits(good):
+    assert dice_module.parse_model_dice(good) == parse(good)
+
+
+def test_model_dice_check_does_not_change_the_ordinary_parser():
+    # Записи SRD (фиксированный урон, сотня костей в тестах) по-прежнему разбираются `parse`.
+    assert parse("5").terms == ()
+    assert len(parse("100d6").terms) == 1
+
+
+@pytest.mark.parametrize(
+    ("bad", "reason"),
+    [
+        ("5", "кост"),  # ни одной кости: фиксированное число модель получила бы даром
+        ("-3", "разобрать"),
+        ("", "разобрать"),
+        ("1d4" + "+1" * 40, "длин"),  # длиннее предела записи
+        ("1d4+1d4+1d4+1d4+1d4", "терм"),  # слишком много термов
+        ("21d4", "костей"),  # слишком много костей
+        ("10d6+11d6", "костей"),  # общее число костей, а не по одному терму
+        ("100d100", "костей"),
+        ("1d4+31", "модификатор"),
+        ("1d4-31", "модификатор"),
+        ("1d4+20+20", "модификатор"),  # плоские числа складываются в модификатор
+        ("1d7", "граней"),
+    ],
+)
+def test_model_dice_rejects_what_exceeds_the_limits_with_a_syntax_error(bad, reason):
+    with pytest.raises(DiceSyntaxError, match=reason):
+        dice_module.parse_model_dice(bad)
+
+
+def test_model_dice_rejects_a_huge_number_by_length_before_parsing_it():
+    with pytest.raises(DiceSyntaxError, match="длин"):
+        dice_module.parse_model_dice("1d4+" + "9" * 5000)
+
+
+def test_model_dice_limits_are_the_documented_constants():
+    assert (
+        dice_module.MODEL_DICE_MAX_CHARS,
+        dice_module.MODEL_DICE_MAX_TERMS,
+        dice_module.MODEL_DICE_MAX_DICE,
+        dice_module.MODEL_DICE_MAX_MODIFIER,
+    ) == (40, 4, 20, 30)

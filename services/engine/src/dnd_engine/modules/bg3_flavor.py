@@ -2,9 +2,13 @@
 
 Флаги правил читает бой: зелье и толчок — бонусные действия, «Помощь» поднимает упавшего
 союзника (`combat.engine.simple_action`). Хук проверок делает натуральные 20 и 1 автоматическим
-успехом и провалом. Вдохновение за предысторию выдаёт мастер инструментом `grant_inspiration`:
-сам инструмент появится в B4.7, а здесь правило описано для промпта мастера словами.
+успехом и провалом. Вдохновение за предысторию выдаёт мастер инструментом `grant_inspiration`
+(не чаще раза на персонажа за сцену), а правило описано для промпта мастера словами.
 """
+
+from typing import Any
+
+from pydantic import Field
 
 from dnd_engine.checks import CheckKind, CheckResult
 from dnd_engine.modules.base import (
@@ -57,6 +61,63 @@ def natural_20_and_1(result: CheckResult) -> CheckResult:
     return result
 
 
+def grant_inspiration_tool() -> Any:
+    """Спецификация инструмента `grant_inspiration` (`ToolSpec`).
+
+    Типы реестра инструментов подключаются здесь, а не наверху файла: `tools.registry` сам
+    импортирует `modules.base`, и верхний импорт замкнул бы цикл между пакетами. Инструмент
+    выдаёт вдохновение (`Character.inspiration`) и записывает персонажа в
+    `Scene.inspiration_granted`: вторая выдача за ту же сцену — ошибка для модели."""
+    from dnd_engine.events import InspirationEvent
+    from dnd_engine.tools.lore import MAX_ID_CHARS
+    from dnd_engine.tools.registry import (
+        MAX_REASON_CHARS,
+        ToolArgs,
+        ToolContext,
+        ToolError,
+        ToolSpec,
+        find_or_error,
+    )
+
+    class GrantInspirationArgs(ToolArgs):
+        character_id: str = Field(max_length=MAX_ID_CHARS, description="id персонажа отряда")
+        reason: str = Field(
+            min_length=1,
+            max_length=MAX_REASON_CHARS,
+            description="коротко: какой повод предыстории персонаж ярко отыграл",
+        )
+
+    def grant_inspiration(ctx: ToolContext, args: GrantInspirationArgs) -> dict[str, Any]:
+        character = find_or_error(ctx.state.party, "персонажа отряда", args.character_id)
+        scene = ctx.state.scene
+        if character.id in scene.inspiration_granted:
+            raise ToolError(
+                f"Персонажу {character.id!r} вдохновение в этой сцене уже выдавали: не чаще "
+                "одного раза на персонажа за сцену."
+            )
+        if character.inspiration:
+            raise ToolError(
+                f"У персонажа {character.id!r} уже есть вдохновение: второе не копится."
+            )
+        character.inspiration = True
+        scene.inspiration_granted.append(character.id)
+        ctx.events.append(
+            InspirationEvent(character_id=character.id, granted=True, reason=args.reason)
+        )
+        return {"character": character.name, "inspiration": True}
+
+    return ToolSpec(
+        name="grant_inspiration",
+        description=(
+            "Выдать вдохновение персонажу, который ярко отыграл повод своей предыстории. Не чаще "
+            "одного раза на персонажа за сцену; если вдохновение у него уже есть, второе не "
+            "выдаётся. Игрок потратит его галочкой «Вдохновение» вместе с ходом."
+        ),
+        args_model=GrantInspirationArgs,
+        handler=grant_inspiration,
+    )
+
+
 class Bg3Flavor:
     id = "bg3_flavor"
     name = "Специи BG3"
@@ -69,6 +130,7 @@ class Bg3Flavor:
         registry.add_check_hook(natural_20_and_1)
         registry.add_prompt_fragment(RULES_FRAGMENT)
         registry.add_prompt_fragment(INSPIRATION_FRAGMENT)
+        registry.add_tool(grant_inspiration_tool())
 
 
 BG3_FLAVOR = Bg3Flavor()

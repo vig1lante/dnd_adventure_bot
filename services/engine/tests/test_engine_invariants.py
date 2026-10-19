@@ -36,6 +36,15 @@ NONE = Advantage.NONE
 PACKAGE_DIR = Path(dnd_engine.__file__).parent
 MODULE_FILES = sorted(PACKAGE_DIR.rglob("*.py"))
 
+
+def module_path(path: Path) -> str:
+    """Путь модуля внутри пакета: `content.py`, `adventure/loader.py`.
+
+    Ограничения «только в этом модуле» привязаны к пути, а не к имени файла: одноимённый файл
+    в другом подпакете (`tools/content.py`) не получает чужих разрешений."""
+    return path.relative_to(PACKAGE_DIR).as_posix()
+
+
 # Допустимые корневые импорты движка (allowlist): только то, что ему реально нужно. Любой другой
 # корень — сеть, БД, процессы, клиенты моделей, `os`, `sys`, `io`, `pickle` — тест отклонит.
 # Новый корень — осознанное решение: добавьте его сюда вместе с обоснованием и, если он нужен
@@ -51,29 +60,36 @@ ALLOWED_IMPORTS: dict[str, str] = {
     "re": "разбор записи костей вида 2d6+3 (dice.py)",
     "pydantic": "модели данных: проверка и (де)сериализация состояния игры в JSON",
     "pydantic_core": "ErrorDetails: описание проблем при чтении данных SRD (content.py)",
-    "yaml": "safe_load данных SRD из YAML (content.py)",
+    "yaml": "safe_load данных SRD (content.py), safe_load/safe_dump папки приключения (loader.py)",
     "importlib": "importlib.resources.files: данные SRD лежат внутри пакета (content.py)",
-    "pathlib": "Path: необязательная папка с данными в `load_srd(path)` (content.py)",
+    "pathlib": "Path: папка данных в `load_srd(path)` (content.py), папка приключения (loader.py)",
     "random": "SeededRng: воспроизводимый генератор для тестов (rng.py)",
     "secrets": "SystemRng: криптостойкий генератор для игры (rng.py)",
 }
 # Корни, которым место только в одном модуле: остальным они не нужны, а появление там — сигнал.
+# Модуль назван путём внутри пакета (`adventure/loader.py`), а не именем файла.
 IMPORT_ONLY_IN: dict[str, set[str]] = {
     "random": {"rng.py"},
     "secrets": {"rng.py"},
     "re": {"dice.py"},
-    "yaml": {"content.py"},
+    "yaml": {"content.py", "adventure/loader.py"},
     "importlib": {"content.py"},
-    "pathlib": {"content.py"},
+    "pathlib": {"content.py", "adventure/loader.py"},
     "pydantic_core": {"content.py"},
 }
 # Динамический код и произвольный доступ к файлам. Имена встроенных функций ловятся по любому
 # упоминанию (в том числе `f = open`), атрибуты — по любому обращению (`path.open()`).
 FORBIDDEN_NAMES = {"open", "eval", "exec", "compile", "__import__", "__builtins__"}
-FORBIDDEN_ATTRIBUTES = {"open", "read_text", "write_text", "write_bytes", "import_module"}
-# Единственное обоснованное чтение файлов: данные SRD читает `Traversable.read_bytes()` загрузчика
-# (`content._read_entries`) — `open` там не вызывается, путь идёт из `importlib.resources`.
-FILE_READS_ONLY_IN: dict[str, set[str]] = {"read_bytes": {"content.py"}}
+FORBIDDEN_ATTRIBUTES = {"open", "read_text", "write_bytes", "import_module"}
+# Обоснованный доступ к файлам — только в двух загрузчиках, и `open` они не вызывают:
+# - чтение: данные SRD читает `Traversable.read_bytes()` (`content._read_entries`), путь идёт
+#   из `importlib.resources`; папку приключения читает `Path.read_bytes()` (`adventure/loader.py`);
+# - запись: только `adventure/loader.py` (`dump_adventure`), и только после проверки имён файлов.
+# Модули названы путями внутри пакета, как в `IMPORT_ONLY_IN`.
+FILE_READS_ONLY_IN: dict[str, set[str]] = {
+    "read_bytes": {"content.py", "adventure/loader.py"},
+    "write_text": {"adventure/loader.py"},
+}
 ENVIRONMENT_ATTRIBUTES = {"environ", "getenv"}
 # Генераторы случайных чисел разрешены только в `rng.py`; остальной код бросает через `Rng`.
 RANDOMNESS_IMPORTS = {"random", "secrets"}
@@ -123,24 +139,26 @@ def imports_outside_allowlist(source: str) -> set[str]:
     return roots_of_imports(source) - ALLOWED_IMPORTS.keys()
 
 
-def imports_outside_their_module(source: str, file_name: str) -> set[str]:
-    """Корни из `IMPORT_ONLY_IN`, которые импортирует не тот файл."""
+def imports_outside_their_module(source: str, module: str) -> set[str]:
+    """Корни из `IMPORT_ONLY_IN`, которые импортирует не тот модуль (`module` — путь в пакете)."""
     return {
         root
         for root in roots_of_imports(source) & IMPORT_ONLY_IN.keys()
-        if file_name not in IMPORT_ONLY_IN[root]
+        if module not in IMPORT_ONLY_IN[root]
     }
 
 
-def forbidden_constructs(source: str, file_name: str) -> list[str]:
-    """Динамический код и обращения к файлам: `open`, `eval`, `exec`, `__import__` и им подобное."""
+def forbidden_constructs(source: str, module: str) -> list[str]:
+    """Динамический код и обращения к файлам: `open`, `eval`, `exec`, `__import__` и им подобное.
+
+    `module` — путь модуля в пакете: чтение и запись файлов разрешены только названным путям."""
     found = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
             found.append(f"{node.id} (строка {node.lineno})")
         elif isinstance(node, ast.Attribute):
             only_in = FILE_READS_ONLY_IN.get(node.attr)
-            if node.attr in FORBIDDEN_ATTRIBUTES or (only_in and file_name not in only_in):
+            if node.attr in FORBIDDEN_ATTRIBUTES or (only_in and module not in only_in):
                 found.append(f".{node.attr} (строка {node.lineno})")
         elif (
             isinstance(node, ast.Call)
@@ -156,23 +174,39 @@ def forbidden_constructs(source: str, file_name: str) -> list[str]:
 
 def test_package_files_are_found():
     names = {path.name for path in MODULE_FILES}
+    paths = {module_path(path) for path in MODULE_FILES}
 
     assert {"rng.py", "dice.py", "creation.py", "checks.py", "rest.py"} <= names
     # Новые модули блока B3 тоже под проверкой: иначе границы держались бы только на старых файлах.
     assert {"events.py", "state.py", "conditions.py", "engine.py", "model.py"} <= names
     assert {"base.py", "bg3_flavor.py", "campfire.py"} <= names
+    # Блок B4: приключение и инструменты мастера тоже под проверкой границ, не только старые файлы.
+    assert {
+        "adventure/schema.py",
+        "adventure/loader.py",
+        "adventure/validator.py",
+        "adventure/budget.py",
+    } <= paths
+    assert {
+        "tools/registry.py",
+        "tools/lore.py",
+        "tools/world.py",
+        "tools/checks.py",
+        "tools/combat.py",
+        "tools/narrative.py",
+    } <= paths
 
 
-@pytest.mark.parametrize("path", MODULE_FILES, ids=lambda p: p.relative_to(PACKAGE_DIR).as_posix())
+@pytest.mark.parametrize("path", MODULE_FILES, ids=module_path)
 def test_engine_module_imports_only_what_the_allowlist_permits(path):
     outside = imports_outside_allowlist(path.read_text(encoding="utf-8"))
 
     assert not outside, f"корни {sorted(outside)} не из ALLOWED_IMPORTS: сеть, БД или лишнее"
 
 
-@pytest.mark.parametrize("path", MODULE_FILES, ids=lambda p: p.relative_to(PACKAGE_DIR).as_posix())
+@pytest.mark.parametrize("path", MODULE_FILES, ids=module_path)
 def test_restricted_imports_stay_in_their_own_module(path):
-    misplaced = imports_outside_their_module(path.read_text(encoding="utf-8"), path.name)
+    misplaced = imports_outside_their_module(path.read_text(encoding="utf-8"), module_path(path))
 
     assert not misplaced, f"{sorted(misplaced)} разрешены только в {IMPORT_ONLY_IN}"
 
@@ -183,19 +217,19 @@ def test_the_allowlist_has_no_unused_entries():
     assert set(ALLOWED_IMPORTS) == used  # лишняя запись молча расширяла бы допустимое
     assert IMPORT_ONLY_IN.keys() <= ALLOWED_IMPORTS.keys()
     for root, files in IMPORT_ONLY_IN.items():
-        assert files == {p.name for p in MODULE_FILES if root in imported_roots(p)}, root
+        assert files == {module_path(p) for p in MODULE_FILES if root in imported_roots(p)}, root
 
 
-@pytest.mark.parametrize("path", MODULE_FILES, ids=lambda p: p.relative_to(PACKAGE_DIR).as_posix())
+@pytest.mark.parametrize("path", MODULE_FILES, ids=module_path)
 def test_engine_module_has_no_dynamic_code_or_arbitrary_file_access(path):
-    found = forbidden_constructs(path.read_text(encoding="utf-8"), path.name)
+    found = forbidden_constructs(path.read_text(encoding="utf-8"), module_path(path))
 
     assert not found, found
 
 
 def test_the_only_file_read_is_the_srd_loader_through_importlib_resources():
     readers = {
-        path.name
+        module_path(path)
         for path in MODULE_FILES
         if any(
             isinstance(node, ast.Attribute) and node.attr == "read_bytes"
@@ -204,12 +238,26 @@ def test_the_only_file_read_is_the_srd_loader_through_importlib_resources():
     }
 
     # `open` движок не вызывает нигде: данные SRD читает `Traversable.read_bytes()` загрузчика,
-    # а путь к ним даёт `importlib.resources.files("dnd_engine")`.
-    assert readers == FILE_READS_ONLY_IN["read_bytes"] == {"content.py"}
+    # а путь к ним даёт `importlib.resources.files("dnd_engine")`; папку приключения читает
+    # загрузчик приключения.
+    assert readers == FILE_READS_ONLY_IN["read_bytes"] == {"content.py", "adventure/loader.py"}
     assert "importlib" in imported_roots(PACKAGE_DIR / "content.py")
 
 
-@pytest.mark.parametrize("path", MODULE_FILES, ids=lambda p: p.relative_to(PACKAGE_DIR).as_posix())
+def test_the_only_file_writer_is_the_adventure_loader():
+    writers = {
+        module_path(path)
+        for path in MODULE_FILES
+        if any(
+            isinstance(node, ast.Attribute) and node.attr == "write_text"
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        )
+    }
+
+    assert writers == FILE_READS_ONLY_IN["write_text"] == {"adventure/loader.py"}
+
+
+@pytest.mark.parametrize("path", MODULE_FILES, ids=module_path)
 def test_engine_module_does_not_read_the_environment(path):
     tree = ast.parse(path.read_text(encoding="utf-8"))
     attributes = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
@@ -217,9 +265,9 @@ def test_engine_module_does_not_read_the_environment(path):
     assert not attributes & ENVIRONMENT_ATTRIBUTES
 
 
-@pytest.mark.parametrize("path", MODULE_FILES, ids=lambda p: p.relative_to(PACKAGE_DIR).as_posix())
+@pytest.mark.parametrize("path", MODULE_FILES, ids=module_path)
 def test_only_rng_module_imports_random_generators(path):
-    if path.name == "rng.py":
+    if module_path(path) == "rng.py":
         assert imported_roots(path) & RANDOMNESS_IMPORTS
     else:
         assert not imported_roots(path) & RANDOMNESS_IMPORTS
@@ -256,6 +304,7 @@ def test_the_allowlist_check_accepts_allowed_and_relative_imports():
 def test_the_restricted_import_check_catches_a_root_in_the_wrong_file():
     assert imports_outside_their_module("import yaml", "checks.py") == {"yaml"}
     assert imports_outside_their_module("import yaml", "content.py") == set()
+    assert imports_outside_their_module("import yaml", "adventure/loader.py") == set()
     assert imports_outside_their_module("import secrets", "dice.py") == {"secrets"}
 
 
@@ -302,6 +351,259 @@ def test_the_srd_loader_may_read_bytes_but_other_files_may_not():
 
     assert forbidden_constructs(source, "content.py") == []
     assert forbidden_constructs(source, "rest.py")
+
+
+def test_only_the_adventure_loader_may_write_text_and_other_writes_stay_forbidden():
+    assert forbidden_constructs("path.write_text('x')", "adventure/loader.py") == []
+    assert forbidden_constructs("path.write_text('x')", "rest.py")
+    assert forbidden_constructs("path.write_bytes(b'x')", "adventure/loader.py")
+    assert forbidden_constructs("path.open('w')", "adventure/loader.py")
+
+
+@pytest.mark.parametrize(
+    "module", ["loader.py", "tools/loader.py", "adventure/content.py", "tools/content.py"]
+)
+def test_a_file_with_a_trusted_name_in_another_place_gets_no_loader_rights(module):
+    # Ограничения идут по пути в пакете: одноимённый файл в другом подпакете их не обходит.
+    assert imports_outside_their_module("import yaml\nimport pathlib", module) == {
+        "yaml",
+        "pathlib",
+    }
+    assert forbidden_constructs("data = path.read_bytes()", module)
+    assert forbidden_constructs("path.write_text('x')", module)
+
+
+def test_a_random_generator_import_is_allowed_only_in_the_top_level_rng_module():
+    assert imports_outside_their_module("import random", "rng.py") == set()
+    assert imports_outside_their_module("import random", "tools/rng.py") == {"random"}
+    assert imports_outside_their_module("import secrets", "adventure/rng.py") == {"secrets"}
+
+
+def test_every_restricted_module_named_in_the_guard_exists():
+    # Опечатка или переименованный файл молча оставили бы запись без модуля.
+    paths = {module_path(path) for path in MODULE_FILES}
+
+    for files in (*IMPORT_ONLY_IN.values(), *FILE_READS_ONLY_IN.values()):
+        assert files <= paths, files - paths
+
+
+# --- инструменты мастера: Сл только из таблицы ---
+
+TOOL_FILES = sorted((PACKAGE_DIR / "tools").rglob("*.py"))
+# «Сл движка»: концентрация, заклинания и статблоки задают её сами, до таблицы 5/10/15/20/25/30
+# она не округляется. Из аргументов модели эти пути недоступны: модули `tools/` их не вызывают.
+ENGINE_DC_FUNCTIONS = {"engine_saving_throw", "monster_saving_throw"}
+# Поля состояния, которыми оно получает свою Сл и спасбросок (повторный бросок в конце хода).
+CONDITION_DC_FIELDS = {"dc", "save"}
+# Проверки, чью Сл инструмент берёт из аргумента (`args.dc`), а модель аргументов ограничивает
+# таблицей. Событие броска (`RollEvent`) только записывает Сл, которую посчитал движок.
+TABLE_DC_CHECKS = {"ability_check", "saving_throw"}
+CONDITION_CONSTRUCTORS = {"model_validate", "model_validate_json", "model_construct"}
+
+
+def callee_name(call: ast.Call) -> str | None:
+    """Имя вызываемого: `f(...)` и `module.f(...)` дают `f`."""
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return None
+
+
+def engine_dc_mentions(source: str) -> list[str]:
+    """Любое упоминание путей «Сл движка»: имя, атрибут, импорт (и под псевдонимом), строка."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Name):
+            name = node.id
+        elif isinstance(node, ast.Attribute):
+            name = node.attr
+        elif isinstance(node, ast.alias):
+            name = node.name.split(".")[-1]
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            name = node.value  # getattr(checks, "monster_saving_throw")
+        else:
+            continue
+        if name in ENGINE_DC_FUNCTIONS:
+            found.append(f"{name} (строка {node.lineno})")
+    return found
+
+
+def condition_names(tree: ast.AST) -> set[str]:
+    """Имена `ActiveCondition` в модуле, в том числе псевдонимы импорта."""
+    return {"ActiveCondition"} | {
+        node.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.alias) and node.name.split(".")[-1] == "ActiveCondition"
+        if node.asname
+    }
+
+
+def condition_dc_inputs(source: str) -> list[str]:
+    """Откуда у состояния может появиться своя Сл или спасбросок.
+
+    Это `dc=`/`save=` в `ActiveCondition(...)`, распаковка `**данные` туда же, построение из
+    словаря (`model_validate`) и присваивание полю `.dc`/`.save`: в нём может быть что угодно."""
+    tree = ast.parse(source)
+    names = condition_names(tree)
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if callee_name(node) in names:
+                found += [
+                    f"ActiveCondition({kw.arg or '**'}=...) (строка {node.lineno})"
+                    for kw in node.keywords
+                    if kw.arg is None or kw.arg in CONDITION_DC_FIELDS
+                ]
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in CONDITION_CONSTRUCTORS
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in names
+            ):
+                found.append(f"ActiveCondition.{node.func.attr} (строка {node.lineno})")
+        elif isinstance(node, ast.Assign | ast.AugAssign | ast.AnnAssign):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            found += [
+                f".{target.attr} = ... (строка {node.lineno})"
+                for target in targets
+                if isinstance(target, ast.Attribute) and target.attr in CONDITION_DC_FIELDS
+            ]
+    return found
+
+
+def dc_arguments_outside_the_table(source: str) -> list[str]:
+    """Вызовы с `dc=`, где Сл не из аргументов инструмента: число, расчёт, другая функция."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "dc":
+                continue
+            from_arguments = isinstance(keyword.value, ast.Attribute) and keyword.value.attr == "dc"
+            allowed = callee_name(node) == "RollEvent" or (
+                callee_name(node) in TABLE_DC_CHECKS and from_arguments
+            )
+            if not allowed:
+                found.append(f"{callee_name(node)}(dc=...) (строка {node.lineno})")
+    return found
+
+
+def test_tool_files_are_found():
+    names = {path.name for path in TOOL_FILES}
+
+    # Пустой список молча превратил бы все проверки ниже в «ничего не найдено».
+    assert {"registry.py", "lore.py", "world.py", "checks.py", "combat.py", "narrative.py"} <= names
+
+
+@pytest.mark.parametrize("path", TOOL_FILES, ids=module_path)
+def test_tool_modules_do_not_use_the_engine_dc_paths(path):
+    found = engine_dc_mentions(path.read_text(encoding="utf-8"))
+
+    assert not found, f"Сл движка недоступна модели: {found}"
+
+
+@pytest.mark.parametrize("path", TOOL_FILES, ids=module_path)
+def test_tool_modules_give_conditions_no_dc_and_no_save(path):
+    found = condition_dc_inputs(path.read_text(encoding="utf-8"))
+
+    assert not found, f"у внешнего состояния нет своей Сл и спасброска: {found}"
+
+
+@pytest.mark.parametrize("path", TOOL_FILES, ids=module_path)
+def test_tool_modules_take_the_check_dc_only_from_their_arguments(path):
+    found = dc_arguments_outside_the_table(path.read_text(encoding="utf-8"))
+
+    assert not found, f"Сл проверки берётся только из аргументов инструмента: {found}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "engine_saving_throw(hero, CON, dc=12)",
+        "monster_saving_throw(monster, 'ogre-1', [], CON, dc=12)",
+        "from dnd_engine.checks import engine_saving_throw",
+        "from dnd_engine.checks import monster_saving_throw as roll_save",
+        "import dnd_engine.checks as checks\nchecks.engine_saving_throw(hero, CON, dc=12)",
+        "getattr(checks, 'monster_saving_throw')",
+        "save = engine_saving_throw",
+    ],
+)
+def test_the_engine_dc_check_catches_every_form(source):
+    assert engine_dc_mentions(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "saving_throw(hero, CON, dc=args.dc)",
+        '"""Путь engine_saving_throw из аргументов модели недоступен."""',
+        "# monster_saving_throw: комментарий",
+        "engine_dc = 12",
+    ],
+)
+def test_the_engine_dc_check_leaves_ordinary_code_alone(source):
+    assert engine_dc_mentions(source) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "ActiveCondition(id='prone', dc=15)",
+        "ActiveCondition(id='prone', save='con')",
+        "ActiveCondition(id='prone', **extra)",
+        "character.ActiveCondition(id='prone', dc=15)",
+        "from dnd_engine.character import ActiveCondition as Tag\nTag(id='prone', save='dex')",
+        "ActiveCondition.model_validate(data)",
+        "ActiveCondition.model_construct(id='prone', dc=15)",
+        "condition.dc = 12",
+        "condition.save = 'con'",
+        "condition.dc += 1",
+    ],
+)
+def test_the_condition_check_catches_every_form(source):
+    assert condition_dc_inputs(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "ActiveCondition(id='prone', rounds_left=3, source='')",
+        "other(dc=15)",
+        "RollEvent(dc=result.dc)",
+        "x.dc_text = 1",
+        "saved = hero.save_proficiencies",
+    ],
+)
+def test_the_condition_check_leaves_ordinary_code_alone(source):
+    assert condition_dc_inputs(source) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "ability_check(hero, DEX, dc=15)",
+        "saving_throw(hero, DEX, dc=args.dc + 1)",
+        "saving_throw(hero, DEX, dc=compute())",
+        "other_check(hero, DEX, dc=args.dc)",
+    ],
+)
+def test_the_dc_argument_check_catches_a_dc_that_is_not_from_the_arguments(source):
+    assert dc_arguments_outside_the_table(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "ability_check(hero, DEX, dc=args.dc)",
+        "checks.saving_throw(hero, DEX, dc=args.dc)",
+        "RollEvent(actor_id='x', dc=result.dc)",
+        "ability_check(hero, DEX, advantage=NONE)",
+    ],
+)
+def test_the_dc_argument_check_accepts_the_table_dc_from_the_arguments(source):
+    assert dc_arguments_outside_the_table(source) == []
 
 
 # --- расход костей: только через переданный Rng и без лишнего ---

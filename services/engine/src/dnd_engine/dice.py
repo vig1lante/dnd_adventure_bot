@@ -16,6 +16,13 @@ from dnd_engine.rng import Rng
 MAX_DICE_COUNT = 100
 ALLOWED_SIDES = (2, 3, 4, 6, 8, 10, 12, 20, 100)
 
+# Запись костей, которую прислала модель мастера (урон и лечение вне боя), строже общей: её
+# присылает недоверенный ввод, а записи SRD и движка этих пределов не проходят (`parse_model_dice`).
+MODEL_DICE_MAX_CHARS = 40  # длина записи
+MODEL_DICE_MAX_TERMS = 4  # термов с костями; плоские числа складываются в модификатор
+MODEL_DICE_MAX_DICE = 20  # костей суммарно по всем термам (отброшенные `kh` тоже считаются)
+MODEL_DICE_MAX_MODIFIER = 30  # |итоговый плоский модификатор|
+
 # Только ASCII-цифры: \d в Python принимает и цифры других письменностей.
 _TERM = re.compile(
     r"(?:(?P<count>[0-9]*)d(?P<sides>[0-9]+)(?:kh(?P<keep>[0-9]+))?|(?P<flat>[0-9]+))"
@@ -95,6 +102,26 @@ def parse(expr: str) -> DiceExpr:
         else:
             terms.append(_parse_dice_term(match, sign, expr))
     return DiceExpr(terms=tuple(terms), modifier=modifier)
+
+
+def parse_model_dice(expr: str) -> DiceExpr:
+    """Разбирает запись костей от модели и проверяет пределы `MODEL_DICE_*`.
+
+    Нарушение — `DiceSyntaxError` с понятной причиной. В записи должна быть хотя бы одна кость:
+    фиксированное число модель не получает. Длина проверяется до разбора, поэтому огромная
+    запись не тратит время. Пределы относятся только к записям от модели; `parse` их не знает."""
+    if len(expr) > MODEL_DICE_MAX_CHARS:
+        raise DiceSyntaxError(f"запись костей длиннее {MODEL_DICE_MAX_CHARS} символов")
+    parsed = parse(expr)
+    if not parsed.terms:
+        raise DiceSyntaxError("в записи должна быть хотя бы одна кость, например 2d6")
+    if len(parsed.terms) > MODEL_DICE_MAX_TERMS:
+        raise DiceSyntaxError(f"термов с костями не больше {MODEL_DICE_MAX_TERMS}")
+    if sum(term.count for term in parsed.terms) > MODEL_DICE_MAX_DICE:
+        raise DiceSyntaxError(f"костей суммарно не больше {MODEL_DICE_MAX_DICE}")
+    if abs(parsed.modifier) > MODEL_DICE_MAX_MODIFIER:
+        raise DiceSyntaxError(f"модификатор по модулю не больше {MODEL_DICE_MAX_MODIFIER}")
+    return parsed
 
 
 def _is_single_d20(expr: DiceExpr) -> bool:

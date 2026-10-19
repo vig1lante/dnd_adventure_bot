@@ -12,11 +12,17 @@
 спасбросков от смерти, мёртвый монстр — 0 HP. Эффекты «до начала своего хода» («Безрассудная
 атака», «Уклонение») живут в `turn_flags` и `dodging` и сбрасываются в начале хода бойца.
 
-Модули правил (`RuleSet`) читает только `simple_action`, поэтому параметр `rules` есть у неё
-одной (по умолчанию `NO_RULES` — правила SRD без модулей). Флаги: зелье и толчок тратят
-бонусное действие вместо действия (`potion_bonus_action`, `shove_bonus_action`), «Помощь»
-поднимает упавшего союзника с 1 HP (`help_revives`); проверка скрытности идёт через хуки
-проверок набора. Остальные функции флагов не читают и `rules` не принимают.
+Модули правил (`RuleSet`) читает `simple_action` (флаги боя) и `end_scene` (триггеры конца
+сцены), поэтому параметр `rules` есть у них (у `simple_action` по умолчанию `NO_RULES` —
+правила SRD без модулей). Флаги: зелье и толчок тратят бонусное действие вместо действия
+(`potion_bonus_action`, `shove_bonus_action`), «Помощь» поднимает упавшего союзника с 1 HP
+(`help_revives`); проверка скрытности идёт через хуки проверок набора. Остальные функции
+флагов не читают и `rules` не принимают.
+
+Добавки «раз за ход» (Скрытая атака, Убийца колоссов, «Свирепый атакующий») по SRD действуют в
+любой ход, в том числе в чужой (атака по возможности, подготовленная атака): их флаги
+сбрасываются в начале каждого хода боя у всех бойцов (`ONCE_PER_TURN_FLAGS`). Остальные флаги
+хода живут до начала своего хода бойца.
 
 Союзники в `engaged_with` не записываются (вовлечение — только с противником), поэтому
 «вовлечённый союзник» из плана означает союзника в той же зоне: до него достаёт касание, ему
@@ -24,11 +30,12 @@
 """
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 from dnd_engine.abilities import Ability, Skill, modifier
+from dnd_engine.adventure.schema import Adventure
 from dnd_engine.character import (
     IMPROVISED_WEAPON_ID,
     ActiveBuff,
@@ -128,6 +135,11 @@ CONCENTRATION_MIN_DC, CONCENTRATION_MAX_DC = 10, 30
 # Внешнее состояние держится от раунда до 10 минут (100 раундов): дольше — только записью без срока.
 EXTERNAL_CONDITION_MAX_ROUNDS = 100
 DEATH_SAVE_DC = 10
+# Добавки «раз за ход» по SRD 5.2.1 срабатывают в любой ход, а не только в свой: флаг снимается в
+# начале каждого хода боя. «Бешенство» берсерка — «в свой ход», его флаг сбрасывает только свой ход.
+ONCE_PER_TURN_FLAGS = ("sneak_attack_used", "colossus_slayer_used", "savage_attacker_used")
+# Источники записей состояний, которые ведёт сам движок: «без сознания» от 0 HP и скрытность.
+ENGINE_CONDITION_SOURCES = frozenset({ZERO_HP_SOURCE, HIDDEN_SOURCE})
 
 Distance = Literal["engaged", "near", "far"]
 # Что платит за атаку: действие своего хода, реакция по «Подготовке» (публичная `attack`) или
@@ -1222,6 +1234,51 @@ def apply_condition(
     return result, _add_condition(result, target, condition.model_copy(), content)
 
 
+def _is_engine_owned(s: GameState, record: ActiveCondition, content: SrdContent) -> bool:
+    """Запись состояния ведут правила, а не мастер: служебный источник (0 HP, «Спрятаться»),
+    повторный спасбросок (заклинания и состояния со Сл) или эффект концентрации заклинателя."""
+    if (
+        record.source in ENGINE_CONDITION_SOURCES
+        or record.save is not None
+        or record.dc is not None
+    ):
+        return True
+    caster = s.party.get(record.source)
+    return (
+        caster is not None
+        and caster.concentration is not None
+        and record.id in _concentration_effect_ids(caster, content)
+    )
+
+
+def remove_condition(
+    state: GameState, target_id: str, condition_id: str, *, content: SrdContent
+) -> tuple[GameState, list[Event]]:
+    """Снимает состояние с персонажа или монстра по решению мастера («сбит с ног» встал, «схвачен»
+    отпущен, ошибочное бессрочное состояние убрано).
+
+    Снимаются все записи этого состояния, кроме тех, что ведёт движок (`_is_engine_owned`):
+    «без сознания» от 0 HP, скрытность, эффекты заклинаний со спасброском и концентрацией. Если
+    состояния нет или снять можно только служебное — `CombatError` без изменений."""
+    result = state.model_copy(deep=True)
+    target = _entity(result, target_id)
+    records = [c for c in target.conditions if c.id == condition_id]
+    _require(bool(records), f"{target.name}: нет состояния «{condition_id}»")
+    removable = [c for c in records if not _is_engine_owned(result, c, content)]
+    _require(
+        bool(removable),
+        f"состояние «{condition_id}» у {target.name} — служебная запись движка или эффект "
+        "заклинания: его снимают правила, а не мастер",
+    )
+    target.conditions = [
+        c for c in target.conditions if c.id != condition_id or _is_engine_owned(result, c, content)
+    ]
+    events: list[Event] = [
+        ConditionEvent(target_id=target.id, condition=condition_id, added=False) for _ in removable
+    ]
+    return result, events
+
+
 def _immune_message(target: Entity, condition_id: str) -> str:
     return f"{target.name} невосприимчив к состоянию «{condition_id}»"
 
@@ -1244,11 +1301,18 @@ def _holders(s: GameState) -> list[Entity]:
     return [*s.party.values(), *monsters]
 
 
+def _concentration_effect_ids(caster: Character, content: SrdContent) -> set[str | None]:
+    """Id эффектов, которые держатся на концентрации заклинателя (неизвестное заклинание — его id)."""
+    spell = content.spells.get(caster.concentration)
+    if spell is None:
+        return {caster.concentration}
+    return {spell.effect.buff, spell.effect.condition}
+
+
 def _end_concentration(s: GameState, caster: Character, content: SrdContent) -> list[Event]:
     """Заклинатель теряет концентрацию: эффекты его заклинания (с `source` = он) исчезают у всех."""
-    spell_id, caster.concentration = caster.concentration, None
-    spell = content.spells.get(spell_id)
-    effect_ids = {spell_id} if spell is None else {spell.effect.buff, spell.effect.condition}
+    effect_ids = _concentration_effect_ids(caster, content)
+    caster.concentration = None
     events: list[Event] = []
     for holder in _holders(s):
         if isinstance(holder, Character):
@@ -1560,11 +1624,16 @@ def _is_dead_monster(combat: Combat, fighter_id: str) -> bool:
 def _begin_turn(s: GameState, fighter_id: str, *, rng: Rng) -> list[Event]:
     """Начало хода бойца — одно для первого хода боя и для каждой смены хода: сбрасываются
     флаги хода, «Помощь» от этого бойца кончается, персонаж на 0 HP (не стабильный, не
-    мёртвый) делает спасбросок от смерти."""
-    fighter = _combatant(_active_combat(s), fighter_id)
+    мёртвый) делает спасбросок от смерти. Флаги добавок «раз за ход» сбрасываются у всех
+    бойцов: новый ход — новый «раз», и в чужой ход они снова доступны для реакции."""
+    combat = _active_combat(s)
+    fighter = _combatant(combat, fighter_id)
     fighter.turn_flags = {}
     fighter.dodging = False
     fighter.disengaged = False
+    for other in combat.combatants.values():
+        for flag in ONCE_PER_TURN_FLAGS:
+            other.turn_flags.pop(flag, None)
     events: list[Event] = [CombatEvent(phase="turn", actor_id=fighter_id)]
     for holder in _holders(s):  # «Помощь» длится до начала следующего хода помощника
         events += _drop_conditions(holder, {HELPED}, fighter_id)
@@ -1618,6 +1687,55 @@ def end_turn(state: GameState, *, rng: Rng, content: SrdContent) -> tuple[GameSt
     return result, events
 
 
+def can_act(state: GameState, fighter_id: str) -> bool:
+    """Боец способен действовать: на ногах и не недееспособен. Иначе его ход проходит впустую."""
+    return _can_act(_entity(state, fighter_id))
+
+
+def advance_to(
+    state: GameState, fighter_id: str, *, rng: Rng, content: SrdContent
+) -> tuple[GameState, list[Event]]:
+    """Передаёт ход вперёд (`end_turn` столько раз, сколько нужно), пока он не окажется у бойца.
+
+    Нужна, когда мастер разбирает за один вызов ход персонажа и идущие следом ходы монстров:
+    движок разрешает действия только в ход бойца. Бойцы между текущим и нужным должны быть
+    неспособны действовать (лежат, мертвы, парализованы): их ходы проходят вхолостую, со
+    спасбросками от смерти и повторными спасбросками. Если среди них есть способный действовать,
+    его ход нельзя перепрыгнуть — `CombatError`. Проверки идут до первого `end_turn` и повторяются
+    после каждого: лежащий боец мог встать на ногах от натуральной 20 спасброска от смерти в
+    начале хода, и тогда его ход уже не пропустить. Боец, чей ход уже идёт, — состояние и
+    события не меняются."""
+    combat = _active_combat(state)
+    target = _combatant(combat, fighter_id)
+    if current_actor(state).id == fighter_id:
+        return state, []
+    _require(can_act(state, fighter_id), f"{target.name} не может действовать: ход ему не нужен")
+    order = combat.order
+    for step in range(1, len(order)):
+        passed = order[(combat.turn_index + step) % len(order)]
+        if passed == fighter_id:
+            break
+        _require(
+            not can_act(state, passed),
+            f"сначала ходит {combat.combatants[passed].name}: его ход нельзя пропустить",
+        )
+    else:  # боец жив, но не в очереди: этого не бывает, пока очередь ведёт сам движок
+        raise CombatError(f"{target.name} нет в очереди хода")
+
+    events: list[Event] = []
+    for _ in order:  # до цели не больше одного круга
+        state, new_events = end_turn(state, rng=rng, content=content)
+        events += new_events
+        actor = current_actor(state)
+        if actor.id == fighter_id:
+            return state, events
+        _require(
+            not can_act(state, actor.id),
+            f"сначала ходит {actor.name}: его ход нельзя пропустить",
+        )
+    raise CombatError(f"ход не дошёл до бойца {target.name}")
+
+
 def combat_winner(state: GameState) -> Literal["party", "enemies"] | None:
     """Сторона, у которой остались бойцы на ногах (с хитами); у обеих — None.
 
@@ -1634,6 +1752,86 @@ def combat_winner(state: GameState) -> Literal["party", "enemies"] | None:
     if "party" not in standing:
         return "enemies"
     return None
+
+
+# --- конец сцены ---
+
+
+def _end_timed_effects(s: GameState, content: SrdContent) -> list[Event]:
+    """Эффекты персонажей со сроком кончаются вместе с боем: срок тикает только в `end_turn`, и
+    вне боя они висели бы вечно. Сначала концентрация (она снимает свои эффекты у всех), затем
+    состояния и эффекты со сроком; бессрочные остаются."""
+    events: list[Event] = []
+    for c in s.party.values():
+        if c.concentration is not None:
+            events += _end_concentration(s, c, content)
+        timed = [x for x in c.conditions if x.rounds_left is not None]
+        c.conditions = [x for x in c.conditions if x.rounds_left is None]
+        events += [ConditionEvent(target_id=c.id, condition=x.id, added=False) for x in timed]
+        ended = end_buffs(c, lambda b: b.rounds_left is not None)
+        events += [ConditionEvent(target_id=c.id, condition=b.id, added=False) for b in ended]
+    return events
+
+
+def _mark_fallen_npcs(s: GameState, adventure: Adventure) -> None:
+    """NPC со статблоком, павшие в этом бою, помечаются мёртвыми.
+
+    Связь бойца с NPC — id статблока, и NPC должен быть там, где шёл бой. NPC считается павшим,
+    когда пали все монстры его статблока: если рядом дерутся такие же безымянные монстры,
+    NPC остаётся жив (ошибка в эту сторону безопаснее)."""
+    fighters = s.combat.combatants.values()
+    for npc in adventure.npcs.values():
+        here = s.world.npc_location.get(npc.id, npc.location_id) == s.location_id
+        if npc.statblock is None or not here or not s.world.npc_alive.get(npc.id, True):
+            continue
+        group = [f for f in fighters if f.kind == "monster" and f.ref == npc.statblock]
+        if group and all(f.hp == 0 for f in group):
+            s.world.npc_alive[npc.id] = False
+
+
+def _close_combat(s: GameState, content: SrdContent, adventure: Adventure) -> list[Event]:
+    """Завершает бой в переданной копии: эффекты со сроком, павшие NPC, метка боя, `combat=None`."""
+    combat = s.combat
+    winner = combat_winner(s)
+    events = _end_timed_effects(s, content)
+    _mark_fallen_npcs(s, adventure)
+    if combat.encounter_id is not None:
+        s.world.flags[f"encounter:{combat.encounter_id}"] = "done"
+    s.combat = None
+    return [*events, CombatEvent(phase="ended", winner=winner)]
+
+
+def end_scene(
+    state: GameState,
+    next_type: SceneType,
+    rules: RuleSet,
+    *,
+    content: SrdContent,
+    adventure: Adventure,
+) -> tuple[GameState, list[Event]]:
+    """Заканчивает текущую сцену и начинает следующую (исследование, разговор, привал).
+
+    Сначала по порядку вызываются триггеры модулей `on_scene_end`: каждый видит состояние как
+    оно было в конце сцены (в том числе её тип) и возвращает новое, так что «Привал у костра» на
+    конце сцены `camp` проводит длинный отдых. Если шёл бой, он завершается: эффекты со сроком
+    снимаются, павшие NPC помечаются мёртвыми, `flags["encounter:<id>"] = "done"`, `combat = None`.
+    Затем идёт новая сцена — со счётчиками сцены с нуля (вдохновение выдаётся раз за сцену).
+
+    Бой начинает `start_combat`, поэтому `next_type == COMBAT` и переход в ту же сцену —
+    `CombatError`. Кому разрешено вызывать конец привала (таймер, хост), решает вызывающий;
+    триггеры `on_scene_start` пока не вызываются: ни один модуль их не регистрирует."""
+    _require(next_type != SceneType.COMBAT, "бой начинает start_combat, а не конец сцены")
+    _require(next_type != state.scene.type, f"сцена уже «{next_type.value}»")
+    result = state.model_copy(deep=True)
+    events: list[Event] = []
+    for trigger in rules.triggers.get("on_scene_end", ()):
+        result, new_events = trigger(result, content)
+        events += new_events
+    if result.combat is not None:
+        events += _close_combat(result, content, adventure)
+    result.scene = Scene(type=next_type, started_turn=result.turn)
+    events.append(SceneEvent(scene=next_type))
+    return result, events
 
 
 # --- заклинания, простые действия и действия монстров (B3.4) ---
@@ -2128,6 +2326,7 @@ class _Act:
     rng: Rng
     content: SrdContent
     rules: RuleSet
+    carried_items: Mapping[str, str]  # предмет приключения -> предмет SRD, чья механика применяется
 
     def target(self) -> Combatant:
         _require(self.target_id is not None, "укажите цель (target_id)")
@@ -2245,9 +2444,14 @@ def _hide(a: _Act) -> list[Event]:
 def _use_item(a: _Act) -> list[Event]:
     c = a.entity
     _require(a.item_id is not None, "укажите предмет (item_id)")
-    entry = next((e for e in c.inventory if e.item_id == a.item_id and e.qty > 0), None)
-    _require(entry is not None, f"у {c.name} нет предмета {a.item_id!r}")
-    item_def = a.content.items.get(a.item_id)
+    # Предмет приключения лежит вне листа персонажа (его держателя ведёт мир): механика — у
+    # предмета SRD, а расход записи в инвентаре не нужен.
+    srd_id, entry = a.carried_items.get(a.item_id), None
+    if srd_id is None:
+        entry = next((e for e in c.inventory if e.item_id == a.item_id and e.qty > 0), None)
+        _require(entry is not None, f"у {c.name} нет предмета {a.item_id!r}")
+        srd_id = a.item_id
+    item_def = a.content.items.get(srd_id)
     _require(
         item_def is not None and item_def.kind == "potion" and item_def.heal is not None,
         f"предмет {a.item_id!r} нельзя применить в бою",
@@ -2260,9 +2464,10 @@ def _use_item(a: _Act) -> list[Event]:
     )
     _require(not _is_dead(_entity(a.s, target.id)), f"{target.name} мёртв")
     a.take(_action_or_bonus(a, POTION_BONUS_ACTION))
-    entry.qty -= 1
-    if entry.qty == 0:
-        c.inventory.remove(entry)
+    if entry is not None:
+        entry.qty -= 1
+        if entry.qty == 0:
+            c.inventory.remove(entry)
     label = f"Зелье: {item_def.name}"
     healed = roll(item_def.heal, rng=a.rng, reason=label)
     events: list[Event] = [RollEvent(actor_id=c.id, label=label, roll=healed)]
@@ -2505,6 +2710,7 @@ def simple_action(
     item_id: str | None = None,
     option: str | None = None,
     rules: RuleSet = NO_RULES,
+    carried_items: Mapping[str, str] | None = None,
     rng: Rng,
     content: SrdContent,
 ) -> tuple[GameState, list[Event]]:
@@ -2518,6 +2724,9 @@ def simple_action(
     `rules` — набор правил модулей: флаги `potion_bonus_action` и `shove_bonus_action` переводят
     зелье и толчок на бонусное действие, `help_revives` разрешает «Помощь» упавшему союзнику
     (цель в той же зоне на 0 HP, не мёртвая; она встаёт с 1 HP), хуки проверок идут в «Спрятаться».
+    `carried_items` — предметы приключения, которые боец несёт вне листа персонажа: `item_id`
+    из этого словаря берёт механику у предмета SRD (зелье лечения), но запись инвентаря не
+    расходует — расход предмета ведёт вызывающий.
     Монстры по этой функции могут только уклоняться, отходить, делать рывок, готовить действие
     и помогать; остальное они делают через `monster_action`.
     """
@@ -2530,7 +2739,10 @@ def simple_action(
         _require(
             isinstance(entity, Character), f"{slot.name}: монстр действует через monster_action"
         )
-    return s, handler(_Act(s, slot, entity, target_id, item_id, option, rng, content, rules))
+    act = _Act(
+        s, slot, entity, target_id, item_id, option, rng, content, rules, carried_items or {}
+    )
+    return s, handler(act)
 
 
 # --- действия монстров ---

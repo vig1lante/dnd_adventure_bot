@@ -20,9 +20,12 @@ from dnd_engine.checks import (
     ability_check,
     apply_bless,
     apply_luck,
+    character_contest_side,
+    check_label,
     combine_advantage,
     contest,
     engine_saving_throw,
+    monster_contest_side,
     monster_saving_throw,
     saving_throw,
 )
@@ -1010,3 +1013,149 @@ def test_the_same_effect_from_two_casters_adds_only_one_die(make_character):
     assert apply_bless(blessed, first, rng=ScriptedRng([3, 4])).rolls == [12, 3]
     assert save(blessed, [10, 2, 4]).roll.rolls == [10, 2]
     assert check(guided, [10, 2, 4]).roll.rolls == [10, 2]
+
+
+# --- состязание: сторона знает про персонажа (Удача, Указание, помехи) ---
+
+
+def test_check_label_names_the_ability_and_the_skill():
+    assert check_label(DEX, Skill.STEALTH) == "Ловкость (Скрытность)"
+    assert check_label(STR) == "Сила"
+    assert check_label(STR, Skill.INTIMIDATION) == "Сила (Запугивание)"  # нестандартная пара
+
+
+def test_character_side_takes_the_skill_bonus_from_the_character(make_character):
+    c = make_character(id="pc-7", scores={STR: 16}, skill_proficiencies=[Skill.ATHLETICS])
+
+    side = character_contest_side(c, Skill.ATHLETICS)
+
+    # Сила 16 (+3) и мастерство 3-го уровня (+2).
+    assert (side.actor_id, side.label, side.bonus) == ("pc-7", "Сила (Атлетика)", 5)
+    assert (side.advantage, side.luck, side.guidance) == (NONE, False, False)
+
+
+def test_character_side_for_a_bare_ability_uses_only_the_modifier(make_character):
+    c = make_character(scores={STR: 16}, skill_proficiencies=[Skill.ATHLETICS])
+
+    side = character_contest_side(c, STR)
+
+    assert (side.label, side.bonus) == ("Сила", 3)
+
+
+def test_character_side_flags_halfling_luck_and_guidance(make_character):
+    lucky = make_character(species="halfling", buffs=[guidance()])
+    plain = make_character()
+
+    flagged = character_contest_side(lucky, Skill.STEALTH)
+
+    assert (flagged.luck, flagged.guidance) == (True, True)
+    assert (character_contest_side(plain, Skill.STEALTH).luck) is False
+
+
+@pytest.mark.parametrize(
+    ("condition", "given", "expected"),
+    [
+        ("poisoned", NONE, DISADVANTAGE),
+        ("frightened", NONE, DISADVANTAGE),
+        ("poisoned", ADVANTAGE, NONE),  # вдохновение гасит помеху состояния
+        ("blinded", NONE, NONE),  # состояние не влияет на проверки
+    ],
+)
+def test_character_side_combines_given_advantage_with_condition_disadvantage(
+    make_character, condition, given, expected
+):
+    c = make_character(conditions=[ActiveCondition(id=condition)])
+
+    assert character_contest_side(c, Skill.ATHLETICS, advantage=given).advantage == expected
+
+
+def test_monster_side_takes_the_statblock_skill_bonus(srd):
+    fanatic = srd.monsters["cultist_fanatic"]
+
+    side = monster_contest_side(fanatic, "fabian", Skill.DECEPTION)
+
+    # В статблоке навык записан итоговым бонусом: Обман +3.
+    assert (side.actor_id, side.label, side.bonus) == ("fabian", "Харизма (Обман)", 3)
+    assert (side.advantage, side.luck, side.guidance) == (NONE, False, False)
+
+
+def test_monster_side_without_the_skill_falls_back_to_the_ability_modifier(srd):
+    fanatic = srd.monsters["cultist_fanatic"]
+
+    assert monster_contest_side(fanatic, "m", Skill.ATHLETICS).bonus == 0  # Сила 11
+    assert monster_contest_side(fanatic, "m", DEX).bonus == 2  # Ловкость 14
+    assert monster_contest_side(fanatic, "m", DEX).label == "Ловкость"
+
+
+def test_monster_side_gets_disadvantage_from_its_conditions(srd):
+    fanatic = srd.monsters["cultist_fanatic"]
+
+    poisoned = monster_contest_side(
+        fanatic, "m", Skill.DECEPTION, conditions=[ActiveCondition(id="poisoned")]
+    )
+
+    assert poisoned.advantage == DISADVANTAGE
+
+
+def test_contest_side_rerolls_a_natural_one_with_luck():
+    a = ContestSide(actor_id="pc-1", label="А", bonus=2, luck=True)
+    b = ContestSide(actor_id="npc-1", label="Б", bonus=0)
+
+    result = contest(a, b, rng=ScriptedRng([1, 14, 9]), reason="тест")
+
+    assert result.a_roll.rolls == [1, 14]  # оба броска видны
+    assert (result.a_roll.natural, result.a_roll.total) == (14, 16)
+    assert result.b_roll.natural == 9
+    assert result.winner == "a"
+
+
+def test_contest_luck_does_not_trigger_on_other_values():
+    a = ContestSide(actor_id="pc-1", label="А", bonus=0, luck=True)
+    b = ContestSide(actor_id="npc-1", label="Б", bonus=0, luck=True)
+
+    result = contest(a, b, rng=ScriptedRng([2, 1, 17]), reason="тест")
+
+    # У a перебросов нет; единица у b перебрасывается после броска a.
+    assert (result.a_roll.rolls, result.b_roll.rolls) == ([2], [1, 17])
+
+
+def test_contest_side_adds_a_guidance_die_after_its_own_d20():
+    a = ContestSide(actor_id="pc-1", label="А", bonus=1, guidance=True)
+    b = ContestSide(actor_id="npc-1", label="Б", bonus=0)
+
+    result = contest(a, b, rng=ScriptedRng([10, 3, 12]), reason="тест")
+
+    assert result.a_roll.rolls == [10, 3]
+    assert (result.a_roll.natural, result.a_roll.total) == (10, 14)
+    assert result.b_roll.rolls == [12]
+    assert result.winner == "a"
+
+
+def test_contest_side_rolls_two_dice_with_advantage_or_disadvantage():
+    a = ContestSide(actor_id="pc-1", label="А", bonus=0, advantage=ADVANTAGE)
+    b = ContestSide(actor_id="npc-1", label="Б", bonus=0, advantage=DISADVANTAGE)
+
+    result = contest(a, b, rng=ScriptedRng([4, 16, 18, 7]), reason="тест")
+
+    assert (result.a_roll.natural, result.b_roll.natural) == (16, 7)
+    assert (result.a_roll.advantage, result.b_roll.advantage) == (ADVANTAGE, DISADVANTAGE)
+
+
+def test_contest_side_with_luck_and_guidance_rolls_in_a_fixed_order():
+    a = ContestSide(actor_id="pc-1", label="А", bonus=0, luck=True, guidance=True)
+    b = ContestSide(actor_id="npc-1", label="Б", bonus=0)
+
+    result = contest(a, b, rng=ScriptedRng([1, 15, 2, 5]), reason="тест")
+
+    # Сначала к20, затем переброс единицы (Удача), затем кость Указания, и только потом сторона b.
+    assert result.a_roll.rolls == [1, 15, 2]
+    assert (result.a_roll.natural, result.a_roll.total) == (15, 17)
+    assert result.b_roll.rolls == [5]
+
+
+def test_contest_result_with_effects_survives_json_round_trip():
+    a = ContestSide(actor_id="pc-1", label="А", bonus=1, luck=True, guidance=True)
+    b = ContestSide(actor_id="npc-1", label="Б", bonus=0, advantage=DISADVANTAGE)
+    result = contest(a, b, rng=ScriptedRng([1, 15, 2, 5, 8]), reason="тест")
+
+    assert ContestResult.model_validate_json(result.model_dump_json()) == result

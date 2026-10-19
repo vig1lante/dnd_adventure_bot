@@ -34,11 +34,21 @@ from dnd_engine.combat.engine import (
     simple_action,
     start_combat,
 )
+from dnd_engine.combat import engine as combat_engine
 from dnd_engine.combat.model import Zone, ZoneLink
 from dnd_engine.conditions import ZERO_HP_SOURCE, is_dead
 from dnd_engine.content import MonsterAction, SrdContent, load_srd
 from dnd_engine.dice import Advantage
-from dnd_engine.events import ActionEvent, ConditionEvent, DamageEvent, HealEvent, RollEvent
+from dnd_engine.events import (
+    ActionEvent,
+    CombatEvent,
+    ConditionEvent,
+    DamageEvent,
+    HealEvent,
+    RestEvent,
+    RollEvent,
+    SceneEvent,
+)
 from dnd_engine.modules import build_ruleset
 from dnd_engine.modules.base import (
     POTION_BONUS_ACTION,
@@ -47,7 +57,7 @@ from dnd_engine.modules.base import (
 )
 from dnd_engine.rest import end_buffs
 from dnd_engine.rng import ScriptedRng
-from dnd_engine.state import GameState, RulesRef
+from dnd_engine.state import GameState, RulesRef, SceneType
 
 STR, DEX, CON, INT, WIS, CHA = Ability
 NONE, ADVANTAGE, DISADVANTAGE = Advantage.NONE, Advantage.ADVANTAGE, Advantage.DISADVANTAGE
@@ -3689,3 +3699,620 @@ def test_a_save_action_without_a_save_dc_in_the_statblock_is_refused(srd, make_h
     state = turn_of(battle(custom, [make_hero()]), GOBLIN)
 
     refused_mob(custom, state, GOBLIN, "mist", [HERO], "не заданы")
+
+
+# =============================================================================================
+# B4.7: флаги «раз за ход» живут один ход любого бойца
+# =============================================================================================
+# По SRD 5.2.1 Скрытая атака, Убийца колоссов и «Свирепый атакующий» срабатывают раз за ход, и
+# «ходом» считается чужой тоже: атака по возможности или подготовленная атака в ход противника
+# — новый ход, поэтому флаги сбрасываются в начале каждого хода боя, а не только своего.
+
+ONCE_PER_TURN = ("sneak_attack_used", "colossus_slayer_used", "savage_attacker_used")
+
+
+def rogue_vs_blinded_ogre(srd, make_character) -> GameState:
+    """Плут вплотную с ослеплённым огром: у атаки по нему преимущество, значит, Скрытая атака есть."""
+    rogue = make_character(
+        id=HERO,
+        name="Плут",
+        class_id="rogue",
+        background="acolyte",
+        scores={DEX: 16},
+        inventory=[item("rapier")],
+    )
+    state = melee(battle(srd, [rogue], ("ogre",)), HERO, OGRE)
+    fighter(state, OGRE).conditions.append(ActiveCondition(id="blinded"))
+    return state
+
+
+SNEAK_ROLLS = [10, 12, 4, 3, 5]  # к20 с преимуществом, 1к8 рапиры, 2к6 Скрытой атаки
+
+
+def sneak_attacked(events) -> bool:
+    return any(label.startswith("Скрытая атака") for label in labels(events))
+
+
+def test_the_once_per_turn_flags_of_every_fighter_are_cleared_when_any_turn_begins(
+    srd, make_character
+):
+    state = rogue_vs_blinded_ogre(srd, make_character)
+    flags(state, HERO).update(dict.fromkeys(ONCE_PER_TURN, True))
+
+    after, _ = end_turn(state, rng=ScriptedRng([]), content=srd)
+
+    assert current_actor(after).id == OGRE  # начался чужой ход, а флаги героя уже сброшены
+    assert flags(after, HERO) == {}
+
+
+def test_only_once_per_turn_flags_are_cleared_on_someone_elses_turn(srd, make_character):
+    state = rogue_vs_blinded_ogre(srd, make_character)
+    kept = {"action": True, "moved": True, "reaction": True, "readied": True, "frenzy_used": True}
+    flags(state, HERO).update(kept | dict.fromkeys(ONCE_PER_TURN, True))
+
+    after, _ = end_turn(state, rng=ScriptedRng([]), content=srd)
+
+    # Реакция, «Подготовка» и расход хода живут до собственного хода; «Бешенство» — «в свой ход».
+    assert flags(after, HERO) == kept
+
+
+def test_the_once_per_turn_flags_of_the_new_actor_are_cleared_like_all_flags(srd, make_character):
+    state = rogue_vs_blinded_ogre(srd, make_character)
+    flags(state, OGRE).update(dict.fromkeys(ONCE_PER_TURN, True) | {"action": True})
+
+    after, _ = end_turn(state, rng=ScriptedRng([]), content=srd)
+
+    assert flags(after, OGRE) == {}
+
+
+def test_a_rogue_sneak_attacks_again_with_an_opportunity_attack_on_the_enemys_turn(
+    srd, make_character
+):
+    state = rogue_vs_blinded_ogre(srd, make_character)
+    struck, first = attack(
+        state, HERO, OGRE, weapon="rapier", rng=ScriptedRng(SNEAK_ROLLS), content=srd
+    )
+    assert sneak_attacked(first)
+    assert flags(struck, HERO)["sneak_attack_used"]
+    ogre_turn, _ = end_turn(struck, rng=ScriptedRng([]), content=srd)
+
+    # Огр уходит: герой бьёт по возможности — это другой ход, Скрытая атака снова доступна.
+    moved, events = move(
+        ogre_turn, OGRE, to_zone="stairs", rng=ScriptedRng(SNEAK_ROLLS), content=srd
+    )
+
+    assert sneak_attacked(events)
+    assert flags(moved, HERO) == {"action": True, "reaction": True, "sneak_attack_used": True}
+
+
+def test_a_readied_attack_of_a_rogue_on_the_enemys_turn_sneak_attacks_again(srd, make_character):
+    state = rogue_vs_blinded_ogre(srd, make_character)
+    struck, _ = attack(
+        state, HERO, OGRE, weapon="rapier", rng=ScriptedRng(SNEAK_ROLLS), content=srd
+    )
+    ogre_turn, _ = end_turn(struck, rng=ScriptedRng([]), content=srd)
+    flags(ogre_turn, HERO)["readied"] = True  # «Подготовка» из прошлого круга, условие наступило
+
+    after, events = attack(
+        ogre_turn,
+        HERO,
+        OGRE,
+        weapon="rapier",
+        reaction=True,
+        rng=ScriptedRng(SNEAK_ROLLS),
+        content=srd,
+    )
+
+    assert sneak_attacked(events)
+    assert flags(after, HERO) == {"action": True, "reaction": True, "sneak_attack_used": True}
+
+
+def own_attack_then_opportunity_attack(srd, state, own_rolls, opportunity_rolls, weapon):
+    """Атака героя в свой ход, затем огр уходит и герой бьёт по возможности в чужой ход."""
+    struck, first = attack(
+        state, HERO, OGRE, weapon=weapon, rng=ScriptedRng(own_rolls), content=srd
+    )
+    ogre_turn, _ = end_turn(struck, rng=ScriptedRng([]), content=srd)
+    _, second = move(
+        ogre_turn, OGRE, to_zone="stairs", rng=ScriptedRng(opportunity_rolls), content=srd
+    )
+    return first, second
+
+
+def test_colossus_slayer_adds_its_die_again_to_an_opportunity_attack_on_the_enemys_turn(
+    srd, make_character
+):
+    ranger = make_character(
+        id=HERO,
+        name="Следопыт",
+        class_id="ranger",
+        background="acolyte",
+        scores={STR: 16},
+        inventory=[item("longsword")],
+    )
+    state = melee(battle(srd, [ranger], ("ogre",)), HERO, OGRE)
+    fighter(state, OGRE).hp = 60  # ранен: Убийца колоссов бьёт только по раненым
+
+    first, second = own_attack_then_opportunity_attack(
+        srd, state, [10, 4, 5], [10, 4, 5], "longsword"
+    )
+
+    assert labels(first)[2].startswith("Убийца колоссов")
+    assert labels(second)[2].startswith("Убийца колоссов")
+
+
+def test_savage_attacker_rolls_the_damage_twice_again_on_an_opportunity_attack(srd, make_hero):
+    state = melee(battle(srd, [make_hero(background="soldier")], ("ogre",)), HERO, OGRE)
+
+    first, second = own_attack_then_opportunity_attack(
+        srd, state, [10, 2, 6], [10, 2, 6], "longsword"
+    )
+
+    assert len(roll_events(first)) == len(roll_events(second)) == 3  # к20 и две кости урона
+
+
+def test_sneak_attack_still_happens_once_within_one_turn(srd, make_character):
+    state = rogue_vs_blinded_ogre(srd, make_character)
+    struck, _ = attack(
+        state, HERO, OGRE, weapon="rapier", rng=ScriptedRng(SNEAK_ROLLS), content=srd
+    )
+    flags(struck, HERO)["action"] = False  # второе действие того же хода (например, Всплеск)
+
+    _, again = attack(
+        struck, HERO, OGRE, weapon="rapier", rng=ScriptedRng([10, 12, 4]), content=srd
+    )
+
+    assert not sneak_attacked(again)
+
+
+# =============================================================================================
+# B4.7: снятие внешнего состояния (apply_effect с add=false)
+# =============================================================================================
+
+
+def test_a_state_applied_by_the_master_can_be_removed_from_a_character_and_a_monster(
+    srd, make_hero
+):
+    state = battle(srd, [make_hero(conditions=[ActiveCondition(id="frightened")])])
+    fighter(state, GOBLIN).conditions.append(ActiveCondition(id="prone"))
+
+    off_hero, hero_events = combat_engine.remove_condition(state, HERO, "frightened", content=srd)
+    off_goblin, goblin_events = combat_engine.remove_condition(state, GOBLIN, "prone", content=srd)
+
+    assert condition_ids(off_hero, HERO) == [] and condition_ids(state, HERO) == ["frightened"]
+    assert hero_events == [ConditionEvent(target_id=HERO, condition="frightened", added=False)]
+    assert condition_ids(off_goblin, GOBLIN) == []
+    assert goblin_events == [ConditionEvent(target_id=GOBLIN, condition="prone", added=False)]
+
+
+def test_prone_and_grappled_left_by_a_shove_or_a_grapple_can_be_removed(srd, make_hero):
+    # Сбитого с ног и схваченного (без срока, источник — боец) больше ничто не отпустит.
+    state = battle(srd, [make_hero()])
+    fighter(state, GOBLIN).conditions += [
+        ActiveCondition(id="prone", source=HERO),
+        ActiveCondition(id="grappled", source=HERO),
+    ]
+
+    after, _ = combat_engine.remove_condition(state, GOBLIN, "grappled", content=srd)
+    after, _ = combat_engine.remove_condition(after, GOBLIN, "prone", content=srd)
+
+    assert condition_ids(after, GOBLIN) == []
+
+
+def test_removal_drops_every_removable_record_of_the_state_and_keeps_the_rest(srd, make_hero):
+    state = battle(srd, [make_hero()])
+    fighter(state, GOBLIN).conditions += [
+        ActiveCondition(id="prone"),
+        ActiveCondition(id="prone", source=HERO),
+        ActiveCondition(id="poisoned"),
+    ]
+
+    after, events = combat_engine.remove_condition(state, GOBLIN, "prone", content=srd)
+
+    assert condition_ids(after, GOBLIN) == ["poisoned"]
+    assert len(events) == 2
+
+
+def test_the_zero_hp_and_hiding_records_belong_to_the_engine_and_stay(srd, make_hero):
+    down = make_hero(hp=0, conditions=[ActiveCondition(id="unconscious", source=ZERO_HP_SOURCE)])
+    state = battle(srd, [down])
+    fighter(state, GOBLIN).conditions.append(ActiveCondition(id="invisible", source=HIDDEN_SOURCE))
+
+    refused(
+        lambda s, rng: combat_engine.remove_condition(s, HERO, "unconscious", content=srd),
+        state,
+        "служебн",
+    )
+    refused(
+        lambda s, rng: combat_engine.remove_condition(s, GOBLIN, "invisible", content=srd),
+        state,
+        "служебн",
+    )
+
+
+def test_spell_records_with_a_repeated_save_or_held_by_concentration_stay(srd, make_cleric):
+    cleric = make_cleric(concentration="hold_person")
+    state = battle(srd, [cleric])
+    held = fighter(state, GOBLIN)
+    held.conditions.append(
+        ActiveCondition(id="paralyzed", rounds_left=10, source=CLERIC, save=WIS, dc=13)
+    )
+    refused(
+        lambda s, rng: combat_engine.remove_condition(s, GOBLIN, "paralyzed", content=srd),
+        state,
+        "заклинани",
+    )
+
+    # Без повторного спасброска запись всё равно принадлежит концентрации заклинателя.
+    held.conditions = [ActiveCondition(id="paralyzed", rounds_left=10, source=CLERIC)]
+    refused(
+        lambda s, rng: combat_engine.remove_condition(s, GOBLIN, "paralyzed", content=srd),
+        state,
+        "заклинани",
+    )
+
+
+def test_removing_a_state_that_is_not_there_or_a_target_that_is_missing_is_refused(srd, make_hero):
+    state = battle(srd, [make_hero()])
+
+    refused(
+        lambda s, rng: combat_engine.remove_condition(s, HERO, "prone", content=srd),
+        state,
+        "нет состояния",
+    )
+    refused(
+        lambda s, rng: combat_engine.remove_condition(s, "ghost-1", "prone", content=srd),
+        state,
+        "ghost-1",
+    )
+
+
+# =============================================================================================
+# B4.7: ход бойца в нужный момент (advance_to) и предметы приключения (carried_items)
+# =============================================================================================
+
+
+def two_heroes_and_goblins(srd, make_hero, make_ally) -> GameState:
+    """Очередь: герой (20), союзник (19), гоблин 1 (5), гоблин 2 (4)."""
+    return battle(srd, [make_hero(), make_ally()], ("goblin_warrior", "goblin_warrior"))
+
+
+def test_advance_to_passes_the_turn_to_a_fighter_after_a_run_of_fighters_who_cannot_act(
+    srd, make_hero, make_ally
+):
+    # Союзник лежит на 0 HP: его ход проходит вхолостую (спасбросок от смерти), затем ход гоблина.
+    state = battle(srd, [make_hero(), downed(make_ally)])
+
+    after, events = combat_engine.advance_to(state, GOBLIN, rng=ScriptedRng([12]), content=srd)
+
+    assert current_actor(after).id == GOBLIN
+    assert [e.actor_id for e in events if isinstance(e, CombatEvent)] == [ALLY, GOBLIN]
+    assert labels(events) == ["Спасбросок от смерти"]
+    assert current_actor(state).id == HERO  # исходное состояние не изменилось
+
+
+def test_advance_to_refuses_when_a_fallen_fighter_stands_up_on_the_way(srd, make_hero, make_ally):
+    # Союзник лежит: проверка до передачи хода его пропускает. Но натуральная 20 спасброска от
+    # смерти в начале его хода ставит его на ноги (1 HP), и теперь его ход не пропустить.
+    state = battle(srd, [make_hero(), downed(make_ally)])
+    snapshot = state.model_copy(deep=True)
+
+    with pytest.raises(CombatError, match="сначала ходит"):
+        combat_engine.advance_to(state, GOBLIN, rng=ScriptedRng([20]), content=srd)
+
+    assert state == snapshot
+
+
+def test_advance_to_still_passes_a_fallen_fighter_who_stays_down(srd, make_hero, make_ally):
+    state = battle(srd, [make_hero(), downed(make_ally)])
+
+    after, _ = combat_engine.advance_to(state, GOBLIN, rng=ScriptedRng([19]), content=srd)
+
+    assert current_actor(after).id == GOBLIN and after.party[ALLY].hp == 0
+
+
+def test_advance_to_the_current_fighter_changes_nothing(srd, make_hero):
+    state = battle(srd, [make_hero()])
+
+    after, events = combat_engine.advance_to(state, HERO, rng=ScriptedRng([]), content=srd)
+
+    assert (after, events) == (state, [])
+
+
+def test_advance_to_refuses_to_jump_over_a_fighter_who_can_act(srd, make_hero, make_ally):
+    state = two_heroes_and_goblins(srd, make_hero, make_ally)
+
+    refused(
+        lambda s, rng: combat_engine.advance_to(s, GOBLIN, rng=rng, content=srd),
+        state,
+        "сначала",
+    )
+    refused(
+        lambda s, rng: combat_engine.advance_to(s, "goblin_warrior-2", rng=rng, content=srd),
+        state,
+        "сначала",
+    )
+
+
+def test_advance_to_passes_a_paralyzed_monster_in_the_middle_of_the_order(srd, make_hero):
+    state = battle(srd, [make_hero()], ("goblin_warrior", "goblin_warrior"))
+    fighter(state, GOBLIN).conditions.append(ActiveCondition(id="paralyzed", rounds_left=3))
+
+    after, _ = combat_engine.advance_to(state, "goblin_warrior-2", rng=ScriptedRng([]), content=srd)
+
+    assert current_actor(after).id == "goblin_warrior-2"
+
+
+def test_advance_to_the_next_round_wraps_around_the_order(srd, make_hero):
+    state = turn_of(battle(srd, [make_hero()]), GOBLIN)
+
+    after, _ = combat_engine.advance_to(state, HERO, rng=ScriptedRng([]), content=srd)
+
+    assert (current_actor(after).id, after.combat.round) == (HERO, 2)
+
+
+def test_advance_to_refuses_a_fighter_who_cannot_act_or_is_not_in_the_battle(srd, make_hero):
+    state = battle(srd, [make_hero()], ("goblin_warrior", "goblin_warrior"))
+    fighter(state, "goblin_warrior-2").hp = 0
+
+    refused(
+        lambda s, rng: combat_engine.advance_to(s, "goblin_warrior-2", rng=rng, content=srd),
+        state,
+        "не может действовать",
+    )
+    refused(
+        lambda s, rng: combat_engine.advance_to(s, "orc-1", rng=rng, content=srd),
+        state,
+        "в бою нет",
+    )
+
+
+def test_can_act_means_standing_and_not_incapacitated(srd, make_hero, make_ally):
+    state = battle(srd, [make_hero(), downed(make_ally)])
+    fighter(state, GOBLIN).conditions.append(ActiveCondition(id="stunned", rounds_left=1))
+
+    assert combat_engine.can_act(state, HERO)
+    assert not combat_engine.can_act(state, ALLY)  # лежит
+    assert not combat_engine.can_act(state, GOBLIN)  # оглушён
+
+
+def adventure_potion_hero(make_hero, **overrides):
+    return make_hero(hp_max=30, hp=10, inventory=[item("longsword")], **overrides)
+
+
+CHEST_POTION = {"healing-potion": "potion_of_healing"}  # предмет приключения -> предмет SRD
+
+
+def test_an_adventure_item_carried_outside_the_sheet_is_drunk_with_the_srd_potion_mechanics(
+    srd, make_hero
+):
+    state = battle(srd, [adventure_potion_hero(make_hero)])
+
+    after, events = act(
+        srd, state, [3, 2], "use_item", item_id="healing-potion", carried_items=CHEST_POTION
+    )
+
+    assert (roll_events(events)[0].roll.expr, hp(after, HERO)) == ("2d4+2", 17)
+    assert flags(after, HERO) == {"action": True}
+    # Лист персонажа не менялся: расход предмета приключения ведёт мир (`item_holders`).
+    assert after.party[HERO].inventory == state.party[HERO].inventory
+
+
+def test_an_adventure_item_follows_the_bonus_action_flag_of_the_modules(srd, make_hero):
+    state = battle(srd, [adventure_potion_hero(make_hero)])
+
+    drunk, _ = act(
+        srd,
+        state,
+        [3, 2],
+        "use_item",
+        item_id="healing-potion",
+        carried_items=CHEST_POTION,
+        rules=BG3,
+    )
+
+    assert flags(drunk, HERO) == {"bonus_action": True}
+
+
+def test_an_adventure_item_still_obeys_the_potion_rules_and_unknown_items_are_refused(
+    srd, make_hero, make_ally
+):
+    state = battle(srd, [adventure_potion_hero(make_hero), make_ally()])
+    fighter(state, ALLY).zone_id = "stairs"
+
+    refused_act(
+        srd,
+        state,
+        "use_item",
+        "вне дальности",
+        item_id="healing-potion",
+        target_id=ALLY,
+        carried_items=CHEST_POTION,
+    )
+    refused_act(
+        srd,
+        state,
+        "use_item",
+        "нельзя применить",
+        item_id="rope-of-doom",
+        carried_items={"rope-of-doom": "rope"},
+    )
+    refused_act(srd, state, "use_item", "нет предмета", item_id="healing-potion")
+
+
+# =============================================================================================
+# B4.7: конец сцены (end_scene)
+# =============================================================================================
+
+
+def crypt_battle(srd, make_hero, monsters=("cultist_fanatic", "skeleton")) -> GameState:
+    state = battle(srd, [make_hero()], monsters)
+    state.location_id = "crypt"
+    state.combat.encounter_id = "fabian-fight"
+    return state
+
+
+def leave(srd, demo_adventure, state, next_type=SceneType.EXPLORATION, rules=None):
+    rules = rules or build_ruleset(RulesRef())
+    return combat_engine.end_scene(state, next_type, rules, content=srd, adventure=demo_adventure)
+
+
+def test_end_scene_closes_the_battle_marks_the_encounter_and_starts_the_next_scene(
+    srd, demo_adventure, make_hero
+):
+    state = crypt_battle(srd, make_hero)
+    state.scene.inspiration_granted = [HERO]
+    state.turn = 7
+    for monster in (fighter(state, "cultist_fanatic-1"), fighter(state, "skeleton-1")):
+        monster.hp = 0
+
+    after, events = leave(srd, demo_adventure, state)
+
+    assert after.combat is None
+    assert after.world.flags["encounter:fabian-fight"] == "done"
+    assert (after.scene.type, after.scene.started_turn) == (SceneType.EXPLORATION, 7)
+    assert after.scene.inspiration_granted == []  # вдохновение считается за сцену
+    assert events == [
+        CombatEvent(phase="ended", winner="party"),
+        SceneEvent(scene=SceneType.EXPLORATION),
+    ]
+    assert state.combat is not None and state.scene.type == SceneType.COMBAT  # вход цел
+
+
+def test_end_scene_reports_no_winner_when_both_sides_still_stand(srd, demo_adventure, make_hero):
+    state = crypt_battle(srd, make_hero)
+
+    after, events = leave(srd, demo_adventure, state, SceneType.SOCIAL)
+
+    assert after.scene.type == SceneType.SOCIAL
+    assert CombatEvent(phase="ended", winner=None) in events
+    assert after.world.npc_alive == {}  # противники живы: ни один NPC не отмечен погибшим
+
+
+def test_a_fallen_npc_with_a_statblock_is_marked_dead_and_the_living_ones_are_not(
+    srd, demo_adventure, make_hero
+):
+    state = crypt_battle(srd, make_hero)
+    fighter(state, "cultist_fanatic-1").hp = 0
+
+    after, _ = leave(srd, demo_adventure, state)
+
+    assert after.world.npc_alive == {"fabian": False}
+
+
+def test_an_npc_is_marked_dead_only_in_the_location_where_the_battle_happened(
+    srd, demo_adventure, make_hero
+):
+    state = crypt_battle(srd, make_hero)
+    state.location_id = "cemetery"  # Фабиан в склепе, а гибнет другой культист на кладбище
+    fighter(state, "cultist_fanatic-1").hp = 0
+
+    after, _ = leave(srd, demo_adventure, state)
+
+    assert after.world.npc_alive == {}
+
+
+def test_end_scene_removes_timed_effects_and_keeps_the_open_ended_ones(
+    srd, demo_adventure, make_hero, make_cleric
+):
+    hero = make_hero(
+        conditions=[
+            ActiveCondition(id="frightened", rounds_left=3),
+            ActiveCondition(id="prone"),
+        ],
+        buffs=[ActiveBuff(id="rage", rounds_left=8, source_id=HERO)],
+    )
+    state = battle(srd, [hero, make_cleric(concentration="bless")])
+    state.party[HERO].buffs.append(bless())
+    state.party[CLERIC].buffs.append(ActiveBuff(id="aid", rounds_left=None, source_id=CLERIC))
+
+    after, events = leave(srd, demo_adventure, state)
+
+    assert condition_ids(after, HERO) == ["prone"]  # без срока: снимает только мастер
+    assert after.party[HERO].buffs == []
+    assert after.party[CLERIC].concentration is None  # эффекты концентрации кончились вместе с ней
+    assert after.party[CLERIC].buffs == [ActiveBuff(id="aid", rounds_left=None, source_id=CLERIC)]
+    removed = {(e.target_id, e.condition) for e in events if isinstance(e, ConditionEvent)}
+    assert removed == {(HERO, "frightened"), (HERO, "rage"), (HERO, "bless")}
+
+
+def test_end_scene_returns_the_maximum_hp_of_an_expiring_aid(srd, demo_adventure, make_hero):
+    aid = ActiveBuff(id="aid", rounds_left=40, source_id=ALLY, data={"hp": 5})
+    state = battle(srd, [make_hero(hp_max=25, hp=25, buffs=[aid])])
+
+    after, _ = leave(srd, demo_adventure, state)
+
+    assert (after.party[HERO].hp_max, after.party[HERO].hp) == (20, 20)
+
+
+def camp_state(make_hero) -> GameState:
+    state = state_of(make_hero(hp=4, spell_slots={}))
+    state.scene.type = SceneType.CAMP
+    state.short_rests_since_long = 2
+    return state
+
+
+def test_end_scene_runs_the_scene_end_triggers_before_the_scene_changes(
+    srd, demo_adventure, make_hero
+):
+    rules = build_ruleset(RulesRef(modules=["campfire"]))
+
+    after, events = leave(srd, demo_adventure, camp_state(make_hero), rules=rules)
+
+    # Триггер «Привала» видит сцену camp: длинный отдых и утро следующего дня уже посчитаны.
+    assert after.party[HERO].hp == after.party[HERO].hp_max
+    assert (after.time.day, after.time.part, after.short_rests_since_long) == (2, "morning", 0)
+    assert after.scene.type == SceneType.EXPLORATION
+    assert [type(e) for e in events] == [RestEvent, SceneEvent]
+
+
+def test_without_the_campfire_module_the_end_of_a_camp_gives_no_rest(
+    srd, demo_adventure, make_hero
+):
+    after, events = leave(
+        srd, demo_adventure, camp_state(make_hero), rules=build_ruleset(RulesRef())
+    )
+
+    assert after.party[HERO].hp == 4 and after.time.day == 1
+    assert events == [SceneEvent(scene=SceneType.EXPLORATION)]
+
+
+def test_end_scene_applies_the_triggers_in_order_and_each_sees_the_previous_result(
+    srd, demo_adventure, make_hero
+):
+    registry = RuleRegistry()
+    seen = []
+
+    def first(state, content):
+        seen.append(("first", state.scene.type, state.time.day))
+        moved = state.model_copy(deep=True)
+        moved.time.day += 10
+        return moved, [ActionEvent(actor_id="first", action="trigger")]
+
+    def second(state, content):
+        seen.append(("second", state.scene.type, state.time.day))
+        return state.model_copy(deep=True), [ActionEvent(actor_id="second", action="trigger")]
+
+    registry.add_trigger("on_scene_end", first)
+    registry.add_trigger("on_scene_end", second)
+
+    after, events = leave(
+        srd,
+        demo_adventure,
+        state_of(make_hero()),
+        SceneType.SOCIAL,
+        rules=registry.build(["test"]),
+    )
+
+    assert seen == [("first", SceneType.EXPLORATION, 1), ("second", SceneType.EXPLORATION, 11)]
+    assert after.time.day == 11
+    assert [e.actor_id for e in events if isinstance(e, ActionEvent)] == ["first", "second"]
+
+
+def test_end_scene_refuses_the_same_scene_and_a_battle_without_changing_the_state(
+    srd, demo_adventure, make_hero
+):
+    state = state_of(make_hero())
+
+    refused(lambda s, rng: leave(srd, demo_adventure, s, SceneType.EXPLORATION), state, "уже")
+    refused(lambda s, rng: leave(srd, demo_adventure, s, SceneType.COMBAT), state, "start_combat")
