@@ -28,7 +28,7 @@ from dnd_server.authoring.schemas import Seeds
 from dnd_server.config import Settings
 from dnd_server.llm.base import ProviderError, printable, schema_problems
 from dnd_server.llm.factory import ConfigError, make_provider
-from dnd_server.llm.fake import UnreadableYaml, parse_yaml
+from dnd_server.llm.fake import UnreadableYaml, read_yaml
 from dnd_server.llm.internal_api import TurnTokens
 
 EXIT_OK = 0
@@ -131,10 +131,11 @@ def _describe(exc: Exception) -> str:
     """Текст ошибки для строки «Ошибка: …», без значений из файлов.
 
     Для ошибки схемы — путь поля и сообщение. Остальные тексты безопасны сами по себе: `OSError`
-    называет путь, `UnicodeDecodeError` — позицию байта, `UnreadableYaml` — вид ошибки YAML,
-    `AdventureFormatError` — проблемы с путями файлов. Произвольный `ValueError` сюда не попадает:
-    его текст может нести значение из файла (сиды могли указать на чужой файл). Имена полей и
-    сообщения схемы нейтрализует `schema_problems`, остальное — барьер `_fail`."""
+    называет путь (у файла особого вида — причину «не обычный файл»), `UnicodeDecodeError` —
+    позицию байта, `UnreadableYaml` — вид ошибки YAML или предел размера, `AdventureFormatError` —
+    проблемы с путями файлов. Произвольный `ValueError` сюда не попадает: его текст может нести
+    значение из файла (сиды могли указать на чужой файл). Имена полей и сообщения схемы
+    нейтрализует `schema_problems`, остальное — барьер `_fail`."""
     if isinstance(exc, ValidationError):
         return schema_problems(exc)[:MAX_ERROR_CHARS]
     return str(exc)[:MAX_ERROR_CHARS]
@@ -143,7 +144,7 @@ def _describe(exc: Exception) -> str:
 def _load_seeds(path: Path) -> Seeds:
     problem = None
     try:
-        data = parse_yaml(path.read_text(encoding="utf-8"))
+        data = read_yaml(path)
         seeds = Seeds.model_validate({} if data is None else data)
     except (OSError, UnicodeDecodeError, UnreadableYaml, ValidationError) as exc:
         problem = _describe(exc)

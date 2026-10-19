@@ -60,7 +60,10 @@ ALLOWED_IMPORTS: dict[str, str] = {
     "re": "разбор записи костей вида 2d6+3 (dice.py)",
     "pydantic": "модели данных: проверка и (де)сериализация состояния игры в JSON",
     "pydantic_core": "ErrorDetails: описание проблем при чтении данных SRD (content.py)",
-    "yaml": "safe_load данных SRD (content.py), safe_load/safe_dump папки приключения (loader.py)",
+    "yaml": (
+        "безопасный разбор без якорей и алиасов — `content.parse_yaml` (подкласс SafeLoader) для "
+        "данных SRD и папки приключения; запись папки — подклассом SafeDumper (loader.py)"
+    ),
     "importlib": "importlib.resources.files: данные SRD лежат внутри пакета (content.py)",
     "pathlib": "Path: папка данных в `load_srd(path)` (content.py), папка приключения (loader.py)",
     "random": "SeededRng: воспроизводимый генератор для тестов (rng.py)",
@@ -84,6 +87,8 @@ FORBIDDEN_ATTRIBUTES = {"open", "read_text", "write_bytes", "import_module"}
 # Обоснованный доступ к файлам — только в двух загрузчиках, и `open` они не вызывают:
 # - чтение: данные SRD читает `Traversable.read_bytes()` (`content._read_entries`), путь идёт
 #   из `importlib.resources`; папку приключения читает `Path.read_bytes()` (`adventure/loader.py`);
+#   перед чтением `content.check_yaml_size` смотрит `stat`: файл больше предела и не обычный файл
+#   (папка, канал FIFO, устройство) отвергаются, не открываясь;
 # - запись: только `adventure/loader.py` (`dump_adventure`), и только после проверки имён файлов.
 # Модули названы путями внутри пакета, как в `IMPORT_ONLY_IN`.
 FILE_READS_ONLY_IN: dict[str, set[str]] = {

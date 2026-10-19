@@ -18,6 +18,7 @@ import openai
 import pytest
 from pydantic import SecretStr
 
+from dnd_engine.content import MAX_YAML_BYTES
 from dnd_server.config import Settings
 from dnd_server.llm import factory
 from dnd_server.llm.base import TurnRequest
@@ -271,6 +272,10 @@ MISLEADING_SCENARIO_FILES = [
     pytest.param(f"turns: {SCENARIO_SECRET}\n".encode(), id="секрет вместо списка ходов"),
     pytest.param(f"turns: []\n!{SCENARIO_SECRET} 1\n".encode(), id="секрет в имени тега YAML"),
     pytest.param(b"\xff\xfe" + SCENARIO_SECRET.encode(), id="не UTF-8"),
+    pytest.param(
+        f"turns: [&{SCENARIO_SECRET} [], *{SCENARIO_SECRET}]".encode(),
+        id="секрет в именах якоря и алиаса",
+    ),
 ]
 
 
@@ -333,6 +338,39 @@ def test_scenario_errors_say_where_the_problem_is_without_quoting_the_file(
 ):
     with pytest.raises(ConfigError, match=expected):
         make_provider(fake_settings(tmp_path, text))
+
+
+# Сценарий читается теми же частями движка, что и папка приключения: якорь и алиас, огромный файл
+# и файл особого вида отвергаются до чтения, а причина называется в ошибке настройки.
+
+
+def test_scenario_with_an_alias_is_a_config_error_that_names_the_reason(tmp_path):
+    text = "turns:\n  - steps: &say [{text: Привет}]\n  - steps: *say\n"
+
+    with pytest.raises(ConfigError, match="FAKE_LLM_SCENARIO") as error:
+        make_provider(fake_settings(tmp_path, text))
+
+    assert "якоря и алиасы YAML не поддерживаются" in str(error.value)
+
+
+def test_scenario_over_the_size_limit_is_a_config_error_that_names_the_limit(tmp_path):
+    text = "turns: []\n" + "#" * MAX_YAML_BYTES
+
+    with pytest.raises(ConfigError, match="FAKE_LLM_SCENARIO") as error:
+        make_provider(fake_settings(tmp_path, text))
+
+    assert f"файл больше {MAX_YAML_BYTES // 1024} КБ" in str(error.value)
+
+
+def test_scenario_that_is_a_folder_is_a_config_error_that_names_the_reason(tmp_path):
+    folder = tmp_path / "scenario.yaml"
+    folder.mkdir()
+    settings = make_settings(llm_provider="fake", fake_llm_scenario=folder)
+
+    with pytest.raises(ConfigError, match="FAKE_LLM_SCENARIO") as error:
+        make_provider(settings)
+
+    assert "не обычный файл" in str(error.value)
 
 
 # --- anthropic_api ---

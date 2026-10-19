@@ -577,7 +577,10 @@ def test_command_line_arguments_reach_the_written_adventure(
 def stubborn_scenario(tmp_path: Path) -> Path:
     """Копия демо-сценария, в которой улик всегда две: три круга исправления не помогут."""
     scenario = yaml.safe_load(DEMO_SCENARIO.read_text(encoding="utf-8"))
-    scenario["json"]["generator.clues"] = [scenario["json"]["generator.clues"][0]] * 4
+    # Копии, а не один объект четыре раза: `safe_dump` записал бы его якорем и алиасами,
+    # а сценарий читается без них.
+    first = scenario["json"]["generator.clues"][0]
+    scenario["json"]["generator.clues"] = [copy.deepcopy(first) for _ in range(4)]
     path = tmp_path / "stubborn.yaml"
     path.write_text(yaml.safe_dump(scenario, allow_unicode=True), encoding="utf-8")
     return path

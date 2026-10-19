@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import copy
 import json
 import subprocess
 import sysconfig
@@ -23,7 +24,7 @@ import yaml
 
 from dnd_engine.adventure.loader import load_adventure
 from dnd_engine.adventure.validator import Issue, Report, validate
-from dnd_engine.content import load_srd
+from dnd_engine.content import MAX_YAML_BYTES, load_srd
 from dnd_server.authoring import cli
 from dnd_server.authoring.cli import format_report, main
 from dnd_server.llm.base import MAX_LOC_PART_CHARS, ProviderError
@@ -462,6 +463,79 @@ def test_missing_seeds_file_exits_with_2_before_any_model_call(model_calls, tmp_
     assert "nope.yaml" in capsys.readouterr().err
 
 
+# Файл сидов читается теми же частями движка, что и папка приключения: якорь и алиас раздули бы
+# малый файл в миллионы моделей, а сиды целиком уходят в промпт каждого шага генератора (каждый
+# платный запрос). Огромный файл и файл особого вида отвергаются до чтения. Во всех случаях команда
+# отвечает одной строкой «Ошибка: …» с причиной и кодом 2 до первого вызова модели.
+
+# Один NPC с общим списком по алиасу, повторённый тысячи раз: так выглядит «бомба алиасов» в сидах.
+SEEDS_WITH_ALIAS_BOMB = (
+    "npcs:\n"
+    + "  - {id: n0, name: Н, role: r, knows: &lore [a, b, c], location_id: x}\n"
+    + "".join(
+        f"  - {{id: n{i}, name: Н, role: r, knows: *lore, location_id: x}}\n"
+        for i in range(1, 3000)
+    )
+)
+SEEDS_REFUSED = {
+    "алиас": ("items: &x []\nnpcs: *x\n", "якоря и алиасы YAML не поддерживаются"),
+    "якорь без алиаса": ("items: &x []\n", "якоря и алиасы YAML не поддерживаются"),
+    "слияние по алиасу": (
+        "npcs: [{id: a, <<: &base {name: Н}}]\n",
+        "якоря и алиасы YAML не поддерживаются",
+    ),
+    "бомба алиасов": (SEEDS_WITH_ALIAS_BOMB, "якоря и алиасы YAML не поддерживаются"),
+    "больше предела": ("#" * (MAX_YAML_BYTES + 1), f"файл больше {MAX_YAML_BYTES // 1024} КБ"),
+}
+
+
+@pytest.mark.parametrize(("content", "reason"), SEEDS_REFUSED.values(), ids=SEEDS_REFUSED.keys())
+def test_seeds_the_engine_reader_refuses_exit_with_2_and_name_the_reason(
+    content, reason, model_calls, tmp_path, capsys
+):
+    seeds = tmp_path / "seeds.yaml"
+    seeds.write_text(content, encoding="utf-8")
+
+    code = generate_into(tmp_path / "out", "--seeds", str(seeds))
+
+    printed = capsys.readouterr()
+    lines = printed.err.splitlines()
+    assert code == 2
+    assert model_calls == []
+    assert printed.out == ""
+    assert len(lines) == 1 and lines[0].startswith("Ошибка: файл сидов ")
+    assert "seeds.yaml" in lines[0] and reason in lines[0]
+    assert not (tmp_path / "out").exists()
+
+
+def test_seeds_error_for_an_alias_keeps_neither_the_cause_nor_the_context(tmp_path):
+    # Исходное исключение разбора несёт позицию и разметку файла: цепочки у ошибки быть не должно.
+    seeds = tmp_path / "seeds.yaml"
+    seeds.write_text("items: &sk-LEAK-anchor []\nnpcs: *sk-LEAK-anchor\n", encoding="utf-8")
+
+    with pytest.raises(cli.CliError) as error:
+        cli._load_seeds(seeds)
+
+    story = "".join(traceback.format_exception(error.value))
+    assert "sk-leak" not in story.lower()
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+@pytest.mark.skipif(not Path("/dev/null").exists(), reason="нет /dev/null")
+def test_seeds_that_are_a_device_exit_with_2_before_any_model_call(model_calls, tmp_path, capsys):
+    # Пустое чтение устройства дало бы «пустые сиды» и молча запустило генератор без них.
+    seeds = tmp_path / "seeds.yaml"
+    seeds.symlink_to("/dev/null")
+
+    code = generate_into(tmp_path / "out", "--seeds", str(seeds))
+
+    error = capsys.readouterr().err
+    assert code == 2
+    assert model_calls == []
+    assert "seeds.yaml" in error and "не обычный файл" in error
+
+
 # --- папка вывода ---
 
 
@@ -694,7 +768,9 @@ def test_three_failed_rounds_exit_with_2_print_the_report_and_keep_the_folder(
 ):
     def always_two_clues(answers):
         bad = answers["generator.clues"][0]
-        answers["generator.clues"] = [bad] * 4
+        # Копии, а не один объект четыре раза: `safe_dump` записал бы его якорем и алиасами,
+        # а сценарий читается без них.
+        answers["generator.clues"] = [copy.deepcopy(bad) for _ in range(4)]
 
     scenario = write_scenario(tmp_path / "stubborn.yaml", always_two_clues)
     monkeypatch.setenv("FAKE_LLM_SCENARIO", str(scenario))

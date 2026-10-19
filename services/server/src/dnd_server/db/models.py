@@ -1,0 +1,270 @@
+"""Таблицы сервера (спека §9.1, план B6.1).
+
+Здесь только форма данных. Правила игры считает движок: JSON-колонки хранят его модели
+(`Adventure`, `Character`, `GameState`) в виде `model_dump(mode="json")` и читаются обратно
+через `model_validate`. Таблицы `adventures` нет: приключения читаются из `CONTENT_DIR` в память,
+а игра хранит собственную копию (решение владельца «Копия в базе»).
+"""
+
+import uuid
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any
+
+from sqlalchemy import BigInteger, Enum, ForeignKey, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from dnd_engine.state import GameState
+from dnd_server.db.base import Base
+
+# Версия JSON-схемы снимка `GameState`. Растёт, когда формат снимка меняется несовместимо; сервер
+# отказывается читать снимок с версией новее своей, чтобы откат кода не терял поля молча.
+GAME_STATE_SCHEMA_VERSION = 1
+
+# Адресат сообщения «всем»; личные сообщения адресованы id пользователя.
+AUDIENCE_ALL = "all"
+
+
+class GamePhase(StrEnum):
+    LOBBY = "lobby"
+    WEAVING = "weaving"
+    PLAYING = "playing"
+    PAUSED = "paused"
+    FINISHED = "finished"
+
+
+class TurnPhase(StrEnum):
+    DISCUSSION = "discussion"
+    COLLECTING = "collecting"
+    RESOLVING = "resolving"
+    DM_FAILED = "dm_failed"
+    COMBAT_WAIT = "combat_wait"
+    CAMP = "camp"
+
+
+class TurnKind(StrEnum):
+    OPENING = "opening"
+    ROUND = "round"
+    COMBAT = "combat"
+    CAMP_END = "camp_end"
+
+
+class TurnStatus(StrEnum):
+    OPEN = "open"
+    COLLECTING = "collecting"
+    RESOLVING = "resolving"
+    DONE = "done"
+    FAILED = "failed"
+    SUPERSEDED = "superseded"
+
+
+class ActionStatus(StrEnum):
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
+    PASS = "pass"
+    AUTO_PASS = "auto_pass"
+    AUTO_SUBMITTED = "auto_submitted"
+
+
+class MessageKind(StrEnum):
+    NARRATION = "narration"
+    PRIVATE = "private"
+    ROLL = "roll"
+    SYSTEM = "system"
+    CAMP_LINE = "camp_line"
+    ACTION = "action"
+
+
+class UnsupportedSnapshotVersion(ValueError):
+    """Снимок состояния записан более новой схемой, чем понимает этот сервер."""
+
+
+def new_id() -> str:
+    return str(uuid.uuid4())
+
+
+def utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def enum_column(enum_type: type[StrEnum]) -> Enum:
+    """Тип колонки-перечисления: в базе лежат значения (`lobby`), а не имена членов.
+
+    CHECK-ограничение отвергает неизвестное значение и мимо ORM.
+    """
+    return Enum(
+        enum_type,
+        name=enum_type.__name__.lower(),
+        native_enum=False,
+        create_constraint=True,
+        values_callable=lambda members: [member.value for member in members],
+    )
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    tg_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)  # у dev-входа пусто
+    dev_login: Mapped[str | None] = mapped_column(unique=True)  # от dev-1 до dev-6, только в dev
+    name: Mapped[str]
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class Game(Base):
+    __tablename__ = "games"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    code: Mapped[str] = mapped_column(String(6), unique=True)  # приглашение: 6 символов A-Z0-9
+    adventure_id: Mapped[str]
+    host_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    # Копия приключения на момент создания игры (JSON `Adventure`). Игра всегда идёт по ней, а
+    # правки и удаление файлов в CONTENT_DIR касаются только новых игр. После создания игры
+    # колонку никто не меняет.
+    adventure_data: Mapped[dict[str, Any]]
+
+    phase: Mapped[GamePhase] = mapped_column(enum_column(GamePhase), default=GamePhase.LOBBY)
+    turn_phase: Mapped[TurnPhase | None] = mapped_column(enum_column(TurnPhase))
+    deadline_at: Mapped[datetime | None]
+
+    state_version: Mapped[int] = mapped_column(default=0)  # версия текущего `GameState`
+    # Без внешнего ключа: games и turns ссылаются друг на друга, а SQLite не умеет добавлять
+    # ограничения к готовой таблице.
+    current_turn_id: Mapped[str | None]
+
+    # Пусто — значения по умолчанию из env.
+    provider: Mapped[str | None]
+    model: Mapped[str | None]
+    collect_seconds: Mapped[int]
+    hurry_seconds: Mapped[int]
+    camp_seconds: Mapped[int]
+
+    started_at: Mapped[datetime | None]
+    active_seconds: Mapped[int] = mapped_column(default=0)  # время игры без пауз, для темпа
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class PlayerCharacter(Base):
+    """Персонаж игрока: JSON `Character` движка; `id` равен `Character.id`."""
+
+    __tablename__ = "characters"
+
+    id: Mapped[str] = mapped_column(primary_key=True)
+    game_id: Mapped[str] = mapped_column(ForeignKey("games.id"))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    data: Mapped[dict[str, Any]]
+
+
+class GamePlayer(Base):
+    __tablename__ = "game_players"
+
+    game_id: Mapped[str] = mapped_column(ForeignKey("games.id"), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    character_id: Mapped[str | None] = mapped_column(ForeignKey("characters.id"))
+    is_host: Mapped[bool] = mapped_column(default=False)
+    ready: Mapped[bool] = mapped_column(default=False)
+    joined_order: Mapped[int]
+    joined_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class PendingRoll(Base):
+    """Последний набор характеристик, который сервер бросил игроку для создания персонажа."""
+
+    __tablename__ = "pending_rolls"
+
+    game_id: Mapped[str] = mapped_column(ForeignKey("games.id"), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    values: Mapped[list[Any]]
+
+
+class GameStateSnapshot(Base):
+    """Одна версия `GameState`. Хранятся все версии: прежняя нужна откату «Перегенерировать»."""
+
+    __tablename__ = "game_states"
+
+    game_id: Mapped[str] = mapped_column(ForeignKey("games.id"), primary_key=True)
+    version: Mapped[int] = mapped_column(primary_key=True, autoincrement=False)
+    schema_version: Mapped[int]  # версия формата `data`, см. GAME_STATE_SCHEMA_VERSION
+    data: Mapped[dict[str, Any]]
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    @classmethod
+    def from_state(cls, state: GameState) -> GameStateSnapshot:
+        return cls(
+            game_id=state.game_id,
+            version=state.version,
+            schema_version=GAME_STATE_SCHEMA_VERSION,
+            data=state.model_dump(mode="json"),
+        )
+
+    def to_state(self) -> GameState:
+        if self.schema_version > GAME_STATE_SCHEMA_VERSION:
+            raise UnsupportedSnapshotVersion(
+                f"Снимок игры {self.game_id} (версия {self.version}) записан схемой "
+                f"{self.schema_version}, а этот сервер читает схемы не новее "
+                f"{GAME_STATE_SCHEMA_VERSION}: обновите сервер. Снимок не изменён."
+            )
+        return GameState.model_validate(self.data)
+
+
+class Turn(Base):
+    __tablename__ = "turns"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    game_id: Mapped[str] = mapped_column(ForeignKey("games.id"))
+    number: Mapped[int]
+    kind: Mapped[TurnKind] = mapped_column(enum_column(TurnKind))
+    status: Mapped[TurnStatus] = mapped_column(enum_column(TurnStatus), default=TurnStatus.OPEN)
+    # Пусто, пока версии нет: у открытия игры нет «до», у неудавшегося хода нет «после».
+    state_version_before: Mapped[int | None]
+    state_version_after: Mapped[int | None]
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class PlayerAction(Base):
+    __tablename__ = "player_actions"
+
+    turn_id: Mapped[str] = mapped_column(ForeignKey("turns.id"), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    text: Mapped[str] = mapped_column(Text, default="")
+    secret: Mapped[bool] = mapped_column(default=False)
+    inspiration: Mapped[bool] = mapped_column(default=False)
+    status: Mapped[ActionStatus] = mapped_column(
+        enum_column(ActionStatus), default=ActionStatus.DRAFT
+    )
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    game_id: Mapped[str] = mapped_column(ForeignKey("games.id"))
+    turn_id: Mapped[str | None] = mapped_column(ForeignKey("turns.id"))  # пусто вне хода
+    audience: Mapped[str]  # AUDIENCE_ALL или id пользователя
+    kind: Mapped[MessageKind] = mapped_column(enum_column(MessageKind))
+    text: Mapped[str] = mapped_column(Text, default="")
+    data: Mapped[dict[str, Any] | None]
+    superseded: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class DmTurnLog(Base):
+    """Журнал попытки хода мастера (спека §8.8)."""
+
+    __tablename__ = "dm_turn_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    game_id: Mapped[str] = mapped_column(ForeignKey("games.id"))
+    turn_id: Mapped[str] = mapped_column(ForeignKey("turns.id"))
+    attempt: Mapped[int]
+    provider: Mapped[str]
+    model: Mapped[str | None]
+    # Без секретов (инвариант «д»): ни токенов бота, ни ключей, ни initData.
+    request: Mapped[dict[str, Any]]
+    trace: Mapped[list[Any]] = mapped_column(default=list)  # вызовы инструментов и их результаты
+    output: Mapped[str | None] = mapped_column(Text)  # пусто, если итогового текста не было
+    usage: Mapped[dict[str, Any] | None]
+    duration_ms: Mapped[int | None]
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)

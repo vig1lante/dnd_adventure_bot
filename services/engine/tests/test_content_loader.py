@@ -1,6 +1,8 @@
 import copy
 import operator
+import os
 import shutil
+import types
 from contextlib import suppress
 from pathlib import Path
 from typing import get_args
@@ -12,6 +14,9 @@ import dnd_engine
 from dnd_engine import content
 from dnd_engine.abilities import Ability, Skill
 from dnd_engine.content import (
+    MAX_FIELD_LENGTH,
+    MAX_PROBLEM_LENGTH,
+    MAX_YAML_BYTES,
     ContentError,
     MonsterAction,
     MonsterDef,
@@ -19,7 +24,11 @@ from dnd_engine.content import (
     SpellEffect,
     SrdContent,
     WeaponProps,
+    YamlTooLargeError,
+    check_yaml_size,
     load_srd,
+    printable,
+    quoted,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "srd_min"
@@ -420,6 +429,203 @@ def test_python_tag_is_rejected_and_not_executed(srd_dir, tmp_path):
     assert not marker.exists()
     assert len(problems) == 1
     assert "conditions.yaml" in problems[0]
+
+
+def test_yaml_anchors_and_aliases_in_a_table_are_a_content_problem(srd_dir):
+    # Якорь и алиас раздули бы данные при проверке схемы (бомба алиасов), поэтому запрещены целиком.
+    (srd_dir / "conditions.yaml").write_text(
+        "- &a {id: prone, name: A, summary: s}\n- *a\n", encoding="utf-8"
+    )
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert problems[0].startswith("conditions.yaml: некорректный YAML (строка 1): ")
+    assert "якор" in problems[0] and "алиас" in problems[0]
+
+
+def test_a_table_over_the_size_limit_is_a_content_problem_though_its_yaml_is_valid(srd_dir):
+    path = srd_dir / "conditions.yaml"
+    path.write_bytes(path.read_bytes() + b"#" * MAX_YAML_BYTES)
+
+    problems = load_problems(srd_dir)
+
+    assert problems == [f"conditions.yaml: файл больше {MAX_YAML_BYTES // 1024} КБ"]
+
+
+def test_a_table_of_exactly_the_size_limit_is_read(srd_dir):
+    path = srd_dir / "conditions.yaml"
+    body = path.read_bytes()
+    path.write_bytes(body + b"#" * (MAX_YAML_BYTES - len(body)))
+
+    assert set(load_srd(srd_dir).conditions) == {"prone", "poisoned"}
+
+
+def test_the_builtin_srd_tables_fit_the_size_limit_with_a_wide_margin():
+    sizes = [
+        file.stat().st_size
+        for file in (Path(dnd_engine.__file__).parent / "data" / "srd").glob("*.yaml")
+    ]
+
+    assert len(sizes) == len(TABLES) and max(sizes) * 10 < MAX_YAML_BYTES
+
+
+def test_a_long_yaml_tag_in_a_table_is_cut_in_the_problem(srd_dir):
+    (srd_dir / "conditions.yaml").write_text("- !" + "t" * 100_000 + " x\n", encoding="utf-8")
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1 and len(problems[0]) == MAX_PROBLEM_LENGTH
+    assert problems[0].startswith("conditions.yaml: некорректный YAML (строка 1): ")
+    assert problems[0].endswith("…")
+
+
+def test_control_characters_and_length_of_a_schema_problem_are_neutralized(srd_dir):
+    # Лишнее поле записи попадает в проблему по имени: имя из файла — чужой текст.
+    (srd_dir / "conditions.yaml").write_text(
+        '- id: prone\n  name: A\n  summary: s\n  "\\e[2K\\a\\r\\n": 1\n  ? '
+        + "k" * 100_000
+        + "\n  : 1\n",
+        encoding="utf-8",
+    )
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 2
+    assert all(len(problem) <= MAX_PROBLEM_LENGTH and problem.isprintable() for problem in problems)
+    assert "\\x1b[2K\\x07\\r\\n" in problems[0]
+
+
+# --- чтение YAML с пределом размера и безопасный текст проблем ---
+
+
+class SizedSource:
+    """Файл, который заявляет размер, но целиком читать его нельзя."""
+
+    name = "huge.yaml"
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+
+    def stat(self) -> types.SimpleNamespace:
+        return types.SimpleNamespace(st_size=self.size)
+
+    def is_file(self) -> bool:
+        return True
+
+    def read_bytes(self) -> bytes:
+        raise AssertionError("файл больше предела прочитан целиком")
+
+
+def test_a_huge_file_is_refused_by_its_size_before_it_is_read():
+    with pytest.raises(YamlTooLargeError, match=f"файл больше {MAX_YAML_BYTES // 1024} КБ"):
+        check_yaml_size(SizedSource(10 * 1024**3))
+
+
+def test_a_file_of_exactly_the_limit_passes_the_size_check():
+    check_yaml_size(SizedSource(MAX_YAML_BYTES))
+
+
+def test_the_size_check_of_a_missing_file_is_file_not_found(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        check_yaml_size(tmp_path / "missing.yaml")
+
+
+def test_the_size_check_refuses_a_folder_with_a_clear_reason(tmp_path):
+    with pytest.raises(OSError, match="не обычный файл") as caught:
+        check_yaml_size(tmp_path)
+
+    assert not isinstance(caught.value, FileNotFoundError)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="нет os.mkfifo")
+def test_the_size_check_refuses_a_pipe_though_it_has_no_size(tmp_path):
+    pipe = tmp_path / "table.yaml"
+    os.mkfifo(pipe)
+
+    with pytest.raises(OSError, match="не обычный файл"):
+        check_yaml_size(pipe)
+
+
+def test_a_folder_named_like_a_table_is_a_content_problem_not_a_crash(srd_dir):
+    (srd_dir / "conditions.yaml").unlink()
+    (srd_dir / "conditions.yaml").mkdir()
+
+    problems = load_problems(srd_dir)
+
+    assert problems == ["conditions.yaml: не удалось прочитать файл (не обычный файл)"]
+
+
+LONG_ID = "i" * 300
+
+
+def test_a_long_duplicate_id_does_not_eat_the_reason(srd_dir):
+    with (srd_dir / "conditions.yaml").open("a", encoding="utf-8") as file:
+        file.write(f"- id: {LONG_ID}\n  name: A\n  summary: s\n" * 2)
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1 and len(problems[0]) <= MAX_PROBLEM_LENGTH
+    assert problems[0].startswith("conditions.yaml: дубликат id 'iii") and "запись 4" in problems[0]
+
+
+def test_a_long_id_of_a_broken_record_does_not_eat_the_reason(srd_dir):
+    with (srd_dir / "conditions.yaml").open("a", encoding="utf-8") as file:
+        file.write(f"- id: {LONG_ID}\n  name: A\n")
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1 and len(problems[0]) <= MAX_PROBLEM_LENGTH
+    assert problems[0].startswith("conditions.yaml, запись 'iii")
+    assert "поле summary" in problems[0] and "Field required" in problems[0]
+
+
+def test_printable_shows_non_printable_characters_as_escapes():
+    text = "a\x1b[2K\x07\r\n\t\x85\u2028\u202e\ud800b"
+
+    assert printable(text) == "a\\x1b[2K\\x07\\r\\n\\t\\x85\\u2028\\u202e\\ud800b"
+
+
+def test_printable_leaves_readable_text_alone():
+    text = "Склеп у деревни — «долг» 🦴 ё, tab-free."
+
+    assert printable(text, 200) == text
+
+
+def test_printable_leaves_text_within_the_limit_as_it_is():
+    assert printable("x" * 10, 10) == "x" * 10
+
+
+def test_printable_cuts_longer_text_to_the_limit_with_an_ellipsis():
+    assert printable("x" * 11, 10) == "x" * 9 + "…"
+
+
+def test_printable_counts_the_limit_after_escaping():
+    result = printable("\x1b" * 300, 200)
+
+    assert len(result) == 200 and result.endswith("…") and result.startswith("\\x1b\\x1b")
+
+
+def test_quoted_shows_a_value_as_repr_does():
+    assert quoted("prone") == "'prone'"
+    assert quoted("Сбит с ног") == "'Сбит с ног'"
+    assert quoted("it's") == '"it\'s"'
+    assert quoted(7) == "7"
+
+
+def test_quoted_shows_non_printable_characters_as_escapes():
+    assert quoted("a\x1b[2K\r\n\u2028\u202e") == "'a\\x1b[2K\\r\\n\\u2028\\u202e'"
+
+
+def test_quoted_cuts_a_long_value_to_the_field_limit_with_an_ellipsis():
+    shown = quoted("x" * 5000)
+
+    assert len(shown) == MAX_FIELD_LENGTH
+    assert shown.startswith("'xxx") and shown.endswith("…")
+
+
+def test_quoted_leaves_a_value_of_the_longest_legal_id_whole():
+    assert quoted("a" * 64) == "'" + "a" * 64 + "'"
 
 
 # --- перекрёстные ссылки ---

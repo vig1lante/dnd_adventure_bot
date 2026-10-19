@@ -23,6 +23,7 @@ from typing import Any, Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from dnd_engine import content as engine_content
 from dnd_server.llm.base import (
     JsonRequest,
     ProviderError,
@@ -93,26 +94,33 @@ def yaml_problem(exc: yaml.YAMLError) -> str:
     """Вид и позиция ошибки YAML без цитат из файла.
 
     Файл мог указывать на чужое содержимое с секретами, а `problem` бывает цитатой (имя тега или
-    якоря), не говоря о фрагменте строки в `str(exc)`."""
+    якоря), не говоря о фрагменте строки в `str(exc)`. Исключение — `ComposerError`: движковый
+    разбор отвергает якорь и алиас раньше, чем PyYAML успеет назвать их имена в своих сообщениях,
+    так что его `problem` — фиксированный текст («якоря и алиасы YAML не поддерживаются»), и без
+    него владелец не узнал бы, что править."""
     mark = getattr(exc, "problem_mark", None)
     place = f", строка {mark.line + 1}, столбец {mark.column + 1}" if mark else ""
-    return f"{type(exc).__name__}{place}"
+    reason = f": {exc.problem}" if isinstance(exc, yaml.composer.ComposerError) else ""
+    return f"{type(exc).__name__}{place}{reason}"
 
 
 def parse_yaml(text: str) -> Any:
     """Данные из YAML недоверенного ввода (сценарий, сиды генератора) или `UnreadableYaml`.
 
-    Единственное место `yaml.safe_load` в сервере. Конструкторы значений PyYAML на чужом вводе
-    бросают что угодно, а не только `YAMLError`: `!!int ""` — `IndexError`, `!!bool x` —
-    `KeyError`, `!!timestamp x` — `AttributeError`, длинное число или несуществующая дата —
-    `ValueError`; глубокая вложенность — `RecursionError`. Перечень не закрыт, поэтому ловим всё,
-    но строго вокруг `safe_load`. Тип и текст исключения в сообщение не идут: по ним причину не
-    назвать, а текст содержит значение из файла.
+    Единственное место разбора YAML в сервере. Разбор движковый (`content.parse_yaml`), как у
+    загрузчика папки приключения: безопасные теги и без якорей и алиасов, которые раздувают малый
+    файл в миллионы моделей.
+
+    Конструкторы значений PyYAML на чужом вводе бросают что угодно, а не только `YAMLError`:
+    `!!int ""` — `IndexError`, `!!bool x` — `KeyError`, `!!timestamp x` — `AttributeError`, длинное
+    число или несуществующая дата — `ValueError`; глубокая вложенность — `RecursionError`. Перечень
+    не закрыт, поэтому ловим всё, но строго вокруг разбора. Тип и текст исключения в сообщение не
+    идут: по ним причину не назвать, а текст содержит значение из файла.
 
     `UnreadableYaml` поднимается вне `except`: у него нет ни `__cause__`, ни `__context__`, и
     значение из файла не доедет до трассировки."""
     try:
-        return yaml.safe_load(text)
+        return engine_content.parse_yaml(text.encode("utf-8"))
     except yaml.YAMLError as exc:
         problem = yaml_problem(exc)
     except RecursionError:
@@ -125,12 +133,31 @@ def parse_yaml(text: str) -> Any:
     raise UnreadableYaml(problem)
 
 
+def read_yaml(path: Path) -> Any:
+    """Данные из YAML-файла недоверенного ввода (сценарий, сиды генератора) или `UnreadableYaml`.
+
+    Файл проверяется до чтения тем же `check_yaml_size`, что и файлы папки приключения: канал FIFO
+    или устройство вместо файла подвесили бы чтение, а огромный файл целиком попал бы в память.
+    Файла нет — `FileNotFoundError`; не обычный файл (папка, канал, устройство) — `OSError`
+    «не обычный файл»; не в UTF-8 — `UnicodeDecodeError`; больше предела размера —
+    `UnreadableYaml` с готовой причиной («файл больше 512 КБ»), как у нечитаемого YAML."""
+    try:
+        engine_content.check_yaml_size(path)
+    except engine_content.YamlTooLargeError as exc:
+        problem = str(exc)
+    else:
+        return parse_yaml(path.read_text(encoding="utf-8"))
+    # Вне `except`, как в `parse_yaml`: у ошибки нет ни причины, ни контекста.
+    raise UnreadableYaml(problem)
+
+
 def load_scenario(path: Path) -> Scenario:
     """Читает YAML-сценарий.
 
-    Неверный формат — `pydantic.ValidationError` с путём поля, нечитаемый YAML — `UnreadableYaml`,
-    файл не открылся или не в UTF-8 — `OSError` или `UnicodeDecodeError`."""
-    return Scenario.model_validate(parse_yaml(path.read_text(encoding="utf-8")))
+    Неверный формат — `pydantic.ValidationError` с путём поля, нечитаемый или слишком большой
+    YAML — `UnreadableYaml`, файл не открылся или не в UTF-8 — `OSError` или `UnicodeDecodeError`
+    (подробнее в `read_yaml`)."""
+    return Scenario.model_validate(read_yaml(path))
 
 
 class FakeProvider:

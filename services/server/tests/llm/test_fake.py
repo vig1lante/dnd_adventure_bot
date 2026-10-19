@@ -5,13 +5,17 @@
 """
 
 import json
+import os
+import signal
 import traceback
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from dnd_engine.content import MAX_YAML_BYTES
 from dnd_engine.modules import build_ruleset
 from dnd_engine.state import RulesRef
 from dnd_engine.tools import build_registry
@@ -35,6 +39,7 @@ from dnd_server.llm.fake import (
     UnreadableYaml,
     load_scenario,
     parse_yaml,
+    read_yaml,
 )
 
 # Конфтест сервера переходит во временную папку, поэтому путь считаем от файла теста.
@@ -391,6 +396,174 @@ def test_load_scenario_reports_unreadable_yaml_not_a_parser_exception(tmp_path):
 
     with pytest.raises(UnreadableYaml, match="значение не построить"):
         load_scenario(path)
+
+
+# --- чтение YAML-файла: предел размера, только обычные файлы, без якорей и алиасов ---
+# Файл сценария и файл сидов читаются теми же частями движка, что и папка приключения: якорь и
+# алиас раздувают малый файл в миллионы моделей (в сидах это ещё и каждый платный запрос
+# генератора), а канал FIFO вместо файла подвесил бы чтение.
+
+ANCHORS_REFUSED = "якоря и алиасы YAML не поддерживаются"
+TOO_LARGE = f"файл больше {MAX_YAML_BYTES // 1024} КБ"
+ANCHOR_SECRET = "sk-LEAK-anchor"
+ANCHORED_TEXTS = {
+    "якорь и алиас": "a: &base [1, 2]\nb: *base\n",
+    "якорь без алиаса": "a: &base [1, 2]\n",
+    "слияние по алиасу": "base: &base {x: 1}\nitem: {<<: *base}\n",
+    "алиас без якоря": "a: *base\n",
+    "алиас в корне": "*base\n",
+    "секрет в именах": f"[&{ANCHOR_SECRET} 1, *{ANCHOR_SECRET}]",
+    # PyYAML сам называет имя в сообщениях «неопределённый алиас» и «повторный якорь»: до них дело
+    # не должно дойти, иначе причину пришлось бы прятать.
+    "секрет в имени неопределённого алиаса": f"[*{ANCHOR_SECRET}]",
+    "секрет в именах повторных якорей": f"[&{ANCHOR_SECRET} 1, &{ANCHOR_SECRET} 2]",
+}
+
+needs_fifo = pytest.mark.skipif(
+    not (hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM")), reason="нужны FIFO и SIGALRM"
+)
+
+
+@pytest.fixture
+def fail_if_reading_hangs() -> Iterator[None]:
+    """Зависшее чтение канала роняет тест через пять секунд, а не подвешивает прогон."""
+
+    def give_up(signum: int, frame: object) -> None:
+        raise TimeoutError("чтение канала не закончилось")
+
+    previous = signal.signal(signal.SIGALRM, give_up)
+    signal.alarm(5)
+    yield
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, previous)
+
+
+def write_text_file(tmp_path: Path, text: str, name: str = "data.yaml") -> Path:
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_read_yaml_returns_the_data_of_a_good_file(tmp_path):
+    path = write_text_file(tmp_path, "a: [1, 2]\nb: текст\nc: {<<: {x: 1}}\n")
+
+    # Слияние со встроенным словарём (без алиаса) разрешено: бомбы оно не строит.
+    assert read_yaml(path) == {"a": [1, 2], "b": "текст", "c": {"x": 1}}
+
+
+@pytest.mark.parametrize("text", ANCHORED_TEXTS.values(), ids=ANCHORED_TEXTS.keys())
+def test_read_yaml_refuses_anchors_and_aliases_with_a_clear_reason(tmp_path, text):
+    with pytest.raises(UnreadableYaml, match=ANCHORS_REFUSED) as error:
+        read_yaml(write_text_file(tmp_path, text))
+
+    story = "".join(traceback.format_exception(error.value))
+    assert ANCHOR_SECRET not in story
+    # Исходное исключение разбора несёт позицию и разметку файла: цепочки у ошибки быть не должно.
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+def test_read_yaml_names_the_place_of_the_refused_alias(tmp_path):
+    with pytest.raises(UnreadableYaml, match=r"ComposerError, строка 2, столбец 4"):
+        read_yaml(write_text_file(tmp_path, "a: 1\nb: *base\n"))
+
+
+def test_read_yaml_names_a_second_document_without_quoting_the_file(tmp_path):
+    # Другая ошибка композера: текст PyYAML фиксирован, но и он не должен цитировать файл.
+    path = write_text_file(tmp_path, f"a: 1\n---\nb: {ANCHOR_SECRET}\n")
+
+    with pytest.raises(UnreadableYaml, match=r"^ComposerError, строка \d+, столбец \d+") as error:
+        read_yaml(path)
+
+    assert ANCHOR_SECRET not in str(error.value)
+
+
+def test_read_yaml_refuses_a_file_over_the_limit_and_takes_one_at_the_limit(tmp_path):
+    at_limit = write_text_file(tmp_path, "#" * MAX_YAML_BYTES, "at_limit.yaml")
+    over_limit = write_text_file(tmp_path, "#" * (MAX_YAML_BYTES + 1), "over_limit.yaml")
+
+    assert read_yaml(at_limit) is None  # один комментарий: данных нет, но файл прочитан
+    with pytest.raises(UnreadableYaml, match=TOO_LARGE) as error:
+        read_yaml(over_limit)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+def test_read_yaml_does_not_read_a_file_over_the_limit(tmp_path, monkeypatch):
+    path = write_text_file(tmp_path, "#" * (MAX_YAML_BYTES + 1))
+
+    def forbidden(self: Path) -> bytes:
+        raise AssertionError("файл больше предела прочитан")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(Path, "read_text", forbidden)
+    with pytest.raises(UnreadableYaml, match=TOO_LARGE):
+        read_yaml(path)
+
+
+def test_read_yaml_keeps_the_error_of_a_missing_file(tmp_path):
+    with pytest.raises(FileNotFoundError, match="nope.yaml"):
+        read_yaml(tmp_path / "nope.yaml")
+
+
+def test_read_yaml_keeps_the_error_of_a_file_that_is_not_utf8(tmp_path):
+    path = tmp_path / "data.yaml"
+    path.write_bytes(b"a: \xff\xfe\n")
+
+    with pytest.raises(UnicodeDecodeError):
+        read_yaml(path)
+
+
+def test_read_yaml_refuses_a_folder_under_a_file_name(tmp_path):
+    folder = tmp_path / "data.yaml"
+    folder.mkdir()
+
+    with pytest.raises(OSError, match="не обычный файл"):
+        read_yaml(folder)
+
+
+@pytest.mark.skipif(not Path("/dev/null").exists(), reason="нет /dev/null")
+def test_read_yaml_refuses_a_device_behind_a_file_name(tmp_path):
+    device = tmp_path / "data.yaml"
+    device.symlink_to("/dev/null")
+
+    with pytest.raises(OSError, match="не обычный файл"):
+        read_yaml(device)
+
+
+@needs_fifo
+def test_read_yaml_refuses_a_pipe_without_reading_it(tmp_path, fail_if_reading_hangs):
+    pipe = tmp_path / "data.yaml"
+    os.mkfifo(pipe)
+
+    with pytest.raises(OSError, match="не обычный файл"):
+        read_yaml(pipe)
+
+
+def test_load_scenario_refuses_a_scenario_with_an_alias_in_a_valid_shape(tmp_path):
+    scenario = write_text_file(
+        tmp_path,
+        "turns:\n  - steps: &say [{text: Привет}]\n  - steps: *say\n",
+    )
+
+    with pytest.raises(UnreadableYaml, match=ANCHORS_REFUSED):
+        load_scenario(scenario)
+
+
+def test_load_scenario_refuses_a_scenario_over_the_limit(tmp_path):
+    path = write_text_file(tmp_path, "turns: []\n" + "#" * MAX_YAML_BYTES)
+
+    with pytest.raises(UnreadableYaml, match=TOO_LARGE):
+        load_scenario(path)
+
+
+@needs_fifo
+def test_load_scenario_refuses_a_pipe_without_reading_it(tmp_path, fail_if_reading_hangs):
+    pipe = tmp_path / "scenario.yaml"
+    os.mkfifo(pipe)
+
+    with pytest.raises(OSError, match="не обычный файл"):
+        load_scenario(pipe)
 
 
 # --- обрезка трассы ---

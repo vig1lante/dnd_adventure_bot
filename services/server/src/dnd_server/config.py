@@ -1,9 +1,9 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, SecretStr, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, PositiveInt, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -14,12 +14,17 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        # `.env` ищется в текущем каталоге: относительные пути из `.env.example`
-        # (`./data/...`, `content/adventures`) тоже считаются от корня репозитория.
+        # `.env` ищется в текущем каталоге, поэтому сервер запускают из корня репозитория.
+        # От корня репозитория считается только путь SQLite в DATABASE_URL (db/session.py):
+        # база не зависит от каталога запуска. Остальные относительные пути (CONTENT_DIR,
+        # FAKE_LLM_SCENARIO) читаются от текущего каталога.
         env_file=".env",
         env_file_encoding="utf-8",
         # В `.env` могут лежать переменные других частей проекта.
         extra="ignore",
+        # Ошибка настройки уходит в журнал запуска. Без этого pydantic дописывает к ней входное
+        # значение: у секретного поля это сам секрет, у ошибки целой модели — все значения сразу.
+        hide_input_in_errors=True,
     )
 
     # По умолчанию prod: dev-вход и claude_code_cli включаются только явным APP_ENV=dev.
@@ -34,6 +39,14 @@ class Settings(BaseSettings):
     # секрета — на стороне потребителя.
     session_secret: SecretStr | None = None
     telegram_bot_token: SecretStr | None = None
+    # Имя бота без «@»: нужно для ссылок-приглашений `https://t.me/<имя>?startapp=<код>`. Набор
+    # символов — правило Telegram; шаблон не пускает в ссылку ничего лишнего.
+    telegram_bot_username: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
+    # Telegram-id тех, кто может создавать игры и выбирать провайдера и модель (решение владельца
+    # B6: «Только из списка»). Остальные только входят в чужую игру по коду. Пусто — в prod игры не
+    # создаёт никто; в dev создают dev-логины (см. auth/deps.py). Переменная — числа через запятую:
+    # NoDecode не даёт pydantic-settings разбирать её как JSON, запятые режет валидатор ниже.
+    game_creator_tg_ids: Annotated[tuple[PositiveInt, ...], NoDecode] = ()
 
     llm_provider: str = "fake"
     llm_model: str = "claude-opus-5-5"
@@ -65,6 +78,13 @@ class Settings(BaseSettings):
         if not isinstance(values, dict):
             return values
         return {name: value for name, value in values.items() if value != ""}
+
+    @field_validator("game_creator_tg_ids", mode="before")
+    @classmethod
+    def _split_creator_ids(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        return [part.strip() for part in value.split(",") if part.strip()]
 
 
 @lru_cache

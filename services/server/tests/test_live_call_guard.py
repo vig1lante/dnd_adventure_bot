@@ -17,6 +17,7 @@ from pathlib import Path
 import anthropic
 import openai
 import pytest
+from websockets.asyncio.client import connect as websockets_connect
 
 from dnd_server.llm.anthropic_api import AnthropicProvider
 from dnd_server.llm.base import ProviderError, TurnRequest
@@ -98,6 +99,16 @@ async def test_loopback_connections_stay_possible(live_call_attempts):
         writer.close()
 
     assert live_call_attempts == []
+
+
+async def test_a_websocket_client_to_an_external_host_is_refused_and_recorded(live_call_attempts):
+    # Клиенты сокетов в тестах ходят на loopback (`test_ws.py`); внешний адрес запрещён так же.
+    with pytest.raises(AssertionError, match="getaddrinfo"):
+        async with websockets_connect("ws://games.example.org/ws/games/1?token=t"):
+            pass
+
+    assert len(live_call_attempts) == 1
+    live_call_attempts.clear()
 
 
 async def test_a_sdk_that_swallows_the_refusal_still_fails_the_test(

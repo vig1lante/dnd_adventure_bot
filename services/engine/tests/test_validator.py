@@ -4,6 +4,7 @@
 ошибок, ни предупреждений, а каждый тест вносит в него одну правку и ждёт один код.
 """
 
+import time
 from collections.abc import Callable
 from typing import Any, get_args
 
@@ -16,7 +17,14 @@ from dnd_engine.adventure.budget import (
     encounter_xp,
 )
 from dnd_engine.adventure.schema import Adventure
-from dnd_engine.adventure.validator import DAMAGE_TYPES, Issue, Report, validate
+from dnd_engine.adventure.validator import (
+    DAMAGE_TYPES,
+    MAX_MESSAGE_LENGTH,
+    MAX_REF_LENGTH,
+    Issue,
+    Report,
+    validate,
+)
 from dnd_engine.content import SrdContent, load_srd
 from dnd_engine.tools.narrative import DamageType
 
@@ -1747,6 +1755,130 @@ def test_a_key_in_an_unlocked_place_of_an_unreachable_location_is_not_called_loc
     assert "внутри места" not in message and "заперто" not in message
 
 
+# --- скорость прохождения: длинные цепочки замков ---
+# Приключение пишет автор или кто-то передал папку, а валидатор идёт при старте сервера: цепочка
+# из сотен сундуков не должна задерживать старт. Раньше каждый круг прохождения заново искал для
+# каждого предмета место, где он лежит, перебором всех мест локации, и 800 сундуков считались около
+# 47 с. Порог в тестах с большим запасом над целью (меньше секунды): он ловит возврат к кубическому
+# росту, но не зависит от загруженности машины.
+
+CHAIN_LENGTH = 800
+CHAIN_TIME_LIMIT_SECONDS = 5
+
+
+def add_chest_chain(data: dict[str, Any], length: int, *, closed_ring: bool = False) -> None:
+    """В деревню добавлено `length` сундуков: сундук k заперт ключом k−1 и хранит ключ k. Первый
+    сундук открыт; при `closed_ring` он заперт последним ключом, и ни один сундук не открыть."""
+    village = data["locations"]["village"]
+    for number in range(length):
+        lock = number - 1 if number else (length - 1 if closed_ring else None)
+        village["features"].append(
+            {
+                "id": f"chest-{number}",
+                "name": f"Сундук {number}",
+                "description": "Окованный сундук.",
+                "locked_by": None if lock is None else f"item:chest-key-{lock}",
+                "reveals": [{"kind": "item", "id": f"chest-key-{number}"}],
+            }
+        )
+        data["items"][f"chest-key-{number}"] = DEAD_KEY | {
+            "id": f"chest-key-{number}",
+            "holder": "location:village",
+        }
+
+
+def validated_within_limit(adventure: Adventure, srd: SrdContent) -> Report:
+    started = time.perf_counter()
+    report = validate(adventure, srd)
+    assert time.perf_counter() - started < CHAIN_TIME_LIMIT_SECONDS
+    return report
+
+
+def test_a_chain_of_800_chests_each_holding_the_key_to_the_next_is_validated_quickly(srd):
+    adventure = edited(lambda data: add_chest_chain(data, CHAIN_LENGTH))
+
+    assert validated_within_limit(adventure, srd).issues == []
+
+
+def test_a_ring_of_800_chests_that_lock_each_other_is_validated_quickly_and_all_are_lost(srd):
+    adventure = edited(lambda data: add_chest_chain(data, CHAIN_LENGTH, closed_ring=True))
+
+    report = validated_within_limit(adventure, srd)
+
+    assert codes(report) == ["unreachable_key"] * CHAIN_LENGTH
+    assert {issue.ref for issue in report.issues} == {
+        f"location:village/feature:chest-{number}" for number in range(CHAIN_LENGTH)
+    }
+    assert all(issue.severity == "error" for issue in report.issues)
+
+
+def add_room_chain(data: dict[str, Any], length: int) -> None:
+    """Из деревни ведёт цепочка из `length` комнат: дверь из комнаты k заперта ключом k, а ключ k
+    лежит в ящике комнаты k. Чтобы дойти до последней, нужно получить все ключи по порядку."""
+    data["locations"]["village"]["exits"].append(
+        {"id": "to-room-0", "to": "room-0", "direction": "восток", "description": "Дверь."}
+    )
+    for number in range(length):
+        exits = [
+            {"id": f"back-{number}", "to": "village", "direction": "назад", "description": "."}
+        ]
+        if number + 1 < length:
+            exits.append(
+                {
+                    "id": f"to-room-{number + 1}",
+                    "to": f"room-{number + 1}",
+                    "direction": "дальше",
+                    "description": "Дверь.",
+                    "locked_by": f"item:room-key-{number}",
+                }
+            )
+        data["locations"][f"room-{number}"] = {
+            "id": f"room-{number}",
+            "name": f"Комната {number}",
+            "read_aloud": "Тесно.",
+            "exits": exits,
+            "features": [
+                {
+                    "id": f"box-{number}",
+                    "name": "Ящик",
+                    "description": "Ящик с ключом.",
+                    "reveals": [{"kind": "item", "id": f"room-key-{number}"}],
+                }
+            ],
+        }
+        data["items"][f"room-key-{number}"] = DEAD_KEY | {
+            "id": f"room-key-{number}",
+            "holder": f"location:room-{number}",
+        }
+
+
+def test_a_chain_of_800_rooms_each_behind_the_key_of_the_previous_one_is_validated_quickly(srd):
+    # Другая форма той же цепочки: растёт число локаций, а не особенностей одной локации. Оценка
+    # времени игры от такого числа комнат уходит от цели, это единственное замечание.
+    adventure = edited(lambda data: add_room_chain(data, CHAIN_LENGTH))
+
+    report = validated_within_limit(adventure, srd)
+
+    assert codes(report) == ["duration_mismatch"]
+    assert report.blocking is False
+
+
+def test_a_chain_broken_in_the_middle_loses_only_the_chests_from_the_break_on(srd):
+    # Сундук 3 заперт ключом, которого нет в игре: ключи 3 и дальше недостижимы, ключи 0–2 нет.
+    def edit(data: dict[str, Any]) -> None:
+        add_chest_chain(data, 8)
+        data["items"]["ghost-key"] = DEAD_KEY | {"id": "ghost-key"}
+        chests = {f["id"]: f for f in data["locations"]["village"]["features"]}
+        chests["chest-3"]["locked_by"] = "item:ghost-key"
+
+    report = validate(edited(edit), srd)
+
+    assert {issue.ref for issue in report.issues} == {
+        f"location:village/feature:chest-{number}" for number in range(3, 8)
+    }
+    assert codes(report) == ["unreachable_key"] * 5
+
+
 # --- открытия и улики ---
 
 
@@ -1990,3 +2122,219 @@ def test_a_duration_more_than_25_percent_off_the_target_is_a_warning(srd, hours)
 
     assert (issue.code, issue.severity, issue.ref) == ("duration_mismatch", "warning", "adventure")
     assert "86" in issue.message
+
+
+# --- безопасный текст проблем ---
+# Отчёт идёт в журнал сервера, в ответ создателю игры и в отчёт генератора. Папку приключения пишет
+# владелец или ему её кто-то передал, поэтому текст проблем — чужой: id зоны и id действия монстра
+# шаблона не имеют (модели боя общие с состоянием игры), а ссылки (`Exit.to`, `locked_by`, `holder`)
+# — свободные строки. Ссылка и сообщение каждой проблемы состоят из печатных символов и ограничены
+# по длине, а после чужого значения в сообщении остаётся причина.
+
+HOSTILE = "x\nFAKE LOG LINE\x1b[31m\u2028\u202e" + "Z" * 3000
+HOSTILE_ESCAPED = "x\\nFAKE LOG LINE\\x1b[31m\\u2028\\u202e"
+
+
+def assert_issues_are_safe(report: Report) -> None:
+    assert report.issues
+    for issue in report.issues:
+        # Значения не выводятся в сообщение проверки: чужой текст на три тысячи символов.
+        ref_is_safe = issue.ref.isprintable() and len(issue.ref) <= MAX_REF_LENGTH
+        message_is_safe = issue.message.isprintable() and len(issue.message) <= MAX_MESSAGE_LENGTH
+        assert ref_is_safe, f"ссылка проблемы {issue.code} небезопасна"
+        assert message_is_safe, f"сообщение проблемы {issue.code} небезопасно"
+
+
+def test_a_repeated_zone_with_a_hostile_id_gives_safe_issues_and_names_the_reason(srd):
+    def hostile_zones(data: dict[str, Any]) -> None:
+        zones = [{"id": HOSTILE, "name": "зал"}, {"id": HOSTILE, "name": "ещё зал"}]
+        data["locations"]["cemetery"]["zones"] = zones
+
+    report = validate(edited(hostile_zones), srd)
+
+    assert_issues_are_safe(report)
+    repeated = [issue for issue in report.issues if issue.message.startswith("зона: id")]
+    assert len(repeated) == 1
+    assert repeated[0].ref.startswith(f"location:cemetery/zone:{HOSTILE_ESCAPED}")
+    assert "повторяется" in repeated[0].message
+
+
+def hostile_action_ids(data: dict[str, Any]) -> None:
+    bite = custom_monster_data()["actions"][0]
+    actions = [bite | {"id": HOSTILE}, bite | {"id": HOSTILE}]
+    data["monsters"] = {"crypt-rat": custom_monster_data(actions=actions)}
+
+
+def test_a_repeated_action_with_a_hostile_id_gives_safe_issues_and_names_the_reason(srd):
+    report = validate(edited(hostile_action_ids), srd)
+
+    assert_issues_are_safe(report)
+    repeated = [issue for issue in report.issues if issue.message.startswith("действие: id")]
+    assert len(repeated) == 1
+    assert repeated[0].ref.startswith(f"monster:crypt-rat/action:{HOSTILE_ESCAPED}")
+    assert "повторяется" in repeated[0].message
+
+
+def hostile_link_end(data: dict[str, Any]) -> None:
+    link = {"a": HOSTILE, "b": "here", "distance": "near"}
+    data["locations"]["cemetery"]["links"] = [link]
+
+
+def hostile_engine_flag_reveal(data: dict[str, Any]) -> None:
+    flag = {"kind": "flag", "id": "encounter:" + HOSTILE}
+    data["locations"]["village"]["features"][0]["reveals"] = [flag]
+
+
+def hostile_item_holder_of_a_revealed_item(data: dict[str, Any]) -> None:
+    data["items"]["potion"]["holder"] = HOSTILE
+    data["locations"]["cemetery"]["features"][0]["reveals"].append(ITEM_REVEAL)
+
+
+def hostile_monster(**overrides: Any) -> Callable[[dict[str, Any]], None]:
+    def edit(data: dict[str, Any]) -> None:
+        data["monsters"] = {"crypt-rat": custom_monster_data(**overrides)}
+
+    return edit
+
+
+def at(path: FieldPath, value: Any) -> Callable[[dict[str, Any]], None]:
+    """Правка «сырых» данных: значение `value` по пути из ключей и индексов."""
+
+    def edit(data: dict[str, Any]) -> None:
+        target: Any = data
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+
+    return edit
+
+
+# (правка, фрагмент причины, который виден в сообщении после чужого значения)
+HOSTILE_VALUES = [
+    pytest.param(
+        at(("locations", "crypt", "exits", 0, "to"), HOSTILE), "никуда не ведёт", id="exit-to"
+    ),
+    pytest.param(at(("items", "key", "holder"), HOSTILE), "никуда не ведёт", id="item-holder"),
+    pytest.param(
+        at(("locations", "crypt", "exits", 0, "locked_by"), HOSTILE),
+        "никуда не ведёт",
+        id="exit-lock",
+    ),
+    pytest.param(
+        at(("locations", "village", "features", 0, "locked_by"), HOSTILE),
+        "никуда не ведёт",
+        id="feature-lock",
+    ),
+    pytest.param(
+        at(("revelations", "kidnapper", "clues", 0, "where"), HOSTILE),
+        "никуда не ведёт",
+        id="clue-where",
+    ),
+    pytest.param(at(("npcs", "marta", "location_id"), HOSTILE), "никуда не ведёт", id="npc-place"),
+    pytest.param(
+        at(("npcs", "marta", "statblock"), HOSTILE), "никуда не ведёт", id="npc-statblock"
+    ),
+    pytest.param(
+        at(("npcs", "marta", "relations", 0, "npc_id"), HOSTILE),
+        "никуда не ведёт",
+        id="npc-relation",
+    ),
+    pytest.param(at(("items", "key", "base_item"), HOSTILE), "никуда не ведёт", id="srd-item"),
+    pytest.param(
+        at(("encounters", "bones", "location_id"), HOSTILE), "никуда не ведёт", id="fight-place"
+    ),
+    pytest.param(at(("seeds",), [HOSTILE]), "нет ни в одной коллекции", id="seed"),
+    pytest.param(
+        at(("encounters", "bones", "monsters", 0, "monster_id"), HOSTILE),
+        "нет ни в SRD",
+        id="monster-id",
+    ),
+    pytest.param(at(("encounters", "bones", "pc_zone"), HOSTILE), " нет", id="party-zone"),
+    pytest.param(
+        at(("encounters", "bones", "monsters", 0, "zone"), HOSTILE), " нет", id="monster-zone"
+    ),
+    pytest.param(hostile_link_end, " нет", id="link-end"),
+    pytest.param(at(("rules", "modules"), [HOSTILE]), "доступны", id="rules-module"),
+    pytest.param(
+        hostile_engine_flag_reveal, "находка не может его выставить", id="engine-flag-reveal"
+    ),
+    pytest.param(
+        at(("locations", "village", "features", 0, "locked_by"), "flag:encounter:" + HOSTILE),
+        "открылся бы в начале боя",
+        id="engine-flag-lock",
+    ),
+    pytest.param(
+        hostile_item_holder_of_a_revealed_item, "должен лежать в локации", id="revealed-holder"
+    ),
+    pytest.param(hostile_action_ids, "повторяется", id="action-id"),
+    pytest.param(
+        hostile_monster(actions=rat_actions(1, multiattack=[HOSTILE])),
+        "ссылается на несуществующий id",
+        id="multiattack-target",
+    ),
+    pytest.param(
+        hostile_monster(actions=rat_actions(0, damage_type=HOSTILE)),
+        "допустимы",
+        id="damage-type",
+    ),
+    pytest.param(
+        hostile_monster(actions=rat_actions(2, condition=HOSTILE)), "допустимы", id="condition"
+    ),
+    pytest.param(
+        hostile_monster(actions=rat_actions(0, damage="2d6\n\x1b[31m")),
+        "не удалось разобрать запись костей",
+        id="dice",
+    ),
+    pytest.param(
+        hostile_monster(actions=rat_actions(0, id=HOSTILE, attack_bonus=99)),
+        "вне пределов",
+        id="action-id-in-number",
+    ),
+]
+
+
+@pytest.mark.parametrize(("edit", "reason"), HOSTILE_VALUES)
+def test_a_hostile_value_from_a_file_gives_safe_issues_and_leaves_the_reason_visible(
+    srd, edit, reason
+):
+    report = validate(edited(edit), srd)
+
+    assert_issues_are_safe(report)
+    assert any(reason in issue.message for issue in report.issues), report.issues
+
+
+def test_the_longest_reference_made_of_pattern_ids_is_not_clipped():
+    longest_id = "a" * 64  # длиннее id шаблон не пропускает
+    refs = [
+        f"location:{longest_id}/feature:{longest_id}",
+        f"location:{longest_id}/exit:{longest_id}",
+        f"revelation:{longest_id}/clue:{longest_id}",
+    ]
+
+    assert max(map(len, refs)) <= MAX_REF_LENGTH
+
+
+def test_a_longest_legal_id_stays_whole_in_a_message(srd):
+    longest_id = "a" * 64
+    adventure = with_value(("locations", "crypt", "exits", 0, "to"), longest_id)
+
+    issue = only_issue(validate(adventure, srd))
+
+    assert f"location:{longest_id}" in issue.message and "…" not in issue.message
+
+
+def test_the_shipped_adventure_keeps_its_report_word_for_word(demo_adventure, srd):
+    # Обычные id короче пределов: нейтрализация и обрезка текста проблем отчёт не меняют.
+    report = validate(demo_adventure, srd)
+
+    assert (report.blocking, report.score) == (False, 91)
+    assert [(issue.code, issue.severity, issue.ref, issue.message) for issue in report.issues] == [
+        ("encounter_too_easy", "warning", "encounter:fabian-fight", "бой слишком лёгок: 550 XP"),
+        ("encounter_too_easy", "warning", "encounter:risen-bones", "бой слишком лёгок: 250 XP"),
+        (
+            "duration_mismatch",
+            "warning",
+            "adventure",
+            "оценка времени игры 116 мин (1.9 ч) отличается от цели 1.5 ч больше чем на 25%",
+        ),
+    ]

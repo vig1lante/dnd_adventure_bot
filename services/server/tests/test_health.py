@@ -7,7 +7,7 @@ from dnd_server.config import Settings, get_settings
 async def test_health_reports_env():
     app = create_app(Settings(app_env="dev"))
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
         response = await client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "env": "dev"}
@@ -15,7 +15,7 @@ async def test_health_reports_env():
 
 async def get_health(app) -> httpx.Response:
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
         return await client.get("/health")
 
 

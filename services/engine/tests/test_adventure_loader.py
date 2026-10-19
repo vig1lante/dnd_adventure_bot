@@ -1,15 +1,19 @@
 """Загрузка и сохранение папки приключения (спека §6.1): структура, ошибки, безопасность."""
 
-from collections.abc import Callable
+import copy
+import os
+import signal
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from dnd_engine.adventure.loader import AdventureFormatError, dump_adventure, load_adventure
 from dnd_engine.adventure.schema import Adventure
-from dnd_engine.content import load_srd
+from dnd_engine.content import MAX_PROBLEM_LENGTH, MAX_YAML_BYTES, load_srd
 
 TRICKY_TEXT = (
     'Фабиан: «долг» — "да" # не комментарий; yes; null; 12:30; - не список\n\tвторая строка 🦴 '
@@ -386,7 +390,8 @@ def test_several_errors_in_one_file_are_all_reported(folder: Path):
 def test_revelations_list_errors_name_the_entry(folder: Path):
     def spoil(entries: list[Any]) -> None:
         del entries[1]["statement"]
-        entries += [entries[0], "строка"]
+        # Копия, а не та же запись: `safe_dump` записал бы повтор объекта якорем, а якоря запрещены.
+        entries += [copy.deepcopy(entries[0]), "строка"]
 
     edit_yaml(folder / "revelations.yaml", spoil)
 
@@ -556,13 +561,61 @@ def test_a_subfolder_in_an_entity_folder_is_reported_with_its_path(folder: Path)
     assert "папк" in problems[0]
 
 
-def test_a_folder_named_like_a_yaml_file_is_still_a_read_error(folder: Path):
+def test_a_folder_named_like_a_yaml_file_is_a_read_error_with_its_own_reason(folder: Path):
     (folder / "locations" / "village.yaml").unlink()
     (folder / "locations" / "village.yaml").mkdir()
 
     problems = problems_of(folder)
 
-    assert len(problems) == 1 and problems[0].startswith("locations/village.yaml:")
+    assert problems == ["locations/village.yaml: не удалось прочитать файл (не обычный файл)"]
+
+
+# Файл особого вида под именем `*.yaml` (канал FIFO, устройство) размера не имеет, предел размера
+# его не ограничивает, а чтение канала без писателя не заканчивается. Загрузчик отказывает такому
+# файлу по виду, не открывая его.
+
+needs_fifo = pytest.mark.skipif(
+    not (hasattr(os, "mkfifo") and hasattr(signal, "SIGALRM")), reason="нужны FIFO и SIGALRM"
+)
+
+
+@pytest.fixture
+def fail_if_reading_hangs() -> Iterator[None]:
+    """Зависшее чтение канала роняет тест через пять секунд, а не подвешивает прогон."""
+
+    def give_up(signum: int, frame: object) -> None:
+        raise TimeoutError("чтение канала не закончилось")
+
+    previous = signal.signal(signal.SIGALRM, give_up)
+    signal.alarm(5)
+    yield
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, previous)
+
+
+@needs_fifo
+@pytest.mark.parametrize(
+    "name", ["adventure.yaml", "revelations.yaml", "seeds.yaml", "npcs/marta.yaml"]
+)
+def test_a_pipe_under_a_yaml_name_is_refused_without_being_read(
+    folder: Path, fail_if_reading_hangs: None, name: str
+):
+    (folder / name).unlink(missing_ok=True)
+    os.mkfifo(folder / name)
+
+    problems = problems_of(folder)
+
+    assert problems == [f"{name}: не удалось прочитать файл (не обычный файл)"]
+
+
+@pytest.mark.skipif(not Path("/dev/null").exists(), reason="нет /dev/null")
+def test_a_device_behind_a_yaml_name_is_refused_like_a_pipe(folder: Path):
+    (folder / "items" / "key.yaml").unlink()
+    (folder / "items" / "key.yaml").symlink_to("/dev/null")
+
+    problems = problems_of(folder)
+
+    assert problems == ["items/key.yaml: не удалось прочитать файл (не обычный файл)"]
 
 
 def test_a_missing_or_empty_entity_folder_is_still_fine(folder: Path, adventure: Adventure):
@@ -592,7 +645,7 @@ def test_unsafe_yaml_tag_is_rejected_and_not_executed(folder: Path, tmp_path: Pa
     assert len(problems) == 1 and problems[0].startswith("items/key.yaml:")
 
 
-def test_alias_bomb_is_rejected_by_the_schema_quickly(folder: Path):
+def test_alias_bomb_is_rejected_before_anything_is_expanded(folder: Path):
     layers = ["a0: &a0 [x, x, x, x, x, x, x, x, x, x]"]
     layers += [f"a{i}: &a{i} [{', '.join([f'*a{i - 1}'] * 10)}]" for i in range(1, 12)]
     bomb = "\n".join(layers) + "\nid: key\nname: *a11\ndescription: d\nholder: gone\n"
@@ -600,9 +653,245 @@ def test_alias_bomb_is_rejected_by_the_schema_quickly(folder: Path):
 
     problems = problems_of(folder)
 
-    # Поле `name` — строка: вложенный список отвергается сразу, без обхода 10^12 элементов.
-    assert any("items/key.yaml, поле name" in problem for problem in problems)
-    assert all(len(problem) < 500 for problem in problems)  # значение не попадает в сообщение
+    # Якоря запрещены целиком: файл не разворачивается и до проверки схемы не доходит.
+    assert len(problems) == 1 and problems[0].startswith("items/key.yaml: некорректный YAML")
+    assert "якор" in problems[0] and "алиас" in problems[0]
+
+
+# --- якоря и алиасы YAML ---
+# Алиас `*a` отдаёт тот же объект, который схема потом проверяет заново на каждом упоминании,
+# поэтому файл в несколько КБ превращается в миллионы моделей (K алиасов на K алиасов даёт K²
+# объектов). Запись якорей не пишет (`dump_adventure` их не создаёт), рукописным приключениям они
+# не нужны, поэтому запрещены якорь и алиас, а значит и слияние `<<: *якорь`. Слияние со встроенным
+# словарём (`<<: {a: 1}`) разрешено: без алиаса оно линейно и бомбы не строит.
+
+ANCHOR_DOCUMENTS = {
+    "алиас": "x: &a 1\ny: *a\n",
+    "якорь-без-алиаса": "x: &a 1\n",
+    "якорь-на-списке": "x: &a [1, 2]\n",
+    "ключ-слияния": "base: &b {a: 1}\nmerged:\n  <<: *b\n",
+    "алиас-без-якоря": "x: *missing\n",
+}
+
+
+@pytest.mark.parametrize("document", ANCHOR_DOCUMENTS.values(), ids=ANCHOR_DOCUMENTS.keys())
+def test_yaml_anchors_and_aliases_are_rejected_with_the_file_path_and_line(
+    folder: Path, document: str
+):
+    (folder / "npcs" / "marta.yaml").write_text(document, encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1
+    assert problems[0].startswith("npcs/marta.yaml: некорректный YAML (строка ")
+    assert "якор" in problems[0] and "алиас" in problems[0]
+
+
+@pytest.mark.parametrize(
+    ("name", "document"),
+    [
+        ("adventure.yaml", "x: &a 1\ny: *a\n"),
+        ("locations/village.yaml", "x: &a 1\ny: *a\n"),
+        ("revelations.yaml", "- &a x\n- *a\n"),
+        ("seeds.yaml", "- &a x\n- *a\n"),
+    ],
+)
+def test_anchors_are_rejected_in_every_file_the_loader_reads(
+    folder: Path, name: str, document: str
+):
+    (folder / name).write_text(document, encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].startswith(f"{name}: некорректный YAML")
+
+
+TEXTS_WITH_INDICATORS = [
+    "&a",
+    "*a",
+    "&",
+    "*",
+    "<<",
+    "!тег",
+    "- не список",
+    "Тор & Ко * 2 &amp; *x*",
+]
+
+
+@pytest.mark.parametrize("text", TEXTS_WITH_INDICATORS)
+def test_text_that_looks_like_an_anchor_or_alias_survives_dump_and_load(tmp_path: Path, text: str):
+    data = adventure_data()
+    data["pitch"] = text
+    data["locations"]["village"]["read_aloud"] = text
+    adventure = Adventure.model_validate(data)
+
+    dump_adventure(adventure, tmp_path / "adv")
+
+    assert load_adventure(tmp_path / "adv") == adventure
+
+
+# --- предел размера файла ---
+
+
+def write_entity_file_of_size(folder: Path, size: int) -> Path:
+    """Файл предмета `key` ровно `size` байт: корректное содержимое и комментарий-заполнитель."""
+    path = folder / "items" / "key.yaml"
+    body = path.read_bytes()
+    path.write_bytes(body + b"#" * (size - len(body)))
+    return path
+
+
+def test_a_file_one_byte_over_the_limit_is_rejected_though_its_yaml_is_valid(folder: Path):
+    write_entity_file_of_size(folder, MAX_YAML_BYTES + 1)
+
+    problems = problems_of(folder)
+
+    assert problems == [f"items/key.yaml: файл больше {MAX_YAML_BYTES // 1024} КБ"]
+
+
+def test_a_file_over_the_limit_is_refused_without_being_read(
+    folder: Path, monkeypatch: pytest.MonkeyPatch
+):
+    big = write_entity_file_of_size(folder, MAX_YAML_BYTES + 1)
+    read_bytes = Path.read_bytes
+
+    def read_all_but_the_big_one(self: Path) -> bytes:
+        assert self != big, "файл больше предела прочитан целиком"
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_all_but_the_big_one)
+
+    assert problems_of(folder) == [f"items/key.yaml: файл больше {MAX_YAML_BYTES // 1024} КБ"]
+
+
+def test_a_file_of_exactly_the_limit_is_read(folder: Path, adventure: Adventure):
+    write_entity_file_of_size(folder, MAX_YAML_BYTES)
+
+    assert load_adventure(folder) == adventure
+
+
+@pytest.mark.parametrize("name", ["adventure.yaml", "revelations.yaml", "seeds.yaml"])
+def test_the_size_limit_applies_to_every_file_the_loader_reads(folder: Path, name: str):
+    (folder / name).write_bytes(b"[]\n" + b"#" * MAX_YAML_BYTES)
+
+    problems = problems_of(folder)
+
+    assert problems == [f"{name}: файл больше {MAX_YAML_BYTES // 1024} КБ"]
+
+
+# --- проблемы загрузчика: безопасный текст ограниченной длины ---
+# Папку приключения пишет владелец или ему её кто-то передал: тег, ключ и имя файла в проблемах —
+# чужой текст. Он не должен ни раздувать отчёт до сотен КБ, ни рисовать в терминале и логе свои
+# строки (ESC, BEL, возврат каретки, перевод строки), поэтому каждая проблема ограничена по длине
+# и содержит только печатные символы.
+
+HOSTILE_ENTITY_TEXT = {
+    "длинный-тег": "surprise: !" + "t" * 100_000 + " x\n",
+    "длинный-явный-ключ": "? " + "k" * 100_000 + "\n: 1\n",
+    "ключ-с-ESC-BEL-CR-LF": '"\\e[2Kx\\a\\r\\n\\u202e": 1\n',
+    "длинный-ключ-с-ESC": '? "' + "\\e" * 5_000 + '"\n: 1\n',
+}
+
+
+@pytest.mark.parametrize("text", HOSTILE_ENTITY_TEXT.values(), ids=HOSTILE_ENTITY_TEXT.keys())
+def test_every_problem_is_a_short_line_of_visible_characters(folder: Path, text: str):
+    path = folder / "npcs" / "marta.yaml"
+    path.write_text(path.read_text(encoding="utf-8") + text, encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert problems and all(problem.startswith("npcs/marta.yaml") for problem in problems)
+    assert all(len(problem) <= MAX_PROBLEM_LENGTH and problem.isprintable() for problem in problems)
+
+
+def test_a_long_extra_key_is_cut_but_the_reason_stays_readable(folder: Path):
+    path = folder / "npcs" / "marta.yaml"
+    path.write_text(
+        path.read_text(encoding="utf-8") + "? " + "k" * 100_000 + "\n: 1\n", encoding="utf-8"
+    )
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1
+    assert "…" in problems[0] and "Extra inputs are not permitted" in problems[0]
+
+
+def test_control_characters_of_an_extra_key_are_shown_as_escapes(folder: Path):
+    path = folder / "npcs" / "marta.yaml"
+    path.write_text(path.read_text(encoding="utf-8") + '"\\e[2K\\a\\r": 1\n', encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and "\\x1b[2K\\x07\\r" in problems[0]
+
+
+def test_a_long_yaml_tag_is_cut_with_an_ellipsis_after_the_file_and_line(folder: Path):
+    (folder / "items" / "key.yaml").write_text("!" + "t" * 100_000 + " x\n", encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and len(problems[0]) == MAX_PROBLEM_LENGTH
+    assert problems[0].startswith("items/key.yaml: некорректный YAML (строка 1): ")
+    assert problems[0].endswith("…")
+
+
+def test_a_file_name_with_control_characters_is_shown_as_escapes(folder: Path):
+    (folder / "locations" / "a\x07b\x1b.json").write_text("id: x\n", encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].startswith("locations/a\\x07b\\x1b.json:")
+
+
+LONG_NAME = "n" * 240  # имя файла вправе быть до 255 байт, а id по шаблону — до 64 символов
+
+
+def test_a_long_file_name_is_cut_but_the_reason_stays_readable(folder: Path):
+    (folder / "npcs" / f"{LONG_NAME}.yaml").write_text("id: x\n", encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert all(len(problem) <= MAX_PROBLEM_LENGTH and problem.isprintable() for problem in problems)
+    assert any("не совпадает с именем файла" in problem for problem in problems)
+    assert any("Field required" in problem for problem in problems)
+    assert all(problem.startswith("npcs/nnn") for problem in problems)
+
+
+@pytest.mark.parametrize(
+    ("file_name", "reason"),
+    [
+        (f"{LONG_NAME}.json", "не читается, сущности лежат только в файлах *.yaml"),
+        (f"{LONG_NAME}.yaml", "ожидался объект (словарь)"),
+    ],
+    ids=["not-yaml", "empty-yaml"],
+)
+def test_a_long_file_name_does_not_eat_the_reason_of_a_read_problem(
+    folder: Path, file_name: str, reason: str
+):
+    (folder / "npcs" / file_name).write_text("", encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].endswith(reason)
+    assert len(problems[0]) <= MAX_PROBLEM_LENGTH
+
+
+def test_a_long_folder_name_does_not_eat_the_reason_either(folder: Path):
+    (folder / "npcs" / LONG_NAME).mkdir()
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and "вложенные папки не читаются" in problems[0]
+
+
+def test_error_keeps_each_problem_one_visible_bounded_line():
+    error = AdventureFormatError(["a\x1b]52;c;x\x07b\r\nc", "x" * 1000, "короткая"])
+
+    first, second, third = error.problems
+    assert first == "a\\x1b]52;c;x\\x07b\\r\\nc"
+    assert len(second) == MAX_PROBLEM_LENGTH and second.endswith("…")
+    assert third == "короткая"
+    assert str(error).count("\n") == 3  # заголовок и по строке на проблему, чужих строк нет
 
 
 # --- безопасность записи ---
@@ -669,3 +958,128 @@ def test_loaded_ids_cannot_point_outside_the_folder(folder: Path):
     problems = problems_of(folder)
 
     assert any("npcs/marta.yaml" in problem for problem in problems)
+
+
+# --- круг «запись → чтение» для переводов строк Unicode ---
+# PyYAML пишет строку с U+0085 (NEL) в одинарных кавычках «сырым» символом, а читает его как обычный
+# перевод строки, который сворачивается в пробел: после круга текст отличается от записанного.
+# U+2028 и U+2029 круг переживают, но тоже «переводы строк»: все три пишутся в двойных кавычках
+# с экранированием, а текст без них остаётся читаемым, как был.
+
+UNICODE_BREAKS = ["\x85", "\u2028", "\u2029"]
+TEXT_AROUND_A_BREAK = {
+    "один-символ": "{}",
+    "внутри-слов": "до{}после",
+    "в-начале": "{}после",
+    "в-конце": "до{}",
+    "подряд-два": "до{0}{0}после",
+    "после-обычного-перевода": "до\n{}после",
+    "перед-обычным-переводом": "до{}\nпосле",
+    "после-CRLF": "до\r\n{}после",
+    "длинная-строка-с-переносом": "строка {0} " + "и ещё слова " * 20 + "{0}конец",
+}
+
+
+@pytest.mark.parametrize("pattern", TEXT_AROUND_A_BREAK.values(), ids=TEXT_AROUND_A_BREAK.keys())
+@pytest.mark.parametrize("line_break", UNICODE_BREAKS, ids=["NEL", "LS", "PS"])
+def test_unicode_line_breaks_survive_dump_and_load(tmp_path: Path, line_break: str, pattern: str):
+    text = pattern.format(line_break)
+    data = adventure_data()
+    data["pitch"] = text
+    data["locations"]["village"]["read_aloud"] = text
+    data["locations"]["village"]["exits"][0]["locked_by"] = f"flag:{text}"
+    data["seeds"] = ["marta", "village"]
+    adventure = Adventure.model_validate(data)
+
+    dump_adventure(adventure, tmp_path / "adv")
+
+    assert load_adventure(tmp_path / "adv") == adventure
+
+
+def test_all_unicode_line_breaks_in_one_text_survive_the_round_trip(tmp_path: Path):
+    data = adventure_data()
+    data["pitch"] = "a\x85b\u2028c\u2029d\ne\r\nf\rg"
+    adventure = Adventure.model_validate(data)
+
+    dump_adventure(adventure, tmp_path / "adv")
+
+    assert load_adventure(tmp_path / "adv").pitch == data["pitch"]
+
+
+def test_only_texts_with_unicode_line_breaks_are_written_escaped(tmp_path: Path):
+    data = adventure_data()
+    data["pitch"] = "Ветер\x85свистит"
+    dump_adventure(Adventure.model_validate(data), tmp_path / "adv")
+
+    text = (tmp_path / "adv" / "adventure.yaml").read_text(encoding="utf-8")
+
+    assert "\\N" in text and "\x85" not in text
+    assert "title: Склеп у деревни\n" in text  # остальной текст по-прежнему читаемый
+
+
+def test_dump_of_ordinary_text_is_what_plain_safe_dump_writes(folder: Path):
+    # Поведение для обычного текста (с табуляцией, кавычками и переводами строк `\n`) не меняется.
+    for file in folder.rglob("*.yaml"):
+        text = file.read_text(encoding="utf-8")
+        again = yaml.safe_dump(yaml.safe_load(text), allow_unicode=True, sort_keys=False)
+        assert text == again, file.name
+
+
+# --- переводы строк Unicode в настоящем приключении ---
+# Круг «запись -> чтение» проверен выше на коротком приключении теста. Здесь он проходит на
+# рукописном `demo-crypt` с символом перевода строки внутри каждого свободного текста: названия,
+# описания, реплики, заметки мастера, улики, замки на флагах. Какие поля свободные, тест не
+# перечисляет: поле с символом принимает схема, значит, это текст, а не id, ссылка или enum.
+
+
+def string_paths(node: Any, path: tuple[str | int, ...] = ()) -> list[tuple[str | int, ...]]:
+    """Пути ко всем строковым значениям вложенных словарей и списков (ключи словарей не в счёт)."""
+    if isinstance(node, dict):
+        return [p for key, value in node.items() for p in string_paths(value, (*path, key))]
+    if isinstance(node, list):
+        return [p for index, value in enumerate(node) for p in string_paths(value, (*path, index))]
+    return [path] if isinstance(node, str) else []
+
+
+def value_at(data: Any, path: tuple[str | int, ...]) -> Any:
+    for step in path:
+        data = data[step]
+    return data
+
+
+def put_at(data: Any, path: tuple[str | int, ...], value: str) -> None:
+    value_at(data, path[:-1])[path[-1]] = value
+
+
+def mark_free_texts(data: dict[str, Any]) -> int:
+    """Вставляет по переводу строки Unicode (по кругу NEL, LS, PS) в середину каждой строки, которую
+    схема принимает с ним. Возвращает, в скольких строках это удалось."""
+    marked = 0
+    for path in string_paths(data):
+        text = value_at(data, path)
+        middle = len(text) // 2
+        put_at(data, path, text[:middle] + UNICODE_BREAKS[marked % 3] + text[middle:])
+        try:
+            Adventure.model_validate(data)
+        except ValidationError:  # id, ссылка или перечисление: не свободный текст
+            put_at(data, path, text)
+        else:
+            marked += 1
+    return marked
+
+
+def test_the_demo_adventure_with_a_unicode_line_break_in_every_free_text_survives_the_round_trip(
+    tmp_path: Path, demo_adventure: Adventure
+):
+    data = demo_adventure.model_dump(mode="json")
+    marked = mark_free_texts(data)
+    marked_adventure = Adventure.model_validate(data)
+
+    dump_adventure(marked_adventure, tmp_path / "adv")
+
+    assert marked >= 100  # поля нашлись: у demo-crypt сотни текстов, а не пара
+    assert marked_adventure != demo_adventure
+    assert load_adventure(tmp_path / "adv") == marked_adventure
+    for file in (tmp_path / "adv").rglob("*.yaml"):
+        text = file.read_text(encoding="utf-8")
+        assert not any(line_break in text for line_break in UNICODE_BREAKS), file.name

@@ -1,16 +1,29 @@
+import asyncio
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import sysconfig
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from alembic import command
+from alembic.config import Config
+from fastapi import FastAPI
+from fastapi.dependencies.models import Dependant
+from fastapi.routing import APIRoute, APIWebSocketRoute, iter_route_contexts
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from dnd_server.app import create_app
+from dnd_server.bot import bot as bot_module
 from dnd_server.config import Settings, get_settings
+from dnd_server.db.session import make_engine, make_sessionmaker
 
 # --- запрет живых вызовов во всех тестах сервера (спека §13, инвариант «и») ---
 #
@@ -177,3 +190,148 @@ def isolated_settings_sources(monkeypatch, tmp_path):
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+# --- таблица маршрутов приложения (финальное покрытие B6) ---
+#
+# Общие проверки блока обходят маршруты, которые приложение действительно подключило (REST,
+# WebSocket, внутренний API в dev), а не список роутеров из теста: маршрут, добавленный позже,
+# попадёт в обход сам. FastAPI не разворачивает подключённые роутеры в `app.routes`, поэтому
+# обход идёт через `iter_route_contexts`, как у самой схемы OpenAPI.
+WEBSOCKET = "WEBSOCKET"
+# Маршруты, которые FastAPI добавляет сам (документация, только в dev): без зависимостей проекта.
+FRAMEWORK_PATHS = frozenset({"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"})
+
+
+@dataclass(frozen=True)
+class MountedRoute:
+    method: str  # GET, POST и так далее; у WebSocket — `WEBSOCKET`
+    path: str  # с префиксом роутера, например `/api/games/{game_id}/ready`
+    dependant: Dependant
+
+
+def mounted_routes(app: FastAPI) -> list[MountedRoute]:
+    """Все маршруты приложения по одному на метод. Неизвестный вид маршрута (подприложение
+    `Mount` и подобное) останавливает обход, а не пропускается молча."""
+    routes: list[MountedRoute] = []
+    for context in iter_route_contexts(app.routes):
+        original = context.original_route
+        if isinstance(original, APIRoute):
+            routes += [
+                MountedRoute(m, context.path, context.dependant) for m in sorted(context.methods)
+            ]
+        elif isinstance(original, APIWebSocketRoute):
+            routes.append(MountedRoute(WEBSOCKET, context.path, context.dependant))
+        else:
+            assert context.path in FRAMEWORK_PATHS, f"обход не знает маршрут {context.path!r}"
+    return routes
+
+
+@pytest.fixture
+def route_table() -> Callable[[FastAPI], list[MountedRoute]]:
+    """Обход маршрутов приложения: `route_table(create_app(settings))`."""
+    return mounted_routes
+
+
+# --- база данных тестов (план B6.1) ---
+#
+# Каждый тест работает со своим файлом SQLite во временном каталоге. Базу владельца
+# (`<корень>/data/`) тесты не трогают, и это не обещание, а запрет: любая попытка открыть файл
+# внутри неё записывается и роняет тест.
+
+ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
+# Корень репозитория считаем независимо от кода сервера: запрет не должен следовать за ним,
+# если код неверно определит корень.
+OWNER_DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+
+
+@pytest.fixture(autouse=True)
+def owner_database_guard(monkeypatch, live_call_attempts: list[str]) -> None:
+    """Запрещает открывать файлы SQLite в `<корень>/data/`; попытка записывается как живой вызов."""
+    real_connect = sqlite3.connect
+
+    def connect(database, *args, **kwargs):
+        is_file_path = isinstance(database, str | os.PathLike)
+        if is_file_path and Path(database).resolve().is_relative_to(OWNER_DATA_DIR):
+            live_call_attempts.append(f"sqlite: {database}")
+            raise AssertionError(f"тест открыл базу владельца: {database}")
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+
+
+# --- Telegram-бот в тестах (план B6.6) ---
+#
+# Приложение с заданным `telegram_bot_token` поднимает в `lifespan` задачу опроса Telegram. Без
+# подмены тест, который просто запускает приложение с токеном (вход через Telegram, проверка
+# секрета), оставил бы задачу, идущую на api.telegram.org: сеть запрещена, но задача успевает
+# записать попытку, и тест падает случайно. Поэтому по умолчанию `make_bot` отвечает «бота нет»,
+# а тесты, которым нужен бот, подставляют свой (`monkeypatch.setattr(bot_module, "make_bot", ...)`)
+# или берут настоящую сборку маркером `real_make_bot`.
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "real_make_bot: тест проверяет настоящую `make_bot` (токен -> `Bot`), а не заглушку",
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_telegram_bot(monkeypatch, request) -> None:
+    """Подменяет `make_bot` на «бота нет»; маркер `real_make_bot` оставляет настоящую."""
+    if request.node.get_closest_marker("real_make_bot") is not None:
+        return
+    monkeypatch.setattr(bot_module, "make_bot", lambda _settings: None)
+
+
+@pytest.fixture
+def settings(tmp_path: Path) -> Settings:
+    """Настройки dev-режима с базой во временном каталоге.
+
+    Папки для файла базы нет: её создаёт код (приложение или Alembic), а не фикстура.
+    """
+    return Settings(
+        app_env="dev",
+        database_url=f"sqlite+aiosqlite:///{tmp_path}/data/test.sqlite3",
+    )
+
+
+@pytest.fixture
+def migrate(settings: Settings, monkeypatch) -> Callable[[str, str], Awaitable[None]]:
+    """Запускает Alembic на базе теста: `await migrate("upgrade", "head")`.
+
+    Адрес базы env.py берёт из настроек, поэтому он передаётся окружением, как при запуске из
+    терминала. Сам env.py запускает цикл событий, значит команда идёт в отдельном потоке.
+    """
+    monkeypatch.setenv("DATABASE_URL", settings.database_url)
+    get_settings.cache_clear()
+    alembic_config = Config(str(ALEMBIC_INI))
+
+    async def run(command_name: str, revision: str) -> None:
+        await asyncio.to_thread(getattr(command, command_name), alembic_config, revision)
+
+    return run
+
+
+@pytest.fixture
+async def db(
+    settings: Settings, migrate: Callable[[str, str], Awaitable[None]]
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    """Фабрика сессий на базе теста, поднятой миграциями до `head`: `async with db() as session`."""
+    await migrate("upgrade", "head")
+    engine = make_engine(settings.database_url)
+    yield make_sessionmaker(engine)
+    await engine.dispose()
+
+
+@pytest.fixture
+async def client(
+    settings: Settings, db: async_sessionmaker[AsyncSession]
+) -> AsyncIterator[httpx.AsyncClient]:
+    """HTTP-клиент к приложению в памяти (ASGI) на той же мигрированной базе, что и `db`."""
+    app = create_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as http:
+        yield http
+    await app.state.engine.dispose()

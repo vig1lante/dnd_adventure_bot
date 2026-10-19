@@ -8,7 +8,8 @@
 чистая функция:
 она читает приключение и данные SRD, ничего не меняет, не касается файлов и сети и не бросает
 исключений на корректно собранном `Adventure`. Тексты приключения для неё — данные: в сообщения
-они попадают только как обрезанные id.
+они попадают только как короткие id и ссылки, а `ref` и `message` каждой проблемы — одна печатная
+строка ограниченной длины (`_issue`): отчёт идёт в журнал сервера, ответ создателю и терминал.
 """
 
 from collections import deque
@@ -25,7 +26,14 @@ from dnd_engine.adventure.budget import (
     find_monster,
 )
 from dnd_engine.adventure.schema import COLLECTIONS, Adventure, Clue, Feature, Item
-from dnd_engine.content import MonsterAction, MonsterDef, SrdContent, _unknown_ids
+from dnd_engine.content import (
+    MonsterAction,
+    MonsterDef,
+    SrdContent,
+    _unknown_ids,
+    printable,
+    quoted,
+)
 from dnd_engine.dice import DiceSyntaxError, parse
 from dnd_engine.modules import MODULES
 
@@ -79,7 +87,12 @@ DAMAGE_TYPES = frozenset(
 # Оценка времени игры считается отличающейся от цели, когда расходится больше чем на четверть.
 DURATION_TOLERANCE = 0.25
 # Длина сообщения ограничена: в него попадают id из файлов приключения, а длина id не задана.
+# Предел считается после экранирования и включает «…» на конце.
 MAX_MESSAGE_LENGTH = 200
+# Длина ссылки `ref` ограничена по той же причине: id зоны и id действия монстра шаблона не имеют.
+# Самая длинная ссылка из id по шаблону (до 64 символов) — `location:<id>/feature:<id>`, 146
+# символов, поэтому такие ссылки предел не режет.
+MAX_REF_LENGTH = 160
 
 # Флаги с этими префиксами ведёт движок (ход боя: `flags["encounter:<id>"]`): ни модель
 # (`set_flag`), ни находка приключения не должны подделывать прогресс боя.
@@ -117,9 +130,15 @@ class Report(BaseModel):
 
 
 def _issue(severity: Literal["error", "warning"], code: str, ref: str, message: str) -> Issue:
-    if len(message) > MAX_MESSAGE_LENGTH:
-        message = message[:MAX_MESSAGE_LENGTH] + "…"
-    return Issue(code=code, severity=severity, ref=ref, message=message)
+    # Единственное место, где проблема становится `Issue`. Id без шаблона (зона, действие монстра)
+    # и чужие значения приходят сюда как есть, а отчёт читают журнал сервера, ответ создателю и
+    # отчёт генератора: ссылка и сообщение — одна печатная строка ограниченной длины.
+    return Issue(
+        code=code,
+        severity=severity,
+        ref=printable(ref, MAX_REF_LENGTH),
+        message=printable(message, MAX_MESSAGE_LENGTH),
+    )
 
 
 def _error(code: str, ref: str, message: str) -> Issue:
@@ -145,7 +164,8 @@ def _check_settings(adventure: Adventure) -> list[Issue]:
         _error(
             "schema",
             "adventure",
-            f"rules.modules: неизвестный модуль правил {module!r}, доступны: {', '.join(MODULES)}",
+            f"rules.modules: неизвестный модуль правил {quoted(module)}, "
+            f"доступны: {', '.join(MODULES)}",
         )
         for module in dict.fromkeys(adventure.rules.modules)
         if module not in MODULES
@@ -187,7 +207,7 @@ def _number_problems(monster: MonsterDef) -> list[str]:
     numbers += [(f"saves.{a.value}", v, BONUS_LIMITS) for a, v in monster.saves.items()]
     numbers += [(f"skills.{s.value}", v, BONUS_LIMITS) for s, v in monster.skills.items()]
     for action in monster.actions:
-        label = f"действие {action.id!r}, "
+        label = f"действие {quoted(action.id)}, "
         numbers.append((label + "targets", action.targets, TARGETS_LIMITS))
         if action.attack_bonus is not None:
             numbers.append((label + "attack_bonus", action.attack_bonus, BONUS_LIMITS))
@@ -247,11 +267,13 @@ def _value_problems(action: MonsterAction, conditions: Collection[str]) -> list[
     ):
         if damage_type is not None and damage_type not in DAMAGE_TYPES:
             known = ", ".join(sorted(DAMAGE_TYPES))
-            problems.append(f"{field}: неизвестный тип урона {damage_type!r}; допустимы: {known}")
+            problems.append(
+                f"{field}: неизвестный тип урона {quoted(damage_type)}; допустимы: {known}"
+            )
     if action.condition is not None and action.condition not in conditions:
         known = ", ".join(sorted(conditions))
         problems.append(
-            f"condition: неизвестное состояние {action.condition!r}; допустимы: {known}"
+            f"condition: неизвестное состояние {quoted(action.condition)}; допустимы: {known}"
         )
     return problems
 
@@ -274,7 +296,7 @@ def _check_custom_monster(monster: MonsterDef, conditions: Collection[str]) -> l
         "монстр берёт первое действие с этим id, остальные недостижимы",
     )
     for action in monster.actions:
-        owner = f"действие {action.id!r}"
+        owner = f"действие {quoted(action.id)}"
         issues += [
             _error("dangling_ref", f"{ref}/action:{action.id}", problem)
             for problem in _unknown_ids(owner, "multiattack", action.multiattack, action_ids)
@@ -387,7 +409,7 @@ def _check_references(adventure: Adventure, content: SrdContent) -> list[Issue]:
         _error(
             "dangling_ref",
             ref.owner,
-            f"{ref.field}: ссылка {ref.target!r} никуда не ведёт "
+            f"{ref.field}: ссылка {quoted(ref.target)} никуда не ведёт "
             f"(допустимы: {', '.join(ref.kinds)})",
         )
         for ref in _references(adventure)
@@ -412,7 +434,7 @@ def _check_zones(adventure: Adventure) -> list[Issue]:
         zones = {zone.id for zone in location.zones}
         for link in location.links:
             issues += [
-                _error("dangling_ref", f"location:{location.id}", f"links: зоны {end!r} нет")
+                _error("dangling_ref", f"location:{location.id}", f"links: зоны {quoted(end)} нет")
                 for end in (link.a, link.b)
                 if end not in zones
             ]
@@ -424,7 +446,7 @@ def _check_zones(adventure: Adventure) -> list[Issue]:
         claims = [("pc_zone", encounter.pc_zone)]
         claims += [("monsters.zone", group.zone) for group in encounter.monsters]
         issues += [
-            _error("dangling_ref", f"encounter:{encounter.id}", f"{field}: зоны {zone!r} нет")
+            _error("dangling_ref", f"encounter:{encounter.id}", f"{field}: зоны {quoted(zone)} нет")
             for field, zone in claims
             if zone not in zones
         ]
@@ -438,8 +460,8 @@ def _check_location_encounters(adventure: Adventure) -> list[Issue]:
         _error(
             "dangling_ref",
             f"location:{location.id}",
-            f"encounter_id: бой {encounter.id!r} происходит в локации {encounter.location_id!r}, "
-            "а не здесь: start_combat его не начнёт",
+            f"encounter_id: бой {encounter.id!r} происходит в локации "
+            f"{quoted(encounter.location_id)}, а не здесь: start_combat его не начнёт",
         )
         for location in adventure.locations.values()
         if location.encounter_id is not None
@@ -459,7 +481,8 @@ def _check_unlinked_encounters(adventure: Adventure) -> list[Issue]:
         _error(
             "dangling_ref",
             f"encounter:{encounter.id}",
-            f"бой не привязан к локации {encounter.location_id!r}: get_location его не покажет",
+            f"бой не привязан к локации {quoted(encounter.location_id)}: "
+            "get_location его не покажет",
         )
         for encounter in adventure.encounters.values()
         # нет локации боя — её уже нашёл `_check_references`
@@ -474,7 +497,7 @@ def _check_seeds(adventure: Adventure) -> list[Issue]:
     """`seeds` — id сущностей, заданных автором: каждый должен лежать в одной из коллекций."""
     known = {key for name in COLLECTIONS for key in getattr(adventure, name)}
     return [
-        _error("dangling_ref", "adventure", f"seeds: id {seed!r} нет ни в одной коллекции")
+        _error("dangling_ref", "adventure", f"seeds: id {quoted(seed)} нет ни в одной коллекции")
         for seed in dict.fromkeys(adventure.seeds)
         if seed not in known
     ]
@@ -494,7 +517,7 @@ def _check_engine_flags(adventure: Adventure) -> list[Issue]:
         _error(
             "schema",
             f"location:{location.id}/feature:{feature.id}",
-            f"reveals: флаг {reveal.id!r} ведёт движок "
+            f"reveals: флаг {quoted(reveal.id)} ведёт движок "
             f"(префиксы {', '.join(ENGINE_FLAG_PREFIXES)}), находка не может его выставить",
         )
         for location in adventure.locations.values()
@@ -512,7 +535,7 @@ def _check_engine_flags(adventure: Adventure) -> list[Issue]:
         _error(
             "schema",
             ref,
-            f"locked_by: замок {locked_by!r} ждёт флаг, который ведёт движок "
+            f"locked_by: замок {quoted(locked_by)} ждёт флаг, который ведёт движок "
             f"(префиксы {', '.join(ENGINE_FLAG_PREFIXES)}): он открылся бы в начале боя",
         )
         for ref, locked_by in locks
@@ -547,8 +570,8 @@ def _check_revealed_items(adventure: Adventure) -> list[Issue]:
         _error(
             "dangling_ref",
             f"location:{location.id}/feature:{feature.id}",
-            f"reveals: предмет {reveal.id!r} должен лежать в локации места "
-            f"(holder 'location:{location.id}'), а лежит у {item.holder!r}",
+            f"reveals: предмет {quoted(reveal.id)} должен лежать в локации места "
+            f"(holder 'location:{location.id}'), а лежит у {quoted(item.holder)}",
         )
         for location in adventure.locations.values()
         for feature in location.features
@@ -572,7 +595,9 @@ def _repeated_id_errors(kind: str, entries: Iterable[tuple[str, str]], reason: s
             first_use[ident] = ref
             continue
         earlier = f" (раньше: {first_use[ident]})" if first_use[ident] != ref else ""
-        issues.append(_error("schema", ref, f"{kind}: id {ident!r} повторяется{earlier}; {reason}"))
+        issues.append(
+            _error("schema", ref, f"{kind}: id {quoted(ident)} повторяется{earlier}; {reason}")
+        )
     return issues
 
 
@@ -760,34 +785,43 @@ def _check_revelations(adventure: Adventure) -> list[Issue]:
 # «по-настоящему»: ключ сначала нужно получить.
 
 
-def _closed_place(item: Item, adventure: Adventure) -> Feature | None:
-    """Место, внутри которого лежит предмет: в локации-держателе есть место, чьи `reveals` его
-    называют. Так же ищет закрытое место `tools.lore.closed_place_with_item`; у NPC предмет не
-    «внутри»."""
-    kind, _, location_id = item.holder.partition(":")
-    location = adventure.locations.get(location_id) if kind == "location" else None
-    if location is None:
-        return None
-    return next(
-        (
-            feature
-            for feature in location.features
-            if any(reveal.kind == "item" and reveal.id == item.id for reveal in feature.reveals)
-        ),
-        None,
-    )
+def _closed_places(adventure: Adventure) -> dict[str, Feature]:
+    """Предмет → место, внутри которого он лежит: в локации-держателе есть место, чьи `reveals` его
+    называют (первое по порядку). Так же ищет закрытое место `tools.lore.closed_place_with_item`; у
+    NPC предмет не «внутри», и таких предметов в словаре нет.
+
+    Индекс строится один раз: поиск места перебором на каждый предмет в каждом круге
+    `_playthrough` делал проверку кубической (800 сундуков цепочкой считались около 47 секунд)."""
+    named_in: dict[tuple[str, str], Feature] = {}
+    for location_id, location in adventure.locations.items():
+        for feature in location.features:
+            for reveal in feature.reveals:
+                if reveal.kind == "item":
+                    named_in.setdefault((location_id, reveal.id), feature)
+    places: dict[str, Feature] = {}
+    for item in adventure.items.values():
+        kind, _, location_id = item.holder.partition(":")
+        if kind == "location" and (feature := named_in.get((location_id, item.id))) is not None:
+            places[item.id] = feature
+    return places
 
 
-def _unopened_place(item: Item, adventure: Adventure, owned: Container[str]) -> Feature | None:
-    """Место, внутри которого лежит предмет и которое заперто ключом, ещё не полученным (`owned`).
-    Нет такого места (предмет лежит открыто, замка нет или он флаговый, ключ уже есть) — `None`."""
-    closed = _closed_place(item, adventure)
+def _unopened_place(
+    item: Item, adventure: Adventure, places: dict[str, Feature], owned: Container[str]
+) -> Feature | None:
+    """Место, внутри которого лежит предмет (`places`) и которое заперто ключом, ещё не полученным
+    (`owned`). Нет такого места (предмет лежит открыто, замка нет или он флаговый, ключ уже есть) —
+    `None`."""
+    closed = places.get(item.id)
     inner_key = None if closed is None else _lock_key(closed.locked_by, adventure)
     return closed if inner_key is not None and inner_key not in owned else None
 
 
 def _obtainable_items(
-    adventure: Adventure, reached: Container[str], owned: Container[str]
+    adventure: Adventure,
+    places: dict[str, Feature],
+    reached: Container[str],
+    owned: Container[str],
 ) -> set[str]:
     """Предметы, которые отряд получит, побывав в `reached` и имея `owned`: предмет лежит в такой
     локации (сам или у NPC) и не заперт внутри места, ключ которого ещё не получен. Ушедший из игры
@@ -801,18 +835,18 @@ def _obtainable_items(
         if place is None or place not in adventure.locations:
             found.add(item.id)
             continue
-        if place in reached and _unopened_place(item, adventure, owned) is None:
+        if place in reached and _unopened_place(item, adventure, places, owned) is None:
             found.add(item.id)
     return found
 
 
-def _playthrough(adventure: Adventure) -> tuple[set[str], set[str]]:
+def _playthrough(adventure: Adventure, places: dict[str, Feature]) -> tuple[set[str], set[str]]:
     """Что отряд пройдёт и получит от старта: (локации, предметы). Круг за кругом: полученные
     предметы открывают замки, новые локации дают новые предметы, пока что-то прибавляется."""
     owned: set[str] = set()
     while True:
         reached = _reachable_locations(adventure, owned)
-        found = _obtainable_items(adventure, reached, owned)
+        found = _obtainable_items(adventure, places, reached, owned)
         if found <= owned:
             return reached, owned
         owned |= found
@@ -829,12 +863,13 @@ def _lost_key_issue(
     ref: str,
     key: Item,
     adventure: Adventure,
+    places: dict[str, Feature],
     owned: Container[str],
 ) -> Issue:
     """Проблема `unreachable_key` с настоящей причиной: ключ ушёл из игры, заперт внутри места или
     лежит там, куда отряд не попадёт. Если верны две последние, называется место: его замок
     исправляется первым, а недоступность локации покажут другие проблемы."""
-    locked_place = _unopened_place(key, adventure, owned)
+    locked_place = _unopened_place(key, adventure, places, owned)
     if key.holder == "gone":
         reason = "ушёл из игры (holder 'gone')"
     elif locked_place is not None:
@@ -845,7 +880,7 @@ def _lost_key_issue(
         )
     else:
         reason = (
-            f"лежит у {key.holder!r}, "
+            f"лежит у {quoted(key.holder)}, "
             "куда отряд не попадёт без него самого или другого такого ключа"
         )
     return _issue(severity, "unreachable_key", ref, f"locked_by: ключ {key.id!r} {reason}")
@@ -860,7 +895,8 @@ def _check_lock_keys(adventure: Adventure) -> list[Issue]:
     замка (его покажет он сам) или `unreachable_location`."""
     if adventure.start_location not in adventure.locations:
         return []  # без старта нечего проходить; об этом уже сказал `dangling_ref`
-    reached, owned = _playthrough(adventure)
+    places = _closed_places(adventure)
+    reached, owned = _playthrough(adventure, places)
     clue_places = {clue.where for rev in adventure.revelations.values() for clue in rev.clues}
     issues: list[Issue] = []
     for location in adventure.locations.values():
@@ -870,13 +906,13 @@ def _check_lock_keys(adventure: Adventure) -> list[Issue]:
             if key := _lost_key(exit_.locked_by, adventure, owned):
                 severity = "warning" if exit_.to in reached else "error"
                 ref = f"location:{location.id}/exit:{exit_.id}"
-                issues.append(_lost_key_issue(severity, ref, key, adventure, owned))
+                issues.append(_lost_key_issue(severity, ref, key, adventure, places, owned))
         for feature in location.features:
             if key := _lost_key(feature.locked_by, adventure, owned):
                 holds_findings = bool(feature.reveals) or f"feature:{feature.id}" in clue_places
                 severity = "error" if holds_findings else "warning"
                 ref = f"location:{location.id}/feature:{feature.id}"
-                issues.append(_lost_key_issue(severity, ref, key, adventure, owned))
+                issues.append(_lost_key_issue(severity, ref, key, adventure, places, owned))
     return issues
 
 
@@ -897,7 +933,11 @@ def _check_encounters(adventure: Adventure, content: SrdContent) -> list[Issue]:
             if find_monster(group.monster_id, adventure, content) is None
         ]
         issues += [
-            _error("unknown_monster", ref, f"монстра {monster_id!r} нет ни в SRD, ни в статблоках")
+            _error(
+                "unknown_monster",
+                ref,
+                f"монстра {quoted(monster_id)} нет ни в SRD, ни в статблоках",
+            )
             for monster_id in dict.fromkeys(unknown)
         ]
         total = sum(group.count for group in encounter.monsters)

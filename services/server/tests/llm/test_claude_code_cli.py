@@ -998,7 +998,8 @@ class LateCall:
             "raw_path": self._path.encode(),
             "query_string": b"",
             "root_path": "",
-            "headers": [(b"content-type", b"application/json")],
+            # Host нужен, как у любого настоящего клиента: без него проверка Host вернёт 400.
+            "headers": [(b"content-type", b"application/json"), (b"host", b"127.0.0.1:8000")],
             "client": LOCALHOST,
             "server": ("127.0.0.1", 8000),
         }

@@ -19,6 +19,83 @@ from pydantic_core import ErrorDetails
 from dnd_engine.abilities import Ability, Skill
 
 
+# --- безопасное чтение недоверенного YAML ---
+# Здесь общие части чтения для загрузчика данных SRD и загрузчика папки приключения
+# (`adventure/loader.py`): оба читают файлы, которые пишет владелец или ему кто-то передал.
+
+# Предел размера одного YAML-файла. Самая большая таблица SRD — 22 КБ, самый большой файл
+# `demo-crypt` — 5 КБ, так что запас больше двадцати раз. Предел держит и время: чистому PyYAML на
+# плотном файле в 512 КБ нужно около двух секунд, на мегабайте — вдвое больше.
+MAX_YAML_BYTES = 512 * 1024
+# Предел длины одной проблемы вместе с «…» на конце: в проблему попадают чужие теги, ключи и имена.
+MAX_PROBLEM_LENGTH = 200
+# Предел записи одного чужого фрагмента внутри проблемы (путь к полю, имя файла, id записи или
+# значение из файла): после длинного фрагмента должна остаться причина. Id по шаблону приключения
+# (до 64 символов) с кавычками и ссылка вида `location:<id>` в него помещаются целиком.
+MAX_FIELD_LENGTH = 80
+
+
+class YamlTooLargeError(ValueError):
+    """YAML-файл больше `MAX_YAML_BYTES`; текст ошибки — готовая причина для проблемы."""
+
+
+def check_yaml_size(source: Path | Traversable) -> None:
+    """Отказывает источнику YAML до чтения, не открывая его.
+
+    Файл больше `MAX_YAML_BYTES` — `YamlTooLargeError`: огромный файл в память целиком не попадает.
+    Не обычный файл (папка, канал FIFO, устройство) — `OSError` с причиной «не обычный файл»: у
+    канала и устройства размера нет, предел его не ограничивает, а чтение может не закончиться.
+    Нет файла — `FileNotFoundError`, как у чтения. Размер и вид берутся у файловой системы
+    (`stat`), поэтому проверка рассчитана на файлы на диске, как и данные пакета."""
+    size = source.stat().st_size  # раньше вида: у отсутствующего файла `is_file()` лишь `False`
+    if not source.is_file():
+        raise OSError(0, "не обычный файл")
+    if size > MAX_YAML_BYTES:
+        raise YamlTooLargeError(f"файл больше {MAX_YAML_BYTES // 1024} КБ")
+
+
+class _NoAnchorsLoader(yaml.SafeLoader):
+    """`SafeLoader`, который отвергает якоря и алиасы YAML.
+
+    Алиас отдаёт один и тот же объект в тысячи мест, а схема потом проверяет каждое место заново:
+    файл в несколько КБ строит миллионы моделей («бомба алиасов»). Файлы данных их не используют,
+    поэтому запрещены якорь и алиас, а значит и слияние `<<: *якорь`. Слияние со встроенным
+    словарём (`<<: {a: 1}`) разрешено: без алиаса оно линейно и бомбы не строит."""
+
+    def compose_node(self, parent: yaml.Node | None, index: Any) -> yaml.Node | None:
+        event = self.peek_event()
+        if isinstance(event, yaml.events.NodeEvent) and event.anchor is not None:
+            # Имя якоря в сообщение не идёт: оно чужое, а причина от него не зависит.
+            raise yaml.composer.ComposerError(
+                None, None, "якоря и алиасы YAML не поддерживаются", event.start_mark
+            )
+        return super().compose_node(parent, index)
+
+
+def parse_yaml(raw: bytes) -> Any:
+    """Разбирает YAML без якорей и алиасов. Только безопасные теги: `!!python/object/apply` не
+    выполнит код, а даст `yaml.YAMLError`."""
+    return yaml.load(raw, Loader=_NoAnchorsLoader)
+
+
+def printable(text: str, limit: int | None = None) -> str:
+    """Текст, безопасный для терминала, лога и отчёта: непечатаемые символы (ESC, BEL, возврат
+    каретки, перевод строки, разделители строк Unicode, управление направлением письма, одинокие
+    суррогаты) заменены записью, как в `repr`: `\\x1b`, `\\n`, `\\u202e`.
+
+    `limit` — предел длины уже готовой записи (с «…» на конце), а не исходного текста."""
+    escaped = "".join(char if char.isprintable() else repr(char)[1:-1] for char in text)
+    if limit is None or len(escaped) <= limit:
+        return escaped
+    return escaped[: limit - 1] + "…"
+
+
+def quoted(value: object) -> str:
+    """Чужое значение для текста проблемы в кавычках, как в `repr`, но безопасное и не длиннее
+    `MAX_FIELD_LENGTH`: длинный id не съедает причину, которая идёт после него."""
+    return printable(repr(value), MAX_FIELD_LENGTH)
+
+
 class _ReadOnlyDict(dict):
     """Словарь, который нельзя изменить: кеш `load_srd()` общий для всех игр процесса.
 
@@ -262,7 +339,8 @@ class ContentError(ValueError):
     """Данные SRD некорректны; `problems` — список всех найденных проблем."""
 
     def __init__(self, problems: Iterable[str]):
-        self.problems = list(problems)
+        # Каждая проблема — одна короткая строка из печатных символов, как бы ни выглядел файл.
+        self.problems = [printable(problem, MAX_PROBLEM_LENGTH) for problem in problems]
         super().__init__("Данные SRD некорректны:\n" + "\n".join(f"- {p}" for p in self.problems))
 
 
@@ -277,11 +355,16 @@ def _describe_yaml_error(exc: yaml.YAMLError) -> str:
 def _read_entries(source: Traversable, problems: list[str]) -> list[Any]:
     """Читает YAML-файл таблицы; ошибки чтения и формата пишет в `problems`."""
     try:
-        # Только safe_load: он не умеет создавать python-объекты, так что тег вроде
-        # `!!python/object/apply` не выполнит код, а даст YAMLError.
-        data = yaml.safe_load(source.read_bytes())
+        check_yaml_size(source)
+        data = parse_yaml(source.read_bytes())
     except FileNotFoundError:
         problems.append(f"{source.name}: файл не найден")
+        return []
+    except YamlTooLargeError as exc:
+        problems.append(f"{source.name}: {exc}")
+        return []
+    except OSError as exc:
+        problems.append(f"{source.name}: не удалось прочитать файл ({exc.strerror})")
         return []
     except yaml.YAMLError as exc:
         problems.append(f"{source.name}: {_describe_yaml_error(exc)}")
@@ -301,7 +384,7 @@ def _index_by_id(file_name: str, entries: list[Any], problems: list[str]) -> dic
         if not isinstance(entry_id, str):
             problems.append(f"{file_name}: запись {number}: нужен объект с текстовым полем id")
         elif entry_id in indexed:
-            problems.append(f"{file_name}: дубликат id {entry_id!r} (запись {number})")
+            problems.append(f"{file_name}: дубликат id {quoted(entry_id)} (запись {number})")
         else:
             indexed[entry_id] = entry
     return indexed
@@ -310,14 +393,14 @@ def _index_by_id(file_name: str, entries: list[Any], problems: list[str]) -> dic
 def _describe_schema_error(error: ErrorDetails) -> str:
     # loc из SrdContent.model_validate: (таблица, id записи, путь к полю внутри записи).
     table, entry_id, *path = error["loc"]
-    field = ".".join(str(part) for part in path)
-    return f"{table}.yaml, запись {entry_id!r}, поле {field}: {error['msg']}"
+    field = printable(".".join(str(part) for part in path), MAX_FIELD_LENGTH)
+    return f"{table}.yaml, запись {quoted(entry_id)}, поле {field}: {error['msg']}"
 
 
 def _unknown_ids(owner: str, field: str, ids: Iterable[str], known: Container[str]) -> list[str]:
     """Жалобы на id из `ids`, которых нет в `known` (повторы одного id — одной жалобой)."""
     return [
-        f"{owner}: {field} ссылается на несуществующий id {ref!r}"
+        f"{owner}: {field} ссылается на несуществующий id {quoted(ref)}"
         for ref in dict.fromkeys(ids)
         if ref not in known
     ]

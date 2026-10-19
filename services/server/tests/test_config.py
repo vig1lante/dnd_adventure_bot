@@ -28,6 +28,8 @@ ALL_FIELDS_ENV = {
     "CONTENT_DIR": "other/adventures",
     "SESSION_SECRET": "env-session-secret",
     "TELEGRAM_BOT_TOKEN": "env-telegram-token",
+    "TELEGRAM_BOT_USERNAME": "env_test_bot",
+    "GAME_CREATOR_TG_IDS": "111,222",
     "LLM_PROVIDER": "anthropic_api",
     "LLM_MODEL": "env-model",
     "LLM_EFFORT": "high",
@@ -115,6 +117,8 @@ def test_every_field_is_read_from_its_uppercase_env_variable(monkeypatch):
         "content_dir": Path("other/adventures"),
         "session_secret": "env-session-secret",
         "telegram_bot_token": "env-telegram-token",
+        "telegram_bot_username": "env_test_bot",
+        "game_creator_tg_ids": (111, 222),
         "llm_provider": "anthropic_api",
         "llm_model": "env-model",
         "llm_effort": "high",
@@ -136,9 +140,7 @@ def test_every_field_is_read_from_its_uppercase_env_variable(monkeypatch):
 def test_secret_fields_are_exactly_the_secret_looking_ones():
     # Любое новое поле с именем секрета обязано стать SecretStr и попасть в SECRET_FIELDS.
     secret_looking = {
-        name
-        for name in Settings.model_fields
-        if name.endswith(("_secret", "_token", "_api_key"))
+        name for name in Settings.model_fields if name.endswith(("_secret", "_token", "_api_key"))
     }
 
     assert secret_looking == set(SECRET_FIELDS)
@@ -176,6 +178,21 @@ def test_secret_is_hidden_in_validation_error(monkeypatch):
 
     for name in SECRET_FIELDS:
         assert f"sentinel-{name}" not in str(error.value)
+
+
+def test_validation_error_hides_input_values_of_field_and_model_level_errors():
+    # Ошибка настройки попадает в журнал запуска. Входное значение в ней показывать нельзя: у
+    # секретного поля оно и есть секрет, а у ошибки целой модели входом служит весь набор значений.
+    with pytest.raises(ValidationError) as field_error:
+        Settings(session_secret=["sentinel-field-level"])
+    with pytest.raises(ValidationError) as model_error:
+        Settings.model_validate(["sentinel-model-level"])
+
+    assert "session_secret" in str(field_error.value)  # само поле названо
+    assert "sentinel-field-level" not in str(field_error.value)
+    assert "sentinel-field-level" not in repr(field_error.value)
+    assert "sentinel-model-level" not in str(model_error.value)
+    assert "sentinel-model-level" not in repr(model_error.value)
 
 
 @pytest.mark.parametrize("name", OPTIONAL_FIELDS)
@@ -333,3 +350,71 @@ def test_get_settings_reads_environment_until_cache_is_cleared(monkeypatch):
 
     get_settings.cache_clear()
     assert get_settings().app_env == "prod"
+
+
+# --- список создателей игр (решение владельца B6: «Только из списка») ---
+
+
+def test_nobody_creates_games_by_default():
+    # Пусто — в prod игры не создаёт никто (в dev создают dev-логины, это решает auth).
+    assert Settings().game_creator_tg_ids == ()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("111", (111,)),
+        ("111,222", (111, 222)),
+        (" 111 , 222 ", (111, 222)),
+        ("111,,222,", (111, 222)),  # лишние запятые не ошибка
+        ("9007199254740991", (9007199254740991,)),  # id Telegram — до 52 бит, не 32
+    ],
+)
+def test_game_creator_ids_are_read_as_comma_separated_numbers(monkeypatch, raw, expected):
+    monkeypatch.setenv("GAME_CREATOR_TG_IDS", raw)
+
+    assert Settings().game_creator_tg_ids == expected
+
+
+def test_game_creator_ids_are_read_from_the_dotenv_file(tmp_path):
+    (tmp_path / ".env").write_text("GAME_CREATOR_TG_IDS=111,222\n", encoding="utf-8")
+
+    assert Settings().game_creator_tg_ids == (111, 222)
+
+
+@pytest.mark.parametrize("raw", ["abc", "111,secret-x", "0", "-5", "1.5", "[111]", "111;222"])
+def test_game_creator_ids_reject_anything_but_positive_numbers(monkeypatch, raw):
+    monkeypatch.setenv("GAME_CREATOR_TG_IDS", raw)
+
+    with pytest.raises(ValidationError) as error:
+        Settings()
+
+    assert {item["loc"][0] for item in error.value.errors()} == {"game_creator_tg_ids"}
+    assert "secret-x" not in str(error.value)  # значение в сообщении не повторяется
+
+
+# --- имя бота для ссылок-приглашений ---
+
+
+def test_bot_username_is_not_set_by_default():
+    assert Settings().telegram_bot_username is None
+
+
+@pytest.mark.parametrize("value", ["my_test_bot", "MyBot", "a1234", "x" * 32])
+def test_bot_username_accepts_telegram_usernames(monkeypatch, value):
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", value)
+
+    assert Settings().telegram_bot_username == value
+
+
+@pytest.mark.parametrize(
+    "value", ["@my_test_bot", "abcd", "x" * 33, "bad name", "1abcde", "бот_бот"]
+)
+def test_bot_username_rejects_values_that_would_break_the_invite_link(monkeypatch, value):
+    # Имя подставляется в `https://t.me/<имя>?startapp=…`: сюда не должна попасть «@» и прочее.
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", value)
+
+    with pytest.raises(ValidationError) as error:
+        Settings()
+
+    assert [item["loc"] for item in error.value.errors()] == [("telegram_bot_username",)]

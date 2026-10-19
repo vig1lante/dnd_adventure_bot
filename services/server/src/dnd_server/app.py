@@ -1,17 +1,164 @@
-from fastapi import FastAPI
+import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
+
+from dnd_engine.content import load_srd
+from dnd_engine.rng import SystemRng
+from dnd_server.adventures import load_catalog
+from dnd_server.adventures import router as adventures_router
+from dnd_server.auth.api import router as auth_router
+from dnd_server.auth.dev import dev_router
+from dnd_server.auth.session import SessionSigner
+from dnd_server.bot.bot import running_bot
+from dnd_server.bot.handlers import BotDeps
+from dnd_server.bot.notify import Notifier
+from dnd_server.characters.api import router as characters_router
 from dnd_server.config import Settings, get_settings
+from dnd_server.db.session import create_database_directory, make_engine, make_sessionmaker
+from dnd_server.games.api import handle_game_error
+from dnd_server.games.api import router as games_router
+from dnd_server.games.hooks import NullGameHooks
+from dnd_server.games.service import GameError, GameLocks, JoinAttempts, ModelCalls
 from dnd_server.llm.internal_api import TurnTokens, build_internal_router
+from dnd_server.realtime.hub import Hub
+from dnd_server.realtime.ws import router as realtime_router
+
+# Имена, под которыми к серверу обращаются с этой же машины. Прокси Vite шлёт сюда либо
+# `127.0.0.1:8000`, либо исходный Host страницы (`localhost:5173`); порт при проверке не важен.
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+
+
+# Имя поля, которое можно назвать в ответе: обычный идентификатор модели. Всё остальное (чужой
+# ключ тела, индекс в списке) в текст ошибки не попадает.
+FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,40}")
+
+
+def validation_detail(exc: RequestValidationError) -> str:
+    """Русский текст ошибки запроса: названы только поля, значения из запроса не повторяются.
+
+    Договорённость блока B6: ошибка — `{"detail": "<строка>"}`, а FastAPI отдаёт в `detail` список
+    с входными значениями (`input`), то есть возвращает клиенту недоверенный ввод.
+    """
+    fields: list[str] = []
+    for error in exc.errors():
+        location = error["loc"]  # ("body", "login"), ("query", "limit"), ("body", 10) у битого JSON
+        name = location[1] if len(location) > 1 else None
+        if isinstance(name, str) and FIELD_NAME.fullmatch(name) and name not in fields:
+            fields.append(name)
+    if not fields:
+        return "Некорректные данные запроса."
+    return f"Некорректные данные запроса: проверьте {', '.join(fields)}."
+
+
+async def handle_invalid_request(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": validation_detail(exc)})
+
+
+async def handle_unexpected_error(_request: Request, _exc: Exception) -> JSONResponse:
+    """Необработанное исключение отвечает по общему контракту блока, а не текстом Starlette.
+
+    Подробности клиенту не уходят: Starlette после ответа пробрасывает исключение серверу, и
+    uvicorn пишет трассировку в журнал. WebSocket сюда не попадает: сокет сам закрывается с кодом.
+    """
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Внутренняя ошибка сервера. Попробуйте ещё раз немного позже."},
+    )
+
+
+def trusted_hosts(settings: Settings) -> list[str]:
+    """Допустимые значения заголовка Host: локальные имена и хост из `WEBAPP_PUBLIC_URL`.
+
+    Публичный хост нужен для VPS и туннеля. Шаблоны со «*» из него не берутся: опечатка в адресе
+    не должна открывать сервер для любых имён.
+    """
+    hosts = list(LOCAL_HOSTS)
+    public_host = urlsplit(settings.webapp_public_url).hostname
+    if public_host and "*" not in public_host:
+        hosts.append(public_host)
+    return hosts
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # В prod слабый SESSION_SECRET останавливает старт: с ним сессии подделываются.
+    SessionSigner.from_settings(app.state.settings)
+    # Папку для файла SQLite создаёт приложение при старте, а не сборка приложения: сборка
+    # (в том числе в тестах) не должна ничего создавать на диске.
+    create_database_directory(app.state.engine.url)
+    # Каталог приключений читается один раз при старте; битая папка в него не попадает.
+    app.state.adventures = load_catalog(app.state.settings.content_dir, load_srd())
+    # Бот живёт, пока работает приложение, и только с токеном; к этому моменту каталог уже загружен.
+    bot_deps = BotDeps(
+        settings=app.state.settings,
+        sessionmaker=app.state.sessionmaker,
+        catalog=app.state.adventures,
+        turn_tokens=getattr(app.state, "turn_tokens", None),
+    )
+    async with running_bot(bot_deps) as notifier:
+        app.state.notifier = notifier
+        yield
+    await app.state.engine.dispose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     if settings is None:
         settings = get_settings()
-    app = FastAPI(title="DnD Adventure Bot")
+    # В prod описание API (/openapi.json, /docs, /redoc) закрыто: оно выдаёт устройство сервера тем,
+    # кто знает адрес туннеля.
+    description_urls = (
+        {}
+        if settings.app_env == "dev"
+        else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    )
+    app = FastAPI(title="DnD Adventure Bot", lifespan=lifespan, **description_urls)
+    app.state.settings = settings
+    app.add_exception_handler(RequestValidationError, handle_invalid_request)
+    app.add_exception_handler(GameError, handle_game_error)
+    app.add_exception_handler(Exception, handle_unexpected_error)
+    # Чужое имя хоста — признак DNS-rebinding (страница злоумышленника ходит на localhost как на
+    # свой сайт); запрос получает 400 до любого маршрута, в том числе рукопожатие WebSocket.
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts(settings))
+    # Путь к базе проверяется здесь, при сборке: недопустимый путь останавливает старт, а соединение
+    # с файлом открывается только при первом запросе. Сессию берут зависимостью `get_session`.
+    app.state.engine = make_engine(settings.database_url)
+    app.state.sessionmaker = make_sessionmaker(app.state.engine)
+    # Пока `lifespan` не выполнен (клиент в памяти без старта), приключений нет, но маршруты живы.
+    app.state.adventures = {}
+    # События игры рассылает хаб сокетов; он же `Broadcaster` для лобби, персонажей и хода мастера.
+    # Запуск мастера (B7.8) подключится вместо заглушки.
+    app.state.game_locks = GameLocks()
+    # Пределы тоже считаются в памяти процесса: сервер всегда один процесс (README), как и блокировки.
+    app.state.model_calls = ModelCalls()
+    app.state.join_attempts = JoinAttempts()
+    app.state.hub = Hub()
+    app.state.broadcaster = app.state.hub
+    app.state.game_hooks = NullGameHooks()
+    # Уведомления в Telegram шлёт мастер (B7) через `app.state.notifier`. До старта и без токена
+    # бота это заглушка, которая ничего не отправляет; `lifespan` подставляет рабочую.
+    app.state.notifier = Notifier(app.state.sessionmaker)
+    # Броски персонажей делает только сервер и только `SystemRng`. Подменить генератор можно лишь
+    # кодом (тесты кладут сюда `SeededRng`); настройки и запросы такой возможности не дают.
+    app.state.rng = SystemRng()
 
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok", "env": settings.app_env}
+
+    app.include_router(auth_router)
+    app.include_router(adventures_router)
+    app.include_router(games_router)
+    app.include_router(characters_router)
+    app.include_router(realtime_router)
+    # dev-вход есть только в dev: в prod маршрута нет вовсе, запрос получает обычный 404.
+    if settings.app_env == "dev":
+        app.include_router(dev_router)
 
     # Внутренний API нужен только провайдеру claude_code_cli, а он доступен лишь в dev
     # (спека §2): в prod маршрутов /internal нет вовсе, запрос получает обычный 404.

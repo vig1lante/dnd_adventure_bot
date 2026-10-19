@@ -7,12 +7,17 @@
 - `revelations.yaml` — список открытий;
 - `seeds.yaml` — необязательный список id сущностей, заданных автором вручную.
 
-Загрузка читает только `yaml.safe_load` и собирает ошибки по всем файлам сразу, с путями
-относительно папки приключения. В папках сущностей читаются только `*.yaml`: любой другой файл или
-подпапка — проблема с путём, а не молчаливый пропуск (сущность из `crypt.yml` пропала бы без
-следа). Исключение — скрытые файлы и папки (имя с точки: `.DS_Store`, `._crypt.yaml` от
-архиваторов, `.#crypt.yaml` от редакторов): они служебные, автор их не писал. Запись проверяет
-имена файлов до первой записи: id становится именем файла, и сюда он попадает от модели-генератора.
+Загрузка читает безопасным разбором YAML без якорей и алиасов (`content.parse_yaml`), файлы не
+больше `content.MAX_YAML_BYTES`, и собирает ошибки по всем файлам сразу, с путями относительно
+папки приключения. Каждая проблема — одна короткая строка из печатных символов: тег, ключ или имя
+файла из чужой папки не раздувают отчёт и не рисуют в терминале свои строки.
+
+В папках сущностей читаются только `*.yaml`: любой другой файл или подпапка — проблема с путём,
+а не молчаливый пропуск (сущность из `crypt.yml` пропала бы без следа). Исключение — скрытые файлы
+и папки (имя с точки: `.DS_Store`, `._crypt.yaml` от архиваторов, `.#crypt.yaml` от редакторов):
+они служебные, автор их не писал. Запись проверяет имена файлов до первой записи: id становится
+именем файла, и сюда он попадает от модели-генератора. Строки с переводами строк Unicode пишутся
+в двойных кавычках, чтобы чтение вернуло ровно записанный текст.
 """
 
 from pathlib import Path
@@ -31,7 +36,16 @@ from dnd_engine.adventure.schema import (
     Revelation,
     is_entity_id,
 )
-from dnd_engine.content import MonsterDef, _describe_yaml_error
+from dnd_engine.content import (
+    MAX_FIELD_LENGTH,
+    MAX_PROBLEM_LENGTH,
+    MonsterDef,
+    YamlTooLargeError,
+    _describe_yaml_error,
+    check_yaml_size,
+    parse_yaml,
+    printable,
+)
 
 # Коллекции, у которых каждая сущность лежит в своём файле `<папка>/<id>.yaml`.
 ENTITY_FOLDERS: dict[str, type[BaseModel]] = {
@@ -49,15 +63,38 @@ class AdventureFormatError(ValueError):
     """Папка приключения некорректна; `problems` — список всех найденных проблем."""
 
     def __init__(self, problems: list[str]) -> None:
-        self.problems = list(problems)
+        # Каждая проблема — одна короткая строка из печатных символов, как бы ни выглядела папка.
+        self.problems = [printable(problem, MAX_PROBLEM_LENGTH) for problem in problems]
         super().__init__("Приключение некорректно:\n" + "\n".join(f"- {p}" for p in self.problems))
+
+
+# Переводы строк Unicode, кроме `\n`: NEL (U+0085), разделители строки и абзаца.
+_UNICODE_LINE_BREAKS = "\x85\u2028\u2029"
+
+
+class _AdventureDumper(yaml.SafeDumper):
+    """`SafeDumper`, который пишет строки с переводами строк Unicode в двойных кавычках.
+
+    В одинарных кавычках (выбор PyYAML) NEL записывается «сырым» символом, а чтение сворачивает его
+    в пробел: после круга «запись → чтение» текст не тот. Двойные кавычки экранируют его (`\\N`,
+    `\\L`, `\\P`). Остальной текст пишется так же, как у `yaml.safe_dump`."""
+
+
+def _represent_str(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
+    has_unicode_break = any(char in data for char in _UNICODE_LINE_BREAKS)
+    return dumper.represent_scalar(
+        "tag:yaml.org,2002:str", data, style='"' if has_unicode_break else None
+    )
+
+
+_AdventureDumper.add_representer(str, _represent_str)
 
 
 def _describe_validation_error(name: str, exc: ValidationError) -> list[str]:
     # Значение из файла в сообщение не попадает (include_input=False): оно может быть огромным.
     problems = []
     for error in exc.errors(include_input=False, include_url=False, include_context=False):
-        field = ".".join(str(part) for part in error["loc"])
+        field = printable(".".join(str(part) for part in error["loc"]), MAX_FIELD_LENGTH)
         where = f", поле {field}" if field else ""
         problems.append(f"{name}{where}: {error['msg']}")
     return problems
@@ -69,16 +106,21 @@ def _read_yaml(file: Path, name: str, kind: type, problems: list[str]) -> Any | 
     Любая проблема (нет файла, битый YAML, не тот тип) пишется в `problems`, результат — `None`.
     """
     try:
+        check_yaml_size(file)
         raw = file.read_bytes()
     except FileNotFoundError:
         problems.append(f"{name}: файл не найден")
+        return None
+    except YamlTooLargeError as exc:
+        problems.append(f"{name}: {exc}")
         return None
     except OSError as exc:
         problems.append(f"{name}: не удалось прочитать файл ({exc.strerror})")
         return None
     try:
-        # Только safe_load: тег вроде `!!python/object/apply` не выполнит код, а даст YAMLError.
-        data = yaml.safe_load(raw)
+        # Только безопасный разбор: тег вроде `!!python/object/apply` не выполнит код, а даст
+        # YAMLError; якорь или алиас тоже дают YAMLError (бомба алиасов не разворачивается).
+        data = parse_yaml(raw)
     except yaml.YAMLError as exc:
         problems.append(f"{name}: {_describe_yaml_error(exc)}")
         return None
@@ -89,7 +131,7 @@ def _read_yaml(file: Path, name: str, kind: type, problems: list[str]) -> Any | 
         # Конструкторы значений PyYAML на чужом вводе бросают что угодно, а не только YAMLError:
         # `!!int ""` — IndexError, `!!bool x` — KeyError, `!!timestamp x` — AttributeError, длинное
         # число или несуществующая дата — ValueError. Перечень не закрыт, поэтому ловим всё, но
-        # строго вокруг `safe_load`. Тип и текст исключения в сообщение не идут: по ним причину не
+        # строго вокруг разбора. Тип и текст исключения в сообщение не идут: по ним причину не
         # назвать, а текст содержит значение из файла.
         problems.append(
             f"{name}: значение не построить (тег или литерал): слишком длинное число, "
@@ -108,10 +150,10 @@ def _entity_files(root: Path, folder: str, problems: list[str]) -> list[Path]:
     `*.yaml` (в том числе подпапка), — проблема с путём. Нет папки — нет и файлов."""
     files: list[Path] = []
     for entry in sorted((root / folder).glob("*")):
-        name = f"{folder}/{entry.name}"
+        name = printable(f"{folder}/{entry.name}", MAX_FIELD_LENGTH)
         if entry.name.startswith("."):
             continue
-        # Папка с именем `*.yaml` тоже идёт на чтение: оно скажет «Is a directory».
+        # Папка с именем `*.yaml` тоже идёт на чтение: проверка перед ним скажет «не обычный файл».
         if entry.suffix == ".yaml":
             files.append(entry)
         elif entry.is_dir():
@@ -126,7 +168,7 @@ def _load_entities(root: Path, folder: str, problems: list[str]) -> dict[str, Ba
     model = ENTITY_FOLDERS[folder]
     entities: dict[str, BaseModel] = {}
     for file in _entity_files(root, folder, problems):
-        name = f"{folder}/{file.name}"
+        name = printable(f"{folder}/{file.name}", MAX_FIELD_LENGTH)
         raw = _read_yaml(file, name, dict, problems)
         if raw is None:
             continue
@@ -236,6 +278,5 @@ def dump_adventure(adventure: Adventure, path: Path) -> None:
     for name, document in documents.items():
         file = path / name
         file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_text(
-            yaml.safe_dump(document, allow_unicode=True, sort_keys=False), encoding="utf-8"
-        )
+        text = yaml.dump(document, Dumper=_AdventureDumper, allow_unicode=True, sort_keys=False)
+        file.write_text(text, encoding="utf-8")
