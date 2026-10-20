@@ -27,6 +27,7 @@ from starlette.websockets import WebSocket
 from dnd_engine.content import SrdContent, load_srd
 from dnd_server.auth.deps import websocket_user
 from dnd_server.db.models import User
+from dnd_server.dm.text import safe_traceback
 from dnd_server.games.service import NotFound, get_game
 from dnd_server.realtime.hub import Connection, Hub
 from dnd_server.realtime.views import snapshot_for
@@ -119,10 +120,15 @@ async def game_socket(
     try:
         try:
             snapshot = await snapshot_text(websocket, user, game_id, srd)
-        except Exception:
+        except Exception as exc:
             # Снимок не собрался (например, состояние записано более новой версией сервера):
             # подробности в журнал, клиенту — понятный отказ, а не молчание.
-            logger.exception("Не удалось собрать снимок игры %s для игрока %s.", game_id, user.id)
+            logger.error(
+                "Не удалось собрать снимок игры %s для игрока %s.\n%s",
+                game_id,
+                user.id,
+                safe_traceback(exc, websocket.app.state.settings),
+            )
             with contextlib.suppress(Exception):
                 await websocket.send_text(SNAPSHOT_ERROR)
             await close_quietly(websocket, CLOSE_SERVER_ERROR)

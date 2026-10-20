@@ -10,6 +10,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from types import MappingProxyType
+from typing import NamedTuple
 
 from pydantic import BaseModel
 
@@ -21,6 +22,7 @@ from dnd_engine.content import (
     ItemDef,
     SpeciesDef,
     SpellcastingDef,
+    SpellDef,
     SrdContent,
 )
 from dnd_engine.dice import roll
@@ -57,6 +59,28 @@ SKILLFUL_TRAIT = "skillful"  # Умелость человека: один на�
 TRAIT_SKILLS: Mapping[str, Skill] = MappingProxyType({"keen_senses": Skill.PERCEPTION})
 
 UNNAMED_CHARACTER_NAME = "Безымянный странник"
+
+
+class FightingStyle(NamedTuple):
+    name: str  # русское название для формы создания
+    summary: str  # суть стиля одной фразой
+
+
+# Движок знает боевые стили по id (`ClassDef.fighting_styles`), а русские название и суть нужны
+# форме создания персонажа. Они записаны здесь, а не в таблице SRD: набор файлов `SrdContent` не
+# меняется ради двух строк на стиль, а соседние названия (`ABILITY_NAMES_RU`, `SKILL_NAMES_RU`)
+# тоже лежат в коде. Тест следит, что у каждого стиля каждого класса есть запись и лишних записей
+# нет.
+FIGHTING_STYLES: Mapping[str, FightingStyle] = MappingProxyType(
+    {
+        "archery": FightingStyle("Стрельба", "+2 к броскам атаки дальнобойным оружием."),
+        "defense": FightingStyle("Оборона", "+1 к КД, пока надет доспех."),
+        "dueling": FightingStyle(
+            "Дуэлянт",
+            "+2 к урону одноручным оружием ближнего боя, пока вторая рука свободна.",
+        ),
+    }
+)
 
 
 class AbilityMethod(StrEnum):
@@ -295,23 +319,31 @@ def _check_fighting_style(style: str | None, cls: ClassDef) -> list[str]:
     return []
 
 
-def _prepared_levels(spellcasting: SpellcastingDef) -> range:
-    """Уровни заклинаний, доступные ячейкам персонажа (заговоры сюда не входят)."""
-    return range(1, max(spellcasting.slots[CHARACTER_LEVEL]) + 1)
+class SpellOptions(NamedTuple):
+    cantrips: tuple[SpellDef, ...]  # заговоры класса (0-й уровень)
+    spells: tuple[SpellDef, ...]  # заклинания от 1-го уровня до высшего уровня ячеек персонажа
 
 
-def _spell_ids(spellcasting: SpellcastingDef, content: SrdContent, levels: range) -> list[str]:
-    """Заклинания списка класса указанных уровней в порядке данных."""
-    return [
-        spell.id
-        for spell in content.spells.values()
-        if spellcasting.spell_list in spell.classes and spell.level in levels
+def class_spell_options(spellcasting: SpellcastingDef, content: SrdContent) -> SpellOptions:
+    """Заклинания списка класса, из которых персонаж 3-го уровня выбирает свои, в порядке данных.
+
+    Заговоры — заклинания 0-го уровня; подготовленные — от 1-го уровня до высшего уровня ячеек
+    персонажа (заговоры сюда не входят). По этим вариантам `build_character` проверяет выбор,
+    из них же случайный режим набирает заклинания и форма создания показывает список."""
+    top_level = max(spellcasting.slots[CHARACTER_LEVEL])
+    in_list = [
+        spell for spell in content.spells.values() if spellcasting.spell_list in spell.classes
     ]
+    return SpellOptions(
+        cantrips=tuple(spell for spell in in_list if spell.level == 0),
+        spells=tuple(spell for spell in in_list if 1 <= spell.level <= top_level),
+    )
 
 
 def _check_spell_group(
-    label: str, picks: Sequence[str], wanted: int, allowed: Sequence[str], content: SrdContent
+    label: str, picks: Sequence[str], wanted: int, allowed: Sequence[SpellDef], content: SrdContent
 ) -> list[str]:
+    allowed_ids = {spell.id for spell in allowed}
     problems = []
     if len(picks) != wanted:
         problems.append(f"{label}: нужно выбрать ровно {wanted}, выбрано {len(picks)}")
@@ -320,7 +352,7 @@ def _check_spell_group(
         if spell is None:
             problems.append(f"{label}: неизвестное заклинание {spell_id!r}")
             continue
-        if spell_id not in allowed:
+        if spell_id not in allowed_ids:
             problems.append(
                 f"{label}: заклинание «{spell.name}» недоступно — нужно из списка класса"
                 " и подходящего уровня"
@@ -335,19 +367,20 @@ def _check_spells(choices: CharacterChoices, cls: ClassDef, content: SrdContent)
     if spellcasting is None:
         has_spells = choices.cantrips or choices.prepared_spells
         return [f"у класса «{cls.name}» нет заклинаний"] if has_spells else []
+    options = class_spell_options(spellcasting, content)
     return [
         *_check_spell_group(
             "заговоры",
             choices.cantrips,
             spellcasting.cantrips_known[CHARACTER_LEVEL],
-            _spell_ids(spellcasting, content, range(1)),
+            options.cantrips,
             content,
         ),
         *_check_spell_group(
             "подготовленные заклинания",
             choices.prepared_spells,
             spellcasting.prepared[CHARACTER_LEVEL],
-            _spell_ids(spellcasting, content, _prepared_levels(spellcasting)),
+            options.spells,
             content,
         ),
     ]
@@ -582,12 +615,10 @@ def _random_spells(rng: Rng, cls: ClassDef, content: SrdContent) -> tuple[list[s
     spellcasting = cls.spellcasting
     if spellcasting is None:
         return [], []
-    cantrip_pool = _spell_ids(spellcasting, content, range(1))
-    prepared_pool = _spell_ids(spellcasting, content, _prepared_levels(spellcasting))
-    return (
-        _shuffled(rng, cantrip_pool)[: spellcasting.cantrips_known[CHARACTER_LEVEL]],
-        _shuffled(rng, prepared_pool)[: spellcasting.prepared[CHARACTER_LEVEL]],
-    )
+    options = class_spell_options(spellcasting, content)
+    cantrips = _shuffled(rng, options.cantrips)[: spellcasting.cantrips_known[CHARACTER_LEVEL]]
+    prepared = _shuffled(rng, options.spells)[: spellcasting.prepared[CHARACTER_LEVEL]]
+    return [spell.id for spell in cantrips], [spell.id for spell in prepared]
 
 
 def random_character(

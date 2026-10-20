@@ -19,6 +19,7 @@ from dnd_server.db import session as db_session
 from dnd_server.db.session import (
     DatabasePathError,
     create_database_directory,
+    is_inside_folder,
     resolve_database_url,
 )
 
@@ -192,6 +193,77 @@ def test_folder_next_to_webapp_with_a_similar_name_is_allowed():
     path = REPO_ROOT / "services" / "webapp-backup" / "dnd.sqlite3"
 
     assert resolve_database_url(sqlite_url(path)).database == str(path)
+
+
+# На macOS (APFS) и Windows `services/WebApp` — та же папка, что `services/webapp`, а `resolve()`
+# регистр не исправляет: строковое сравнение путей такой алиас пропустило бы. Есть ли алиас, зависит
+# от файловой системы, где лежит репозиторий, поэтому два теста взаимоисключающие.
+CASE_VARIANTS = ["services/WebApp", "services/WEBAPP", "Services/webapp", "SERVICES/WEBAPP"]
+FILESYSTEM_IGNORES_CASE = (REPO_ROOT / "SERVICES" / "WEBAPP").exists()
+
+
+@pytest.mark.skipif(not FILESYSTEM_IGNORES_CASE, reason="файловая система различает регистр")
+@pytest.mark.parametrize("folder", CASE_VARIANTS)
+@pytest.mark.parametrize("deeper", ["", "data/nested/"], ids=["прямо в папке", "в новой подпапке"])
+@pytest.mark.parametrize("absolute", [True, False], ids=["абсолютный", "от корня репозитория"])
+def test_database_inside_webapp_is_refused_under_another_letter_case(folder, deeper, absolute):
+    path = Path(folder) / f"{deeper}dnd.sqlite3"
+
+    with pytest.raises(DatabasePathError, match="раздаёт Vite"):
+        resolve_database_url(sqlite_url(REPO_ROOT / path if absolute else path))
+
+
+@pytest.mark.skipif(FILESYSTEM_IGNORES_CASE, reason="файловая система не различает регистр")
+@pytest.mark.parametrize("folder", CASE_VARIANTS)
+def test_another_letter_case_is_another_folder_where_the_filesystem_tells_them_apart(folder):
+    path = REPO_ROOT / folder / "dnd.sqlite3"
+
+    assert resolve_database_url(sqlite_url(path)).database == str(path)
+
+
+# --- вторые имена папки: сверка по самому файлу, а не по строке ---
+
+
+@pytest.fixture
+def folder_with_alias(tmp_path) -> tuple[Path, Path]:
+    """Папка и её второе имя: символическая ссылка играет роль алиаса регистронезависимой ФС."""
+    folder = tmp_path / "webapp"
+    folder.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(folder, target_is_directory=True)
+    return folder, alias
+
+
+@pytest.mark.parametrize(
+    "deeper", ["x.sqlite3", "new/sub/x.sqlite3"], ids=["в папке", "в подпапке"]
+)
+def test_a_path_under_a_second_name_of_the_folder_is_inside_it(folder_with_alias, deeper):
+    folder, alias = folder_with_alias
+
+    assert is_inside_folder(alias / deeper, folder)
+    assert is_inside_folder(folder / deeper, folder)
+
+
+def test_the_folder_itself_under_a_second_name_is_inside_it(folder_with_alias):
+    folder, alias = folder_with_alias
+
+    assert is_inside_folder(alias, folder)
+
+
+def test_a_similar_or_missing_folder_is_not_taken_for_the_folder(folder_with_alias, tmp_path):
+    folder, _alias = folder_with_alias
+    (tmp_path / "webapp-backup").mkdir()
+
+    assert not is_inside_folder(tmp_path / "webapp-backup" / "x.sqlite3", folder)
+    assert not is_inside_folder(tmp_path / "other" / "x.sqlite3", folder)
+    assert not is_inside_folder(tmp_path / "x.sqlite3", folder)
+
+
+def test_a_folder_that_is_not_on_the_disk_is_compared_by_name_only(tmp_path):
+    missing = tmp_path / "no-such-webapp"
+
+    assert is_inside_folder(missing / "data" / "x.sqlite3", missing)
+    assert not is_inside_folder(tmp_path / "data" / "x.sqlite3", missing)
 
 
 # --- папка для файла ---

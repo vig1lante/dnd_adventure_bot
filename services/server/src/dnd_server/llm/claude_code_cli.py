@@ -366,7 +366,10 @@ class ClaudeCodeCliProvider:
             raise ProviderError(
                 f"claude завершился с кодом {process.returncode}: {_stderr_tail(stderr, secret)}"
             )
-        return stdout.decode("utf-8", errors="replace")
+        text = stdout.decode("utf-8", errors="replace")
+        # Вывод CLI цитируется в тексте ProviderError (журнал хода, терминал владельца): как и из
+        # stderr, из него вырезается токен хода, если CLI его напечатал.
+        return text.replace(secret, "***") if secret else text
 
     async def _stop(self, process: asyncio.subprocess.Process) -> None:
         """Останавливает ещё живой процесс: сначала SIGINT, по истечении ожидания SIGKILL."""

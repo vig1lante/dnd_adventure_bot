@@ -222,6 +222,13 @@ async def test_provider_satisfies_the_llm_provider_protocol():
     assert provider.name == "anthropic_api"
 
 
+async def test_the_provider_names_the_model_of_the_turn_and_not_the_cheap_one():
+    # Журнал хода мастера берёт модель у собранного провайдера, а не повторяет правило фабрики.
+    provider = FakeApi().make_provider(model="claude-test-main", cheap_model="claude-test-cheap")
+
+    assert provider.model == "claude-test-main"
+
+
 async def test_turn_request_marks_stable_parts_for_caching_and_sets_reasoning():
     api = FakeApi(reply(text("Рассказ.")))
 

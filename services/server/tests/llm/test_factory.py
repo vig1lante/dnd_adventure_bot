@@ -371,6 +371,7 @@ def test_scenario_that_is_a_folder_is_a_config_error_that_names_the_reason(tmp_p
         make_provider(settings)
 
     assert "не обычный файл" in str(error.value)
+    assert "[Errno 0]" not in str(error.value)  # 0 — не код ОС, а наша проверка вида файла
 
 
 # --- anthropic_api ---

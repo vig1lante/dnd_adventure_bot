@@ -27,6 +27,7 @@ import json
 import re
 import sqlite3
 from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +62,10 @@ GOLDEN_NAME = re.compile(r"game_state_v(\d+)\.json")
 GOLDEN_ADVENTURE_NAME = re.compile(r"adventure_v(\d+)\.json")
 NOW = "2026-10-01 12:00:00.000000"
 # Ревизия миграции -> тест этого файла, который читает игру, сохранённую до неё.
-SAVED_GAME_TESTS = {"0001": "test_a_game_saved_on_the_first_revision_is_read_after_upgrade_head"}
+SAVED_GAME_TESTS = {
+    "0001": "test_a_game_saved_on_the_first_revision_is_read_after_upgrade_head",
+    "0002": "test_a_game_saved_before_the_clock_column_keeps_counting_after_upgrade_head",
+}
 
 
 def golden_files() -> dict[int, Path]:
@@ -276,4 +280,37 @@ async def test_a_game_saved_on_the_first_revision_is_read_after_upgrade_head(set
         assert all(note not in response.text for note in notes if note)
     finally:
         await app.state.engine.dispose()
+        await engine.dispose()
+
+
+async def test_a_game_saved_before_the_clock_column_keeps_counting_after_upgrade_head(
+    settings, migrate
+):
+    # Ревизия 0002 (B7.4) завела `clock_at`: идущая игра прежней ревизии не должна обнулить время
+    # игры и должна читаться теми же моделями, что и раньше.
+    golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
+    adventure = json.loads(golden_adventures()[1].read_text(encoding="utf-8"))
+    await migrate("upgrade", "0001")
+    ids = insert_saved_game(sqlite_file(settings.database_url), golden, adventure)
+    await migrate("upgrade", "head")
+
+    engine = make_engine(settings.database_url)
+    db = make_sessionmaker(engine)
+    try:
+        async with db() as session:
+            game = await session.get(Game, ids["game_id"])
+            snapshot = await session.get(GameStateSnapshot, (ids["game_id"], game.state_version))
+            alice = await session.get(User, ids["Алиса"])
+            view = await snapshot_for(session, alice, ids["game_id"], srd=load_srd())
+        started = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+        assert (game.started_at, game.clock_at) == (started, started)
+        assert (game.active_seconds, game.phase.value) == (600, "playing")
+        # Часы идут с момента старта: накопленные 600 с и прошедшие после него. 600 — условный
+        # остаток образца: он показывает, что накопленное миграцией не теряется. Но миграция ставит
+        # `clock_at = started_at`, и у игры с ненулевым остатком эти секунды посчитались бы дважды.
+        # Базы B6 такой игры не содержат: `active_seconds` писал только блок B7 (в B6 он всегда 0).
+        assert game.active_time(started + timedelta(seconds=90)) == 690
+        assert snapshot.to_state().model_dump(mode="json") == golden["state"]
+        assert view["phase"]["phase"] == "playing" and view["phase"]["remaining_seconds"] is None
+    finally:
         await engine.dispose()

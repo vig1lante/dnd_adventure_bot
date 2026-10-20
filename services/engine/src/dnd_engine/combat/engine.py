@@ -32,6 +32,7 @@
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal
 
 from dnd_engine.abilities import Ability, Skill, modifier
@@ -120,6 +121,11 @@ POTENT_CANTRIP = "potent_cantrip"  # «Мощный заговор» эвока�
 DISCIPLE_OF_LIFE = "disciple_of_life"  # «Ученик жизни» жреца: лечение ячейкой сильнее
 FAVORED_ENEMY = "favored_enemy"  # «Избранный враг»: Метка охотника без ячейки
 HELPED = "helped"  # метка на противнике: первая атака союзника помощника идёт с преимуществом
+# Русские названия меток, которых нет в данных SRD (ни состояние, ни заклинание, ни умение класса):
+# клиенту нужно название, а не id. Помощь — не состояние SRD, поэтому она не в `conditions.yaml`:
+# иначе мастер мог бы наложить её внешним решением (`apply_condition`), а метку ставит только бой.
+# Таблица только для чтения; сервер берёт название отсюда после данных SRD.
+MARK_NAMES_RU: Mapping[str, str] = MappingProxyType({HELPED: "Помощь"})
 INVISIBLE = "invisible"
 HIDDEN_SOURCE = (
     "hide"  # источник «невидим» от действия «Спрятаться»: кончается атакой и заклинанием

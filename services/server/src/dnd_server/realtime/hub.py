@@ -21,6 +21,7 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 from dnd_server.db.models import AUDIENCE_ALL
+from dnd_server.dm.text import safe_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -97,11 +98,16 @@ class Connection:
             )
         except asyncio.CancelledError:
             raise
-        except Exception:
-            # Закрытый клиентом сокет — обычное дело, а не сбой: подробности нужны только отладке.
-            logger.debug(
-                "Сокет игрока %s (игра %s) закрыт.", self.user_id, self.game_id, exc_info=True
-            )
+        except Exception as exc:
+            # Закрытый клиентом сокет — обычное дело, а не сбой: подробности нужны только отладке,
+            # поэтому трассировка собирается, только если уровень DEBUG включён.
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Сокет игрока %s (игра %s) закрыт.\n%s",
+                    self.user_id,
+                    self.game_id,
+                    safe_traceback(exc, None),
+                )
         finally:
             self._on_stop(self)
 
@@ -137,6 +143,17 @@ class Hub:
         """Снимает соединение и останавливает писателя; повторный вызов безопасен."""
         self._forget(connection)
         connection.stop()
+
+    def drop_user(self, game_id: str, user_id: str) -> int:
+        """Снимает все соединения игрока в игре; возвращает, сколько снято.
+
+        Нужен, когда игрок перестал быть участником (вышел из лобби, исключён): иначе его открытые
+        сокеты продолжили бы получать события игры, в том числе общие. Очередь не досылается;
+        клиент, увидев закрытие, переподключится и получит 4403 (`realtime.ws`)."""
+        dropped = [c for c in self._games.get(game_id, ()) if c.user_id == user_id]
+        for connection in dropped:
+            self.disconnect(connection)
+        return len(dropped)
 
     def connections(self, game_id: str) -> int:
         return len(self._games.get(game_id, ()))
@@ -180,8 +197,11 @@ class Hub:
             return None
         try:
             return json.dumps(payload, ensure_ascii=False)
-        except TypeError, ValueError:
-            logger.exception(
-                "Событие %r игры %s не разослано: оно не сериализуется.", payload["type"], game_id
+        except (TypeError, ValueError) as exc:
+            logger.error(
+                "Событие %r игры %s не разослано: оно не сериализуется.\n%s",
+                payload["type"],
+                game_id,
+                safe_traceback(exc, None),
             )
             return None

@@ -8,7 +8,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import HTTPConnection, Request
@@ -23,6 +23,8 @@ from dnd_server.games.hooks import Broadcaster, GameHooks, run_game_started
 from dnd_server.games.schemas import CreateGameIn, GameOut, JoinIn, ReadyIn
 from dnd_server.games.service import GameError, GameLocks, JoinAttempts, ModelCalls
 from dnd_server.llm.internal_api import TurnTokens
+from dnd_server.realtime.hub import Hub
+from dnd_server.realtime.ws import get_hub
 
 router = APIRouter(prefix="/api/games")
 
@@ -74,6 +76,7 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 UserDep = Annotated[User, Depends(current_user)]
 LocksDep = Annotated[GameLocks, Depends(get_locks)]
 BroadcasterDep = Annotated[Broadcaster, Depends(get_broadcaster)]
+HubDep = Annotated[Hub, Depends(get_hub)]
 
 
 @router.post("", status_code=201)
@@ -141,4 +144,36 @@ async def start_game(
     game = await service.start_game(session, user, game_id, locks=locks, broadcaster=broadcaster)
     # Мастер стартует после ответа: вплетение идёт долго, и хост не должен ждать его в запросе.
     background.add_task(run_game_started, hooks, game.id)
+    return game
+
+
+@router.post("/{game_id}/leave", status_code=204)
+async def leave_game(
+    game_id: str,
+    user: UserDep,
+    session: SessionDep,
+    locks: LocksDep,
+    broadcaster: BroadcasterDep,
+    hub: HubDep,
+) -> Response:
+    await service.leave_game(session, user, game_id, locks=locks, broadcaster=broadcaster)
+    # Вышедший больше не участник: его открытые сокеты перестают получать события игры.
+    hub.drop_user(game_id, user.id)
+    return Response(status_code=204)
+
+
+@router.post("/{game_id}/players/{user_id}/kick")
+async def kick_player(
+    game_id: str,
+    user_id: str,
+    user: UserDep,
+    session: SessionDep,
+    locks: LocksDep,
+    broadcaster: BroadcasterDep,
+    hub: HubDep,
+) -> GameOut:
+    game = await service.kick_player(
+        session, user, game_id, user_id, locks=locks, broadcaster=broadcaster
+    )
+    hub.drop_user(game_id, user_id)
     return game

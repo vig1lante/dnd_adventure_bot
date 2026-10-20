@@ -30,9 +30,11 @@ from dnd_engine.character import Character
 from dnd_engine.conditions import ZERO_HP_SOURCE
 from dnd_engine.content import load_srd
 from dnd_engine.creation import (
+    FIGHTING_STYLES,
     UNNAMED_CHARACTER_NAME,
     CharacterChoices,
     build_character,
+    class_spell_options,
     quick_character,
     random_character,
     roll_ability_set,
@@ -59,6 +61,7 @@ from dnd_server.db.models import (
     PlayerCharacter,
     User,
 )
+from dnd_server.dm import provider as provider_module
 from dnd_server.games.service import MAX_MODEL_CALLS
 from dnd_server.llm.base import JsonRequest
 from dnd_server.llm.fake import FakeProvider, load_scenario
@@ -375,7 +378,7 @@ def use_provider(monkeypatch: pytest.MonkeyPatch, provider: Any) -> list[dict[st
         calls.append(kwargs)
         return provider
 
-    monkeypatch.setattr(service, "make_provider", make)
+    monkeypatch.setattr(provider_module, "make_provider", make)
     return calls
 
 
@@ -511,6 +514,38 @@ async def test_every_fighting_style_of_every_class_has_a_russian_name(world):
     assert used <= set(styles)
     assert all(re.search("[а-яё]", style["name"], re.IGNORECASE) for style in styles.values())
     assert all(style["summary"] for style in styles.values())
+
+
+# Варианты заклинаний и боевые стили форме даёт движок (`class_spell_options`, `FIGHTING_STYLES`):
+# сервер своих копий не держит, поэтому форма и проверка `build_character` не могут разойтись.
+
+
+@pytest.mark.parametrize(
+    "class_id", sorted(id_ for id_, cls in load_srd().classes.items() if cls.spellcasting)
+)
+def test_the_form_lists_exactly_the_spells_the_engine_offers_for_the_class(class_id):
+    srd = load_srd()
+    offered = class_spell_options(srd.classes[class_id].spellcasting, srd)
+
+    shown = {c.id: c for c in service.creation_options(srd).classes}[class_id].spellcasting
+
+    def lines(spells):
+        return [(s.id, s.name, s.level, s.summary) for s in spells]
+
+    assert lines(shown.cantrip_options) == lines(offered.cantrips)
+    assert lines(shown.spell_options) == lines(offered.spells) != []  # у следопыта заговоров нет
+
+
+def test_the_form_describes_the_fighting_styles_with_the_engine_names():
+    srd = load_srd()
+    used = {style for cls in srd.classes.values() for style in cls.fighting_styles}
+
+    shown = {
+        style.id: (style.name, style.summary)
+        for style in service.creation_options(srd).fighting_styles
+    }
+
+    assert shown == {style: tuple(FIGHTING_STYLES[style]) for style in used} != {}
 
 
 @pytest.mark.parametrize("class_id", sorted(load_srd().classes))
@@ -1248,6 +1283,43 @@ async def test_a_character_replaced_while_the_model_thinks_keeps_the_newer_data(
     assert (await stored_player(world.db, game["id"], host.id)).character_id == row.id
 
 
+async def test_a_player_who_left_while_the_model_thinks_gets_a_conflict_and_leaves_no_character(
+    world, monkeypatch
+):
+    game, _host, [friend] = await make_game(world, friends=1)
+    provider = GatedProvider()
+    use_provider(monkeypatch, provider)
+
+    slow = asyncio.create_task(create(world, friend, game["id"], quick_body()))
+    await asyncio.wait_for(provider.started.wait(), 5)
+    left = await world.http.post(f"/api/games/{game['id']}/leave", headers=friend.headers)
+    provider.release.set()
+    response = await asyncio.wait_for(slow, 5)
+
+    assert left.status_code == 204
+    assert response.status_code == 409, response.text  # не 500
+    assert re.search("[а-яё]", response.json()["detail"], re.IGNORECASE)
+    assert friend.id not in {r.user_id for r in await stored_characters(world.db, game["id"])}
+
+
+async def test_a_player_kicked_while_the_model_thinks_gets_a_conflict_too(world, monkeypatch):
+    game, host, [friend] = await make_game(world, friends=1)
+    provider = GatedProvider()
+    use_provider(monkeypatch, provider)
+
+    slow = asyncio.create_task(create(world, friend, game["id"], quick_body()))
+    await asyncio.wait_for(provider.started.wait(), 5)
+    kicked = await world.http.post(
+        f"/api/games/{game['id']}/players/{friend.id}/kick", headers=host.headers
+    )
+    provider.release.set()
+    response = await asyncio.wait_for(slow, 5)
+
+    assert kicked.status_code == 200
+    assert response.status_code == 409, response.text
+    assert friend.id not in {r.user_id for r in await stored_characters(world.db, game["id"])}
+
+
 async def test_the_description_is_not_written_after_the_game_has_started(world, monkeypatch):
     game, host, _ = await make_game(world)
     provider = GatedProvider()
@@ -1373,6 +1445,35 @@ async def test_sixteen_players_wait_for_the_model_and_the_server_stays_responsiv
     responses = await asyncio.wait_for(asyncio.gather(*pending), 10)
 
     assert [response.status_code for response in responses] == [200] * PARALLEL_CALLS
+
+
+async def test_heroes_with_ready_descriptions_wait_for_the_game_lock_without_connections(
+    world, monkeypatch
+):
+    # Описание готово, а игру кто-то держит: запись описания ждёт блокировку, но соединения пула не
+    # занимает, иначе держатель блокировки (ход мастера, другой игрок) не получил бы своё.
+    members = await players_of_three_games(world, PARALLEL_CALLS)
+    provider = GatedProvider()
+    use_provider(monkeypatch, provider)
+    pending = [
+        asyncio.create_task(create(world, player, game["id"], quick_body()))
+        for game, player in members
+    ]
+    await provider.wait_for_calls(PARALLEL_CALLS)
+    games = {game["id"] for game, _player in members}
+    held = [world.app.state.game_locks.lock(game_id) for game_id in games]
+    for lock in held:
+        await lock.acquire()
+
+    provider.release.set()
+    await asyncio.sleep(0.2)
+
+    assert not any(task.done() for task in pending)  # все ждут блокировки своих игр
+    assert checked_out(world) == 0
+    for lock in held:
+        lock.release()
+    responses = await asyncio.wait_for(asyncio.gather(*pending), 10)
+    assert [response.status_code for response in responses] == [201] * PARALLEL_CALLS
 
 
 async def test_sixteen_heroes_wait_for_their_descriptions_and_the_server_stays_responsive(

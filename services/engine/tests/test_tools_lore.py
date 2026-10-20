@@ -751,6 +751,99 @@ def test_get_location_follows_npc_moves_and_deaths(lore, make_ctx, make_state):
     assert crypt == []
 
 
+# Предметы «здесь»: лежащие в локации открыто и находящиеся у NPC, присутствующих в ней. Предмет
+# внутри ещё не раскрытого места (сундук в сторожке) в список не попадает: он по-прежнему назван
+# только в `reveals` места, а выдать его до раскрытия мастеру не даёт `give_item`.
+
+CHEST_KEY = {"id": "chest-key", "name": "Запасной ключ Ульриха"}
+POTION = {"id": "healing-potion", "name": "Зелье лечения"}
+
+
+def items_of(lore, ctx, **args) -> list[dict[str, Any]]:
+    return lore.call(ctx, "get_location", args).result["items"]
+
+
+def test_get_location_shows_an_item_held_by_an_npc_who_is_here(lore, make_ctx):
+    assert items_of(lore, make_ctx()) == [{**CHEST_KEY, "holder": "npc:marta"}]
+
+
+def test_get_location_does_not_show_an_item_inside_a_closed_place(lore, make_ctx, make_state):
+    ctx = make_ctx(make_state(location_id="cemetery"))
+
+    result = lore.call(ctx, "get_location", {}).result
+
+    assert result["items"] == []
+    # Предмет назван только как следствие находки места, по-прежнему для мастера.
+    assert by_id(result["features"])["chest"]["reveals"] == [
+        {"kind": "item", "id": "healing-potion"}
+    ]
+
+
+def test_get_location_shows_an_item_once_its_place_is_revealed(lore, make_ctx, make_state):
+    state = make_state(location_id="cemetery")
+    state.world.revealed.append("feature:chest")
+
+    assert items_of(lore, make_ctx(state)) == [{**POTION, "holder": "location:cemetery"}]
+
+
+def test_get_location_shows_an_item_left_lying_in_the_location(lore, make_ctx, make_state):
+    # Брошенный предмет уже снаружи места, где он лежал, даже если место не раскрывали.
+    state = make_state(
+        location_id="cemetery",
+        world=WorldState(item_holders={"healing-potion": "location:cemetery"}),
+    )
+
+    assert items_of(lore, make_ctx(state)) == [{**POTION, "holder": "location:cemetery"}]
+
+
+@pytest.mark.parametrize("holder", ["character:pc-1", "character:ghost", "gone", "npc:fabian"])
+def test_get_location_hides_an_item_that_is_held_by_someone_else_or_gone(
+    lore, make_ctx, make_state, holder
+):
+    # Ключ у героя, у того, кого нет в отряде, ушёл из игры или у NPC, которого здесь нет.
+    state = make_state(world=WorldState(item_holders={"chest-key": holder}))
+
+    assert items_of(lore, make_ctx(state)) == []
+
+
+def test_get_location_follows_an_npc_with_the_item_to_another_location(lore, make_ctx, make_state):
+    state = make_state(world=WorldState(npc_location={"marta": "cemetery"}))
+    ctx = make_ctx(state)
+
+    assert items_of(lore, ctx) == []
+    assert items_of(lore, ctx, location_id="cemetery") == [{**CHEST_KEY, "holder": "npc:marta"}]
+
+
+def test_get_location_still_shows_the_item_of_a_dead_npc(lore, make_ctx, make_state):
+    # `give_item` отдаёт и то, что осталось у павшего NPC здесь, так что мастер должен его видеть.
+    state = make_state(world=WorldState(npc_alive={"marta": False}))
+
+    assert items_of(lore, make_ctx(state)) == [{**CHEST_KEY, "holder": "npc:marta"}]
+
+
+def test_get_location_by_id_lists_the_items_of_that_location(lore, make_ctx, make_state):
+    state = make_state(world=WorldState(item_holders={"healing-potion": "location:crypt"}))
+    ctx = make_ctx(state)
+
+    assert items_of(lore, ctx, location_id="crypt") == [{**POTION, "holder": "location:crypt"}]
+    assert items_of(lore, ctx) == [{**CHEST_KEY, "holder": "npc:marta"}]
+
+
+def test_get_location_items_are_short_and_json_compatible(lore, make_ctx, make_state):
+    state = make_state(
+        location_id="cemetery", world=WorldState(item_holders={"chest-key": "location:cemetery"})
+    )
+    state.world.revealed.append("feature:chest")
+
+    result = lore.call(make_ctx(state), "get_location", {}).result
+    items = result["items"]
+
+    assert [item["id"] for item in items] == ["chest-key", "healing-potion"]
+    # Описание предмета не копируется в ответ: его читают через `get_item`.
+    assert all(set(item) == {"id", "name", "holder"} for item in items)
+    assert json.loads(json.dumps(result)) == result
+
+
 def test_get_location_shows_an_unfinished_encounter(lore, make_ctx, make_state):
     state = make_state(location_id="cemetery")
     ctx = make_ctx(state)

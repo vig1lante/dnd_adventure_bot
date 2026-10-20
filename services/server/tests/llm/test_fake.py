@@ -19,6 +19,7 @@ from dnd_engine.content import MAX_YAML_BYTES
 from dnd_engine.modules import build_ruleset
 from dnd_engine.state import RulesRef
 from dnd_engine.tools import build_registry
+from dnd_server.dm.weaving import WeavingOut
 from dnd_server.llm.base import (
     MAX_PROBLEMS_CHARS,
     MAX_TRACE_ARGS_CHARS,
@@ -37,6 +38,7 @@ from dnd_server.llm.fake import (
     FakeProvider,
     Scenario,
     UnreadableYaml,
+    describe_os_error,
     load_scenario,
     parse_yaml,
     read_yaml,
@@ -48,6 +50,13 @@ SCENARIOS_DIR = Path(__file__).resolve().parents[1] / "scenarios"
 
 class Weaving(BaseModel):
     hooks: list[str]
+
+
+class Links(BaseModel):
+    """Схема с вложенностью: ответ с id героев в словарях, списках и тексте."""
+
+    links: list[dict[str, str]]
+    note: str
 
 
 class StrictWeaving(BaseModel):
@@ -312,6 +321,59 @@ async def test_complete_json_single_answer_is_given_every_time():
     assert all(answer.hooks == ["один"] for answer in answers)
 
 
+async def test_pc_placeholders_become_character_ids_in_json_answers():
+    # Так сценарий называет героев в ответе вплетения: id настоящие появляются только в игре.
+    answer = {"links": [{"character_id": "$pc2"}, {"character_id": "$pc1"}], "note": "$pc1 и $pc2"}
+    provider = FakeProvider(make_scenario(links=answer), pc_ids=("char-a", "char-b"))
+
+    result = await provider.complete_json(make_json_request("links"), Links)
+
+    assert result.links == [{"character_id": "char-b"}, {"character_id": "char-a"}]
+    assert result.note == "char-a и char-b"
+
+
+async def test_json_placeholders_are_filled_in_every_answer_of_a_list_and_keep_the_scenario():
+    scenario = make_scenario(weaving=[{"hooks": ["$pc1"]}, {"hooks": ["второй $pc2"]}])
+    provider = FakeProvider(scenario, pc_ids=("char-a", "char-b"))
+    request = make_json_request("weaving")
+
+    first = await provider.complete_json(request, Weaving)
+    second = await provider.complete_json(request, Weaving)
+
+    assert (first.hooks, second.hooks) == (["char-a"], ["второй char-b"])
+    # Сценарий хранит шаблон: подстановка делается на копии, а не на самом ответе.
+    assert scenario.json_answers["weaving"] == [{"hooks": ["$pc1"]}, {"hooks": ["второй $pc2"]}]
+
+
+async def test_a_single_json_answer_is_filled_again_for_every_call_of_a_provider_with_other_ids():
+    scenario = make_scenario(weaving={"hooks": ["$pc1"]})
+
+    first = await FakeProvider(scenario, pc_ids=("char-a",)).complete_json(
+        make_json_request(), Weaving
+    )
+    second = await FakeProvider(scenario, pc_ids=("char-z",)).complete_json(
+        make_json_request(), Weaving
+    )
+
+    assert (first.hooks, second.hooks) == (["char-a"], ["char-z"])
+
+
+@pytest.mark.parametrize("pc_ids", [(), ("char-a", "char-b")])
+async def test_json_placeholder_without_character_is_provider_error(pc_ids):
+    provider = FakeProvider(make_scenario(weaving={"hooks": ["$pc3"]}), pc_ids=pc_ids)
+
+    with pytest.raises(ProviderError, match=r"\$pc3"):
+        await provider.complete_json(make_json_request(), Weaving)
+
+
+async def test_json_without_placeholders_is_given_as_it_is_with_or_without_characters():
+    provider = FakeProvider(make_scenario(weaving={"hooks": ["цена 5$ или $pcx"]}))
+
+    result = await provider.complete_json(make_json_request(), Weaving)
+
+    assert result.hooks == ["цена 5$ или $pcx"]  # без цифры после $pc это просто текст
+
+
 # --- формат сценария ---
 
 
@@ -348,12 +410,15 @@ async def test_basic_round_scenario_runs_against_real_engine_tool_schemas():
     provider = FakeProvider(load_scenario(SCENARIOS_DIR / "basic_round.yaml"), pc_ids=("pc-1",))
 
     turn = await provider.run_turn(make_request(), SchemaCheckingTools())
-    weaving = await provider.complete_json(make_json_request("weaving"), Weaving)
+    weaving = await provider.complete_json(make_json_request("weaving"), WeavingOut)
 
     assert [call.name for call in turn.trace] == ["request_check", "chronicle"]
     assert turn.trace[0].args["character_id"] == "pc-1"
     assert turn.text == "Тени скрывают вас…"
-    assert weaving.hooks == []
+    # Вплетение сценария называет героя по id игры и связывает его с миром demo-crypt.
+    [hook] = weaving.hooks
+    assert hook.character_id == "pc-1"
+    assert hook.npc_links or hook.location_links
 
 
 # --- чтение недоверенного YAML (сценарий, сиды генератора) ---
@@ -538,6 +603,42 @@ def test_read_yaml_refuses_a_pipe_without_reading_it(tmp_path, fail_if_reading_h
 
     with pytest.raises(OSError, match="не обычный файл"):
         read_yaml(pipe)
+
+
+# --- текст ошибки файловой системы для владельца ---
+
+
+def test_a_refusal_without_an_os_code_is_told_by_its_reason_without_errno(tmp_path):
+    # `OSError(0, «не обычный файл»)` печатается как «[Errno 0] …»: 0 — не код ОС, а наша проверка.
+    folder = tmp_path / "data.yaml"
+    folder.mkdir()
+    with pytest.raises(OSError) as refusal:
+        read_yaml(folder)
+
+    assert "[Errno 0]" in str(refusal.value)
+    assert describe_os_error(refusal.value) == "не обычный файл"
+
+
+def test_a_real_os_error_keeps_its_code_and_the_path(tmp_path):
+    missing = tmp_path / "nope.yaml"
+    with pytest.raises(FileNotFoundError) as refusal:
+        read_yaml(missing)
+
+    assert describe_os_error(refusal.value) == str(refusal.value)
+    assert "[Errno 2]" in describe_os_error(refusal.value)
+    assert str(missing) in describe_os_error(refusal.value)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (OSError("своя причина"), "своя причина"),
+        (OSError(0, "причина"), "причина"),
+    ],
+    ids=["без кода", "код 0"],
+)
+def test_an_os_error_is_always_some_text(error, expected):
+    assert describe_os_error(error) == expected
 
 
 def test_load_scenario_refuses_a_scenario_with_an_alias_in_a_valid_shape(tmp_path):

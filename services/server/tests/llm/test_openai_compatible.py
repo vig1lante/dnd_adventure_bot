@@ -207,6 +207,13 @@ async def test_provider_satisfies_the_llm_provider_protocol():
     assert provider.name == "openai_compatible"
 
 
+async def test_the_provider_names_the_model_of_the_turn_and_not_the_cheap_one():
+    # Журнал хода мастера берёт модель у собранного провайдера, а не повторяет правило фабрики.
+    provider = FakeApi().make_provider(model="compat-test-main", cheap_model="compat-test-cheap")
+
+    assert provider.model == "compat-test-main"
+
+
 async def test_turn_request_puts_system_and_brief_first_then_context():
     api = FakeApi(says("Рассказ."))
 

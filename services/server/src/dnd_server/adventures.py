@@ -25,6 +25,7 @@ from dnd_engine.adventure.schema import Adventure
 from dnd_engine.adventure.validator import Report, validate
 from dnd_engine.content import SrdContent
 from dnd_server.auth.deps import current_user
+from dnd_server.dm.text import safe_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -103,11 +104,14 @@ def _load_entry(folder: Path, srd: SrdContent) -> CatalogEntry | None:
             folder.name,
             "; ".join(shorten_problems(exc.problems)),
         )
-    except Exception:
+    except Exception as exc:
         # Папку читает чужой ввод; что бы с ней ни случилось, остальные приключения и старт
-        # сервера не страдают. Трассировка нужна, чтобы такой сбой не остался загадкой.
-        logger.exception(
-            "Приключение из папки %r пропущено из-за непредвиденной ошибки.", folder.name
+        # сервера не страдают. Трассировка нужна, чтобы такой сбой не остался загадкой; идёт она
+        # через `safe_traceback`: в тексте ошибки бывают значения из файлов папки.
+        logger.error(
+            "Приключение из папки %r пропущено из-за непредвиденной ошибки.\n%s",
+            folder.name,
+            safe_traceback(exc, None),
         )
     return None
 

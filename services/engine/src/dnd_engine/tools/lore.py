@@ -144,6 +144,23 @@ def _npc_here(state: GameState, npc: Npc) -> dict[str, Any]:
     }
 
 
+def _items_here(
+    state: GameState, adventure: Adventure, location: Location, npcs_here: list[Npc]
+) -> list[dict[str, Any]]:
+    """Предметы, лежащие в локации открыто или находящиеся у присутствующих в ней NPC.
+
+    Тот же расчёт видимости, что у `give_item`: предмет внутри ещё не раскрытого места (сундук,
+    тайник) не показывается — он назван только в `reveals` этого места, пока его не найдут. Описание
+    предмета в список не идёт: его читают через `get_item`."""
+    holders = {f"location:{location.id}", *(f"npc:{npc.id}" for npc in npcs_here)}
+    return [
+        {"id": item.id, "name": item.name, "holder": holder}
+        for item in adventure.items.values()
+        if (holder := item_holder(state, adventure, item.id)) in holders
+        and closed_place_with_item(state, adventure, item.id) is None
+    ]
+
+
 def _encounter_view(
     state: GameState, adventure: Adventure, location: Location
 ) -> dict[str, Any] | None:
@@ -179,7 +196,7 @@ def get_location(ctx: ToolContext, args: GetLocationArgs) -> dict[str, Any]:
     state, adventure = ctx.state, ctx.adventure
     location = find_or_error(adventure.locations, "локации", args.location_id or state.location_id)
     npcs_here = [
-        _npc_here(state, npc)
+        npc
         for npc in adventure.npcs.values()
         if state.world.npc_location.get(npc.id, npc.location_id) == location.id
     ]
@@ -191,7 +208,8 @@ def get_location(ctx: ToolContext, args: GetLocationArgs) -> dict[str, Any]:
         "dm_notes": location.dm_notes,
         "exits": [_exit_view(state, adventure, exit_) for exit_ in location.exits],
         "features": [_feature_view(state, adventure, feature) for feature in location.features],
-        "npcs": npcs_here,
+        "npcs": [_npc_here(state, npc) for npc in npcs_here],
+        "items": _items_here(state, adventure, location, npcs_here),
         "encounter": _encounter_view(state, adventure, location),
     }
 
@@ -307,9 +325,11 @@ LORE_TOOLS = (
         name="get_location",
         description=(
             "Прочитать локацию: текст для чтения вслух, заметки мастера, выходы, интересные места, "
-            "NPC и бой. Без аргумента — текущая локация. Статус выхода: open — свободен, "
+            "NPC, предметы и бой. Без аргумента — текущая локация. Статус выхода: open — свободен, "
             "locked — заперт (locked_by говорит, что открывает), hidden — скрыт, пока его не "
-            "нашли (hidden_dc — Сл поиска). Интересное место со статусом locked тоже заперто."
+            "нашли (hidden_dc — Сл поиска). Интересное место со статусом locked тоже заперто. "
+            "Предметы — те, что лежат здесь открыто или у NPC здесь (holder); предмет внутри ещё "
+            "не раскрытого места в списке не появится, пока место не найдут."
         ),
         args_model=GetLocationArgs,
         handler=get_location,

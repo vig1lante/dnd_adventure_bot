@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 import dnd_engine
@@ -554,6 +555,89 @@ def test_a_folder_named_like_a_table_is_a_content_problem_not_a_crash(srd_dir):
     problems = load_problems(srd_dir)
 
     assert problems == ["conditions.yaml: не удалось прочитать файл (не обычный файл)"]
+
+
+# `yaml.safe_load` на чужом вводе бросает не только `YAMLError`: конструкторы значений падают чем
+# попало (`!!int ""` — `IndexError`, `!!bool x` — `KeyError`, длинное число — `ValueError`),
+# глубокая вложенность — `RecursionError`. Любая беда данных обязана стать `ContentError` с путём
+# файла и фиксированной причиной, без значения из файла (как у загрузчика приключения).
+
+SECRET_VALUE = "секрет-из-файла"
+UNBUILDABLE_VALUES = {
+    "вложенность": ("[" * 5000 + "]" * 5000, "слишком глубокая вложенность"),
+    "int-пустая-строка": ('- !!int ""\n', "значение не построить"),
+    "int-не-число": (f"- !!int {SECRET_VALUE}\n", "значение не построить"),
+    "bool-не-литерал": (f"- !!bool {SECRET_VALUE}\n", "значение не построить"),
+    "число-5000-цифр": ("- " + "9" * 5000 + "\n", "значение не построить"),
+    "несуществующая-дата": ("- 2023-02-30\n", "значение не построить"),
+    "timestamp-не-дата": (f"- !!timestamp {SECRET_VALUE}\n", "значение не построить"),
+}
+
+
+@pytest.mark.parametrize("table", TABLES)
+@pytest.mark.parametrize(
+    ("text", "reason"), UNBUILDABLE_VALUES.values(), ids=UNBUILDABLE_VALUES.keys()
+)
+def test_a_value_yaml_cannot_build_is_a_content_problem_without_the_value(
+    srd_dir, table, text, reason
+):
+    (srd_dir / f"{table}.yaml").write_text(text, encoding="utf-8")
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert problems[0].startswith(f"{table}.yaml: {reason}")
+    assert SECRET_VALUE not in problems[0] and "9" * 20 not in problems[0]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        IndexError(SECRET_VALUE),
+        KeyError(SECRET_VALUE),
+        AttributeError(SECRET_VALUE),
+        ValueError(SECRET_VALUE),
+        OverflowError(SECRET_VALUE),
+        TypeError(SECRET_VALUE),
+    ],
+    ids=lambda error: type(error).__name__,
+)
+def test_the_reason_for_an_unexpected_parse_error_is_one_fixed_text_that_never_repeats_the_error(
+    error,
+):
+    reason = content.describe_parse_failure(error)
+
+    assert SECRET_VALUE not in reason and type(error).__name__ not in reason
+    assert reason == content.describe_parse_failure(RuntimeError("другая беда"))
+    assert reason.startswith("значение не построить")
+
+
+def test_the_reason_for_too_deep_nesting_is_its_own_and_keeps_no_text_of_the_error():
+    reason = content.describe_parse_failure(RecursionError(SECRET_VALUE))
+
+    assert reason == "слишком глубокая вложенность"
+
+
+@pytest.mark.parametrize(
+    ("raw", "line", "reason"),
+    [
+        ("ключ: [1, 2\nсекрет: значение: ещё\n", 2, "expected ',' or ']'"),
+        ("a: b: c\n", 1, "mapping values are not allowed here"),
+        ("a: &x 1\nb: *x\n", 1, "якоря и алиасы YAML не поддерживаются"),
+    ],
+    ids=["парсер", "сканер", "алиас"],
+)
+def test_the_reason_for_a_broken_yaml_names_the_line_and_the_cause_but_not_the_document(
+    raw, line, reason
+):
+    with pytest.raises(yaml.YAMLError) as caught:
+        content.parse_yaml(raw.encode())
+
+    described = content.describe_parse_failure(caught.value)
+
+    assert described.startswith(f"некорректный YAML (строка {line}): ")
+    assert reason in described
+    assert "секрет" not in described  # слов документа в причине нет
 
 
 LONG_ID = "i" * 300

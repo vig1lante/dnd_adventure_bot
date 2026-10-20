@@ -6,9 +6,7 @@ import uvicorn
 from uvicorn.config import LOGGING_CONFIG
 from uvicorn.logging import AccessFormatter, DefaultFormatter
 
-# Только localhost: наружу сервер выставляет туннель cloudflared, а не привязка к интерфейсу.
-HOST = "127.0.0.1"
-PORT = 8000
+from dnd_server.config import HOST, PORT
 
 # Токен сессии WebSocket идёт в query (`/ws/games/<id>?token=…`): браузер не умеет слать заголовки
 # при открытии сокета. uvicorn пишет путь вместе с query в строку рукопожатия (`uvicorn.error`),

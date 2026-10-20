@@ -64,6 +64,11 @@ class OpenAICompatibleProvider:
         # Сервер, отвергший json_schema один раз, отвергнет и дальше: не платим лишним запросом.
         self._json_schema_supported = True
 
+    @property
+    def model(self) -> str:
+        """Основная модель, которой идёт ход мастера (дешёвая нужна только `complete_json`)."""
+        return self._model
+
     async def run_turn(self, req: TurnRequest, tools: ToolExecutor) -> TurnResult:
         # Тайм-аут общий на весь ход (спека §8.4), а не на один запрос: инструменты и повторные
         # запросы цикла тоже ограничены.

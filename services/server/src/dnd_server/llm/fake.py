@@ -13,6 +13,11 @@
 
 Инструменты шаги вызывают через переданный `ToolExecutor`, как настоящий провайдер: Fake сам
 ничего не считает. `timeout_s` запроса он не применяет, потому что ничего не ждёт.
+
+`$pc1…$pc6` в сценарии — id персонажей игры по порядку входа: Fake подставляет их и в аргументы
+инструментов, и в JSON-ответы (так ответ вплетения называет героев, id которых до игры неизвестны).
+Подстановка идёт на копии, сам сценарий остаётся шаблоном. Герой, которого в игре нет, — ошибка
+сценария (`ProviderError`).
 """
 
 import re
@@ -123,13 +128,9 @@ def parse_yaml(text: str) -> Any:
         return engine_content.parse_yaml(text.encode("utf-8"))
     except yaml.YAMLError as exc:
         problem = yaml_problem(exc)
-    except RecursionError:
-        problem = "слишком глубокая вложенность"
-    except Exception:
-        problem = (
-            "значение не построить (тег или литерал): слишком длинное число, "
-            "несуществующая дата или неверное значение под тегом"
-        )
+    except Exception as exc:
+        # Причины не-YAML ошибок общие с загрузчиком движка: свои копии текстов разошлись бы.
+        problem = engine_content.describe_parse_failure(exc)
     raise UnreadableYaml(problem)
 
 
@@ -151,6 +152,18 @@ def read_yaml(path: Path) -> Any:
     raise UnreadableYaml(problem)
 
 
+def describe_os_error(exc: OSError) -> str:
+    """Текст ошибки файловой системы для сообщения владельцу.
+
+    Проверка вида файла (`check_yaml_size`) бросает `OSError(0, «не обычный файл»)`, а `str()` такой
+    ошибки — «[Errno 0] не обычный файл»: 0 не код ОС, и префикс только путает. У неё остаётся
+    причина (`strerror`). Ошибка ОС с настоящим кодом (нет файла, нет прав) печатается как есть:
+    в ней путь, который владельцу нужен."""
+    if exc.errno == 0 and exc.strerror:
+        return exc.strerror
+    return str(exc)
+
+
 def load_scenario(path: Path) -> Scenario:
     """Читает YAML-сценарий.
 
@@ -164,8 +177,8 @@ class FakeProvider:
     """Провайдер без сети: ход берётся из очереди сценария, JSON — из его раздела `json`.
 
     `pc_ids` — id персонажей по порядку входа: сервер передаёт их при создании провайдера
-    игры, и `$pc1…$pc6` в аргументах инструментов превращаются в эти id. У каждой игры свой
-    провайдер: очередь ходов хранится в нём."""
+    игры, и `$pc1…$pc6` в аргументах инструментов и в JSON-ответах превращаются в эти id. У каждой
+    игры свой провайдер: очередь ходов хранится в нём."""
 
     name = "fake"
 
@@ -196,7 +209,7 @@ class FakeProvider:
         return TurnResult(text=text, trace=tuple(trace), usage=Usage(), stop_reason="end_turn")
 
     async def complete_json[T: BaseModel](self, req: JsonRequest, schema: type[T]) -> T:
-        answer = self._next_json_answer(req.purpose)
+        answer = self._fill_placeholders(self._next_json_answer(req.purpose))
         try:
             return schema.model_validate(answer)
         except ValidationError as exc:

@@ -158,7 +158,10 @@ def request_save(ctx: ToolContext, args: RequestSaveArgs) -> dict[str, Any]:
 class ContestArgs(ToolArgs):
     a_id: str = Field(
         max_length=MAX_ID_CHARS,
-        description="id первого участника: персонаж отряда, боец боя или NPC со статблоком",
+        description=(
+            "id первого участника: персонаж отряда, боец боя или NPC со статблоком из текущей "
+            "локации"
+        ),
     )
     a_skill: Skill | Ability = Field(description="навык или характеристика первого участника")
     b_id: str = Field(
@@ -185,7 +188,12 @@ def _statblock(ctx: ToolContext, monster_id: str) -> MonsterDef:
 
 
 def _find_participant(ctx: ToolContext, who: str) -> _Participant:
-    """Персонаж отряда, монстр идущего боя или живой NPC со статблоком; иначе `ToolError`."""
+    """Персонаж отряда, монстр идущего боя или живой NPC со статблоком из текущей локации; иначе
+    `ToolError`.
+
+    NPC не из этой локации в состязание не берётся: его карточка броска уходит всем игрокам и
+    выдала бы NPC, которого отряд ещё не встретил. Положение NPC — как у остальных инструментов:
+    переопределение мира (`world.npc_location`), иначе локация из приключения."""
     state = ctx.state
     if (character := state.party.get(who)) is not None:
         return _Participant(who, character.name, character, ())
@@ -203,6 +211,11 @@ def _find_participant(ctx: ToolContext, who: str) -> _Participant:
         raise ToolError(f"У NPC {npc.id!r} нет статблока: состязание с ним не посчитать.")
     if not state.world.npc_alive.get(npc.id, True):
         raise ToolError(f"NPC {npc.id!r} мёртв: состязание с ним невозможно.")
+    if state.world.npc_location.get(npc.id, npc.location_id) != state.location_id:
+        raise ToolError(
+            f"NPC {npc.id!r} сейчас не в текущей локации отряда ({state.location_id!r}): "
+            "состязание возможно только с NPC, который здесь."
+        )
     return _Participant(who, npc.name, _statblock(ctx, npc.statblock), ())
 
 
@@ -272,7 +285,8 @@ CHECK_TOOLS = (
         description=(
             "Состязание двух участников: каждый бросает к20 с бонусом своего навыка или "
             "характеристики, побеждает больший итог, при ничьей — второй (защищающийся). "
-            "Участник — персонаж отряда, боец боя или NPC со статблоком; бонус считает движок."
+            "Участник — персонаж отряда, боец боя или NPC со статблоком из текущей локации; "
+            "бонус считает движок."
         ),
         args_model=ContestArgs,
         handler=request_contest,

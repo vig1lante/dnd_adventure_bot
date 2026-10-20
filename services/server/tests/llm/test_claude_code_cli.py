@@ -792,6 +792,37 @@ async def test_run_turn_error_text_never_contains_turn_token(tmp_path):
     assert "MCP server dm failed" in str(caught.value)
 
 
+FIXED_TOKEN = "turn-token-0123456789-abcdefghijklmnopqrstuvwxyz"
+
+
+@pytest.fixture
+def fixed_turn_token(monkeypatch) -> str:
+    """Токен хода известен заранее: ответ имитатора может его процитировать, как мог бы CLI."""
+    monkeypatch.setattr("dnd_server.llm.internal_api.secrets.token_urlsafe", lambda _n: FIXED_TOKEN)
+    return FIXED_TOKEN
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        f"сбой моста: {FIXED_TOKEN}",
+        reply(is_error=True, subtype="error_during_execution", result=f"MCP {FIXED_TOKEN} упал"),
+    ],
+    ids=["unparsable-stdout", "error-result"],
+)
+async def test_run_turn_error_text_from_stdout_never_contains_turn_token(
+    tmp_path, fixed_turn_token, stdout
+):
+    harness = Harness(tmp_path, FAKE_CLAUDE_REPLIES=json.dumps([stdout]))
+
+    with pytest.raises(ProviderError) as caught:
+        await harness.provider.run_turn(turn_request(), RecordingTools())
+
+    assert token_of(harness.only_run()) == fixed_turn_token  # токен действительно тот же
+    assert fixed_turn_token not in str(caught.value)
+    assert "***" in str(caught.value)
+
+
 class SpyTokens(TurnTokens):
     """Реестр, который помнит выданные токены: нужен там, где процесс CLI не успел их показать."""
 

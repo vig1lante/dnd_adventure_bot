@@ -19,6 +19,7 @@ from dnd_engine.tools import build_registry
 from dnd_server.authoring import schemas
 from dnd_server.authoring.pipeline import STEPS, GenerationRequest, generate
 from dnd_server.authoring.schemas import Seeds
+from dnd_server.dm.weaving import WeavingOut
 from dnd_server.llm.base import JsonRequest, ProviderError, TurnRequest
 from dnd_server.llm.fake import FakeProvider, Scenario, ToolStep, load_scenario
 
@@ -27,6 +28,18 @@ SCENARIOS_DIR = Path(__file__).resolve().parents[1] / "scenarios"
 SCENARIO_FILES = sorted(SCENARIOS_DIR.glob("*.yaml"))
 PC_IDS = tuple(f"pc-{number}" for number in range(1, 7))
 MAX_PC_NUMBER = len(PC_IDS)
+# Сценарии, с которыми сервер запускают вручную (`FAKE_LLM_SCENARIO`): после «Начать» игра просит
+# у провайдера вплетение героев, и без JSON-ответа `weaving` она встанет в `dm_failed`. Для каждого
+# указано, при каком числе игроков он стартует: `combat.yaml` и `weaving.yaml` названы для трёх
+# героев (`$pc1…$pc3`), у остальных зацепка есть у первого героя, поэтому годится любой состав.
+# Без ответа вплетения остаются `loop.yaml` (предел итераций ставят только тесты) и
+# `characters.yaml` (создание героев): игра на них после «Начать» останавливается.
+MANUAL_RUN_PLAYERS: dict[str, tuple[int, ...]] = {
+    "basic_round.yaml": tuple(range(1, MAX_PC_NUMBER + 1)),
+    "failing.yaml": tuple(range(1, MAX_PC_NUMBER + 1)),
+    "combat.yaml": (3,),
+    "weaving.yaml": (3,),
+}
 
 SCHEMA_BY_STEP: dict[str, type[BaseModel]] = {
     "concept": schemas.ConceptOut,
@@ -101,6 +114,28 @@ def test_scenario_names_only_characters_a_game_can_have(path):
     numbers = [int(number) for number in re.findall(r"\$pc(\d+)", path.read_text("utf-8"))]
 
     assert all(1 <= number <= MAX_PC_NUMBER for number in numbers)
+
+
+@pytest.mark.parametrize(
+    ("name", "players"),
+    [
+        pytest.param(name, players, id=f"{name}-{players}")
+        for name, counts in MANUAL_RUN_PLAYERS.items()
+        for players in counts
+    ],
+)
+async def test_a_scenario_for_manual_runs_answers_the_weaving_request(name, players):
+    scenario = load_scenario(SCENARIOS_DIR / name)
+    pc_ids = PC_IDS[:players]
+    provider = FakeProvider(scenario, pc_ids=pc_ids)
+
+    out = await provider.complete_json(
+        JsonRequest(system="", prompt="", purpose="weaving"), WeavingOut
+    )
+
+    assert {hook.character_id for hook in out.hooks} <= set(pc_ids)
+    # Связь с миром есть хотя бы у одного героя: иначе сервер повторял бы запрос впустую.
+    assert any(hook.npc_links or hook.location_links for hook in out.hooks)
 
 
 @pytest.mark.parametrize("path", SCENARIO_FILES, ids=lambda path: path.name)

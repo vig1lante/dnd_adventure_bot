@@ -18,6 +18,7 @@ from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute, APIWebSocketRoute, iter_route_contexts
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dnd_server.app import create_app
@@ -295,6 +296,30 @@ def settings(tmp_path: Path) -> Settings:
         app_env="dev",
         database_url=f"sqlite+aiosqlite:///{tmp_path}/data/test.sqlite3",
     )
+
+
+@dataclass(frozen=True)
+class Leak:
+    """Ошибка, которой в журнал сервера нельзя класть значения входа (`input_value`).
+
+    `value` — кусок «состояния игры» (запись летописи), `error` — ошибка pydantic, в тексте которой
+    это значение лежит. Тесты записи ошибок в журнал ищут `value` в записях."""
+
+    value: str
+    error: ValidationError
+
+
+@pytest.fixture
+def leak() -> Leak:
+    class Row(BaseModel):
+        chronicle: str = Field(max_length=3)
+
+    value = "ТАЙНАЯ-ЗАПИСЬ-ЛЕТОПИСИ"
+    try:
+        Row(chronicle=value)
+    except ValidationError as error:
+        return Leak(value, error)
+    raise AssertionError("ошибка pydantic не возникла")
 
 
 @pytest.fixture

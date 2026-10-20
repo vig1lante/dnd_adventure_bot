@@ -27,6 +27,7 @@ from dnd_engine.adventure.validator import Issue, Report, validate
 from dnd_engine.content import MAX_YAML_BYTES, load_srd
 from dnd_server.authoring import cli
 from dnd_server.authoring.cli import format_report, main
+from dnd_server.dm import provider as provider_module
 from dnd_server.llm.base import MAX_LOC_PART_CHARS, ProviderError
 from dnd_server.llm.fake import FakeProvider, load_scenario
 
@@ -534,6 +535,22 @@ def test_seeds_that_are_a_device_exit_with_2_before_any_model_call(model_calls, 
     assert code == 2
     assert model_calls == []
     assert "seeds.yaml" in error and "не обычный файл" in error
+    assert "[Errno 0]" not in error  # 0 — не код ОС, а наша проверка вида файла
+
+
+def test_seeds_that_are_a_folder_exit_with_2_naming_the_reason_without_errno(
+    model_calls, tmp_path, capsys
+):
+    seeds = tmp_path / "seeds.yaml"
+    seeds.mkdir()
+
+    code = generate_into(tmp_path / "out", "--seeds", str(seeds))
+
+    error = capsys.readouterr().err
+    assert code == 2
+    assert model_calls == []
+    assert "seeds.yaml" in error and "не обычный файл" in error
+    assert "[Errno 0]" not in error
 
 
 # --- папка вывода ---
@@ -604,14 +621,20 @@ def test_claude_code_cli_outside_dev_exits_with_2_without_starting_a_process(
     assert not (tmp_path / "out").exists()
 
 
-def test_claude_code_cli_gets_the_bridge_arguments_the_factory_requires(model_calls, tmp_path):
+def test_claude_code_cli_gets_the_bridge_arguments_the_factory_requires(
+    model_calls, tmp_path, monkeypatch
+):
+    # Адрес один на весь сервер (`dm.provider.bridge_url`): у генератора своего литерала нет, он
+    # идёт за настройками запуска. Моста генератор не поднимает: он зовёт только complete_json,
+    # а адрес нужен фабрике.
+    monkeypatch.setattr(provider_module, "PORT", 9123)
+
     code = generate_into(tmp_path / "out", "--provider", "claude_code_cli")
 
-    # Генератор вызывает только complete_json, но фабрика требует реестр токенов и адрес моста MCP.
     assert code == 0
     assert model_calls[0]["provider"] == "claude_code_cli"
     assert model_calls[0]["turn_tokens"] is not None
-    assert model_calls[0]["internal_url"]
+    assert model_calls[0]["internal_url"] == "http://127.0.0.1:9123"
 
 
 def test_provider_error_exits_with_2_and_prints_the_reason(tmp_path, monkeypatch, capsys):

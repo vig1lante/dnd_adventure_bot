@@ -679,3 +679,72 @@ def test_the_same_seed_replays_the_whole_master_turn_and_another_seed_changes_th
     assert replay(make_scene, tool_registry, seed=11) == first
     assert replay(make_scene, tool_registry, seed=12) != first
     assert sum(outcome["error"] is None for outcome in first["outcomes"]) >= 8  # ход не пустой
+
+
+# --- состязание с NPC: только из текущей локации отряда (решение D9, security-review B7, L1) ---
+
+# Фабиан живёт в склепе, а `make_scene` ставит отряд на кладбище: «здесь» его нет.
+HERO_VS_FABIAN = {
+    "a_id": HERO,
+    "a_skill": "deception",
+    "b_id": "fabian",
+    "b_skill": "insight",
+    "reason": "т",
+}
+
+
+def test_a_contest_with_an_npc_from_another_location_is_refused_and_leaves_no_trace(
+    make_scene, call_tool
+):
+    ctx = make_scene()
+    ctx.rng = ScriptedRng([12])
+    ctx.state.party[HERO].inspiration = True
+    ctx.inspired = {HERO}
+    before = ctx.state.model_dump()
+
+    outcome = call_tool(ctx, "contest", **HERO_VS_FABIAN)
+
+    assert outcome.error is not None
+    assert "fabian" in outcome.error and "cemetery" in outcome.error  # кто и где сейчас отряд
+    assert "текущей локации" in outcome.error
+    assert ctx.state.model_dump() == before and ctx.events == []
+    assert ctx.inspired == {HERO}  # вдохновение не потрачено
+    assert ctx.rng.randint(1, 20) == 12  # кубы не бросались: очередь осталась нетронутой
+
+
+def test_a_contest_with_an_npc_of_the_current_location_rolls_for_both_sides(make_scene, call_tool):
+    ctx = make_scene()
+    ctx.state.location_id = "crypt"  # родная локация Фабиана по данным приключения
+
+    outcome = call_tool(ctx, "contest", **HERO_VS_FABIAN)
+
+    assert outcome.error is None, outcome.error
+    assert [e.actor_id for e in ctx.events if isinstance(e, RollEvent)] == [HERO, "fabian"]
+
+
+def test_the_place_of_an_npc_is_where_the_world_put_him_and_not_only_his_home(
+    make_scene, call_tool
+):
+    # Мир переопределяет положение NPC: его сюда привели.
+    arrived = make_scene()
+    arrived.state.world.npc_location["fabian"] = "cemetery"
+    # Отряд в склепе, но Фабиан ушёл оттуда.
+    left = make_scene()
+    left.state.location_id = "crypt"
+    left.state.world.npc_location["fabian"] = "village"
+
+    assert call_tool(arrived, "contest", **HERO_VS_FABIAN).error is None
+    outcome = call_tool(left, "contest", **HERO_VS_FABIAN)
+
+    assert outcome.error is not None and "crypt" in outcome.error
+
+
+def test_a_contest_with_a_hero_or_a_fighter_does_not_depend_on_the_location_of_npcs(
+    make_scene, call_tool
+):
+    heroes = make_scene()
+    fight = make_scene(fight=True)
+    fighter = {**CONTEST, "b_id": "skeleton-1"}
+
+    assert call_tool(heroes, "contest", **CONTEST).error is None  # герои отряда, склепа нет
+    assert call_tool(fight, "contest", **fighter).error is None  # скелет из идущего боя

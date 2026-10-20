@@ -1438,8 +1438,12 @@ def test_contest_accepts_a_bare_ability_instead_of_a_skill(
     assert (outcome.result["a"]["total"], outcome.result["b"]["total"]) == (13, 10)
 
 
-def test_contest_against_an_npc_with_a_statblock_uses_the_statblock_bonus(run, make_ctx):
-    ctx = make_ctx(rng=ScriptedRng([10, 10]))
+# Фабиан живёт в склепе, а состязание берёт только NPC из текущей локации (решение D9): отряд
+# в этих тестах стоит там же.
+def test_contest_against_an_npc_with_a_statblock_uses_the_statblock_bonus(
+    run, make_ctx, make_state
+):
+    ctx = make_ctx(make_state(location_id="crypt"), rng=ScriptedRng([10, 10]))
 
     outcome = run(
         ctx, "contest", **contest_args(a_skill="deception", b_id="fabian", b_skill="deception")
@@ -1468,7 +1472,9 @@ def test_contest_against_a_custom_statblock_of_the_adventure(
             "npcs": {**demo_adventure.npcs, "fabian": fabian},
         }
     )
-    ctx = make_ctx(make_state(), adventure=adventure, rng=ScriptedRng([10, 10]))
+    ctx = make_ctx(
+        make_state(location_id="crypt"), adventure=adventure, rng=ScriptedRng([10, 10])
+    )
 
     outcome = run(ctx, "contest", **contest_args(b_id="fabian", b_skill="deception"))
 
@@ -1482,7 +1488,9 @@ def test_a_broken_statblock_link_is_a_data_error_and_not_a_mistake_of_the_model(
     adventure = demo_adventure.model_copy(
         update={"npcs": {**demo_adventure.npcs, "fabian": fabian}}
     )
-    ctx = make_ctx(make_state(), adventure=adventure, rng=ScriptedRng([10, 10]))
+    ctx = make_ctx(
+        make_state(location_id="crypt"), adventure=adventure, rng=ScriptedRng([10, 10])
+    )
 
     # Валидатор такие ссылки не пропускает: если она всё же встретилась, это баг данных, и ход
     # должен упасть, а не выглядеть для модели её ошибкой.
@@ -1542,8 +1550,10 @@ def test_inspiration_gives_a_contest_participant_advantage(
     assert hero.inspiration is False and ctx.inspired == set()
 
 
-def test_contest_with_a_secret_actor_is_visible_only_to_its_author(run, make_ctx):
-    ctx = make_ctx(secret_actors={"pc-1"}, rng=ScriptedRng([10, 10]))
+def test_contest_with_a_secret_actor_is_visible_only_to_its_author(run, make_ctx, make_state):
+    ctx = make_ctx(
+        make_state(location_id="crypt"), secret_actors={"pc-1"}, rng=ScriptedRng([10, 10])
+    )
 
     run(ctx, "contest", **contest_args(b_id="fabian", b_skill="persuasion"))
 

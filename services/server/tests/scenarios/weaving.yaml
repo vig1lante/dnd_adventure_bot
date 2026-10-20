@@ -1,0 +1,39 @@
+# Сценарий FakeProvider для начала игры: вплетение героев (JSON `weaving`) и открытие игры
+# (первый ход мастера), дальше шаблон раунда. Рассчитан на демо-приключение demo-crypt и ровно
+# троих игроков: зацепки названы для $pc1…$pc3, ссылки на NPC и места — id из demo-crypt. $pcN
+# подставляет FakeProvider (в аргументах инструментов и в JSON-ответах); игроков меньше трёх —
+# ошибка сценария («в сценарии $pc3, а персонажей в игре: 2»), вплетение упадёт в dm_failed.
+turns:
+  - steps:
+      - tool: chronicle
+        args: {entry: "Отряд собрался в Мшистом Броде."}
+      - text: "Вечер в Мшистом Броде. Отряд собрался у трактира «Сонный покойник»: в окнах дрожит свет, а с холма тянет сырой землёй."
+  - repeat: true
+    steps:
+      - tool: chronicle
+        args: {entry: "Отряд идёт дальше."}
+      - text: "Отряд идёт дальше, и впереди снова что-то шевелится."
+json:
+  weaving:
+    hooks:
+      - character_id: "$pc1"
+        npc_links:
+          - {npc_id: marta, relation: "двоюродная сестра", note: "нянчила вас в детстве"}
+        location_links:
+          - {location_id: village, note: "здесь вы выросли"}
+        party_links:
+          - {character_id: "$pc2", relation: "старый друг"}
+        personal_goal: "найти пропавшего смотрителя и вернуть его сестре"
+        secret: "когда-то вы взяли у гильдии воров деньги и до сих пор не вернули"
+      - character_id: "$pc2"
+        npc_links:
+          - {npc_id: fabian, relation: "должник", note: "задолжал вам и прячется"}
+        personal_goal: "вернуть долг до рассвета"
+      - character_id: "$pc3"
+        location_links:
+          - {location_id: cemetery, note: "вы ухаживали здесь за могилами"}
+        party_links:
+          - {character_id: "$pc1", relation: "земляки"}
+        secret: "вы слышите шёпот мёртвых и никому об этом не говорили"
+  chronicle:
+    summary: "Отряд собрался в Мшистом Броде и узнал о пропаже смотрителя кладбища."

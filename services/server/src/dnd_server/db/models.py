@@ -7,7 +7,7 @@
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -141,7 +141,25 @@ class Game(Base):
 
     started_at: Mapped[datetime | None]
     active_seconds: Mapped[int] = mapped_column(default=0)  # время игры без пауз, для темпа
+    # Отметка часов игры (миграция 0002). Идущая игра: `active_seconds` посчитано до `clock_at`, а
+    # время после неё ещё не добавлено (`active_time`); часы заводят старт игры и снятие паузы.
+    # Пауза добавляет прошедшее время в `active_seconds` и ставит сюда момент паузы: часы стоят, а
+    # от этого момента считается остаток отсчёта до `deadline_at` (`paused_remaining`). Пусто —
+    # часов нет: игра в лобби или законченная.
+    clock_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    def active_time(self, now: datetime) -> int:
+        """Секунды игры без пауз на момент `now`; на паузе часы стоят."""
+        if self.phase == GamePhase.PAUSED or self.clock_at is None:
+            return self.active_seconds
+        return self.active_seconds + max(0, int((now - self.clock_at).total_seconds()))
+
+    def paused_remaining(self) -> timedelta | None:
+        """Остаток отсчёта на паузе; `None` — игра не на паузе или отсчёта у неё нет."""
+        if self.phase != GamePhase.PAUSED or self.deadline_at is None or self.clock_at is None:
+            return None
+        return max(timedelta(0), self.deadline_at - self.clock_at)
 
 
 class PlayerCharacter(Base):

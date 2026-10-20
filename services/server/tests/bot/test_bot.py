@@ -45,9 +45,13 @@ from dnd_server.app import create_app
 from dnd_server.bot import bot as bot_module
 from dnd_server.bot.bot import build_dispatcher
 from dnd_server.bot.handlers import (
-    BotDeps,
+    MAX_ALERT_CHARS,
     NEWGAME_PREFIX,
+    NOT_CREATOR_TEXT,
+    STALE_BUTTON_TEXT,
+    BotDeps,
     adventure_id_from_callback,
+    alert_text,
     invite_link,
     newgame_keyboard,
     open_lobby,
@@ -55,9 +59,12 @@ from dnd_server.bot.handlers import (
 )
 from dnd_server.bot.notify import (
     Notifier,
+    camp_text,
     collecting_text,
     combat_turn_text,
     game_continues_text,
+    game_started_text,
+    hurry_text,
 )
 from dnd_server.config import Settings
 from dnd_server.db.models import Game, GamePhase, GamePlayer
@@ -539,6 +546,59 @@ async def test_a_forged_button_naming_no_adventure_creates_nothing_and_is_answer
     assert answer.show_alert is True
 
 
+# --- текст окна-уведомления: Telegram принимает не больше 200 символов ---
+
+
+def test_a_short_text_goes_into_the_alert_untouched():
+    text = "я" * MAX_ALERT_CHARS
+
+    assert alert_text(text) == text
+
+
+@pytest.mark.parametrize("length", [MAX_ALERT_CHARS + 1, 312, 5000])
+def test_a_long_text_is_cut_to_the_limit_and_marked_with_an_ellipsis(length):
+    text = "я" * length
+
+    shown = alert_text(text)
+
+    assert len(shown) == MAX_ALERT_CHARS
+    assert shown == "я" * (MAX_ALERT_CHARS - 1) + "…"
+
+
+@pytest.mark.parametrize(
+    "text", [STALE_BUTTON_TEXT, NOT_CREATOR_TEXT], ids=["кнопка устарела", "не создатель"]
+)
+def test_fixed_refusals_fit_into_the_alert_as_they_are(text):
+    assert alert_text(text) == text
+
+
+async def test_a_long_refusal_reaches_telegram_cut_to_the_limit_and_whole_in_the_log(
+    deps, db, tmp_path, caplog
+):
+    # Нет файла сценария по длинному пути: причина отказа `create_game` длиннее 200 символов.
+    missing = tmp_path / ("a" * 60) / ("b" * 60) / "scenario.yaml"
+    broken = BotDeps(
+        deps.settings.model_copy(update={"fake_llm_scenario": missing}),
+        deps.sessionmaker,
+        deps.catalog,
+        None,
+    )
+    [button] = adventure_buttons(deps.catalog)
+    full = (await lobby_reply(broken)).text
+    assert len(full) > MAX_ALERT_CHARS
+
+    with caplog.at_level(logging.WARNING, logger="dnd_server.bot.handlers"):
+        session = await feed(broken, callback_update(button.callback_data, CREATOR_TG_ID))
+
+    [answer] = session.answers()
+    assert answer.show_alert is True
+    assert answer.text == alert_text(full)
+    assert len(answer.text) <= MAX_ALERT_CHARS
+    assert full in caplog.text  # полная причина не пропала: владелец находит её в журнале
+    assert session.sent() == []
+    assert await count(db, Game) == 0
+
+
 @pytest.mark.parametrize("data", [None, "garbage"])
 async def test_a_callback_that_is_not_ours_is_ignored(deps, db, data):
     session = await feed(deps, callback_update(data, CREATOR_TG_ID))
@@ -554,7 +614,12 @@ def test_notification_texts():
     assert collecting_text(45) == "Хост собирает ходы — осталось 45 с"
     assert collecting_text(-3) == "Хост собирает ходы — осталось 0 с"
     assert combat_turn_text() == "Твой ход в бою"
+    assert hurry_text(60) == "Хост торопит: на ход в бою осталось 60 с"
+    assert hurry_text(-1) == "Хост торопит: на ход в бою осталось 0 с"
+    assert camp_text(300) == "Привал у костра — осталось 300 с: оставьте реплику своего героя"
+    assert camp_text(-5) == "Привал у костра — осталось 0 с: оставьте реплику своего героя"
     assert game_continues_text() == "Игра продолжается"
+    assert game_started_text() == "Игра началась: мастер рассказал первую сцену"
 
 
 async def add_user(db, *, tg_id: int | None, dev_login: str | None = None) -> str:
@@ -761,6 +826,29 @@ async def test_a_polling_crash_is_logged_and_does_not_stop_the_server(
     await app.state.engine.dispose()
 
 
+async def test_a_polling_crash_is_logged_without_the_input_of_the_error(
+    settings, monkeypatch, caplog, leak
+):
+    class BrokenSession(RecordingSession):
+        async def make_request(self, bot, method, timeout=None):
+            if isinstance(method, GetMe):
+                raise leak.error
+            return await super().make_request(bot, method, timeout)
+
+    monkeypatch.setattr(bot_module, "make_bot", lambda _s: Bot(BOT_TOKEN, session=BrokenSession()))
+    app = create_app(with_token(settings))
+
+    with caplog.at_level(logging.ERROR, logger="dnd_server.bot.bot"):
+        async with app.router.lifespan_context(app):
+            await wait_for(lambda: "Telegram-бот остановился" in caplog.text)
+
+    [record] = caplog.records
+    assert record.exc_info is None and "ValidationError" in record.getMessage()
+    assert leak.value not in caplog.text and "input_value" not in caplog.text
+    assert BOT_TOKEN not in caplog.text
+    await app.state.engine.dispose()
+
+
 # --- токен бота не попадает в журналы ---
 
 
@@ -810,6 +898,37 @@ async def test_a_failed_notification_does_not_leak_the_token_either(
     assert user_id in caplog.text
     assert BOT_TOKEN not in caplog.text
     await app.state.engine.dispose()
+
+
+async def test_an_unexpected_failure_of_a_notification_is_logged_without_the_input_of_the_error(
+    db, caplog, leak
+):
+    user_id = await add_user(db, tg_id=555)
+    bot, _session = make_test_bot(FailingSendSession(lambda method: leak.error))
+
+    with caplog.at_level(logging.ERROR, logger="dnd_server.bot.notify"):
+        await Notifier(db, bot).notify(user_id, "текст")  # не бросает
+
+    [record] = caplog.records
+    assert record.exc_info is None and user_id in record.getMessage()
+    assert "ValidationError" in caplog.text
+    assert leak.value not in caplog.text and "input_value" not in caplog.text
+
+
+async def test_the_trace_of_a_failed_notification_hides_the_secrets_of_the_settings(
+    db, settings, caplog
+):
+    # Фильтр токена стоит только пока работает бот; здесь уведомитель сам знает настройки.
+    user_id = await add_user(db, tg_id=555)
+    bot, _session = make_test_bot(
+        FailingSendSession(lambda method: RuntimeError(f"сбой в запросе к bot{BOT_TOKEN}"))
+    )
+
+    with caplog.at_level(logging.ERROR, logger="dnd_server.bot.notify"):
+        await Notifier(db, bot, with_token(settings)).notify(user_id, "текст")
+
+    assert user_id in caplog.text and "***" in caplog.text
+    assert BOT_TOKEN not in caplog.text and BOT_TOKEN.partition(":")[2] not in caplog.text
 
 
 def test_the_log_filter_works_only_while_the_bot_runs():

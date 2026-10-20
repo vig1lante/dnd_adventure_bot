@@ -26,19 +26,16 @@ from dnd_engine.modules import MODULES
 from dnd_server.authoring.pipeline import GenerationRequest, generate
 from dnd_server.authoring.schemas import Seeds
 from dnd_server.config import Settings
+from dnd_server.dm.provider import bridge_url
 from dnd_server.llm.base import ProviderError, printable, schema_problems
 from dnd_server.llm.factory import ConfigError, make_provider
-from dnd_server.llm.fake import UnreadableYaml, read_yaml
+from dnd_server.llm.fake import UnreadableYaml, describe_os_error, read_yaml
 from dnd_server.llm.internal_api import TurnTokens
 
 EXIT_OK = 0
 EXIT_FAILED = 2  # то же значение, что у argparse для неверных аргументов
 
 MAX_PLAYERS = 6
-# Генератор вызывает только `complete_json`, но фабрика claude_code_cli требует реестр токенов и
-# адрес моста MCP для `run_turn`. Ход мастера здесь не ведётся: токены не выдаются, адрес не
-# открывается.
-BRIDGE_URL = "http://127.0.0.1:8000"
 MAX_ERROR_CHARS = 1000
 
 
@@ -138,6 +135,8 @@ def _describe(exc: Exception) -> str:
     нейтрализует `schema_problems`, остальное — барьер `_fail`."""
     if isinstance(exc, ValidationError):
         return schema_problems(exc)[:MAX_ERROR_CHARS]
+    if isinstance(exc, OSError):
+        return describe_os_error(exc)[:MAX_ERROR_CHARS]
     return str(exc)[:MAX_ERROR_CHARS]
 
 
@@ -204,8 +203,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             _settings_for(args.model),
             provider=args.provider,
             model=args.model,
+            # Генератор вызывает только `complete_json`, но фабрика claude_code_cli требует реестр
+            # токенов и адрес моста MCP для `run_turn`. Ход мастера здесь не ведётся: токены не
+            # выдаются, моста генератор не поднимает и адрес не открывает, поэтому свой адрес ему не
+            # нужен: берётся тот же, что у сервера игры (`dm.provider.bridge_url`).
             turn_tokens=TurnTokens(),
-            internal_url=BRIDGE_URL,
+            internal_url=bridge_url(),
         )
         result = asyncio.run(generate(provider, request, seeds, progress=_say))
         dump_adventure(result.adventure, args.out)

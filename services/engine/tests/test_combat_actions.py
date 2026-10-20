@@ -10,6 +10,8 @@
 - лечение: одна запись костей на всех целей.
 """
 
+import re
+
 import pytest
 
 from dnd_engine.abilities import Ability, Skill
@@ -3202,6 +3204,45 @@ def test_ids_that_the_engine_relies_on_exist_in_the_srd_data(srd):
         assert feature in features and spell_id in srd.spells
         assert any(resource in cls.resources for cls in srd.classes.values())
     assert engine.INVISIBLE in srd.conditions and engine.RAGE_BUFF == "rage"
+
+
+def srd_name_of(srd: SrdContent, effect_id: str) -> str | None:
+    """Русское название эффекта в данных SRD: состояние, заклинание или умение класса."""
+    if effect_id in srd.conditions:
+        return srd.conditions[effect_id].name
+    if effect_id in srd.spells:
+        return srd.spells[effect_id].name
+    return next(
+        (f.name for cls in srd.classes.values() for f in cls.features if f.id == effect_id), None
+    )
+
+
+def test_the_help_mark_is_called_help_in_russian(srd):
+    assert combat_engine.MARK_NAMES_RU[combat_engine.HELPED] == "Помощь"
+    # Метка не состояние SRD: внешним решением мастера её не наложить (см. apply_condition).
+    assert combat_engine.HELPED not in srd.conditions
+
+
+def test_every_mark_and_effect_the_engine_places_has_exactly_one_russian_name(srd):
+    placed = {
+        combat_engine.HELPED,
+        combat_engine.INVISIBLE,
+        combat_engine.RAGE_BUFF,
+        *combat_engine.MARK_EFFECTS,
+    }
+
+    for effect_id in placed:
+        in_srd = srd_name_of(srd, effect_id)
+        in_table = combat_engine.MARK_NAMES_RU.get(effect_id)
+        assert (in_srd is None) != (in_table is None), effect_id  # ровно один источник названия
+    assert all(
+        re.search("[а-яё]", name, re.IGNORECASE) for name in combat_engine.MARK_NAMES_RU.values()
+    )
+
+
+def test_the_mark_name_table_is_read_only():
+    with pytest.raises(TypeError):
+        combat_engine.MARK_NAMES_RU["helped"] = "Другое"  # type: ignore[index]
 
 
 def test_class_resources_used_by_actions_exist_in_the_class_tables(srd):

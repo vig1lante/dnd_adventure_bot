@@ -5,6 +5,13 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, PositiveInt, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+# Адрес, по которому сервер слушает при запуске `dnd-server` (`__main__`). Только localhost: наружу
+# сервер выставляет туннель cloudflared, а не привязка к интерфейсу. Константы живут здесь, а не в
+# `__main__`: по ним же строится адрес моста MCP для `claude_code_cli` (`dm.provider`), и сервисам
+# незачем импортировать модуль запуска.
+HOST = "127.0.0.1"
+PORT = 8000
+
 
 class Settings(BaseSettings):
     """Конфигурация сервера из переменных окружения и `.env` (спека §14).

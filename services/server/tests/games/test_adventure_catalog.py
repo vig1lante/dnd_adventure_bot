@@ -140,6 +140,30 @@ def test_unexpected_failure_in_one_folder_does_not_stop_the_others(
     assert "aaa-first" in caplog.text
 
 
+def test_unexpected_failure_in_a_folder_is_logged_without_the_input_of_the_error(
+    content_dir, caplog, monkeypatch, leak
+):
+    copy_demo(content_dir)
+    copy_demo(content_dir, "aaa-first")
+    real_load = adventures.load_adventure
+
+    def flaky_load(path: Path):
+        if path.name == "aaa-first":
+            raise leak.error  # ошибка проверки данных: в её тексте лежит значение входа
+        return real_load(path)
+
+    monkeypatch.setattr(adventures, "load_adventure", flaky_load)
+
+    with caplog.at_level(logging.WARNING, logger=adventures.__name__):
+        catalog = load_catalog(content_dir, load_srd())
+
+    assert list(catalog) == ["demo-crypt"]
+    [record] = caplog.records
+    assert record.exc_info is None  # трассировку формирует сервер, а не logging
+    assert "aaa-first" in caplog.text and "ValidationError" in caplog.text
+    assert leak.value not in caplog.text and "input_value" not in caplog.text
+
+
 def test_stray_files_and_hidden_folders_are_not_adventures(content_dir, caplog):
     copy_demo(content_dir)
     (content_dir / ".DS_Store").write_bytes(b"\x00")

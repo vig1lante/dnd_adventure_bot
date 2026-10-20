@@ -352,11 +352,31 @@ def _describe_yaml_error(exc: yaml.YAMLError) -> str:
     return f"некорректный YAML{where}: {reason}"
 
 
+def describe_parse_failure(exc: Exception) -> str:
+    """Причина отказа `parse_yaml` для текста проблемы; значения из файла в ней нет, кроме того, что
+    сказал сам разбор YAML (см. `_describe_yaml_error`).
+
+    Конструкторы значений PyYAML на чужом вводе бросают что угодно, а не только `YAMLError`:
+    `!!int ""` — `IndexError`, `!!bool x` — `KeyError`, `!!timestamp x` — `AttributeError`, длинное
+    число или несуществующая дата — `ValueError`; глубокая вложенность — `RecursionError`. Перечень
+    не закрыт, поэтому вызывающий ловит всякое `Exception`, но строго вокруг `parse_yaml`. Тип и
+    текст прочих исключений в причину не идут: по ним причину не назвать, а текст содержит значение
+    из файла."""
+    if isinstance(exc, yaml.YAMLError):
+        return _describe_yaml_error(exc)
+    if isinstance(exc, RecursionError):
+        return "слишком глубокая вложенность"
+    return (
+        "значение не построить (тег или литерал): слишком длинное число, "
+        "несуществующая дата или неверное значение под тегом"
+    )
+
+
 def _read_entries(source: Traversable, problems: list[str]) -> list[Any]:
     """Читает YAML-файл таблицы; ошибки чтения и формата пишет в `problems`."""
     try:
         check_yaml_size(source)
-        data = parse_yaml(source.read_bytes())
+        raw = source.read_bytes()
     except FileNotFoundError:
         problems.append(f"{source.name}: файл не найден")
         return []
@@ -366,8 +386,10 @@ def _read_entries(source: Traversable, problems: list[str]) -> list[Any]:
     except OSError as exc:
         problems.append(f"{source.name}: не удалось прочитать файл ({exc.strerror})")
         return []
-    except yaml.YAMLError as exc:
-        problems.append(f"{source.name}: {_describe_yaml_error(exc)}")
+    try:
+        data = parse_yaml(raw)
+    except Exception as exc:
+        problems.append(f"{source.name}: {describe_parse_failure(exc)}")
         return []
     if not isinstance(data, list):
         problems.append(f"{source.name}: ожидался список объектов")

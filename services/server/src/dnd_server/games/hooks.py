@@ -6,13 +6,16 @@
 
 Оба вызова идут после коммита, когда игра в базе уже изменена, и поэтому сбой слушателя не должен
 ронять запрос: изменение не откатить, а ответ «ошибка» заставил бы клиента повторять его. Сбой
-записывается в журнал сервера с id игры.
+записывается в журнал сервера с id игры. Трассировка идёт через `dm.text.safe_traceback`: настроек
+здесь нет, значения секретов из текста не вырезаются, но значения входа pydantic и управляющие
+знаки в записи не попадают.
 """
 
 import logging
 from typing import Any, Protocol
 
 from dnd_server.db.models import AUDIENCE_ALL
+from dnd_server.dm.text import safe_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +56,22 @@ async def send_to_game(
     """Рассылает событие; сбой рассылки пишется в журнал и вызывающего не касается."""
     try:
         await broadcaster.send(game_id, payload, audience)
-    except Exception:
-        logger.exception("Не удалось разослать событие %r игры %s.", payload.get("type"), game_id)
+    except Exception as exc:
+        logger.error(
+            "Не удалось разослать событие %r игры %s.\n%s",
+            payload.get("type"),
+            game_id,
+            safe_traceback(exc, None),
+        )
 
 
 async def run_game_started(hooks: GameHooks, game_id: str) -> None:
     """Запускает `on_game_started` фоновой задачей запроса; сбой пишется в журнал, не в ответ."""
     try:
         await hooks.on_game_started(game_id)
-    except Exception:
-        logger.exception("Не удалось начать игру %s после старта из лобби.", game_id)
+    except Exception as exc:
+        logger.error(
+            "Не удалось начать игру %s после старта из лобби.\n%s",
+            game_id,
+            safe_traceback(exc, None),
+        )

@@ -20,6 +20,7 @@ from aiogram.utils.token import TokenValidationError
 from dnd_server.bot.handlers import BotDeps, build_router
 from dnd_server.bot.notify import Notifier
 from dnd_server.config import Settings
+from dnd_server.dm.text import safe_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -103,15 +104,16 @@ def build_dispatcher(deps: BotDeps) -> Dispatcher:
     return dispatcher
 
 
-async def poll(dispatcher: Dispatcher, bot: Bot) -> None:
+async def poll(dispatcher: Dispatcher, bot: Bot, settings: Settings) -> None:
     """Опрос Telegram до остановки. Сбой не уходит дальше: бот — удобство, а не основа сервера."""
     try:
         # Сигналами процесса управляет uvicorn: перехват aiogram отнял бы у него SIGINT и SIGTERM.
         await dispatcher.start_polling(bot, handle_signals=False)
-    except Exception:
-        logger.exception(
+    except Exception as exc:
+        logger.error(
             "Telegram-бот остановился из-за ошибки: сервер продолжает работать, "
-            "но команды бота не принимаются."
+            "но команды бота не принимаются.\n%s",
+            safe_traceback(exc, settings),
         )
 
 
@@ -134,13 +136,14 @@ async def running_bot(deps: BotDeps) -> AsyncIterator[Notifier]:
     """Бот на время `async with`; отдаёт `Notifier` (без токена — тот, что ничего не отправляет)."""
     bot = make_bot(deps.settings)
     if bot is None:
-        yield Notifier(deps.sessionmaker)
+        yield Notifier(deps.sessionmaker, settings=deps.settings)
         return
     with hide_token_in_logs(bot.token):
         dispatcher = build_dispatcher(deps)
-        task = asyncio.create_task(poll(dispatcher, bot), name="telegram-bot-polling")
+        polling = poll(dispatcher, bot, deps.settings)
+        task = asyncio.create_task(polling, name="telegram-bot-polling")
         try:
-            yield Notifier(deps.sessionmaker, bot)
+            yield Notifier(deps.sessionmaker, bot, deps.settings)
         finally:
             await stop_polling(dispatcher, task)
             await bot.session.close()

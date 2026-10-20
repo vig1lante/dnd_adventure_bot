@@ -32,6 +32,22 @@ BODIES = {
         "concept": "Карманник",
         "draft": "",
     },
+    ("PUT", "/api/games/{game_id}/action"): {"text": "Ход", "secret": False, "inspiration": False},
+    ("POST", "/api/games/{game_id}/action/submit"): None,
+    ("POST", "/api/games/{game_id}/action/pass"): None,
+    ("POST", "/api/games/{game_id}/host/collect"): None,
+    ("POST", "/api/games/{game_id}/host/extend"): None,
+    ("POST", "/api/games/{game_id}/host/close"): None,
+    ("POST", "/api/games/{game_id}/host/pause"): None,
+    ("POST", "/api/games/{game_id}/host/resume"): None,
+    ("POST", "/api/games/{game_id}/host/retry"): None,
+    ("POST", "/api/games/{game_id}/host/regenerate"): None,
+    ("POST", "/api/games/{game_id}/host/hurry"): None,
+    ("POST", "/api/games/{game_id}/host/camp-extend"): None,
+    ("POST", "/api/games/{game_id}/host/camp-end"): None,
+    ("POST", "/api/games/{game_id}/camp/line"): {"text": "Подкину дров в костёр."},
+    ("POST", "/api/games/{game_id}/leave"): None,
+    ("POST", "/api/games/{game_id}/players/{user_id}/kick"): None,
 }
 
 
@@ -67,10 +83,11 @@ async def test_a_stranger_gets_the_same_404_as_for_a_missing_game_on_every_route
     for method, template in game_routes(stand, route_table):
         body = BODIES[(method, template)]
         options = {} if body is None else {"json": body}
-        foreign = await stand.call(stranger, method, template.format(game_id=game["id"]), **options)
-        missing = await stand.call(
-            stranger, method, template.format(game_id=MISSING_GAME), **options
-        )
+        # `user_id` нужен только маршруту исключения: целью берём участника той же игры.
+        foreign_url = template.format(game_id=game["id"], user_id=friend.id)
+        missing_url = template.format(game_id=MISSING_GAME, user_id=friend.id)
+        foreign = await stand.call(stranger, method, foreign_url, **options)
+        missing = await stand.call(stranger, method, missing_url, **options)
         assert (foreign.status_code, missing.status_code) == (404, 404), (method, template)
         assert foreign.json() == missing.json(), (method, template)
         # Отказ не называет ни id, ни код чужой игры.

@@ -1,4 +1,7 @@
-"""Миграции Alembic (план B6.1): схема 0001 создаётся, откатывается и совпадает с моделями.
+"""Миграции Alembic (план B6.1, B7.4): схемы создаются, откатываются и совпадают с моделями.
+
+Ревизия 0001 — начальная схема; 0002 (B7.4) добавляет к играм колонку `clock_at` — отметку часов
+игры, из которой выводятся остаток отсчёта на паузе и время игры без пауз.
 
 Правило на будущее: каждая следующая миграция добавляет тест «игра с состоянием, сохранённая
 до миграции, читается после `upgrade`» (база на предыдущей ревизии, строки игры, `upgrade head`,
@@ -36,7 +39,7 @@ COLUMNS = {
     "games": (
         "id code adventure_id host_user_id adventure_data phase turn_phase deadline_at "
         "state_version current_turn_id provider model collect_seconds hurry_seconds camp_seconds "
-        "started_at active_seconds created_at"
+        "started_at active_seconds clock_at created_at"
     ),
     "game_players": "game_id user_id character_id is_host ready joined_order joined_at",
     "characters": "id game_id user_id data",
@@ -66,7 +69,7 @@ UNIQUE = {"users": ["tg_id", "dev_login"], "games": ["code"]}
 # Остальные колонки обязательны.
 NULLABLE = {
     "users": "tg_id dev_login",
-    "games": "turn_phase deadline_at current_turn_id provider model started_at",
+    "games": "turn_phase deadline_at current_turn_id provider model started_at clock_at",
     "game_players": "character_id",
     "turns": "state_version_before state_version_after",
     "messages": "turn_id data",
@@ -158,7 +161,109 @@ def test_migration_history_is_a_single_line_from_0001():
     script = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
 
     assert script.get_bases() == ["0001"]
-    assert len(script.get_heads()) == 1
+    assert script.get_heads() == ["0002"]
+
+
+# --- ревизия 0002: отметка часов игры ---
+
+NOW = "2026-10-01 12:00:00.000000"
+
+
+def insert_minimal_game(path: Path, *, phase: str, started_at: str | None, number: int) -> str:
+    """Игра прямым SQL по таблицам ревизии 0001: ровно те столбцы, что требует схема."""
+    game_id = f"game-{number}"
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO users (id, tg_id, dev_login, name, created_at)"
+            " VALUES ('host', NULL, NULL, 'Хост', ?)",
+            (NOW,),
+        )
+        connection.execute(
+            "INSERT INTO games (id, code, adventure_id, host_user_id, adventure_data, phase,"
+            " turn_phase, deadline_at, state_version, current_turn_id, provider, model,"
+            " collect_seconds, hurry_seconds, camp_seconds, started_at, active_seconds, created_at)"
+            " VALUES (?, ?, 'demo-crypt', 'host', '{}', ?, NULL, NULL, 0, NULL, NULL, NULL,"
+            " 120, 60, 300, ?, 40, ?)",
+            (game_id, f"CODE{number:02d}", phase, started_at, NOW),
+        )
+        connection.commit()
+    return game_id
+
+
+async def test_the_second_revision_only_adds_the_nullable_clock_column_to_games(settings, migrate):
+    def columns(inspector: Any) -> dict[str, dict[str, Any]]:
+        return {
+            table: {c["name"]: c for c in inspector.get_columns(table)}
+            for table in inspector.get_table_names()
+            if table != ALEMBIC_TABLE
+        }
+
+    await migrate("upgrade", "0001")
+    before = await reflect(settings, columns)
+    await migrate("upgrade", "0002")
+    after = await reflect(settings, columns)
+
+    assert set(after) == set(before)
+    for table in before:
+        extra = set(after[table]) - set(before[table])
+        assert extra == ({"clock_at"} if table == "games" else set()), table
+        assert set(before[table]) <= set(after[table]), table
+    assert after["games"]["clock_at"]["nullable"] is True
+
+
+async def test_the_clock_of_games_in_play_starts_at_their_start_and_others_stay_empty(
+    settings, migrate
+):
+    await migrate("upgrade", "0001")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    playing = insert_minimal_game(path, phase="playing", started_at=NOW, number=1)
+    weaving = insert_minimal_game(path, phase="weaving", started_at=NOW, number=2)
+    lobby = insert_minimal_game(path, phase="lobby", started_at=None, number=3)
+    finished = insert_minimal_game(path, phase="finished", started_at=NOW, number=4)
+
+    await migrate("upgrade", "head")
+
+    with closing(sqlite3.connect(path)) as connection:
+        clocks = dict(connection.execute("SELECT id, clock_at FROM games"))
+        seconds = dict(connection.execute("SELECT id, active_seconds FROM games"))
+    # Идущая игра продолжает считать время с момента старта, остальные часов не заводят.
+    assert clocks[playing] == NOW and clocks[weaving] == NOW
+    assert clocks[lobby] is None and clocks[finished] is None
+    assert set(seconds.values()) == {40}  # накопленное время старой игры не тронуто
+
+
+async def test_downgrade_to_the_first_revision_drops_the_column_and_keeps_the_games(
+    settings, migrate
+):
+    await migrate("upgrade", "head")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "INSERT INTO users (id, tg_id, dev_login, name, created_at)"
+            " VALUES ('host', NULL, NULL, 'Хост', ?)",
+            (NOW,),
+        )
+        connection.execute(
+            "INSERT INTO games (id, code, adventure_id, host_user_id, adventure_data, phase,"
+            " state_version, collect_seconds, hurry_seconds, camp_seconds, active_seconds,"
+            " clock_at, created_at) VALUES ('game-1', 'ABC123', 'demo-crypt', 'host', '{}',"
+            " 'playing', 3, 90, 45, 200, 600, ?, ?)",
+            (NOW, NOW),
+        )
+        connection.commit()
+
+    await migrate("downgrade", "0001")
+
+    columns = await reflect(
+        settings, lambda inspector: {c["name"] for c in inspector.get_columns("games")}
+    )
+    assert "clock_at" not in columns
+    with closing(sqlite3.connect(path)) as connection:
+        [row] = connection.execute("SELECT id, phase, state_version, active_seconds FROM games")
+        assert row == ("game-1", "playing", 3, 600)
+        # Откат не потерял ограничения таблицы: фаза вне списка по-прежнему отвергается.
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("UPDATE games SET phase = 'bogus'")
 
 
 # --- миграция совпадает с моделями и планом ---
@@ -239,4 +344,4 @@ def test_alembic_command_line_works_from_the_repo_root_and_the_service_folder(
         tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master")}
         [(revision,)] = connection.execute("SELECT version_num FROM alembic_version")
     assert TABLES <= tables
-    assert revision == "0001"
+    assert revision == "0002"

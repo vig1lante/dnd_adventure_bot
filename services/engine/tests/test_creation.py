@@ -6,7 +6,9 @@
 """
 
 import json
+import re
 from collections import Counter
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -15,8 +17,9 @@ from pydantic import ValidationError
 from dnd_engine import creation
 from dnd_engine.abilities import ABILITY_NAMES_RU, SKILL_NAMES_RU, Ability, Skill, modifier
 from dnd_engine.character import Character, Persona, armor_class
-from dnd_engine.content import SrdContent, load_srd
+from dnd_engine.content import SpellDef, SrdContent, load_srd
 from dnd_engine.creation import (
+    FIGHTING_STYLES,
     POINT_BUY_BUDGET,
     POINT_BUY_COST,
     STANDARD_ARRAY,
@@ -24,6 +27,7 @@ from dnd_engine.creation import (
     CharacterChoices,
     CharacterValidationError,
     build_character,
+    class_spell_options,
     quick_character,
     random_character,
     roll_ability_set,
@@ -764,6 +768,98 @@ def test_spells_for_class_without_spellcasting_are_rejected(srd):
     problems = problems_of(srd, "fighter", cantrips=["guidance"], prepared_spells=["bless"])
 
     assert_problem(problems, "нет заклинаний")
+
+
+# --- варианты заклинаний класса: одно место и для проверки выбора, и для формы ---
+
+CASTER_IDS = ("ranger", "cleric", "wizard")
+
+
+def picks(pool: Sequence[SpellDef], wanted: int, first: str | None = None) -> list[str]:
+    """`wanted` разных заклинаний из пула; `first`, если задан, стоит первым."""
+    rest = [spell.id for spell in pool if spell.id != first]
+    return ([first] if first else []) + rest[: wanted - (1 if first else 0)]
+
+
+@pytest.mark.parametrize("class_id", CASTER_IDS)
+def test_every_spell_option_of_a_class_is_accepted_by_the_character_check(srd, class_id):
+    spellcasting = srd.classes[class_id].spellcasting
+    options = class_spell_options(spellcasting, srd)
+    cantrips_wanted = spellcasting.cantrips_known[3]
+    prepared_wanted = spellcasting.prepared[3]
+
+    # Вариантов хватает, чтобы выбрать нужное число.
+    assert len(options.cantrips) >= cantrips_wanted
+    assert len(options.spells) >= prepared_wanted
+    if cantrips_wanted:
+        for cantrip in options.cantrips:
+            build(srd, class_id, cantrips=picks(options.cantrips, cantrips_wanted, cantrip.id))
+    for spell in options.spells:
+        build(srd, class_id, prepared_spells=picks(options.spells, prepared_wanted, spell.id))
+
+
+@pytest.mark.parametrize("class_id", CASTER_IDS)
+def test_a_spell_outside_the_class_options_is_rejected_by_the_character_check(srd, class_id):
+    spellcasting = srd.classes[class_id].spellcasting
+    options = class_spell_options(spellcasting, srd)
+    offered = {spell.id for spell in (*options.cantrips, *options.spells)}
+    outsiders = [spell for spell in srd.spells.values() if spell.id not in offered]
+    assert outsiders  # у каждого класса среза есть чужие заклинания
+
+    for spell in outsiders:
+        if spellcasting.cantrips_known[3]:
+            cantrips = picks(options.cantrips, spellcasting.cantrips_known[3] - 1) + [spell.id]
+            assert_problem(problems_of(srd, class_id, cantrips=cantrips), "недоступно")
+        prepared = picks(options.spells, spellcasting.prepared[3] - 1) + [spell.id]
+        assert_problem(problems_of(srd, class_id, prepared_spells=prepared), "недоступно")
+
+
+@pytest.mark.parametrize("class_id", CASTER_IDS)
+def test_spell_options_are_the_class_list_in_data_order_split_by_level(srd, class_id):
+    spellcasting = srd.classes[class_id].spellcasting
+    top_level = max(spellcasting.slots[3])
+
+    options = class_spell_options(spellcasting, srd)
+
+    in_list = [s for s in srd.spells.values() if spellcasting.spell_list in s.classes]
+    assert options.cantrips == tuple(s for s in in_list if s.level == 0)
+    assert options.spells == tuple(s for s in in_list if 1 <= s.level <= top_level)
+
+
+def test_spell_options_stop_at_the_highest_slot_level_of_the_character(srd):
+    # В данных среза заклинаний 3-го уровня нет: добавляем одно в копию данных. У жреца 3-го
+    # уровня ячейки только 1-го и 2-го уровней, поэтому заклинание 3-го уровня не предлагается.
+    third_level = srd.spells["aid"].model_copy(update={"id": "revivify", "level": 3})
+    content = srd.model_copy(update={"spells": {**srd.spells, "revivify": third_level}})
+
+    options = class_spell_options(content.classes["cleric"].spellcasting, content)
+
+    assert "revivify" not in {spell.id for spell in options.spells}
+    assert {spell.level for spell in options.spells} == {1, 2}
+
+
+# --- боевые стили: русские названия и суть живут в движке ---
+
+
+def test_every_fighting_style_of_every_class_has_a_russian_name_and_summary(srd):
+    used = {style for cls in srd.classes.values() for style in cls.fighting_styles}
+
+    assert used  # в данных среза боевые стили есть
+    assert set(FIGHTING_STYLES) == used  # у каждого стиля есть запись, лишних записей нет
+    for style_id, style in FIGHTING_STYLES.items():
+        assert re.search("[а-яё]", style.name, re.IGNORECASE), style_id
+        assert style.summary.strip(), style_id
+
+
+def test_fighting_style_names_stay_what_the_players_know():
+    assert FIGHTING_STYLES["dueling"].name == "Дуэлянт"
+    assert FIGHTING_STYLES["archery"].name == "Стрельба"
+    assert FIGHTING_STYLES["defense"].name == "Оборона"
+
+
+def test_fighting_style_table_is_read_only():
+    with pytest.raises(TypeError):
+        FIGHTING_STYLES["dueling"] = ("Другое", "Другое")  # type: ignore[index]
 
 
 # --- build_character: числа ---

@@ -6,11 +6,14 @@
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from dnd_server.realtime import hub as hub_module
 from dnd_server.realtime.hub import EVENT_TYPES, Connection, Hub
 
 GAME = "game-1"
@@ -193,6 +196,61 @@ async def test_payloads_outside_the_event_contract_are_refused_without_raising(p
     assert alice.sent == [event(round=1)]
 
 
+async def test_a_socket_that_fails_is_logged_at_debug_without_the_input_of_the_error(
+    caplog, leak
+):
+    caplog.set_level(logging.DEBUG, logger=hub_module.__name__)
+    hub = Hub()
+
+    class BrokenSocket(FakeSocket):
+        async def send_text(self, text: str) -> None:
+            raise leak.error
+
+    join(hub, GAME, "alice", BrokenSocket())
+
+    await hub.send(GAME, event(round=1))
+    await until(lambda: hub.connections(GAME) == 0)
+
+    [record] = [r for r in caplog.records if r.name == hub_module.__name__]
+    assert record.exc_info is None  # трассировку формирует хаб, а не logging
+    assert "alice" in record.getMessage() and "ValidationError" in record.getMessage()
+    assert leak.value not in caplog.text and "input_value" not in caplog.text
+
+
+async def test_the_trace_of_a_closed_socket_is_not_built_when_debug_is_off(monkeypatch, caplog):
+    caplog.set_level(logging.INFO, logger=hub_module.__name__)
+    built: list[BaseException] = []
+    monkeypatch.setattr(hub_module, "safe_traceback", lambda exc, _settings: built.append(exc))
+    hub = Hub()
+    join(hub, GAME, "alice", FakeSocket(dead=True))
+
+    await hub.send(GAME, event(round=1))
+    await until(lambda: hub.connections(GAME) == 0)
+
+    assert built == []  # дорогой текст ради отключённого сообщения не собирается
+
+
+async def test_an_event_that_cannot_be_serialized_is_logged_without_the_input_of_the_error(
+    monkeypatch, caplog, leak
+):
+    def broken_dumps(*_args: Any, **_kwargs: Any) -> str:
+        raise leak.error  # ValidationError — наследник ValueError
+
+    monkeypatch.setattr(hub_module, "json", SimpleNamespace(dumps=broken_dumps))
+    hub = Hub()
+    alice = FakeSocket()
+    join(hub, GAME, "alice", alice)
+
+    with caplog.at_level(logging.ERROR, logger=hub_module.__name__):
+        await hub.send(GAME, event(round=1))
+
+    [record] = caplog.records
+    assert record.exc_info is None and GAME in record.getMessage()
+    assert "ValidationError" in caplog.text
+    assert leak.value not in caplog.text and "input_value" not in caplog.text
+    assert alice.sent == []
+
+
 def test_event_types_are_those_of_the_plan():
     assert EVENT_TYPES == {
         "phase",
@@ -229,3 +287,52 @@ async def test_lobby_event_goes_through_the_hub_to_everyone():
 
     await until(lambda: socket.sent)
     assert socket.sent == [lobby]
+
+
+# --- вышедший или исключённый игрок (S5) ---
+
+
+async def test_drop_user_removes_every_connection_of_that_user_in_that_game_only():
+    hub = Hub()
+    tab_1, tab_2, boris, elsewhere = FakeSocket(), FakeSocket(), FakeSocket(), FakeSocket()
+    join(hub, GAME, "alice", tab_1)
+    join(hub, GAME, "alice", tab_2)
+    join(hub, GAME, "boris", boris)
+    join(hub, OTHER_GAME, "alice", elsewhere)
+
+    dropped = hub.drop_user(GAME, "alice")
+    await hub.send(GAME, event(round=1))
+    await hub.send(OTHER_GAME, event(round=2))
+
+    assert dropped == 2
+    assert (hub.connections(GAME), hub.connections(OTHER_GAME)) == (1, 1)
+    await until(lambda: boris.sent and elsewhere.sent)
+    assert boris.sent == [event(round=1)] and elsewhere.sent == [event(round=2)]
+    assert tab_1.sent == tab_2.sent == []
+
+
+async def test_a_dropped_user_gets_neither_the_queued_nor_the_personal_events():
+    hub = Hub()
+    stuck = FakeSocket(stuck=True)  # клиент не читает: в очереди копятся события
+    join(hub, GAME, "alice", stuck)
+    await hub.send(GAME, event(round=1))
+    await hub.send(GAME, event(round=2))
+    await asyncio.sleep(0.01)
+
+    hub.drop_user(GAME, "alice")
+    await hub.send(GAME, event("character", hp=5), audience="alice")
+
+    await until(lambda: stuck.cancelled)  # писатель остановлен, очередь не дослана
+    assert stuck.sent == [] and hub.connections(GAME) == 0
+
+
+async def test_dropping_a_user_without_connections_or_in_an_unknown_game_is_harmless():
+    hub = Hub()
+    alice = FakeSocket()
+    join(hub, GAME, "alice", alice)
+
+    assert hub.drop_user(GAME, "nobody") == 0
+    assert hub.drop_user("no-such-game", "alice") == 0
+    assert hub.drop_user(GAME, "alice") == 1
+    assert hub.drop_user(GAME, "alice") == 0  # повторный вызов безопасен
+    assert hub.connections(GAME) == 0

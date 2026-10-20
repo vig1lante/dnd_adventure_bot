@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import json
 import logging
 import re
 import shutil
@@ -32,7 +33,14 @@ from dnd_server.adventures import load_catalog
 from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.config import Settings
-from dnd_server.db.models import Game, GamePhase, GamePlayer, PlayerCharacter, User
+from dnd_server.db.models import (
+    Game,
+    GamePhase,
+    GamePlayer,
+    PendingRoll,
+    PlayerCharacter,
+    User,
+)
 from dnd_server.games import service
 
 # tests/games/test_lobby.py -> games -> tests -> server -> services -> корень
@@ -1064,6 +1072,7 @@ async def test_start_moves_the_game_to_weaving_and_calls_the_hook_after_the_comm
     stored = await stored_game(lobby.db, game["id"])
     assert stored.phase == GamePhase.WEAVING
     assert stored.started_at is not None
+    assert stored.clock_at == stored.started_at  # время игры без пауз считается со старта
     assert lobby.hooks.started == [game["id"]]
     # В момент вызова хука изменение уже было в базе.
     assert lobby.hooks.phase_seen == [GamePhase.WEAVING]
@@ -1173,3 +1182,313 @@ async def test_a_failing_broadcaster_does_not_fail_the_change_and_is_logged(sett
         assert response.status_code == 200
         assert len(await stored_players(db, game["id"])) == 2
         assert game["id"] in caplog.text
+
+
+# --- выход и исключение из лобби (решение владельца S5, D2) ---
+
+
+async def give_roll(db: async_sessionmaker[AsyncSession], game_id: str, player: Player) -> None:
+    """Набор характеристик, который сервер бросил игроку для создания персонажа."""
+    async with db() as session:
+        session.add(PendingRoll(game_id=game_id, user_id=player.id, values=[15, 14, 13, 12, 10, 8]))
+        await session.commit()
+
+
+async def leave(lobby: Lobby, game_id: str, player: Player) -> httpx.Response:
+    return await lobby.http.post(f"/api/games/{game_id}/leave", headers=player.headers)
+
+
+async def kick(lobby: Lobby, game_id: str, by: Player, target_id: str) -> httpx.Response:
+    return await lobby.http.post(
+        f"/api/games/{game_id}/players/{target_id}/kick", headers=by.headers
+    )
+
+
+async def stored_characters(db: async_sessionmaker[AsyncSession], game_id: str) -> set[str]:
+    async with db() as session:
+        rows = await session.scalars(
+            select(PlayerCharacter.user_id).where(PlayerCharacter.game_id == game_id)
+        )
+        return set(rows)
+
+
+async def stored_rolls(db: async_sessionmaker[AsyncSession], game_id: str) -> set[str]:
+    async with db() as session:
+        rows = await session.scalars(
+            select(PendingRoll.user_id).where(PendingRoll.game_id == game_id)
+        )
+        return set(rows)
+
+
+async def test_a_player_leaves_the_lobby_with_his_character_and_his_rolled_set(lobby):
+    game, host, (leaver, stayer) = await ready_lobby(lobby)
+    await give_roll(lobby.db, game["id"], leaver)
+    await give_roll(lobby.db, game["id"], stayer)
+    lobby.broadcaster.sent.clear()
+
+    response = await leave(lobby, game["id"], leaver)
+
+    assert response.status_code == 204
+    assert response.content == b""
+    rows = await stored_players(lobby.db, game["id"])
+    assert [row.user_id for row in rows] == [host.id, stayer.id]
+    assert all(row.ready for row in rows)  # отметки остальных не тронуты
+    assert await stored_characters(lobby.db, game["id"]) == {host.id, stayer.id}
+    assert await stored_rolls(lobby.db, game["id"]) == {stayer.id}
+    # Остальные игроки узнают о выходе событием `lobby` с новым составом.
+    [(game_id, payload, audience)] = lobby.broadcaster.sent
+    assert (game_id, audience, payload["type"]) == (game["id"], "all", "lobby")
+    assert [p["user_id"] for p in payload["game"]["players"]] == [host.id, stayer.id]
+
+
+async def test_the_one_who_left_no_longer_sees_the_game_and_may_come_back_by_the_code(lobby):
+    game, _host, (leaver, _stayer) = await ready_lobby(lobby)
+
+    await leave(lobby, game["id"], leaver)
+
+    gone = await lobby.http.get(f"/api/games/{game['id']}", headers=leaver.headers)
+    assert gone.status_code == 404
+    again = await join(lobby, leaver, game["code"])
+    assert again.status_code == 200
+    assert leaver.id in [p["user_id"] for p in again.json()["players"]]
+    # Новый вход — без прежнего персонажа и без готовности.
+    [me] = [p for p in again.json()["players"] if p["user_id"] == leaver.id]
+    assert (me["has_character"], me["ready"]) == (False, False)
+
+
+async def test_a_player_without_a_character_may_leave_too(lobby):
+    host = await add_host(lobby)
+    game = await new_game(lobby, host)
+    friend = await joined_friend(lobby, game)
+
+    response = await leave(lobby, game["id"], friend)
+
+    assert response.status_code == 204
+    assert [row.user_id for row in await stored_players(lobby.db, game["id"])] == [host.id]
+
+
+async def test_the_host_cannot_leave_his_lobby(lobby):
+    game, host, _others = await ready_lobby(lobby)
+    lobby.broadcaster.sent.clear()
+
+    response = await leave(lobby, game["id"], host)
+
+    assert response.status_code == 409
+    assert "хост" in response.json()["detail"].lower()
+    assert len(await stored_players(lobby.db, game["id"])) == 3
+    assert host.id in await stored_characters(lobby.db, game["id"])
+    assert lobby.broadcaster.sent == []
+
+
+async def test_nobody_leaves_after_the_start(lobby):
+    game, host, (friend, _other) = await ready_lobby(lobby)
+    await lobby.http.post(f"/api/games/{game['id']}/start", headers=host.headers)
+
+    response = await leave(lobby, game["id"], friend)
+
+    assert response.status_code == 409
+    assert len(await stored_players(lobby.db, game["id"])) == 3
+    assert friend.id in await stored_characters(lobby.db, game["id"])
+
+
+async def test_a_stranger_or_an_unknown_game_gives_404_on_leave(lobby):
+    game, _host, _others = await ready_lobby(lobby)
+    stranger = await add_friend(lobby)
+
+    assert (await leave(lobby, game["id"], stranger)).status_code == 404
+    assert (await leave(lobby, "no-such-game", stranger)).status_code == 404
+    assert (await lobby.http.post(f"/api/games/{game['id']}/leave")).status_code == 401
+
+
+async def test_leaving_twice_is_404_the_second_time(lobby):
+    game, _host, (friend, _other) = await ready_lobby(lobby)
+
+    first = await leave(lobby, game["id"], friend)
+    second = await leave(lobby, game["id"], friend)
+
+    assert [first.status_code, second.status_code] == [204, 404]
+
+
+async def test_leaving_races_with_the_start_under_the_game_lock(lobby):
+    game, host, (friend, _other) = await ready_lobby(lobby)
+
+    start, left = await asyncio.gather(
+        lobby.http.post(f"/api/games/{game['id']}/start", headers=host.headers),
+        leave(lobby, game["id"], friend),
+    )
+
+    stored = await stored_game(lobby.db, game["id"])
+    members = [row.user_id for row in await stored_players(lobby.db, game["id"])]
+    if start.status_code == 200:  # старт успел раньше: выйти уже нельзя
+        assert (left.status_code, stored.phase, friend.id in members) == (
+            409,
+            GamePhase.WEAVING,
+            True,
+        )
+    else:  # выход успел раньше: игра осталась в лобби без вышедшего
+        assert (left.status_code, stored.phase, friend.id in members) == (
+            204,
+            GamePhase.LOBBY,
+            False,
+        )
+
+
+async def test_the_host_kicks_a_player_with_his_character_and_his_rolled_set(lobby):
+    game, host, (target, stayer) = await ready_lobby(lobby)
+    await give_roll(lobby.db, game["id"], target)
+    await give_roll(lobby.db, game["id"], stayer)
+    lobby.broadcaster.sent.clear()
+
+    response = await kick(lobby, game["id"], host, target.id)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == GAME_FIELDS
+    assert [p["user_id"] for p in body["players"]] == [host.id, stayer.id]
+    rows = await stored_players(lobby.db, game["id"])
+    assert [row.user_id for row in rows] == [host.id, stayer.id]
+    assert all(row.ready for row in rows)
+    assert await stored_characters(lobby.db, game["id"]) == {host.id, stayer.id}
+    assert await stored_rolls(lobby.db, game["id"]) == {stayer.id}
+    [(game_id, payload, audience)] = lobby.broadcaster.sent
+    assert (game_id, audience, payload) == (game["id"], "all", {"type": "lobby", "game": body})
+    gone = await lobby.http.get(f"/api/games/{game['id']}", headers=target.headers)
+    assert gone.status_code == 404
+
+
+async def test_only_the_host_may_kick(lobby):
+    game, host, (friend, other) = await ready_lobby(lobby)
+
+    response = await kick(lobby, game["id"], friend, other.id)
+    against_host = await kick(lobby, game["id"], friend, host.id)
+
+    assert (response.status_code, against_host.status_code) == (403, 403)
+    assert len(await stored_players(lobby.db, game["id"])) == 3
+    assert len(await stored_characters(lobby.db, game["id"])) == 3
+
+
+async def test_the_host_cannot_kick_himself(lobby):
+    game, host, _others = await ready_lobby(lobby)
+
+    response = await kick(lobby, game["id"], host, host.id)
+
+    assert response.status_code == 409
+    assert len(await stored_players(lobby.db, game["id"])) == 3
+
+
+async def test_kicking_somebody_who_is_not_in_the_game_is_404(lobby):
+    game, host, _others = await ready_lobby(lobby)
+    stranger = await add_friend(lobby)
+
+    assert (await kick(lobby, game["id"], host, stranger.id)).status_code == 404
+    assert (await kick(lobby, game["id"], host, "no-such-user")).status_code == 404
+    assert len(await stored_players(lobby.db, game["id"])) == 3
+
+
+async def test_a_stranger_cannot_kick_and_the_game_looks_like_it_does_not_exist(lobby):
+    game, _host, (friend, _other) = await ready_lobby(lobby)
+    stranger = await add_friend(lobby)
+
+    assert (await kick(lobby, game["id"], stranger, friend.id)).status_code == 404
+    assert (await kick(lobby, "no-such-game", stranger, friend.id)).status_code == 404
+    unauthenticated = await lobby.http.post(f"/api/games/{game['id']}/players/{friend.id}/kick")
+    assert unauthenticated.status_code == 401
+    assert len(await stored_players(lobby.db, game["id"])) == 3
+
+
+async def test_nobody_is_kicked_after_the_start(lobby):
+    game, host, (friend, _other) = await ready_lobby(lobby)
+    await lobby.http.post(f"/api/games/{game['id']}/start", headers=host.headers)
+
+    response = await kick(lobby, game["id"], host, friend.id)
+
+    assert response.status_code == 409
+    assert len(await stored_players(lobby.db, game["id"])) == 3
+    assert friend.id in await stored_characters(lobby.db, game["id"])
+
+
+async def test_a_kicked_player_may_join_again_by_the_code_as_a_newcomer(lobby):
+    game, host, (target, _other) = await ready_lobby(lobby)
+    await kick(lobby, game["id"], host, target.id)
+
+    again = await join(lobby, target, game["code"])
+
+    assert again.status_code == 200
+    [me] = [p for p in again.json()["players"] if p["user_id"] == target.id]
+    assert (me["has_character"], me["ready"]) == (False, False)
+
+
+async def test_a_kick_frees_a_seat_for_a_seventh_player(lobby):
+    host = await add_host(lobby)
+    game = await new_game(lobby, host)
+    friends = [await joined_friend(lobby, game) for _ in range(5)]
+    late = await add_friend(lobby)
+    assert (await join(lobby, late, game["code"])).status_code == 409
+
+    await kick(lobby, game["id"], host, friends[0].id)
+
+    assert (await join(lobby, late, game["code"])).status_code == 200
+
+
+class ListeningSocket:
+    """Сокет игрока для настоящего хаба: складывает принятые кадры."""
+
+    def __init__(self) -> None:
+        self.frames: list[dict[str, Any]] = []
+
+    async def send_text(self, data: str) -> None:
+        self.frames.append(json.loads(data))
+
+
+def listen(lobby: Lobby, game_id: str, player: Player) -> tuple[ListeningSocket, Any]:
+    """Подключает игрока к настоящему хабу приложения (как это делает WS-эндпоинт)."""
+    socket = ListeningSocket()
+    connection = lobby.app.state.hub.connect(game_id, player.id, socket)
+    connection.start()
+    return socket, connection
+
+
+async def test_the_one_who_left_is_cut_off_from_the_events_of_the_game(lobby):
+    game, host, (leaver, stayer) = await ready_lobby(lobby)
+    hub = lobby.app.state.hub
+    leaver_socket, _ = listen(lobby, game["id"], leaver)
+    stayer_socket, _ = listen(lobby, game["id"], stayer)
+    assert hub.connections(game["id"]) == 2
+
+    assert (await leave(lobby, game["id"], leaver)).status_code == 204
+    await hub.send(game["id"], {"type": "phase", "phase": {"phase": "playing"}})
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+    assert hub.connections(game["id"]) == 1
+    assert leaver_socket.frames == []  # ни события лобби о его выходе, ни дальнейших
+    assert [f["type"] for f in stayer_socket.frames] == ["phase"]
+
+
+async def test_a_kicked_player_is_cut_off_from_the_events_of_the_game(lobby):
+    game, host, (target, stayer) = await ready_lobby(lobby)
+    hub = lobby.app.state.hub
+    target_socket, _ = listen(lobby, game["id"], target)
+    stayer_socket, _ = listen(lobby, game["id"], stayer)
+
+    assert (await kick(lobby, game["id"], host, target.id)).status_code == 200
+    await hub.send(game["id"], {"type": "phase", "phase": {"phase": "playing"}})
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+    assert hub.connections(game["id"]) == 1
+    assert target_socket.frames == []
+    assert [f["type"] for f in stayer_socket.frames] == ["phase"]  # лобби идёт через регистратор
+
+
+async def test_a_refused_leave_or_kick_keeps_the_sockets_of_the_player(lobby):
+    game, host, (friend, other) = await ready_lobby(lobby)
+    hub = lobby.app.state.hub
+    listen(lobby, game["id"], host)
+    listen(lobby, game["id"], friend)
+
+    assert (await leave(lobby, game["id"], host)).status_code == 409  # хост не выходит
+    assert (await kick(lobby, game["id"], friend, other.id)).status_code == 403  # не хост
+    assert (await kick(lobby, game["id"], host, host.id)).status_code == 409  # себя нельзя
+
+    assert hub.connections(game["id"]) == 2

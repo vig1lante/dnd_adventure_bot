@@ -609,13 +609,121 @@ def test_a_pipe_under_a_yaml_name_is_refused_without_being_read(
 
 
 @pytest.mark.skipif(not Path("/dev/null").exists(), reason="нет /dev/null")
-def test_a_device_behind_a_yaml_name_is_refused_like_a_pipe(folder: Path):
+def test_a_symlink_to_a_device_is_refused_as_a_symlink_before_it_is_looked_at(folder: Path):
     (folder / "items" / "key.yaml").unlink()
     (folder / "items" / "key.yaml").symlink_to("/dev/null")
 
     problems = problems_of(folder)
 
-    assert problems == ["items/key.yaml: не удалось прочитать файл (не обычный файл)"]
+    assert len(problems) == 1 and problems[0].startswith("items/key.yaml: символическая ссылка")
+
+
+# --- симлинки в папке приключения ---
+# Симлинк `*.yaml` может указывать на файл вне папки (например, из присланного архива), и загрузчик
+# прочёл бы его как свой. Файлы приключения лежат прямо в его папке, поэтому любой симлинк — на
+# файл или на папку сущностей, рабочий или битый, наружу или внутрь — это проблема с путём, а цель
+# не читается.
+
+SYMLINK_FILES = [
+    "adventure.yaml",
+    "revelations.yaml",
+    "seeds.yaml",
+    "locations/village.yaml",
+    "npcs/marta.yaml",
+    "items/key.yaml",
+    "encounters/bones.yaml",
+    "monsters/crypt-bones.yaml",
+]
+
+
+@pytest.fixture
+def reads(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Пути, которые читали через `Path.read_bytes` после начала теста."""
+    seen: list[Path] = []
+    original = Path.read_bytes
+
+    def spy(self: Path) -> bytes:
+        seen.append(self)
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", spy)
+    return seen
+
+
+@pytest.mark.parametrize("name", SYMLINK_FILES)
+def test_a_symlink_to_a_file_outside_the_folder_is_refused_and_not_read(
+    folder: Path, tmp_path: Path, reads: list[Path], name: str
+):
+    outside = tmp_path / "outside" / "stolen.yaml"
+    outside.parent.mkdir()
+    # Во внешнем файле настоящее содержимое: прочти его загрузчик, папка загрузилась бы без проблем.
+    (folder / name).replace(outside)
+    (folder / name).symlink_to(outside)
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].startswith(f"{name}: символическая ссылка")
+    assert folder / name not in reads and outside not in reads
+
+
+def test_a_symlink_to_a_file_inside_the_folder_is_refused_too(folder: Path, reads: list[Path]):
+    (folder / "npcs" / "alias.yaml").symlink_to("marta.yaml")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].startswith("npcs/alias.yaml: символическая ссылка")
+    assert folder / "npcs" / "alias.yaml" not in reads
+
+
+@pytest.mark.parametrize(
+    "name", ["adventure.yaml", "revelations.yaml", "seeds.yaml", "npcs/x.yaml"]
+)
+def test_a_dangling_symlink_is_a_symlink_problem_not_a_missing_or_skipped_file(
+    folder: Path, name: str
+):
+    (folder / name).unlink(missing_ok=True)
+    (folder / name).symlink_to(folder / "нет-такого-файла.yaml")
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].startswith(f"{name}: символическая ссылка")
+
+
+@pytest.mark.parametrize("subfolder", ENTITY_FOLDERS)
+def test_a_symlink_instead_of_an_entity_folder_is_refused_and_not_listed(
+    folder: Path, tmp_path: Path, reads: list[Path], subfolder: str
+):
+    outside = tmp_path / "outside"
+    (folder / subfolder).replace(outside)
+    (folder / subfolder).symlink_to(outside, target_is_directory=True)
+
+    problems = problems_of(folder)
+
+    assert len(problems) == 1 and problems[0].startswith(f"{subfolder}: символическая ссылка")
+    assert all(folder / subfolder not in path.parents for path in reads)
+
+
+def test_a_symlinked_entity_file_is_not_the_only_thing_reported(folder: Path, tmp_path: Path):
+    """Остальные файлы читаются как обычно: симлинк не прячет прочие проблемы папки."""
+    outside = tmp_path / "outside.yaml"
+    (folder / "npcs" / "marta.yaml").replace(outside)
+    (folder / "npcs" / "marta.yaml").symlink_to(outside)
+    (folder / "items" / "key.yaml").write_text("id: key\n", encoding="utf-8")
+
+    problems = problems_of(folder)
+
+    assert any(p.startswith("npcs/marta.yaml: символическая ссылка") for p in problems)
+    assert any(p.startswith("items/key.yaml") and "поле" in p for p in problems)
+
+
+def test_the_folder_of_the_adventure_itself_may_be_a_symlink(
+    folder: Path, tmp_path: Path, adventure: Adventure
+):
+    """Запрет симлинков касается файлов внутри папки: саму папку выбирает вызывающий."""
+    link = tmp_path / "link-to-the-adventure"
+    link.symlink_to(folder, target_is_directory=True)
+
+    assert load_adventure(link) == adventure
 
 
 def test_a_missing_or_empty_entity_folder_is_still_fine(folder: Path, adventure: Adventure):

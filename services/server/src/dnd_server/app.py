@@ -1,12 +1,14 @@
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.engine import URL
 
 from dnd_engine.content import load_srd
 from dnd_engine.rng import SystemRng
@@ -21,13 +23,16 @@ from dnd_server.bot.notify import Notifier
 from dnd_server.characters.api import router as characters_router
 from dnd_server.config import Settings, get_settings
 from dnd_server.db.session import create_database_directory, make_engine, make_sessionmaker
+from dnd_server.dm.provider import GameProviders
 from dnd_server.games.api import handle_game_error
 from dnd_server.games.api import router as games_router
-from dnd_server.games.hooks import NullGameHooks
 from dnd_server.games.service import GameError, GameLocks, JoinAttempts, ModelCalls
 from dnd_server.llm.internal_api import TurnTokens, build_internal_router
 from dnd_server.realtime.hub import Hub
 from dnd_server.realtime.ws import router as realtime_router
+from dnd_server.turns.api import router as turns_router
+from dnd_server.turns.flow import Flow, FlowHooks, restore_games, scene_follow_up
+from dnd_server.turns.timers import Scheduler, TaskSet
 
 # Имена, под которыми к серверу обращаются с этой же машины. Прокси Vite шлёт сюда либо
 # `127.0.0.1:8000`, либо исходный Host страницы (`localhost:5173`); порт при проверке не важен.
@@ -85,6 +90,16 @@ def trusted_hosts(settings: Settings) -> list[str]:
     return hosts
 
 
+def database_file_exists(url: URL) -> bool:
+    """Есть ли база, из которой можно восстанавливать игры.
+
+    Ложь только для файловой SQLite, которой ещё нет (свежая установка): подключение создало бы
+    пустой файл, а сборка и старт приложения ничего на диске создавать не должны."""
+    if url.get_backend_name() != "sqlite" or url.database in (None, "", ":memory:"):
+        return True
+    return Path(url.database).exists()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # В prod слабый SESSION_SECRET останавливает старт: с ним сессии подделываются.
@@ -103,7 +118,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     async with running_bot(bot_deps) as notifier:
         app.state.notifier = notifier
-        yield
+        # Игры переживают перезапуск: отсчёты ставятся из базы, прерванные разборы отмечаются.
+        if database_file_exists(app.state.engine.url):
+            await restore_games(Flow.from_app(app))
+        try:
+            yield
+        finally:
+            # Отсчёты снимаются, идущий разбор мастера отменяется и успевает записать себя
+            # неудачным (игра не остаётся в `resolving`); бот ещё работает, пока это происходит.
+            await app.state.scheduler.close()
+            await app.state.turn_tasks.shutdown()
     await app.state.engine.dispose()
 
 
@@ -132,14 +156,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Пока `lifespan` не выполнен (клиент в памяти без старта), приключений нет, но маршруты живы.
     app.state.adventures = {}
     # События игры рассылает хаб сокетов; он же `Broadcaster` для лобби, персонажей и хода мастера.
-    # Запуск мастера (B7.8) подключится вместо заглушки.
+    # Запуск мастера после «Начать» — `FlowHooks` (вплетение героев и открытие игры, B7.8).
     app.state.game_locks = GameLocks()
     # Пределы тоже считаются в памяти процесса: сервер всегда один процесс (README), как и блокировки.
     app.state.model_calls = ModelCalls()
     app.state.join_attempts = JoinAttempts()
     app.state.hub = Hub()
     app.state.broadcaster = app.state.hub
-    app.state.game_hooks = NullGameHooks()
+    app.state.game_hooks = FlowHooks(app)
+    # Ход мастера (B7.3, B7.4): провайдеры игр живут в памяти процесса, как блокировки; выбор
+    # следующей фазы по сцене подставляют бой и привал (B7.5, B7.6); отсчёты ведёт планировщик,
+    # разборы мастера идут фоновыми задачами, обе части останавливаются вместе с сервером.
+    app.state.game_providers = GameProviders()
+    app.state.turn_follow_up = scene_follow_up
+    app.state.scheduler = Scheduler(settings=settings)
+    app.state.turn_tasks = TaskSet(settings=settings)
     # Уведомления в Telegram шлёт мастер (B7) через `app.state.notifier`. До старта и без токена
     # бота это заглушка, которая ничего не отправляет; `lifespan` подставляет рабочую.
     app.state.notifier = Notifier(app.state.sessionmaker)
@@ -155,6 +186,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(adventures_router)
     app.include_router(games_router)
     app.include_router(characters_router)
+    app.include_router(turns_router)
     app.include_router(realtime_router)
     # dev-вход есть только в dev: в prod маршрута нет вовсе, запрос получает обычный 404.
     if settings.app_env == "dev":

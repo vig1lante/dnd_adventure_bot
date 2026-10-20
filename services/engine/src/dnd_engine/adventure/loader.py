@@ -15,7 +15,10 @@
 В папках сущностей читаются только `*.yaml`: любой другой файл или подпапка — проблема с путём,
 а не молчаливый пропуск (сущность из `crypt.yml` пропала бы без следа). Исключение — скрытые файлы
 и папки (имя с точки: `.DS_Store`, `._crypt.yaml` от архиваторов, `.#crypt.yaml` от редакторов):
-они служебные, автор их не писал. Запись проверяет имена файлов до первой записи: id становится
+они служебные, автор их не писал. Символические ссылки (на файл или на папку сущностей, рабочие и
+битые) не читаются: файл `*.yaml` из присланного архива мог бы указывать на чужой файл вне папки,
+поэтому ссылка — проблема с путём, а цель не открывается. Сама папка приключения может быть ссылкой:
+её выбирает вызывающий, а не автор. Запись проверяет имена файлов до первой записи: id становится
 именем файла, и сюда он попадает от модели-генератора. Строки с переводами строк Unicode пишутся
 в двойных кавычках, чтобы чтение вернуло ровно записанный текст.
 """
@@ -41,8 +44,8 @@ from dnd_engine.content import (
     MAX_PROBLEM_LENGTH,
     MonsterDef,
     YamlTooLargeError,
-    _describe_yaml_error,
     check_yaml_size,
+    describe_parse_failure,
     parse_yaml,
     printable,
 )
@@ -67,6 +70,9 @@ class AdventureFormatError(ValueError):
         self.problems = [printable(problem, MAX_PROBLEM_LENGTH) for problem in problems]
         super().__init__("Приключение некорректно:\n" + "\n".join(f"- {p}" for p in self.problems))
 
+
+# Причина отказа символической ссылке; цель ссылки в неё не попадает (путь чужой).
+SYMLINK_REASON = "символическая ссылка не читается: файлы приключения лежат прямо в его папке"
 
 # Переводы строк Unicode, кроме `\n`: NEL (U+0085), разделители строки и абзаца.
 _UNICODE_LINE_BREAKS = "\x85\u2028\u2029"
@@ -103,8 +109,12 @@ def _describe_validation_error(name: str, exc: ValidationError) -> list[str]:
 def _read_yaml(file: Path, name: str, kind: type, problems: list[str]) -> Any | None:
     """Читает YAML-файл, который должен быть словарём (`dict`) или списком (`list`).
 
-    Любая проблема (нет файла, битый YAML, не тот тип) пишется в `problems`, результат — `None`.
+    Любая проблема (нет файла, символическая ссылка, битый YAML, не тот тип) пишется в `problems`,
+    результат — `None`.
     """
+    if file.is_symlink():  # до `stat` и чтения: они идут по ссылке к чужому файлу
+        problems.append(f"{name}: {SYMLINK_REASON}")
+        return None
     try:
         check_yaml_size(file)
         raw = file.read_bytes()
@@ -121,22 +131,9 @@ def _read_yaml(file: Path, name: str, kind: type, problems: list[str]) -> Any | 
         # Только безопасный разбор: тег вроде `!!python/object/apply` не выполнит код, а даст
         # YAMLError; якорь или алиас тоже дают YAMLError (бомба алиасов не разворачивается).
         data = parse_yaml(raw)
-    except yaml.YAMLError as exc:
-        problems.append(f"{name}: {_describe_yaml_error(exc)}")
-        return None
-    except RecursionError:
-        problems.append(f"{name}: слишком глубокая вложенность")
-        return None
-    except Exception:
-        # Конструкторы значений PyYAML на чужом вводе бросают что угодно, а не только YAMLError:
-        # `!!int ""` — IndexError, `!!bool x` — KeyError, `!!timestamp x` — AttributeError, длинное
-        # число или несуществующая дата — ValueError. Перечень не закрыт, поэтому ловим всё, но
-        # строго вокруг разбора. Тип и текст исключения в сообщение не идут: по ним причину не
-        # назвать, а текст содержит значение из файла.
-        problems.append(
-            f"{name}: значение не построить (тег или литерал): слишком длинное число, "
-            "несуществующая дата или неверное значение под тегом"
-        )
+    except Exception as exc:
+        # Разбор на чужом вводе бросает не только YAMLError (см. `describe_parse_failure`).
+        problems.append(f"{name}: {describe_parse_failure(exc)}")
         return None
     if not isinstance(data, kind):
         expected = "объект (словарь)" if kind is dict else "список"
@@ -148,6 +145,9 @@ def _read_yaml(file: Path, name: str, kind: type, problems: list[str]) -> Any | 
 def _entity_files(root: Path, folder: str, problems: list[str]) -> list[Path]:
     """Файлы `<folder>/*.yaml` по порядку имён. Скрытые пропускаются, всё остальное, что не
     `*.yaml` (в том числе подпапка), — проблема с путём. Нет папки — нет и файлов."""
+    if (root / folder).is_symlink():  # `glob` пошёл бы по ссылке в чужую папку
+        problems.append(f"{folder}: {SYMLINK_REASON}")
+        return []
     files: list[Path] = []
     for entry in sorted((root / folder).glob("*")):
         name = printable(f"{folder}/{entry.name}", MAX_FIELD_LENGTH)
@@ -210,7 +210,8 @@ def _load_revelations(root: Path, problems: list[str]) -> dict[str, Revelation]:
 def _load_seeds(root: Path, problems: list[str]) -> tuple[str, ...]:
     """Читает необязательный `seeds.yaml`: список id сущностей, заданных автором."""
     name = "seeds.yaml"
-    if not (root / name).exists():
+    # Битая ссылка `exists()` не видит, но пропускать её молча нельзя: это проблема с путём.
+    if not (root / name).exists() and not (root / name).is_symlink():
         return ()
     seeds = _read_yaml(root / name, name, list, problems)
     if seeds is None:

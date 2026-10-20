@@ -24,10 +24,9 @@
 import logging
 import secrets
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
-from types import MappingProxyType
 
 from pydantic import BaseModel
 from sqlalchemy import delete, select
@@ -41,6 +40,7 @@ from dnd_engine.creation import (
     CHARACTER_LEVEL,
     EXPERTISE_FEATURE,
     EXPERTISE_PICKS,
+    FIGHTING_STYLES,
     POINT_BUY_BUDGET,
     POINT_BUY_COST,
     SKILLFUL_TRAIT,
@@ -50,12 +50,12 @@ from dnd_engine.creation import (
     CharacterChoices,
     CharacterValidationError,
     build_character,
+    class_spell_options,
     quick_character,
     random_character,
     roll_ability_set,
 )
 from dnd_engine.rng import Rng
-from dnd_server.__main__ import HOST, PORT
 from dnd_server.characters.flavor import (
     MAX_REASON_CHARS,
     BackstoryOut,
@@ -69,6 +69,7 @@ from dnd_server.characters.flavor import (
 )
 from dnd_server.config import Settings
 from dnd_server.db.models import Game, GamePhase, GamePlayer, PendingRoll, PlayerCharacter, User
+from dnd_server.dm.provider import game_provider
 from dnd_server.games.hooks import Broadcaster, send_to_game
 from dnd_server.games.schemas import GameOut
 from dnd_server.games.service import (
@@ -81,28 +82,13 @@ from dnd_server.games.service import (
     lobby_event,
 )
 from dnd_server.llm.base import LLMProvider, printable
-from dnd_server.llm.factory import ConfigError, make_provider
+from dnd_server.llm.factory import ConfigError
 from dnd_server.llm.internal_api import TurnTokens
 
 logger = logging.getLogger(__name__)
 
 FLAVOR_PURPOSE = "character.flavor"
 BACKSTORY_PURPOSE = "character.backstory"
-
-# Боевые стили: движок знает их по id (`fighting_styles` класса), а русские названия живут только
-# в тексте умения класса. Форме нужны название и суть, поэтому они записаны здесь; тест следит, что
-# у каждого стиля каждого класса есть запись.
-FIGHTING_STYLES: Mapping[str, tuple[str, str]] = MappingProxyType(
-    {
-        "archery": ("Стрельба", "+2 к броскам атаки дальнобойным оружием."),
-        "defense": ("Оборона", "+1 к КД, пока надет доспех."),
-        "dueling": (
-            "Дуэлянт",
-            "+2 к урону одноручным оружием ближнего боя, пока вторая рука свободна.",
-        ),
-    }
-)
-
 
 # --- id персонажа ---
 
@@ -231,16 +217,14 @@ def _spellcasting_option(cls: ClassDef, srd: SrdContent) -> SpellcastingOption |
     spellcasting = cls.spellcasting
     if spellcasting is None:
         return None
-    # Те же границы, по которым движок проверяет выбор: заговоры — 0-й уровень, подготовленные —
-    # от 1-го до высшего уровня ячеек персонажа. Согласие проверяет тест формы по опциям.
-    top_level = max(spellcasting.slots[CHARACTER_LEVEL])
-    pool = [spell for spell in srd.spells.values() if spellcasting.spell_list in spell.classes]
+    # Варианты те же, по которым `build_character` проверяет выбор: их считает движок.
+    options = class_spell_options(spellcasting, srd)
     return SpellcastingOption(
         ability=spellcasting.ability,
         cantrips=spellcasting.cantrips_known[CHARACTER_LEVEL],
         prepared=spellcasting.prepared[CHARACTER_LEVEL],
-        cantrip_options=[_spell_option(s) for s in pool if s.level == 0],
-        spell_options=[_spell_option(s) for s in pool if 1 <= s.level <= top_level],
+        cantrip_options=[_spell_option(s) for s in options.cantrips],
+        spell_options=[_spell_option(s) for s in options.spells],
     )
 
 
@@ -282,7 +266,9 @@ def _fighting_styles(srd: SrdContent) -> list[Described]:
     """Боевые стили, которые есть хотя бы у одного класса, в порядке появления."""
     used = dict.fromkeys(style for cls in srd.classes.values() for style in cls.fighting_styles)
     return [
-        Described(id=style, name=FIGHTING_STYLES[style][0], summary=FIGHTING_STYLES[style][1])
+        Described(
+            id=style, name=FIGHTING_STYLES[style].name, summary=FIGHTING_STYLES[style].summary
+        )
         for style in used
     ]
 
@@ -515,16 +501,12 @@ async def create_random(session: AsyncSession, user: User, game_id: str, deps: D
 def _provider_for(deps: Deps, game: GameOut) -> LLMProvider:
     """Провайдер игры (переопределение хоста или значение env) для действий игрока.
 
-    Он собирается заново на каждый запрос: сборка не ходит в сеть, а сервер не держит провайдера
-    игры до начала хода мастера (B7). Описание просит дешёвую модель сам запрос (`cheap`)."""
+    Он собирается заново на каждый запрос: сборка не ходит в сеть, а провайдера для ведения игры
+    держит мастер (`dm.provider.GameProviders`). Описание просит дешёвую модель сам запрос
+    (`cheap`)."""
     try:
-        return make_provider(
-            deps.settings,
-            provider=game.provider,
-            model=game.model,
-            pc_ids=(),
-            turn_tokens=deps.turn_tokens,
-            internal_url=f"http://{HOST}:{PORT}",
+        return game_provider(
+            deps.settings, provider=game.provider, model=game.model, turn_tokens=deps.turn_tokens
         )
     except ConfigError as error:
         raise FlavorUnavailable(
@@ -616,10 +598,13 @@ async def _save_description(
     Сессия видела строки до ожидания, а другие запросы успели их изменить: поэтому читаем заново
     (`populate_existing`). Игра, ушедшая из лобби, описание не принимает (`False`): персонаж у
     игрока остаётся прежним. Заменённому персонажу возвращать нечего, это `Conflict`; замена
-    проверяется первой, потому что она важнее: её персонаж уже не тот, что сохранён."""
+    проверяется первой, потому что она важнее: её персонаж уже не тот, что сохранён. Игроку,
+    которого исключили или который вышел за это время, тоже `Conflict`: его персонаж удалён."""
     async with deps.locks.lock(game_id):
         game = await session.get(Game, game_id, populate_existing=True)
         player = await session.get(GamePlayer, (game_id, user.id), populate_existing=True)
+        if player is None:  # вышел из лобби или исключён, пока модель писала описание
+            raise Conflict("Вы больше не участник этой игры: описание отброшено.")
         if player.character_id != character.id:
             raise Conflict("Персонаж уже заменён другим запросом: это описание отброшено.")
         if game.phase != GamePhase.LOBBY:

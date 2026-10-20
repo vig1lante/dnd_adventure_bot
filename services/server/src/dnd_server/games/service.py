@@ -26,16 +26,25 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dnd_server.__main__ import HOST, PORT
 from dnd_server.adventures import Catalog, blocking_problems
 from dnd_server.config import Settings
-from dnd_server.db.models import Game, GamePhase, GamePlayer, User, new_id, utcnow
+from dnd_server.db.models import (
+    Game,
+    GamePhase,
+    GamePlayer,
+    PendingRoll,
+    PlayerCharacter,
+    User,
+    new_id,
+    utcnow,
+)
+from dnd_server.dm.provider import game_provider
 from dnd_server.games.hooks import Broadcaster, send_to_game
 from dnd_server.games.schemas import CreateGameIn, GameOut, PlayerOut
-from dnd_server.llm.factory import ConfigError, make_provider
+from dnd_server.llm.factory import ConfigError
 from dnd_server.llm.internal_api import TurnTokens
 
 # Не больше шести игроков в игре (спека §8): стол и отряд рассчитаны на шестерых.
@@ -282,19 +291,13 @@ def check_provider(
 ) -> None:
     """Отказывает (`Invalid`), если провайдер игры (переопределение хоста или значение env) не собрать.
 
-    Фабрика нужна только для проверки: игре экземпляр не хранится. Мастер (B7) собирает его сам,
-    с id персонажей, которых при создании игры ещё нет. `claude_code_cli` фабрика собирает лишь
-    в dev; адрес моста для него тот же, по которому слушает сервер.
+    Провайдер нужен только для проверки: игре экземпляр не хранится. Мастер собирает его сам
+    (`dm.provider.GameProviders`), с id персонажей, которых при создании игры ещё нет. Сборка идёт
+    той же функцией `game_provider`, что и у хода мастера: `claude_code_cli` она собирает лишь
+    в dev.
     """
     try:
-        make_provider(
-            settings,
-            provider=provider,
-            model=model,
-            pc_ids=(),
-            turn_tokens=turn_tokens,
-            internal_url=f"http://{HOST}:{PORT}",
-        )
+        game_provider(settings, provider=provider, model=model, turn_tokens=turn_tokens)
     except ConfigError as error:
         raise Invalid(f"Провайдер мастера не подходит: {error}.") from None
 
@@ -379,6 +382,11 @@ async def join_game(
         attempts.check(user.id)
         attempts.record_failure(user.id)
         raise NotFound("Игра с таким кодом не найдена.")
+    # Чтение по коду открыло транзакцию и заняло соединение пула, а блокировку игры могут держать
+    # долго (ход мастера). Держатель блокировки открывает свою сессию и ждёт соединение из того же
+    # пула, поэтому ждущий запрос соединения держать не должен (дефект D1 блока B7). Коммит без
+    # изменений отпускает его; игра читается заново уже под блокировкой.
+    await session.commit()
     async with locks.lock(game_id):
         game = await session.get(Game, game_id)
         players = await _players(session, game_id)
@@ -441,9 +449,70 @@ async def start_game(
                 "Не все игроки готовы: у каждого должен быть персонаж и отметка «Готов»."
             )
         game.phase = GamePhase.WEAVING
-        game.started_at = utcnow()
+        game.started_at = game.clock_at = utcnow()  # часы игры идут со старта (миграция 0002)
         await session.commit()
         return await _announce(session, game, broadcaster)
+
+
+async def leave_game(
+    session: AsyncSession, user: User, game_id: str, *, locks: GameLocks, broadcaster: Broadcaster
+) -> None:
+    """Игрок выходит из лобби вместе со своим персонажем и набором характеристик.
+
+    Хост выйти не может (решение D2: передача роли хоста вне среза): игра без хоста осталась бы без
+    того, кто её запускает."""
+    async with locks.lock(game_id):
+        game, player = await _membership(session, game_id, user)
+        if game.phase != GamePhase.LOBBY:
+            raise Conflict("Игра уже началась: выйти можно только до старта.")
+        if player.is_host:
+            raise Conflict("Хост не может выйти из лобби: он ведёт игру.")
+        await _remove_player(session, game_id, user.id)
+        await session.commit()
+        await _announce(session, game, broadcaster)
+
+
+async def kick_player(
+    session: AsyncSession,
+    host: User,
+    game_id: str,
+    target_user_id: str,
+    *,
+    locks: GameLocks,
+    broadcaster: Broadcaster,
+) -> GameOut:
+    """Хост исключает игрока из лобби: тот теряет персонажа и набор характеристик, место свободно.
+
+    Исключённый может войти снова по коду как новичок: списка запретов в срезе нет."""
+    async with locks.lock(game_id):
+        game, me = await _membership(session, game_id, host)
+        if not me.is_host:
+            raise Forbidden("Исключать игроков может только хост.")
+        if game.phase != GamePhase.LOBBY:
+            raise Conflict("Игра уже началась: исключать игроков можно только до старта.")
+        if target_user_id == host.id:
+            raise Conflict("Хост не может исключить себя.")
+        if await session.get(GamePlayer, (game_id, target_user_id)) is None:
+            raise NotFound("Такого игрока нет в этой игре.")
+        await _remove_player(session, game_id, target_user_id)
+        await session.commit()
+        return await _announce(session, game, broadcaster)
+
+
+async def _remove_player(session: AsyncSession, game_id: str, user_id: str) -> None:
+    """Удаляет игрока лобби и всё, что он там нажил. Порядок важен: строка игрока ссылается на
+    персонажа, поэтому персонаж удаляется после неё."""
+    await session.execute(
+        delete(GamePlayer).where(GamePlayer.game_id == game_id, GamePlayer.user_id == user_id)
+    )
+    await session.execute(
+        delete(PlayerCharacter).where(
+            PlayerCharacter.game_id == game_id, PlayerCharacter.user_id == user_id
+        )
+    )
+    await session.execute(
+        delete(PendingRoll).where(PendingRoll.game_id == game_id, PendingRoll.user_id == user_id)
+    )
 
 
 async def _announce(session: AsyncSession, game: Game, broadcaster: Broadcaster) -> GameOut:

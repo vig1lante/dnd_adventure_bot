@@ -10,6 +10,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
@@ -270,6 +271,26 @@ async def test_unreadable_game_state_is_reported_with_an_error_event_and_1011(se
     assert server.hub.connections(table.game_id) == 0
 
 
+async def test_a_snapshot_that_fails_is_logged_without_the_input_of_the_error(
+    server, table, monkeypatch, caplog, leak
+):
+    async def broken_snapshot(*_args: Any, **_kwargs: Any) -> str:
+        raise leak.error
+
+    monkeypatch.setattr(ws_module, "snapshot_text", broken_snapshot)
+
+    with caplog.at_level(logging.ERROR, logger=ws_module.__name__):
+        async with connect(server.url(table.game_id, table.alice.token)) as ws:
+            assert (await recv(ws))["type"] == "error"
+            with pytest.raises(ConnectionClosed):
+                await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+
+    [record] = caplog.records
+    assert record.exc_info is None  # трассировку формирует сервер, а не logging
+    assert table.game_id in record.getMessage() and "ValidationError" in record.getMessage()
+    assert leak.value not in caplog.text and "input_value" not in caplog.text
+
+
 async def test_the_hub_forgets_a_player_who_left(server, table):
     async with watching(server, table, "alice", "boris"):
         assert server.hub.connections(table.game_id) == 2
@@ -431,3 +452,32 @@ async def test_lobby_event_arrives_through_the_hub_after_join_and_ready(
         "Новичок",
     ]
     assert events[1]["game"]["players"][2]["ready"] is True
+
+
+# --- вышедший и исключённый игрок ---
+
+
+async def test_a_player_kicked_from_the_lobby_is_closed_and_cannot_come_back_to_the_socket(
+    server, lobby_table
+):
+    boris, alice = lobby_table.boris, lobby_table.alice
+    async with (
+        watching(server, lobby_table, "alice", "boris") as sockets,
+        server.http() as http,
+    ):
+        kicked = await http.post(
+            f"/api/games/{lobby_table.game_id}/players/{boris.user_id}/kick",
+            headers={"Authorization": f"Bearer {alice.token}"},
+        )
+        host_events = await drain(sockets["alice"])
+        with pytest.raises(ConnectionClosed) as closed:
+            async with asyncio.timeout(TIMEOUT_S):
+                while True:
+                    await sockets["boris"].recv()  # кадров игры исключённому больше нет
+        connections_left = server.hub.connections(lobby_table.game_id)
+
+    assert kicked.status_code == 200
+    assert [e["type"] for e in host_events] == ["lobby"]
+    assert closed.value.rcvd.code == 1013  # «переподключитесь»: вход уже закрыт
+    assert connections_left == 1  # остался только хост
+    assert await close_code(server.url(lobby_table.game_id, boris.token)) == 4403

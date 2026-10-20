@@ -31,7 +31,7 @@ from dnd_server.config import Settings
 from dnd_server.llm.anthropic_api import AnthropicProvider
 from dnd_server.llm.base import LLMProvider, schema_problems
 from dnd_server.llm.claude_code_cli import ClaudeCodeCliProvider
-from dnd_server.llm.fake import FakeProvider, UnreadableYaml, load_scenario
+from dnd_server.llm.fake import FakeProvider, UnreadableYaml, describe_os_error, load_scenario
 from dnd_server.llm.internal_api import TurnTokens
 from dnd_server.llm.openai_compatible import OpenAICompatibleProvider
 
@@ -109,6 +109,8 @@ def _scenario_problem(exc: Exception) -> str:
     файла."""
     if isinstance(exc, ValidationError):
         return schema_problems(exc)
+    if isinstance(exc, OSError):
+        return describe_os_error(exc)
     return str(exc)
 
 

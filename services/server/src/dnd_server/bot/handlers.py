@@ -1,9 +1,9 @@
 """Команды бота (план B6.6): `/start`, `/newgame` и кнопки выбора приключения.
 
-Логика отделена от сети: `invite_link`, `newgame_keyboard`, `adventure_id_from_callback` и
-`open_lobby` ничего не отправляют (последняя ходит только в базу), поэтому тесты вызывают их
-напрямую. Обработчики aiogram ниже тонкие: достают данные из сообщения, зовут эти функции и
-отвечают в чат.
+Логика отделена от сети: `invite_link`, `newgame_keyboard`, `adventure_id_from_callback`,
+`alert_text` и `open_lobby` ничего не отправляют (последняя ходит только в базу), поэтому тесты
+вызывают их напрямую. Обработчики aiogram ниже тонкие: достают данные из сообщения, зовут эти
+функции и отвечают в чат.
 
 Создавать игры может только тот, чей Telegram-id есть в `GAME_CREATOR_TG_IDS` (решение владельца
 B6). Это проверяется до показа списка приключений и ещё раз при нажатии кнопки: кнопка видна всем
@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 # 64 байтами, поэтому префикс короткий, а кнопка приключения с длинным id не создаётся.
 NEWGAME_PREFIX = "ng:"
 MAX_CALLBACK_DATA_BYTES = 64
+# Предел Bot API на текст `answerCallbackQuery`: ответ длиннее Telegram отвергает целиком, и кнопка
+# остаётся «крутиться» без объяснения.
+MAX_ALERT_CHARS = 200
 
 OPEN_GAME_BUTTON = "Открыть игру"
 START_TEXT = (
@@ -137,6 +140,13 @@ def lobby_text(game: GameOut, link: str | None) -> str:
     )
 
 
+def alert_text(text: str) -> str:
+    """Текст для окна-уведомления: длиннее `MAX_ALERT_CHARS` обрезается и заканчивается «…»."""
+    if len(text) <= MAX_ALERT_CHARS:
+        return text
+    return text[: MAX_ALERT_CHARS - 1] + "…"
+
+
 # --- создание игры ---
 
 
@@ -203,7 +213,13 @@ async def on_adventure_chosen(callback: CallbackQuery, deps: BotDeps) -> None:
         )
     if not reply.created:
         # Отказ показывается нажавшему, а не всему чату: кнопку видят и те, кому игры не создать.
-        await callback.answer(reply.text, show_alert=True)
+        # В группе полный текст слать нельзя (в нём пути и настройки сервера), поэтому окно
+        # урезается, а причина целиком остаётся в журнале владельца: в конце длинного текста как
+        # раз причина.
+        shown = alert_text(reply.text)
+        if shown != reply.text:
+            logger.warning("Отказ создать игру не поместился в окно Telegram: %s", reply.text)
+        await callback.answer(shown, show_alert=True)
         return
     keyboard = None
     if reply.link is not None:
