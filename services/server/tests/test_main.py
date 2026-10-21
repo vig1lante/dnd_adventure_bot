@@ -590,9 +590,11 @@ def test_the_same_port_and_the_same_database_report_the_busy_port_first(
     # Сквозной тест e2e «вторая копия на занятом порту» ждёт именно это сообщение.
     use_database(sqlite_url(tmp_path / "one.sqlite3"))
 
-    with server_main.claim_database(sqlite_url(tmp_path / "one.sqlite3")):
-        with pytest.raises(SystemExit) as stop:
-            main(["--port", str(busy_port)])
+    with (
+        server_main.claim_database(sqlite_url(tmp_path / "one.sqlite3")),
+        pytest.raises(SystemExit) as stop,
+    ):
+        main(["--port", str(busy_port)])
 
     message = stop.value.code
     assert isinstance(message, str)
@@ -609,9 +611,11 @@ def test_a_copy_refused_for_the_database_gives_its_port_back_and_keeps_the_bridg
     monkeypatch.setattr(uvicorn, "run", lambda app, **options: started.append(app))
     use_database(sqlite_url(tmp_path / "one.sqlite3"))
 
-    with server_main.claim_database(sqlite_url(tmp_path / "one.sqlite3")):
-        with pytest.raises(SystemExit):
-            main(["--port", str(port)])
+    with (
+        server_main.claim_database(sqlite_url(tmp_path / "one.sqlite3")),
+        pytest.raises(SystemExit),
+    ):
+        main(["--port", str(port)])
 
     assert started == []
     assert try_to_bind(port) is True  # порт занят не остался

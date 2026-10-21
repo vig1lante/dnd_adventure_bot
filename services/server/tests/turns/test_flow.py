@@ -42,8 +42,8 @@ from dnd_engine.creation import quick_character
 from dnd_engine.rng import SeededRng
 from dnd_engine.state import GameState, RulesRef, Scene, SceneType
 from dnd_server.app import create_app
-from dnd_server.bot.notify import game_continues_text, game_started_text
 from dnd_server.auth.session import SessionSigner
+from dnd_server.bot.notify import game_continues_text, game_started_text
 from dnd_server.characters.service import new_character_id
 from dnd_server.config import Settings
 from dnd_server.db.models import (

@@ -1472,9 +1472,7 @@ def test_contest_against_a_custom_statblock_of_the_adventure(
             "npcs": {**demo_adventure.npcs, "fabian": fabian},
         }
     )
-    ctx = make_ctx(
-        make_state(location_id="crypt"), adventure=adventure, rng=ScriptedRng([10, 10])
-    )
+    ctx = make_ctx(make_state(location_id="crypt"), adventure=adventure, rng=ScriptedRng([10, 10]))
 
     outcome = run(ctx, "contest", **contest_args(b_id="fabian", b_skill="deception"))
 
@@ -1488,9 +1486,7 @@ def test_a_broken_statblock_link_is_a_data_error_and_not_a_mistake_of_the_model(
     adventure = demo_adventure.model_copy(
         update={"npcs": {**demo_adventure.npcs, "fabian": fabian}}
     )
-    ctx = make_ctx(
-        make_state(location_id="crypt"), adventure=adventure, rng=ScriptedRng([10, 10])
-    )
+    ctx = make_ctx(make_state(location_id="crypt"), adventure=adventure, rng=ScriptedRng([10, 10]))
 
     # Валидатор такие ссылки не пропускает: если она всё же встретилась, это баг данных, и ход
     # должен упасть, а не выглядеть для модели её ошибкой.

@@ -295,7 +295,7 @@ async def test_effort_from_config_goes_to_output_config(effort):
 
 def test_unknown_effort_is_rejected_at_construction():
     # Опечатка в LLM_EFFORT не должна всплыть только как 400 посреди первой игры.
-    with pytest.raises(ValueError, match="LLM_EFFORT|effort"):
+    with pytest.raises(ValueError, match=r"LLM_EFFORT|effort"):
         FakeApi().make_provider(effort="turbo")
 
 
@@ -431,7 +431,7 @@ async def test_tool_input_too_deep_for_the_sdk_is_a_provider_error(depth):
     body = calls_tool(tool_use("toolu_01", "request_check", dc="DEEP"))
     api = FakeApi(deep_response(body, nested(depth)), reply(text("Итог.")))
 
-    with pytest.raises(ProviderError, match="ValueError|RecursionError"):
+    with pytest.raises(ProviderError, match=r"ValueError|RecursionError"):
         await api.make_provider().run_turn(make_request(), ScriptedTools())
 
 

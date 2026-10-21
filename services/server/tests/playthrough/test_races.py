@@ -6,7 +6,6 @@
 
 import asyncio
 
-from dnd_server.db.models import TurnPhase, TurnStatus
 from evening import (
     BORIS_SECRET_ACTION,
     COLLECT_SECONDS,
@@ -20,6 +19,8 @@ from evening import (
     round_one,
     round_two,
 )
+
+from dnd_server.db.models import TurnPhase, TurnStatus
 
 
 async def press_together(server: Server, *presses: tuple[str, str, str]) -> list[int]:

@@ -78,7 +78,7 @@ SPEC_TOOLS = {
 def test_the_registry_has_every_tool_of_the_spec_table(tool_registry):
     names = {spec.name for spec in tool_registry.specs()}
 
-    assert SPEC_TOOLS <= names
+    assert names >= SPEC_TOOLS
 
 
 @pytest.mark.parametrize("name", ALL_TOOLS)
@@ -142,14 +142,21 @@ def unbounded_arguments(node: Any, path: str) -> list[str]:
     kind = node.get("type")
     if kind == "string" and not {"maxLength", "enum", "const"} & node.keys():
         problems.append(f"{path}: строка без maxLength")
-    if kind in {"integer", "number"} and "enum" not in node:
-        if not {"minimum", "maximum"} <= node.keys():
-            problems.append(f"{path}: число без границ")
+    if (
+        kind in {"integer", "number"}
+        and "enum" not in node
+        and not {"minimum", "maximum"} <= node.keys()
+    ):
+        problems.append(f"{path}: число без границ")
     if kind == "array" and "maxItems" not in node:
         problems.append(f"{path}: список без maxItems")
-    if kind == "object" and "properties" not in node:  # словарь с ключами от модели
-        if "maxProperties" not in node or "maxLength" not in node.get("propertyNames", {}):
-            problems.append(f"{path}: словарь без предела числа и длины ключей")
+    # Словарь с ключами от модели.
+    if (
+        kind == "object"
+        and "properties" not in node
+        and ("maxProperties" not in node or "maxLength" not in node.get("propertyNames", {}))
+    ):
+        problems.append(f"{path}: словарь без предела числа и длины ключей")
     for key, value in node.items():
         problems += unbounded_arguments(value, f"{path}/{key}")
     return problems
@@ -519,7 +526,7 @@ def test_rolls_made_while_the_turn_is_passed_to_a_secret_author_stay_public(make
 
     assert outcome.error is None, outcome.error
     rolls = [e for e in ctx.events[first_new:] if isinstance(e, RollEvent)]
-    assert [(r.actor_id, r.label) for r in rolls][0] == (HERO, "Спасбросок от смерти")
+    assert (rolls[0].actor_id, rolls[0].label) == (HERO, "Спасбросок от смерти")
     assert {r.actor_id: r.audience for r in rolls} == {HERO: "all", WIZARD: WIZARD}
 
 

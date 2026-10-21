@@ -766,7 +766,7 @@ async def test_events_are_broadcast_after_the_commit_by_the_view_builders(world)
     sent = world.broadcaster
     assert sent.versions_at_send  # рассылка была
     assert set(sent.versions_at_send[1:]) == {2}  # всё, кроме «мастер думает», — после коммита
-    assert [payload["type"] for payload, _ in sent.sent][0] == "phase"
+    assert sent.sent[0][0]["type"] == "phase"
     first_phase = sent.sent[0][0]["phase"]
     assert first_phase["turn_phase"] == "resolving"
     last_phase = sent.of_type("phase")[-1][0]["phase"]
@@ -1271,8 +1271,7 @@ async def test_player_actions_are_finished_when_the_turn_is_done(world):
 
 
 async def test_the_spotlight_counts_submitted_turns_and_the_focus_of_the_events(world):
-    world.use_scenario(scenario_turn(check("$pc1"), tool("chronicle", entry="з"), say("Итог."))
-    )
+    world.use_scenario(scenario_turn(check("$pc1"), tool("chronicle", entry="з"), say("Итог.")))
     await world.act("alice", "Крадусь")
     await world.act("boris", "Стою рядом")
     await world.act("vera", "")  # пас
@@ -2248,9 +2247,7 @@ async def test_a_turn_that_is_already_done_is_not_resolved_again(monkeypatch, wo
 
 async def test_a_game_without_a_state_has_nothing_for_the_master_to_resolve(world):
     async with world.db() as session:
-        await session.execute(
-            update(Game).where(Game.id == world.game_id).values(state_version=7)
-        )
+        await session.execute(update(Game).where(Game.id == world.game_id).values(state_version=7))
         await session.commit()
 
     with pytest.raises(Conflict, match="нет состояния"):
@@ -2471,9 +2468,7 @@ async def test_regenerate_keeps_the_actions_of_the_players_and_the_acting_fighte
     assert done.kind == TurnKind.COMBAT
 
 
-@pytest.mark.parametrize(
-    "phase", [TurnPhase.COLLECTING, TurnPhase.DM_FAILED, TurnPhase.RESOLVING]
-)
+@pytest.mark.parametrize("phase", [TurnPhase.COLLECTING, TurnPhase.DM_FAILED, TurnPhase.RESOLVING])
 async def test_regenerate_is_refused_while_the_next_round_is_collected_or_failed(
     monkeypatch, world, phase
 ):

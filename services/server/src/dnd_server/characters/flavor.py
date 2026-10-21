@@ -135,7 +135,8 @@ def backstory_prompt(class_name: str, species_name: str, concept: str, draft: st
             f"Вид: {species_name}.",
             f"Замысел игрока: {quote(concept)}." if concept else "Замысла нет.",
             draft_line,
-            f"Поле backstory: предыстория, 3–6 предложений, не длиннее {BACKSTORY_MAX_CHARS} знаков.",
+            "Поле backstory: предыстория, 3–6 предложений, "
+            f"не длиннее {BACKSTORY_MAX_CHARS} знаков.",
         ]
     )
 
@@ -164,7 +165,7 @@ async def ask_model[T: BaseModel](
 
 
 def with_persona(character: Character, persona: PersonaOut, *, keep_name: bool) -> Character:
-    """Персонаж с описанием от модели: меняются имя (если оно не задано) и текст, числа — никогда."""
+    """Персонаж с описанием от модели: меняются имя (если не задано) и текст, числа — никогда."""
     texts = persona.model_dump(exclude={"name"})
     return character.model_copy(
         update={

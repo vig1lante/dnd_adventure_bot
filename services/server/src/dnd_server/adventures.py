@@ -74,7 +74,7 @@ def shorten_problems(problems: list[str]) -> list[str]:
 
 
 def blocking_problems(report: Report) -> list[str]:
-    """Блокирующие ошибки отчёта строками `объект: сообщение` (с id скрытых мест: не для игроков)."""
+    """Блокирующие ошибки отчёта строками `объект: сообщение` (с id скрытых мест, не игрокам)."""
     return shorten_problems(
         [f"{issue.ref}: {issue.message}" for issue in report.issues if issue.severity == "error"]
     )

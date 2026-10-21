@@ -75,8 +75,8 @@ from typing import Any
 from fastapi import FastAPI
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from dnd_engine.state import GameState, SceneType
 from dnd_server.bot.notify import (

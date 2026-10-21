@@ -468,7 +468,7 @@ async def test_server_message_too_deep_for_the_sdk_is_a_provider_error(depth):
     }
     api = FakeApi(deep_response(completion(message, "tool_calls"), depth), says("Итог."))
 
-    with pytest.raises(ProviderError, match="ValueError|RecursionError"):
+    with pytest.raises(ProviderError, match=r"ValueError|RecursionError"):
         await api.make_provider().run_turn(make_request(), ScriptedTools())
 
 
@@ -618,7 +618,7 @@ async def test_message_refusal_is_a_refusal():
 async def test_response_without_choices_is_an_error():
     api = FakeApi(says("Рассказ.") | {"choices": []})
 
-    with pytest.raises(ProviderError, match="choices|вариант"):
+    with pytest.raises(ProviderError, match=r"choices|вариант"):
         await api.make_provider().run_turn(make_request(), ScriptedTools())
 
 

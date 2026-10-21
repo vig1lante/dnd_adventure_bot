@@ -13,14 +13,6 @@ from typing import Any
 
 import pytest
 import yaml
-from pydantic import SecretStr
-from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import Session
-
-from dnd_server.config import Settings
-from dnd_server.db.models import DmTurnLog, GameStateSnapshot, Message, MessageKind
-from dnd_server.llm.fake import FakeProvider
 from evening import (
     BOT_TOKEN,
     DEMO_ADVENTURE_DIR,
@@ -35,6 +27,14 @@ from evening import (
     evening_scenario,
     running_server,
 )
+from pydantic import SecretStr
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import Session
+
+from dnd_server.config import Settings
+from dnd_server.db.models import DmTurnLog, GameStateSnapshot, Message, MessageKind
+from dnd_server.llm.fake import FakeProvider
 
 
 @pytest.fixture

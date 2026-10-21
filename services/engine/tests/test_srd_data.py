@@ -879,7 +879,7 @@ def test_background_feats_exist(backgrounds, feats):
 
 def test_only_planned_feats_are_mechanical(feats):
     assert {feat.id for feat in feats.values() if feat.mechanical} == MECHANICAL_FEATS
-    assert MECHANICAL_FEATS <= set(feats)
+    assert set(feats) >= MECHANICAL_FEATS
 
 
 # --- ссылки на другие файлы и оформление ---

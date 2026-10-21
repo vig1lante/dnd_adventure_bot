@@ -825,9 +825,9 @@ def test_a_spell_outside_the_class_options_is_rejected_by_the_character_check(sr
 
     for spell in outsiders:
         if spellcasting.cantrips_known[3]:
-            cantrips = picks(options.cantrips, spellcasting.cantrips_known[3] - 1) + [spell.id]
+            cantrips = [*picks(options.cantrips, spellcasting.cantrips_known[3] - 1), spell.id]
             assert_problem(problems_of(srd, class_id, cantrips=cantrips), "недоступно")
-        prepared = picks(options.spells, spellcasting.prepared[3] - 1) + [spell.id]
+        prepared = [*picks(options.spells, spellcasting.prepared[3] - 1), spell.id]
         assert_problem(problems_of(srd, class_id, prepared_spells=prepared), "недоступно")
 
 

@@ -9,6 +9,7 @@ from dnd_engine.checks import (
     CHECK_DISADVANTAGE_CONDITIONS,
     CHECK_TRAIT_BY_SPECIES,
     DC_TABLE,
+    GUIDANCE_BUFF,
     SAVE_DISADVANTAGE_CONDITIONS,
     VALID_DCS,
     CheckHook,
@@ -16,7 +17,6 @@ from dnd_engine.checks import (
     CheckResult,
     ContestResult,
     ContestSide,
-    GUIDANCE_BUFF,
     ability_check,
     apply_bless,
     apply_luck,
@@ -172,7 +172,7 @@ def test_engine_computed_dc_is_not_limited_to_the_table(make_character, dc):
     result = engine_save(make_character(), [10], dc=dc)
 
     assert result.dc == dc
-    assert result.success == (10 >= dc)
+    assert result.success == (dc <= 10)
 
 
 def test_engine_save_rolls_like_a_normal_save(make_character):

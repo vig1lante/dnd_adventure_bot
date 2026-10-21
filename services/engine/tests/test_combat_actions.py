@@ -23,6 +23,7 @@ from dnd_engine.character import (
     InventoryItem,
     armor_class,
 )
+from dnd_engine.combat import engine as combat_engine
 from dnd_engine.combat.engine import (
     HIDDEN_SOURCE,
     CombatError,
@@ -36,7 +37,6 @@ from dnd_engine.combat.engine import (
     simple_action,
     start_combat,
 )
-from dnd_engine.combat import engine as combat_engine
 from dnd_engine.combat.model import Zone, ZoneLink
 from dnd_engine.conditions import ZERO_HP_SOURCE, is_dead
 from dnd_engine.content import MonsterAction, SrdContent, load_srd
@@ -3197,9 +3197,9 @@ def test_ids_that_the_engine_relies_on_exist_in_the_srd_data(srd):
     } <= features
     assert BREATH_WEAPON_TRAIT in traits
     assert srd.spells["aid"].effect.buff == AID_BUFF
-    assert engine.MARK_EFFECTS == {
+    assert {
         srd.spells[sid].effect.buff for sid in ("guiding_bolt", "hunters_mark")
-    }
+    } == engine.MARK_EFFECTS
     for spell_id, (feature, resource) in engine.FREE_CASTS.items():
         assert feature in features and spell_id in srd.spells
         assert any(resource in cls.resources for cls in srd.classes.values())
@@ -3305,7 +3305,7 @@ def downed(make_ally, **overrides):
 def test_bg3_flavor_makes_drinking_a_potion_a_bonus_action(srd, make_hero):
     state = melee(battle(srd, [potion_hero(make_hero)]), HERO, GOBLIN)
 
-    drunk, events = act(srd, state, [3, 2], "use_item", item_id="potion_of_healing", rules=BG3)
+    drunk, _ = act(srd, state, [3, 2], "use_item", item_id="potion_of_healing", rules=BG3)
 
     assert hp(drunk, HERO) == 17
     assert [i.item_id for i in drunk.party[HERO].inventory] == ["longsword"]
@@ -3597,8 +3597,10 @@ def test_random_play_keeps_resources_valid_and_refusals_harmless(
             c = state.party[actor.id]
             spell = srd.spells[pick([*c.cantrips, *c.prepared_spells] or ["fire_bolt"])]
             action = pick(actions)
+            # Лямбды вызываются в этой же итерации; переменные цикла привязаны аргументами
+            # по умолчанию.
             calls = [
-                lambda s, r: cast_spell(
+                lambda s, r, actor=actor, spell=spell: cast_spell(
                     s,
                     actor.id,
                     spell.id,
@@ -3607,7 +3609,7 @@ def test_random_play_keeps_resources_valid_and_refusals_harmless(
                     rng=r,
                     content=srd,
                 ),
-                lambda s, r: simple_action(
+                lambda s, r, actor=actor, action=action, enemies=enemies: simple_action(
                     s,
                     actor.id,
                     action,
@@ -3617,7 +3619,7 @@ def test_random_play_keeps_resources_valid_and_refusals_harmless(
                     rng=r,
                     content=srd,
                 ),
-                lambda s, r: attack(
+                lambda s, r, actor=actor, enemies=enemies, c=c: attack(
                     s,
                     actor.id,
                     pick(enemies),
@@ -3625,7 +3627,7 @@ def test_random_play_keeps_resources_valid_and_refusals_harmless(
                     rng=r,
                     content=srd,
                 ),
-                lambda s, r: move(
+                lambda s, r, actor=actor, enemies=enemies: move(
                     s,
                     actor.id,
                     to_zone=pick(["hall", "stairs"]),
@@ -3635,11 +3637,15 @@ def test_random_play_keeps_resources_valid_and_refusals_harmless(
                 ),
             ]
             if choice.randint(0, 3) == 0:  # чаще вступаем в ближний бой: иначе мало что работает
-                calls = [lambda s, r: move(s, actor.id, engage=pick(enemies), rng=r, content=srd)]
+                calls = [
+                    lambda s, r, actor=actor, enemies=enemies: move(
+                        s, actor.id, engage=pick(enemies), rng=r, content=srd
+                    )
+                ]
         else:
             monster = srd.monsters[actor.ref]
             calls = [
-                lambda s, r: monster_action(
+                lambda s, r, actor=actor, monster=monster, enemies=enemies: monster_action(
                     s,
                     actor.id,
                     pick([a.id for a in monster.actions]),
@@ -3647,7 +3653,9 @@ def test_random_play_keeps_resources_valid_and_refusals_harmless(
                     rng=r,
                     content=srd,
                 ),
-                lambda s, r: move(s, actor.id, engage=pick(enemies), rng=r, content=srd),
+                lambda s, r, actor=actor, enemies=enemies: move(
+                    s, actor.id, engage=pick(enemies), rng=r, content=srd
+                ),
             ]
         call = pick([*calls, lambda s, r: end_turn(s, rng=r, content=srd)])
         snapshot = state.model_copy(deep=True)
@@ -3753,7 +3761,7 @@ ONCE_PER_TURN = ("sneak_attack_used", "colossus_slayer_used", "savage_attacker_u
 
 
 def rogue_vs_blinded_ogre(srd, make_character) -> GameState:
-    """Плут вплотную с ослеплённым огром: у атаки по нему преимущество, значит, Скрытая атака есть."""
+    """Плут вплотную с ослеплённым огром: атака по нему с преимуществом, Скрытая атака есть."""
     rogue = make_character(
         id=HERO,
         name="Плут",

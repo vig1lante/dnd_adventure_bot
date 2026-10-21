@@ -494,7 +494,7 @@ async def test_provider_error_is_not_swallowed():
     answers = demo_answers()
     del answers["generator.items"]
 
-    with pytest.raises(ProviderError, match="generator.items"):
+    with pytest.raises(ProviderError, match=r"generator\.items"):
         await run_generation(answers)
 
 

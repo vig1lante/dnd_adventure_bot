@@ -567,7 +567,7 @@ def test_read_yaml_does_not_read_a_file_over_the_limit(tmp_path, monkeypatch):
 
 
 def test_read_yaml_keeps_the_error_of_a_missing_file(tmp_path):
-    with pytest.raises(FileNotFoundError, match="nope.yaml"):
+    with pytest.raises(FileNotFoundError, match=r"nope\.yaml"):
         read_yaml(tmp_path / "nope.yaml")
 
 

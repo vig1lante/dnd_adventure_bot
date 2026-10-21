@@ -488,7 +488,7 @@ async def test_recorder_keeps_first_failure_and_refuses_later_calls():
 
     with pytest.raises(RuntimeError, match="баг движка"):
         await recorder("heal", {})
-    text, is_error = await recorder("heal", {})  # после сбоя ход прерван: инструменты закрыты
+    _text, is_error = await recorder("heal", {})  # после сбоя ход прерван: инструменты закрыты
 
     assert isinstance(recorder.failure, RuntimeError)
     assert is_error is True

@@ -14,11 +14,6 @@ from typing import Any
 
 import pytest
 import yaml
-
-from dnd_server.bot.notify import collecting_text
-from dnd_server.db import session as db_session
-from dnd_server.db.models import GamePhase, MessageKind, TurnPhase, TurnStatus
-from dnd_server.games.service import GameLocks
 from evening import (
     COLLECT_SECONDS,
     HIDDEN_EXIT_ID,
@@ -38,6 +33,11 @@ from evening import (
     tool,
     view_of,
 )
+
+from dnd_server.bot.notify import collecting_text
+from dnd_server.db import session as db_session
+from dnd_server.db.models import GamePhase, MessageKind, TurnPhase, TurnStatus
+from dnd_server.games.service import GameLocks
 
 SIX = (
     ("alice", "Алиса"),

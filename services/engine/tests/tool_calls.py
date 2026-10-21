@@ -6,6 +6,8 @@
 с какими параметрами фикстуры вызов удаётся; бой — «Встающие кости», первым ходит герой вызова.
 """
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 from dnd_engine.state import RulesRef
@@ -17,7 +19,9 @@ BOTH_MODULES = RulesRef(modules=["bg3_flavor", "campfire"])  # правила д
 class ValidCall(NamedTuple):
     tool: str
     args: dict[str, Any]
-    scene: dict[str, Any] = {}  # параметры фикстуры `make_scene`; пусто — исследование на кладбище
+    # Параметры фикстуры `make_scene`; пусто — исследование на кладбище. Значение по умолчанию
+    # общее для всех вызовов, поэтому пустой словарь неизменяемый.
+    scene: Mapping[str, Any] = MappingProxyType({})
 
 
 FIGHT = {"fight": True, "engaged": True}

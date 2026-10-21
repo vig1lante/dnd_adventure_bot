@@ -151,7 +151,7 @@ class FakeAiohttp:
     def __init__(self, updates_error: Exception) -> None:
         self._updates_error = updates_error
 
-    def post(self, url: str, **_options: Any) -> "FakeAiohttp._Reply":
+    def post(self, url: str, **_options: Any) -> FakeAiohttp._Reply:
         if url.endswith("/getMe"):
             user = {"id": BOT_ID, "is_bot": True, "first_name": "Бот", "username": "b_bot"}
             return self._Reply(body=json.dumps({"ok": True, "result": user}))
@@ -164,7 +164,7 @@ class FakeAiohttp:
             self._body = body
             self._error = error
 
-        async def __aenter__(self) -> "FakeAiohttp._Reply":
+        async def __aenter__(self) -> FakeAiohttp._Reply:
             if self._error is not None:
                 raise self._error
             return self

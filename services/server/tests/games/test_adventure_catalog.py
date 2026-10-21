@@ -1,4 +1,4 @@
-"""Каталог приключений (план B6.3): загрузка `CONTENT_DIR` при старте сервера и `GET /api/adventures`.
+"""Каталог приключений (план B6.3): загрузка `CONTENT_DIR` при старте и `GET /api/adventures`.
 
 Папки владельца — вход сервера: битая папка пропускается с записью в журнал и не роняет старт, а
 отчёт валидатора (в нём id скрытых выходов и запертых мест) игрокам не выдаётся. Приложение
@@ -40,7 +40,7 @@ def copy_demo(content_dir: Path, name: str = "demo-crypt") -> Path:
 
 
 def add_blocked_adventure(content_dir: Path, adventure_id: str = "blocked-crypt") -> None:
-    """Копия демо, где скрытый выход ведёт в пустоту: загрузка проходит, валидатор находит ошибку."""
+    """Копия демо, где скрытый выход ведёт в пустоту: загрузка проходит, валидатор видит ошибку."""
     folder = copy_demo(content_dir, adventure_id)
     manifest = folder / "adventure.yaml"
     manifest.write_text(
@@ -391,7 +391,7 @@ def test_a_folder_with_control_characters_in_its_name_is_written_to_the_log_esca
 # каталога, списке блокирующих проблем и ответе 422 создателю игры. Чинится это в движке, а не
 # здесь: серверу достаточно склеить уже безопасные строки.
 
-HOSTILE_ZONE_ID = "x\nFAKE LOG LINE\x1b[31m ‮" + "Z" * 3000
+HOSTILE_ZONE_ID = "x\nFAKE LOG LINE\x1b[31m\u2028‮" + "Z" * 3000
 # Одна блокирующая проблема — `ссылка: сообщение`, обе части с пределами движка.
 MAX_BLOCKING_PROBLEM = MAX_REF_LENGTH + len(": ") + MAX_MESSAGE_LENGTH
 

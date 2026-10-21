@@ -236,7 +236,7 @@ def test_optional_files_and_folders_may_be_missing(tmp_path: Path):
 def test_error_is_a_value_error_with_all_problems_in_text(folder: Path):
     (folder / "locations" / "village.yaml").write_text("id: [", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="village.yaml") as caught:
+    with pytest.raises(ValueError, match=r"village\.yaml") as caught:
         load_adventure(folder)
 
     assert isinstance(caught.value, AdventureFormatError)
@@ -482,8 +482,14 @@ def test_too_deep_nesting_is_reported_with_the_file_path(folder: Path, name: str
 
 @pytest.mark.parametrize(
     "name",
-    ["locations/crypt.yml", "npcs/marta.json", "items/key.yaml.bak", "encounters/notes.txt"]
-    + ["monsters/crypt-bones.yaml~", "locations/README"],
+    [
+        "locations/crypt.yml",
+        "npcs/marta.json",
+        "items/key.yaml.bak",
+        "encounters/notes.txt",
+        "monsters/crypt-bones.yaml~",
+        "locations/README",
+    ],
 )
 def test_a_file_that_is_not_yaml_in_an_entity_folder_is_reported_with_its_path(
     folder: Path, name: str

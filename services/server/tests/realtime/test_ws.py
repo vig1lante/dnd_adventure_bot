@@ -28,8 +28,8 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.config import Settings
-from dnd_server.realtime import ws as ws_module
 from dnd_server.db.models import DmTurnLog, Game, GameStateSnapshot, MessageKind, User
+from dnd_server.realtime import ws as ws_module
 from dnd_server.realtime.hub import Hub
 from dnd_server.realtime.views import (
     audience_to_user,
@@ -370,7 +370,7 @@ async def test_two_tabs_of_one_player_both_get_the_events(server, table, db):
         assert [e["type"] for e in await drain(tab_2)] == ["phase"]
 
 
-async def test_character_id_equal_to_the_user_id_of_another_player_gives_the_secret_to_the_owner_only(
+async def test_character_id_equal_to_another_players_user_id_gives_the_secret_to_the_owner_only(
     server, table
 ):
     # Серверу так id не выдают, но проверка адресата не должна зависеть от этого: персонаж Алисы

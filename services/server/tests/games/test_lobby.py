@@ -2,9 +2,10 @@
 
 Приложение работает на настоящей SQLite после миграций (`db`, `settings` из `tests/conftest.py`),
 с выполненным стартом (`lifespan` грузит каталог приключений из временной копии `demo-crypt`).
-Рассылка по сокетам и запуск вплетения подменены регистраторами: хаб появится в B6.5, мастер — в B7.8.
-Персонажей создаёт B6.4, поэтому тесты вставляют строки `characters` напрямую. Настоящие модели не
-вызываются: фабрика провайдеров только проверяет настройки, а ключ в тестах — выдуманная строка.
+Рассылка по сокетам и запуск вплетения подменены регистраторами: хаб появится в B6.5, мастер —
+в B7.8. Персонажей создаёт B6.4, поэтому тесты вставляют строки `characters` напрямую. Настоящие
+модели не вызываются: фабрика провайдеров только проверяет настройки, а ключ в тестах — выдуманная
+строка.
 """
 
 import asyncio
@@ -353,7 +354,7 @@ async def test_unknown_adventure_is_404(lobby):
 
 
 def add_blocked_adventure(content_dir: Path) -> None:
-    """Копия демо, где скрытый выход ведёт в пустоту: загрузка проходит, валидатор находит ошибку."""
+    """Копия демо, где скрытый выход ведёт в пустоту: загрузка проходит, валидатор видит ошибку."""
     folder = shutil.copytree(DEMO_ADVENTURE_DIR, content_dir / "blocked-crypt")
     manifest = folder / "adventure.yaml"
     manifest.write_text(
@@ -954,7 +955,7 @@ async def test_game_is_visible_to_its_members_only(lobby):
 
 
 async def test_a_stranger_gets_404_on_ready_and_start_and_changes_nothing(lobby):
-    game, host, _others = await ready_lobby(lobby)
+    game, _host, _others = await ready_lobby(lobby)
     stranger = await add_friend(lobby)
 
     ready = await mark_ready(lobby, game["id"], stranger, False)
@@ -1456,7 +1457,7 @@ def listen(lobby: Lobby, game_id: str, player: Player) -> tuple[ListeningSocket,
 
 
 async def test_the_one_who_left_is_cut_off_from_the_events_of_the_game(lobby):
-    game, host, (leaver, stayer) = await ready_lobby(lobby)
+    game, _host, (leaver, stayer) = await ready_lobby(lobby)
     hub = lobby.app.state.hub
     leaver_socket, _ = listen(lobby, game["id"], leaver)
     stayer_socket, _ = listen(lobby, game["id"], stayer)

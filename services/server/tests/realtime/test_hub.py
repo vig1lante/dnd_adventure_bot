@@ -196,9 +196,7 @@ async def test_payloads_outside_the_event_contract_are_refused_without_raising(p
     assert alice.sent == [event(round=1)]
 
 
-async def test_a_socket_that_fails_is_logged_at_debug_without_the_input_of_the_error(
-    caplog, leak
-):
+async def test_a_socket_that_fails_is_logged_at_debug_without_the_input_of_the_error(caplog, leak):
     caplog.set_level(logging.DEBUG, logger=hub_module.__name__)
     hub = Hub()
 
@@ -252,7 +250,7 @@ async def test_an_event_that_cannot_be_serialized_is_logged_without_the_input_of
 
 
 def test_event_types_are_those_of_the_plan():
-    assert EVENT_TYPES == {
+    assert {
         "phase",
         "player_status",
         "feed_item",
@@ -261,7 +259,7 @@ def test_event_types_are_those_of_the_plan():
         "character",
         "lobby",
         "error",
-    }
+    } == EVENT_TYPES
 
 
 async def test_disconnect_forgets_the_socket_and_is_safe_to_repeat():

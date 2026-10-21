@@ -10,6 +10,7 @@ import asyncio
 import json
 import re
 from contextlib import AsyncExitStack
+from itertools import pairwise
 from typing import Any
 
 import pytest
@@ -174,7 +175,7 @@ async def test_parallel_joins_reach_the_host_as_lobby_events_in_the_order_of_the
     rosters = [[p["user_id"] for p in e["game"]["players"]] for e in events]
     assert [len(roster) for roster in rosters] == [2, 3, 4, 5, 6]
     # Каждое событие — прежний состав плюс один вошедший: события шли в порядке изменений игры.
-    assert all(a == b[: len(a)] for a, b in zip(rosters, rosters[1:], strict=False))
+    assert all(a == b[: len(a)] for a, b in pairwise(rosters))
     assert (await stand.game(host, game["id"]))["players"] == events[-1]["game"]["players"]
     stand.assert_clean()
 

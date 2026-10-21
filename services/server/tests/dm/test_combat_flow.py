@@ -1314,7 +1314,9 @@ async def test_a_fallen_hero_is_skipped_with_a_death_save_in_the_same_commit_as_
 
 
 async def test_the_rolls_the_server_makes_for_the_hand_over_are_in_the_journal(fight):
-    scenario = [scenario_turn(dash("$pc1"), skeleton_strikes(1, "$pc1"), say("Скелет промахнулся."))]
+    scenario = [
+        scenario_turn(dash("$pc1"), skeleton_strikes(1, "$pc1"), say("Скелет промахнулся."))
+    ]
     async with fight(QUEUE, scenario=scenario, rng=ScriptedRng([1, 15]), down=["boris"]) as table:
         await table.submit("alice", "Прикрыться")
         await table.settle()

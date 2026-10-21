@@ -19,11 +19,11 @@ from dnd_server.llm.factory import ConfigError
 
 
 def test_a_json_line_is_one_line_even_for_the_separators_json_leaves_alone():
-    value = {"текст": "раз\u0085два три четыре\nпять"}
+    value = {"текст": "раз\u0085два\u2028три\u2029четыре\nпять"}
 
     line = text.json_line(value)
 
-    assert "\n" not in line and not any(sep in line for sep in "\u0085  ")
+    assert "\n" not in line and not any(sep in line for sep in "\u0085\u2028\u2029")
     assert len(line.splitlines()) == 1
     assert json.loads(line) == value  # экранирование обратимо: данные не изменились
 
@@ -33,7 +33,7 @@ def test_a_json_line_keeps_russian_letters_readable():
 
 
 def test_one_line_folds_every_kind_of_whitespace_into_single_spaces():
-    assert text.one_line("  раз\n\nдва\t три\u0085четыре пять  ") == "раз два три четыре пять"
+    assert text.one_line("  раз\n\nдва\t три\u0085четыре\u2028пять  ") == "раз два три четыре пять"
 
 
 def test_a_printable_line_is_one_clipped_line_with_the_unprintable_made_visible():

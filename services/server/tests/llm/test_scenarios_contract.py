@@ -278,7 +278,9 @@ def test_e2e_scenario_opens_the_game_with_a_story_only():
 def test_e2e_first_round_rolls_for_the_second_hero_in_public_and_the_third_in_secret():
     # Игрок 3 сдаёт тайный ход, игрок 2 — обычный: бросок героя 3 виден только ему, героя 2 — всем.
     turn = e2e_turns()[1]
-    checks = [step.args["character_id"] for step in tool_steps(turn) if step.tool == "request_check"]
+    checks = [
+        step.args["character_id"] for step in tool_steps(turn) if step.tool == "request_check"
+    ]
     damaged = [step.args["character_id"] for step in tool_steps(turn) if step.tool == "damage"]
 
     assert checks == ["$pc2", "$pc3"]

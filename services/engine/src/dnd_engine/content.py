@@ -18,7 +18,6 @@ from pydantic_core import ErrorDetails
 
 from dnd_engine.abilities import Ability, Skill
 
-
 # --- безопасное чтение недоверенного YAML ---
 # Здесь общие части чтения для загрузчика данных SRD и загрузчика папки приключения
 # (`adventure/loader.py`): оба читают файлы, которые пишет владелец или ему кто-то передал.

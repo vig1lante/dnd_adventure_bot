@@ -1308,7 +1308,7 @@ def _holders(s: GameState) -> list[Entity]:
 
 
 def _concentration_effect_ids(caster: Character, content: SrdContent) -> set[str | None]:
-    """Id эффектов, которые держатся на концентрации заклинателя (неизвестное заклинание — его id)."""
+    """Id эффектов на концентрации заклинателя (неизвестное заклинание — его id)."""
     spell = content.spells.get(caster.concentration)
     if spell is None:
         return {caster.concentration}
@@ -2788,7 +2788,8 @@ def _monster_attacks(
     targets = target_ids * len(steps) if len(target_ids) == 1 else target_ids
     combat = _active_combat(s)
     plan = []
-    for step, target_id in zip(steps, targets):
+    # Длины равны всегда: проверка выше пускает одну цель (её размножили) или по одной на атаку.
+    for step, target_id in zip(steps, targets, strict=True):
         _check_target(s, slot, _combatant(combat, target_id))
         strike, range_mode = _prepare_strike(s, slot.id, target_id, None, step.id, content)
         plan.append((target_id, strike, range_mode))

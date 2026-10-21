@@ -671,7 +671,7 @@ def test_known_damage_types_are_the_srd_ones(srd):
     } - {None}
 
     assert in_data <= DAMAGE_TYPES  # всё, что есть в данных SRD, валидатор допускает
-    assert DAMAGE_TYPES == set(get_args(DamageType))  # и ровно те же типы знают инструменты
+    assert set(get_args(DamageType)) == DAMAGE_TYPES  # и ровно те же типы знают инструменты
 
 
 def test_every_srd_statblock_passes_the_checks_of_a_custom_statblock(srd):
@@ -1017,7 +1017,7 @@ def test_every_location_with_its_own_encounter_is_fine(srd):
 
 
 def test_a_custom_statblock_must_not_repeat_the_id_of_its_action(srd):
-    actions = rat_actions(0) + [custom_monster_data()["actions"][0]]
+    actions = [*rat_actions(0), custom_monster_data()["actions"][0]]
 
     issue = only_issue(validate(adventure_with_rat(actions=actions), srd))
 

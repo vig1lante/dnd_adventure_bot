@@ -8,10 +8,6 @@
 import json
 
 import yaml
-
-from dnd_server.bot.notify import combat_turn_text
-from dnd_server.db.models import MessageKind, TurnKind, TurnPhase
-from dnd_server.realtime.views import UNSEEN_ACTOR
 from evening import (
     ScriptedThenSeeded,
     assert_clients_agree_with_snapshots,
@@ -21,6 +17,10 @@ from evening import (
     tool,
     view_of,
 )
+
+from dnd_server.bot.notify import combat_turn_text
+from dnd_server.db.models import MessageKind, TurnKind, TurnPhase
+from dnd_server.realtime.views import UNSEEN_ACTOR
 
 # Кубы: инициатива героев по 5 и скелета 20 (скелет ходит первым), затем атака скелета — промах.
 DICE = [5, 5, 5, 20, 3]
@@ -122,9 +122,7 @@ def hidden_monster_scenario() -> dict:
     scenario["turns"][1] = {
         "steps": [
             tool("move_party", location_id="cemetery", via_exit="to-cemetery"),
-            tool(
-                "start_combat", monsters=[{"monster_id": "skeleton", "count": 1, "zone": "gate"}]
-            ),
+            tool("start_combat", monsters=[{"monster_id": "skeleton", "count": 1, "zone": "gate"}]),
             tool("apply_effect", target_id="skeleton-1", condition="invisible"),
             chronicle("На кладбище началась засада."),
             say("Из тумана доносится сухой шорох."),

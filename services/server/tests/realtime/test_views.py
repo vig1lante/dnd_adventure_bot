@@ -1078,9 +1078,7 @@ def snared_by_a_hidden_monster(table):
     return state
 
 
-def test_the_sheet_of_the_owner_lists_states_and_effects_in_the_form_of_the_party_block(
-    srd, table
-):
+def test_the_sheet_of_the_owner_lists_states_and_effects_in_the_form_of_the_party_block(srd, table):
     sheet = character_event(table.alice.character, srd, table.adventure, table.state)["character"]
 
     assert sheet["conditions"] == [{"id": "poisoned", "name": "Отравлен", "rounds_left": 3}]

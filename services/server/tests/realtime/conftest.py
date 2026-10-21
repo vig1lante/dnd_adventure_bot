@@ -81,7 +81,7 @@ def srd() -> SrdContent:
 
 @pytest.fixture
 def signer() -> SessionSigner:
-    """Тот же подписчик сессий, что у приложения тестов: им выпускают токены чужих и новых игроков."""
+    """Тот же подписчик сессий, что у приложения тестов: им выпускают токены чужих игроков."""
     return SessionSigner(SESSION_SECRET)
 
 
@@ -258,7 +258,7 @@ async def build_table(
     game_id = new_id()
     seats: dict[str, Seat] = {}
     signer = SessionSigner(SESSION_SECRET)
-    for number, (key, name, class_id, species) in enumerate(PLAYERS, start=1):
+    for key, name, class_id, species in PLAYERS:
         user_id = new_id()
         character = hero(key, name, class_id, species, user_id, srd)
         seats[key] = Seat(key, user_id, name, signer.issue(user_id), character)
@@ -269,7 +269,7 @@ async def build_table(
 
     turn_id = new_id()
     async with db() as session:
-        # Порядок вставки задаётся явно: связей между моделями нет, и порядок ключей сам не сложится.
+        # Порядок вставки задаётся явно: связей между моделями нет, сам порядок не сложится.
         session.add_all(
             User(id=seat.user_id, dev_login=f"dev-{number}", name=seat.name)
             for number, seat in enumerate(seats.values(), start=1)

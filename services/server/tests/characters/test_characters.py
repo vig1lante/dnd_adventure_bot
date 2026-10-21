@@ -316,7 +316,7 @@ async def start_playing(db: async_sessionmaker[AsyncSession], game_id: str) -> N
 
 
 def numbers_of(character: Character) -> dict[str, Any]:
-    """Всё, что считает движок: у персонажа нет только имени и описания, их пишет игрок или модель."""
+    """Всё, что считает движок: нет только имени и описания, их пишет игрок или модель."""
     return character.model_dump(mode="json", exclude={"name", "persona"})
 
 
@@ -324,7 +324,7 @@ def numbers_of(character: Character) -> dict[str, Any]:
 
 
 class ScriptedProvider:
-    """Записывает запросы и отвечает по сценарию `characters.yaml` через настоящий `FakeProvider`."""
+    """Записывает запросы и отвечает по сценарию `characters.yaml` через настоящий FakeProvider."""
 
     name = "scripted"
 
@@ -1599,7 +1599,7 @@ async def test_a_model_that_never_answers_is_cut_off_by_the_timeout(world, monke
 
 async def test_an_unconfigured_provider_does_not_stop_the_character(world):
     game, host, _ = await make_game(world)
-    # `fake` без сценария собрать нельзя: ConfigError. Игроку его текст (с именами настроек) не нужен.
+    # `fake` без сценария собрать нельзя: ConfigError. Игроку его текст с именами настроек не нужен.
     world.app.state.settings = world.settings.model_copy(update={"fake_llm_scenario": None})
 
     response = await create(world, host, game["id"], quick_body())

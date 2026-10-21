@@ -318,7 +318,7 @@ def test_a_fight_from_initiative_to_the_morning_after_the_camp(crypt, srd):
     # к20 даёт 7, Благословение жреца ещё 2, Тел +0 — итог 9 против 10, и заклинание рушится.
     t.do(move, [], GOBLIN_2, engage=CLERIC)
     events = t.do(monster_action, [12, 6, 7, 2], GOBLIN_2, "scimitar", [CLERIC])
-    save = [e for e in events if isinstance(e, RollEvent) and e.dc is not None][0]
+    save = next(e for e in events if isinstance(e, RollEvent) and e.dc is not None)
     assert (save.dc, save.roll.total, save.success) == (10, 9, False)
     assert t.hp(CLERIC) == 12
     assert t.state.party[CLERIC].concentration is None
@@ -368,7 +368,7 @@ def test_a_fight_from_initiative_to_the_morning_after_the_camp(crypt, srd):
 
     # Ход переходит к лежащему жрецу: в его начале спасбросок от смерти, 12 — успех.
     events = t.do(end_turn, [12])
-    death_save = [e for e in events if isinstance(e, RollEvent)][0]
+    death_save = next(e for e in events if isinstance(e, RollEvent))
     assert (death_save.label, death_save.dc, death_save.success) == (
         "Спасбросок от смерти",
         10,

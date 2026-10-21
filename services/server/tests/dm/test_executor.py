@@ -209,7 +209,7 @@ async def test_an_unknown_tool_is_refused_with_a_message_that_lists_the_availabl
 async def test_a_name_outside_the_tools_of_the_turn_never_reaches_the_registry(ctx):
     # Список хода зафиксирован при создании исполнителя: поздно добавленный в реестр инструмент
     # модель не получала в `schemas()`, значит, и вызвать его не может.
-    registry, tools = counting_registry("ping")
+    registry, _ = counting_registry("ping")
     executor = DmToolExecutor(ctx, registry)
     late = CountingTool()
     registry.register(ToolSpec("late", "Добавлен после начала хода.", PingArgs, late.handler))
@@ -392,7 +392,7 @@ async def test_the_trace_of_a_call_with_huge_arguments_is_bounded(executor):
 
 
 async def test_a_fresh_executor_starts_with_an_empty_trace_and_a_clean_counter(ctx):
-    registry, tools = counting_registry("ping")
+    registry, _ = counting_registry("ping")
     first = DmToolExecutor(ctx, registry)
     for _ in range(MAX_IDENTICAL_CALLS + 1):
         await first("ping", {"n": 1})

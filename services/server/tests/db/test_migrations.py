@@ -643,5 +643,5 @@ def test_alembic_command_line_works_from_the_repo_root_and_the_service_folder(
     with closing(sqlite3.connect(tmp_path / "data" / "test.sqlite3")) as connection:
         tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master")}
         [(revision,)] = connection.execute("SELECT version_num FROM alembic_version")
-    assert TABLES <= tables
+    assert tables >= TABLES
     assert revision == "0003"

@@ -202,7 +202,7 @@ async def test_internal_api_failure_never_puts_the_turn_token_into_errors_or_log
     assert TURN_TOKEN not in caplog.text
     for record in logged:
         for error in exception_chain(record.exc_info[1]):
-            # Исключения httpx несут запрос с адресом, а значит и токен: в цепочке их быть не должно.
+            # Исключения httpx несут запрос с адресом, а значит и токен: в цепочке их быть не может.
             assert not isinstance(error, httpx.HTTPError)
             assert TURN_TOKEN not in f"{error} {error!r}"
 
