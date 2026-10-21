@@ -39,6 +39,7 @@ from dnd_server.llm.claude_code_cli import ClaudeCodeCliProvider, ToolRecorder
 from dnd_server.llm.internal_api import TurnTokens
 
 FAKE_CLAUDE = Path(__file__).with_name("fake_claude.py")
+FAKE_CLAUDE_LAUNCHER = FAKE_CLAUDE.with_name("fake_claude.sh")
 REPO_ROOT = Path(__file__).resolve().parents[4]
 LOCALHOST = ("127.0.0.1", 50000)
 FORWARDING_HEADERS = ["X-Forwarded-For", "Forwarded", "X-Real-IP", "CF-Connecting-IP"]
@@ -73,16 +74,18 @@ def only_loopback(monkeypatch):
 
 
 def make_cli(tmp_path: Path, **env: str) -> tuple[str, Path]:
-    """Скрипт `claude`, который запускает имитатор с заданным поведением; журнал — рядом."""
+    """`claude`, который запускает имитатор с заданным поведением; журнал — рядом.
+
+    Это ссылка на общую обёртку `fake_claude.sh` и её переменные в `fake_claude.env`: свой
+    исполняемый файл на каждый тест macOS проверял бы при первом запуске (~0.2 с)."""
     log = tmp_path / "fake_claude.log"
     variables = {"FAKE_CLAUDE_LOG": str(log), **env}
-    assignments = " ".join(f"{name}={shlex.quote(value)}" for name, value in variables.items())
+    lines = [f"python={shlex.quote(sys.executable)}", f"script={shlex.quote(str(FAKE_CLAUDE))}"]
+    lines += [f"export {name}={shlex.quote(value)}" for name, value in variables.items()]
+    (tmp_path / "fake_claude.env").write_text("\n".join(lines) + "\n")
     wrapper = tmp_path / "claude"
-    wrapper.write_text(
-        f"#!/bin/sh\nexec /usr/bin/env {assignments} "
-        f'{shlex.quote(sys.executable)} {shlex.quote(str(FAKE_CLAUDE))} "$@"\n'
-    )
-    wrapper.chmod(0o755)
+    wrapper.unlink(missing_ok=True)
+    wrapper.symlink_to(FAKE_CLAUDE_LAUNCHER)
     return str(wrapper), log
 
 

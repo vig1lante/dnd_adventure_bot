@@ -56,7 +56,7 @@ ALLOWED_IMPORTS: dict[str, str] = {
     "dataclasses": "неизменяемые описания разобранного удара, части урона и участника боя",
     "collections": "Counter, deque (очередь ScriptedRng) и collections.abc для аннотаций",
     "types": "MappingProxyType: таблицы правил и модулей только для чтения",
-    "functools": "cache: общий разобранный набор SRD (`load_srd`)",
+    "functools": "cache: общий разобранный набор SRD (`load_srd`), схемы инструментов",
     "re": "разбор записи костей вида 2d6+3 (dice.py)",
     "pydantic": "модели данных: проверка и (де)сериализация состояния игры в JSON",
     "pydantic_core": "ErrorDetails: описание проблем при чтении данных SRD (content.py)",

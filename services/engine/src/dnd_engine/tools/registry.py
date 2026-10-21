@@ -25,11 +25,12 @@
 (не длиннее `MAX_ID_CHARS`, этого требует схема), поэтому `call` обрезает и его.
 """
 
+import functools
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from dnd_engine.adventure.schema import Adventure
 from dnd_engine.character import Character
@@ -177,8 +178,20 @@ class ToolSpec:
         return {value for value in values if isinstance(value, str)}
 
     def json_schema(self) -> dict[str, Any]:
-        """Схема аргументов для провайдера модели; сериализуется `json.dumps`."""
-        return self.args_model.model_json_schema()
+        """Схема аргументов для провайдера модели; сериализуется `json.dumps`.
+
+        Каждый вызов получает свою копию: схема класса строится один раз (`_schema_text`)."""
+        return _SCHEMA.validate_json(_schema_text(self.args_model))
+
+
+_SCHEMA = TypeAdapter(dict[str, Any])
+
+
+@functools.cache
+def _schema_text(args_model: type[BaseModel]) -> bytes:
+    # Схема зависит только от класса аргументов, pydantic строит её долго, а каждый ход мастера
+    # запрашивает схемы всех инструментов. Кэш хранит JSON, чтобы копии не делили словари.
+    return _SCHEMA.dump_json(args_model.model_json_schema())
 
 
 class ToolOutcome(BaseModel):

@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute, APIWebSocketRoute, iter_route_contexts
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dnd_server import __main__ as server_main
@@ -413,12 +414,42 @@ def migrate(settings: Settings, monkeypatch) -> Callable[[str, str], Awaitable[N
     return run
 
 
+@pytest.fixture(scope="session")
+def migrated_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Файл базы, поднятый настоящими миграциями до `head` один раз на процесс тестов.
+
+    Тесты получают его копию: прогон Alembic на каждый тест стоил больше самих тестов. Окружение
+    изолировано так же, как в `isolated_settings_sources`: пустой каталог, снятые переменные
+    настроек, адрес базы — только из `DATABASE_URL`."""
+    folder = tmp_path_factory.mktemp("migrated")
+    path = folder / "head.sqlite3"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.chdir(folder)
+        for variable in list(os.environ):
+            if variable.lower() in Settings.model_fields:
+                patch.delenv(variable)
+        patch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{path}")
+        get_settings.cache_clear()
+        try:
+            command.upgrade(Config(str(ALEMBIC_INI)), "head")
+        finally:
+            get_settings.cache_clear()
+    return path
+
+
 @pytest.fixture
 async def db(
-    settings: Settings, migrate: Callable[[str, str], Awaitable[None]]
+    settings: Settings,
+    migrate: Callable[[str, str], Awaitable[None]],
+    migrated_template: Path,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    """Фабрика сессий на базе теста, поднятой миграциями до `head`: `async with db() as session`."""
-    await migrate("upgrade", "head")
+    """Фабрика сессий на базе теста, поднятой миграциями до `head`: `async with db() as session`.
+
+    База — копия `migrated_template`; `migrate` запрошен ради того же окружения, что и у теста,
+    который мигрирует сам (`DATABASE_URL` на базу теста)."""
+    database = Path(make_url(settings.database_url).database or "")
+    database.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(migrated_template, database)
     engine = make_engine(settings.database_url)
     yield make_sessionmaker(engine)
     await engine.dispose()

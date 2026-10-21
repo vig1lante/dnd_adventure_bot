@@ -1125,11 +1125,11 @@ async def test_a_turn_that_could_not_build_its_provider_has_no_model_in_the_jour
 async def test_the_cli_version_of_the_subscription_provider_reaches_the_journal(world, tmp_path):
     # Настоящий адаптер `claude_code_cli`, но вместо `claude` — имитатор из тестов: версию CLI он
     # узнаёт при первом запуске, то есть уже после начала хода.
-    wrapper = tmp_path / "claude"
-    wrapper.write_text(
-        f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(FAKE_CLAUDE))} \"$@\"\n"
+    (tmp_path / "fake_claude.env").write_text(
+        f"python={shlex.quote(sys.executable)}\nscript={shlex.quote(str(FAKE_CLAUDE))}\n"
     )
-    wrapper.chmod(0o755)
+    wrapper = tmp_path / "claude"
+    wrapper.symlink_to(FAKE_CLAUDE.with_name("fake_claude.sh"))
     settings = world.deps.settings.model_copy(
         update={"llm_provider": "claude_code_cli", "claude_cli_path": str(wrapper)}
     )

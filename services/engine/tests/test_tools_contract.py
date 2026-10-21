@@ -113,6 +113,18 @@ def test_every_object_in_every_schema_forbids_extra_fields(tool_registry, name):
         assert obj["additionalProperties"] is False, (name, obj.get("title"))
 
 
+@pytest.mark.parametrize("name", ALL_TOOLS)
+def test_a_changed_schema_does_not_change_the_next_one(tool_registry, name):
+    spec = spec_of(tool_registry, name)
+    expected = spec.args_model.model_json_schema()
+
+    first = spec.json_schema()
+    first["properties"].clear()
+    first["injected"] = True
+
+    assert spec.json_schema() == expected
+
+
 def unbounded_arguments(node: Any, path: str) -> list[str]:
     """Места схемы, где модель может прислать значение без предела.
 

@@ -215,16 +215,15 @@ async def test_a_gateway_that_echoes_the_key_does_not_put_it_into_any_error(
 def cli_with_log(tmp_path: Path, **env: str) -> tuple[ClaudeCodeCliProvider, Path]:
     """Провайдер, чей `claude` — обёртка над имитатором; журнал имитатора лежит рядом."""
     log = tmp_path / "fake_claude.log"
-    assignments = " ".join(
-        f"{name}={shlex.quote(value)}"
+    # Ссылка на общую обёртку, а не свой скрипт: новый исполняемый файл macOS долго проверяет.
+    lines = [f"python={shlex.quote(sys.executable)}", f"script={shlex.quote(str(FAKE_CLAUDE))}"]
+    lines += [
+        f"export {name}={shlex.quote(value)}"
         for name, value in {"FAKE_CLAUDE_LOG": str(log), **env}.items()
-    )
+    ]
+    (tmp_path / "fake_claude.env").write_text("\n".join(lines) + "\n")
     wrapper = tmp_path / "claude"
-    wrapper.write_text(
-        f"#!/bin/sh\nexec /usr/bin/env {assignments} "
-        f'{shlex.quote(sys.executable)} {shlex.quote(str(FAKE_CLAUDE))} "$@"\n'
-    )
-    wrapper.chmod(0o755)
+    wrapper.symlink_to(FAKE_CLAUDE.with_name("fake_claude.sh"))
     provider = ClaudeCodeCliProvider(
         TurnTokens(), "http://127.0.0.1:8000", cli_path=str(wrapper), stop_grace_s=0.5
     )

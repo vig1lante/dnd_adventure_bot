@@ -5,7 +5,7 @@
 members = ["services/engine", "services/server"]
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.7"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "pytest-xdist>=3.8", "ruff>=0.7"]
 
 [tool.ruff]
 line-length = 100
@@ -17,4 +17,6 @@ select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Тесты идут параллельно на всех ядрах (pytest-xdist); `-n 0` — в одном процессе, для отладки.
+addopts = "-n auto --dist worksteal"
 testpaths = ["services/engine/tests", "services/server/tests"]
