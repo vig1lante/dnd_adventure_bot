@@ -8,6 +8,7 @@
 
 import asyncio
 import json
+import re
 from contextlib import AsyncExitStack
 from typing import Any
 
@@ -131,11 +132,21 @@ async def test_a_players_hero_never_reaches_the_frames_of_the_others(stand):
 
         host_view = await stand.snapshot(game["id"], host)
         mia_view = await stand.snapshot(game["id"], mia)
+        host_mine = await stand.my_character(host, game["id"])
+        mia_mine = await stand.my_character(mia, game["id"])
 
     # У хозяина нет ни героя Мии, ни её текста ни в снимке, ни в кадрах сокета за всё время.
     assert host_view["character"] is None and host_view["feed"] == []
     heard = json.dumps([host_view, *watchers["host"].seen], ensure_ascii=False)
     assert not any(secret in heard for secret in secrets)
+    # Выбор игрока (R10) отдаёт только `characters/mine` и только самой Мии: ни снимки, ни кадры
+    # сокета (её собственные тоже) его не несут, а хозяину чужого выбора не достать.
+    everything = json.dumps([host_view, mia_view, *watchers["host"].seen, *watchers["mia"].seen])
+    seen_keys = set(re.findall(r'"(\w+)":', everything))
+    assert not {"choices", "base_scores", "background_bonus", "method"} & seen_keys
+    assert host_mine.status_code == 404 and not any(s in host_mine.text for s in secrets)
+    assert mia_mine.json()["mode"] == "detailed"
+    assert mia_mine.json()["choices"]["name"] == secrets[1]
     # Сама Мия видит своего героя целиком.
     assert mia_view["character"]["name"] == secrets[1]
     assert mia_view["character"]["persona"]["backstory"] == secrets[2]

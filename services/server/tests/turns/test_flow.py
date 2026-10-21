@@ -986,6 +986,43 @@ async def test_nothing_is_accepted_while_the_game_cannot_take_turns(table, value
     assert await table.actions() == {}
 
 
+@pytest.mark.parametrize(
+    ("kind", "detail"),
+    [
+        (
+            TurnKind.ROUND,
+            "Мастер не справился с ходом: ходы сохранены, хост может нажать «Повторить».",
+        ),
+        (
+            TurnKind.COMBAT,
+            "Мастер не справился с ходом: ходы сохранены, хост может нажать «Повторить».",
+        ),
+        (
+            TurnKind.CAMP_END,
+            "Мастер не справился с концом привала: хост может нажать «Повторить».",
+        ),
+    ],
+    ids=["раунд", "бой", "конец привала"],
+)
+async def test_a_player_is_told_what_the_failed_turn_kept_and_after_the_camp_end_no_moves(
+    table, kind, detail
+):
+    # У конца привала ходов игроков нет, только реплики у костра: «ходы сохранены» там неправда.
+    await table.update_game(turn_phase=TurnPhase.DM_FAILED)
+    async with table.db() as session:
+        await session.execute(update(Turn).where(Turn.id == table.setup.turn_id).values(kind=kind))
+        await session.commit()
+
+    for response in (
+        await table.draft("alice", "Ход"),
+        await table.call("alice", "POST", "/action/submit"),
+        await table.pass_("alice"),
+    ):
+        assert response.status_code == 409
+        assert response.json()["detail"] == detail
+    assert await table.actions() == {}
+
+
 async def put_in_combat(table: Table, current: str, *, paralyzed: tuple[str, ...] = ()) -> None:
     """Игра в бою: порядок Алиса, гоблин, Борис; ходит `current` («alice» или «boris»), а герои из
     `paralyzed` не могут действовать."""
@@ -2413,7 +2450,10 @@ async def test_a_weaving_cut_short_by_a_restart_is_dm_failed_and_the_host_repeat
         )
         [note] = await table.messages(MessageKind.SYSTEM)
         assert (note.audience, note.turn_id) == (table.user_id("alice"), None)
-        assert "перезапу" in note.text and "вплетени" in note.text and "Повторить" in note.text
+        assert note.text == (
+            "Мастер не справился с началом игры: сервер был перезапущен во время вплетения "
+            "героев в историю. Нажмите «Повторить»."
+        )
         assert await table.logs() == [] and await table.turns() == []  # хода не было
         assert await table.feed_of("boris") == []  # остальным игрокам записи нет
         # Часы и отсчёты не тронуты: игра сама не пошла.
@@ -2424,6 +2464,83 @@ async def test_a_weaving_cut_short_by_a_restart_is_dm_failed_and_the_host_repeat
 
         assert retry.status_code == 200
         assert (await table.game()).phase == GamePhase.PLAYING
+
+
+async def cut_by_a_restart(db, setup, *, kind: TurnKind, phase: GamePhase) -> None:
+    """Сервер умер, пока мастер разбирал ход вида `kind`: игра `resolving`, ход открыт."""
+    async with db() as session:
+        await session.execute(
+            update(Game)
+            .where(Game.id == setup.game_id)
+            .values(phase=phase, turn_phase=TurnPhase.RESOLVING, deadline_at=None)
+        )
+        await session.execute(
+            update(Turn)
+            .where(Turn.id == setup.turn_id)
+            .values(kind=kind, status=TurnStatus.RESOLVING)
+        )
+        await session.commit()
+
+
+@pytest.mark.parametrize(
+    ("kind", "phase", "text"),
+    [
+        (
+            TurnKind.OPENING,
+            GamePhase.WEAVING,
+            "Мастер не справился с началом игры: сервер был перезапущен во время разбора. "
+            "Нажмите «Повторить».",
+        ),
+        (
+            TurnKind.ROUND,
+            GamePhase.PLAYING,
+            "Мастер не справился с ходом: сервер был перезапущен во время разбора. "
+            "Ходы игроков сохранены — нажмите «Повторить».",
+        ),
+        (
+            TurnKind.COMBAT,
+            GamePhase.PLAYING,
+            "Мастер не справился с ходом: сервер был перезапущен во время разбора. "
+            "Ходы игроков сохранены — нажмите «Повторить».",
+        ),
+        (
+            TurnKind.CAMP_END,
+            GamePhase.PLAYING,
+            "Мастер не справился с концом привала: сервер был перезапущен во время разбора. "
+            "Нажмите «Повторить».",
+        ),
+    ],
+    ids=["открытие игры", "раунд", "бой", "конец привала"],
+)
+async def test_the_note_after_a_restart_depends_on_the_kind_of_the_cut_short_turn(
+    settings, db, srd, adventure, kind, phase, text
+):
+    # У открытия игры ходов игроков нет: о них говорят только после ходов, где они есть.
+    setup = await seed_game(db, srd, adventure)
+    await cut_by_a_restart(db, setup, kind=kind, phase=phase)
+
+    async with running_table(settings, db, srd, setup) as table:
+        [note] = await table.messages(MessageKind.SYSTEM)
+
+        assert note.audience == table.user_id("alice")
+        assert note.text == text
+        assert (await table.game()).turn_phase == TurnPhase.DM_FAILED
+
+
+async def test_a_player_cannot_write_while_the_opening_is_failed_and_is_not_told_about_moves(
+    settings, db, srd, adventure
+):
+    # Пока открытие не удалось, игра в `weaving`, а не в `playing`: ходы не принимаются, и
+    # причина названа без «ходы сохранены» (их у открытия нет).
+    setup = await seed_game(db, srd, adventure)
+    await cut_by_a_restart(db, setup, kind=TurnKind.OPENING, phase=GamePhase.WEAVING)
+
+    async with running_table(settings, db, srd, setup) as table:
+        response = await table.draft("boris", "Иду вперёд")
+
+        assert response.status_code == 409
+        assert "сохранен" not in response.json()["detail"].lower()
+        assert (await table.game()).turn_phase == TurnPhase.DM_FAILED
 
 
 async def test_a_game_with_the_weaving_written_but_the_opening_not_begun_is_dm_failed(

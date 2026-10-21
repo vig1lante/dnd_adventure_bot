@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dnd_engine.adventure.loader import load_adventure
 from dnd_engine.adventure.schema import Adventure
-from dnd_engine.character import ActiveCondition, Character, DeathSaves
+from dnd_engine.character import ActiveCondition, Character, DeathSaves, armor_class
 from dnd_engine.combat import engine
 from dnd_engine.combat.model import Combat, Combatant, Zone
 from dnd_engine.content import SrdContent, load_srd
@@ -1119,6 +1119,123 @@ async def test_the_scenario_plays_a_whole_fight_from_the_first_round_to_the_end_
         assert [turn.status for turn in await table.turns()][:-1] == [TurnStatus.DONE] * 5
         feed = [item["text"] for item in await table.feed_of("alice")]
         assert any("Бой окончен" in text for text in feed)
+
+
+async def test_a_fight_with_an_npc_names_him_in_every_live_event_and_snapshot_without_his_secrets(
+    fight, adventure
+):
+    # Статблок Фабиана стоит в локации Фабиана: в порядке хода и в карточках бросков он «Фабиан»,
+    # как в рассказе, а не «Фанатик культа». Имя доходит и в живых событиях хода мастера, и в
+    # снимке; тайны NPC (секрет, знания) и его id не выходят ни там, ни там.
+    # Причину броска (`data.reason`) пишет движок, и в ней бывает имя статблока («Инициатива:
+    # Фанатик культа»): в карточке бойца-NPC вместо неё название броска, имени статблока нет нигде.
+    fabian = adventure.npcs["fabian"]
+    assert fabian.statblock == "cultist_fanatic" and fabian.location_id == "crypt"
+    scenario = [
+        scenario_turn(
+            tool("start_combat", monsters=[{"monster_id": "cultist_fanatic", "count": 1}]),
+            tool("chronicle", entry="Фабиан выхватил жезл."),
+            say("Из тени выходит Фабиан."),
+        )
+    ]
+    async with fight(None, location_id="crypt", scenario=scenario) as table:
+        for key in HEROES:
+            await table.pass_(key)
+
+        await table.host("collect")
+        await table.settle()
+
+        state = await table.state()
+        assert state.combat is not None
+        assert state.combat.combatants["cultist_fanatic-1"].name == "Фанатик культа"
+        live = [payload for payload, _audience in table.broadcaster.of_type("combat")]
+        assert live, "бой начался, а события combat не ушло"
+        async with table.db() as session:
+            user = await session.get(User, table.user_id("boris"))
+            snapshot = await snapshot_for(session, user, table.game_id, srd=table.srd)
+        feed_rolls = [item for item in snapshot["feed"] if item["kind"] == "roll"]
+        cards = [item for item in feed_rolls if item["data"].get("actor_id") == "cultist_fanatic-1"]
+        assert cards, "карточки броска Фабиана в ленте нет"
+        for card in cards:
+            assert card["data"]["actor"] == "Фабиан" and card["text"].startswith("Фабиан:")
+            assert card["data"]["reason"] == card["data"]["label"]
+            dumped = json.dumps(card["data"], ensure_ascii=False)
+            assert "Фанатик культа" not in card["text"] + dumped
+        assert "Инициатива" in [card["data"]["label"] for card in cards]
+        for label, payload in [("событие", live[-1]), ("снимок", snapshot)]:
+            monsters = [f["name"] for f in payload["combat"]["order"] if f["kind"] == "monster"]
+            assert monsters == ["Фабиан"], f"{label}: {monsters}"
+            assert "Фанатик культа" not in json.dumps(payload["combat"], ensure_ascii=False)
+        # Тайны NPC и его id не выходят ни в одном кадре и ни в снимке.
+        everything = json.dumps([*live, snapshot], ensure_ascii=False)
+        assert '"fabian"' not in everything
+        for hidden in (fabian.secret, *fabian.knows):
+            assert hidden not in everything
+
+
+async def test_the_scenario_skeleton_engages_and_strikes_with_a_card_of_the_hero_armor_class(
+    fight, srd
+):
+    # Очередь «Алиса, скелет, Борис, Вера»: скелет вовлекается в бой и бьёт героя, а не получает
+    # от движка отказ; карточка атаки называет КД героя и не называет КД скелета.
+    async with fight(None, rng=ScriptedRng([20, 1, 1, 5])) as table:
+        for key in HEROES:
+            await table.pass_(key)
+        await table.host("collect")
+        await table.settle()
+        table.set_rng(FlatRng(1))
+
+        await table.submit("alice", "Прикрыться щитом")
+        await table.settle()
+
+        state = await table.state()
+        alice_ac = armor_class(state.party["alice"], srd)
+        skeleton_ac = state.combat.combatants["skeleton-1"].ac
+        assert alice_ac != skeleton_ac
+        logs = await table.logs()
+        assert logs[-1].request["acting"] == ["alice", "skeleton-1"]
+        assert all(not call["is_error"] for call in logs[-1].trace), logs[-1].trace
+        for key in HEROES:  # карточка общая: её видят все трое
+            (strike,) = [
+                item
+                for item in await table.feed_of(key)
+                if item["kind"] == "roll" and item["data"]["label"].startswith("Атака:")
+            ]
+            assert strike["data"]["actor"].startswith("Скелет")
+            assert strike["data"]["target_ac"] == alice_ac
+            assert f"против КД {alice_ac}" in strike["text"]
+            assert str(skeleton_ac) not in strike["text"]
+
+
+async def test_the_scenario_skeleton_that_goes_first_engages_the_hero_by_itself(fight, srd):
+    # Ручной прогон со скелетом в начале очереди: сервер зовёт мастера за скелета без игрока.
+    # Ход Алисы из сценария отказывает («не действует в этом вызове»), но вовлечение и удар скелета
+    # проходят, и карточка атаки с КД героя есть в ленте.
+    # Кубы: инициатива Алисы, Бориса, Веры и скелета, затем бросок атаки скелета (единица: промах).
+    async with fight(None, rng=ScriptedRng([1, 1, 1, 20, 1])) as table:
+        for key in HEROES:
+            await table.pass_(key)
+        await table.host("collect")
+        await table.settle()
+        table.set_rng(FlatRng(1))
+
+        state = await table.state()
+        assert state.combat.order[0] == "skeleton-1"
+        (call_log,) = [log for log in await table.logs() if log.request["mode"] == "combat"]
+        assert call_log.request["acting"] == ["skeleton-1"]
+        assert [(call["name"], call["is_error"]) for call in call_log.trace] == [
+            ("combat_action", True),
+            ("move", False),
+            ("monster_action", False),
+            ("chronicle", False),
+            ("server_end_turn", False),  # ход скелета закрывает сервер
+        ]
+        (strike,) = [
+            item
+            for item in await table.feed_of("boris")
+            if item["kind"] == "roll" and item["data"]["label"].startswith("Атака:")
+        ]
+        assert strike["data"]["target_ac"] == armor_class(state.party["alice"], srd)
 
 
 # --- ход героя и ход мастера ---

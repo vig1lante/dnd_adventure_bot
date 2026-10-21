@@ -132,8 +132,13 @@ async def test_every_kind_of_refusal_has_one_shape_and_nothing_secret_leaks(serv
 
         # Персонажи: 200, 201, 404, 422 (форма и правила), 503 (нейронка не настроена).
         await expect(200, friend, "GET", "/api/content/creation-options")
-        await expect(200, friend, "POST", f"/api/games/{gid}/characters/roll-abilities")
-        await expect(404, stranger, "POST", f"/api/games/{gid}/characters/roll-abilities")
+        random_abilities = f"/api/games/{gid}/characters/random-abilities"
+        await expect(200, friend, "POST", random_abilities, json={"class_id": "rogue"})
+        await expect(404, stranger, "POST", random_abilities, json={"class_id": "rogue"})
+        await expect(422, friend, "POST", random_abilities, json={"class_id": "nope"})
+        await expect(422, friend, "POST", random_abilities, json={})
+        await expect(404, friend, "GET", f"/api/games/{gid}/characters/mine")  # героя ещё нет
+        await expect(404, stranger, "GET", f"/api/games/{gid}/characters/mine")
         forged_hero = {
             "mode": "quick",
             "class_id": "rogue",
@@ -176,7 +181,9 @@ async def test_every_kind_of_refusal_has_one_shape_and_nothing_secret_leaks(serv
             await expect(200, player, "POST", f"/api/games/{gid}/ready", json={"ready": True})
         await expect(200, creator, "POST", f"/api/games/{gid}/start")
         await expect(409, latecomer, "POST", "/api/games/join", json={"code": game["code"]})
-        await expect(409, friend, "POST", f"/api/games/{gid}/characters/roll-abilities")
+        await expect(409, friend, "POST", random_abilities, json={"class_id": "rogue"})
+        mine = await expect(200, friend, "GET", f"/api/games/{gid}/characters/mine")
+        assert mine.json()["mode"] == "detailed"
         await expect(409, creator, "POST", f"/api/games/{gid}/start")
 
         # Сокеты: токен в query участника, отказы 4401 и 4403 — и ни следа токена потом.

@@ -25,7 +25,7 @@ from dnd_engine.checks import (
     saving_throw,
 )
 from dnd_engine.content import SrdContent, load_srd
-from dnd_engine.creation import quick_character, random_character, roll_ability_set
+from dnd_engine.creation import quick_character, random_character, random_point_buy
 from dnd_engine.dice import Advantage
 from dnd_engine.rest import long_rest, short_rest
 from dnd_engine.rng import Rng, ScriptedRng, SeededRng
@@ -771,14 +771,16 @@ def test_short_rest_rolls_exactly_one_die_per_spent_hit_die(srd, spent):
     assert rng.calls == spent
 
 
-def test_ability_set_always_costs_whole_sets_of_twenty_four_dice():
-    # Шесть характеристик по четыре кости; несбалансированный набор перебрасывается целиком.
+def test_random_point_buy_spends_exactly_four_rng_values():
+    # Один выбор набора значений и перемешивание четырёх неключевых характеристик: лишнего
+    # обращения к генератору нет, а значит, раскладка воспроизводится по seed.
+    srd = load_srd()
     for seed in range(200):
         rng = CountingRng(SeededRng(seed))
 
-        roll_ability_set(rng)
+        random_point_buy(rng, srd, "wizard")
 
-        assert rng.calls > 0 and rng.calls % 24 == 0, f"seed {seed}: {rng.calls}"
+        assert rng.calls == 4, f"seed {seed}: {rng.calls}"
 
 
 # --- чистота: вход и общие данные не меняются ---
@@ -788,7 +790,7 @@ def play_scenario(rng: Rng, srd: SrdContent) -> list[str]:
     """Один и тот же набор действий: создание, проверки, состязание, отдых. Возвращает JSON."""
     hero = random_character(rng, srd, taken_classes=set(), character_id="pc-1")
     rival = quick_character("fighter", "dwarf", srd, name="Т", concept="т", character_id="pc-2")
-    scores = roll_ability_set(rng)
+    scores = random_point_buy(rng, srd, "wizard")
     check = ability_check(
         hero, DEX, skill=Skill.STEALTH, dc=15, advantage=NONE, rng=rng, reason="тест"
     )

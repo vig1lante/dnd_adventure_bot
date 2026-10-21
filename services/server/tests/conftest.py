@@ -7,6 +7,7 @@ import subprocess
 import sys
 import sysconfig
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,9 +22,10 @@ from fastapi.routing import APIRoute, APIWebSocketRoute, iter_route_contexts
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from dnd_server import __main__ as server_main
 from dnd_server.app import create_app
 from dnd_server.bot import bot as bot_module
-from dnd_server.config import Settings, get_settings
+from dnd_server.config import PORT, Settings, get_settings, set_serving_port
 from dnd_server.db.session import make_engine, make_sessionmaker
 
 # --- запрет живых вызовов во всех тестах сервера (спека §13, инвариант «и») ---
@@ -276,6 +278,14 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "real_make_bot: тест проверяет настоящую `make_bot` (токен -> `Bot`), а не заглушку",
     )
+    config.addinivalue_line(
+        "markers",
+        "real_port_claim: тест проверяет настоящую `claim_port` на свободном порту самого теста",
+    )
+    config.addinivalue_line(
+        "markers",
+        "real_database_lock: тест проверяет настоящую `claim_database` на базе во временной папке",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -284,6 +294,70 @@ def no_telegram_bot(monkeypatch, request) -> None:
     if request.node.get_closest_marker("real_make_bot") is not None:
         return
     monkeypatch.setattr(bot_module, "make_bot", lambda _settings: None)
+
+
+# --- порт сервера в тестах (план B8.s2) ---
+#
+# `main()` занимает порт сервера до запуска uvicorn. Порт по умолчанию, 8000, — порт сервера
+# владельца: тест, который просто вызвал `main()`, не должен ни занять его, ни упасть, потому что он
+# занят. Поэтому по умолчанию `claim_port` отвечает неподключённым сокетом и записывает, какой
+# адрес у неё просили. Тесты самой `claim_port` ставят маркер `real_port_claim` и сами берут
+# свободный порт.
+
+
+@pytest.fixture(autouse=True)
+def no_real_port_claim(monkeypatch, request) -> Iterator[list[tuple[str, int]]]:
+    """Адреса `(хост, порт)`, которые `main()` просил занять; настоящий порт не занимается."""
+    asked: list[tuple[str, int]] = []
+    if request.node.get_closest_marker("real_port_claim") is not None:
+        yield asked
+        return
+    stubs: list[socket.socket] = []
+
+    def claim(host: str, port: int) -> socket.socket:
+        asked.append((host, port))
+        stubs.append(socket.socket())
+        return stubs[-1]
+
+    monkeypatch.setattr(server_main, "claim_port", claim)
+    yield asked
+    for stub in stubs:
+        stub.close()
+
+
+# --- база сервера в тестах (B8.security.server.fix1) ---
+#
+# `main()` блокирует файл базы до запуска uvicorn. База по умолчанию, `data/dnd.sqlite3` в корне
+# репозитория, — база владельца: тест, который просто вызвал `main()`, не должен ни создать рядом с
+# ней lock-файл, ни упасть, потому что сервер владельца работает. Поэтому по умолчанию
+# `claim_database` ничего не блокирует и записывает, какую базу у неё просили. Тесты самой
+# `claim_database` ставят маркер `real_database_lock` и берут базу во временной папке.
+
+
+@pytest.fixture(autouse=True)
+def no_real_database_lock(monkeypatch, request) -> Iterator[list[str]]:
+    """Адреса баз, которые `main()` просил заблокировать; настоящий замок не берётся."""
+    asked: list[str] = []
+    if request.node.get_closest_marker("real_database_lock") is not None:
+        yield asked
+        return
+
+    @contextmanager
+    def claim(database_url: str) -> Iterator[None]:
+        asked.append(database_url)
+        yield
+
+    monkeypatch.setattr(server_main, "claim_database", claim)
+    yield asked
+
+
+@pytest.fixture(autouse=True)
+def serving_port_reset() -> Iterator[None]:
+    """`main()` называет порт процесса (`set_serving_port`), от него строится адрес моста MCP:
+    после теста порт возвращается к умолчанию, иначе `--port` одного теста попал бы в соседние."""
+    set_serving_port(PORT)
+    yield
+    set_serving_port(PORT)
 
 
 @pytest.fixture

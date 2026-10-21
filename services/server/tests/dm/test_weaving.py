@@ -1229,6 +1229,21 @@ async def test_a_failure_of_the_weaving_leaves_a_game_the_host_can_repeat(
     assert await world.feed_of("boris") == []
 
 
+async def test_the_note_of_a_failed_weaving_is_worded_like_the_one_of_a_failed_opening(
+    monkeypatch, world
+):
+    # Вплетение — часть начала игры, и хост читает тот же текст, что при сбое хода открытия
+    # (`test_the_note_of_a_failed_opening_speaks_of_the_start_and_not_of_player_moves`).
+    use_provider(monkeypatch, StubProvider(RuntimeError("баг")))
+
+    await world.run()
+
+    [note] = await world.messages()
+    assert note.text == (
+        "Мастер не справился с началом игры: внутренняя ошибка сервера. Нажмите «Повторить»."
+    )
+
+
 def assert_no_input_of(leak, caplog) -> None:
     errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert errors and all(r.exc_info is None for r in errors)

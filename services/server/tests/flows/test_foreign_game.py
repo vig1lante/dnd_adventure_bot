@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-from dnd_server.db.models import GamePlayer, PendingRoll, PlayerCharacter
+from dnd_server.db.models import GamePlayer, PlayerCharacter
 
 MISSING_GAME = "00000000-0000-0000-0000-000000000000"
 # Тело каждого маршрута игры: верное по форме, чтобы отказ был по игре, а не по запросу.
@@ -19,13 +19,15 @@ BODIES = {
     ("GET", "/api/games/{game_id}"): None,
     ("POST", "/api/games/{game_id}/ready"): {"ready": True},
     ("POST", "/api/games/{game_id}/start"): None,
-    ("POST", "/api/games/{game_id}/characters/roll-abilities"): None,
+    ("POST", "/api/games/{game_id}/characters/random-abilities"): {"class_id": "rogue"},
+    ("GET", "/api/games/{game_id}/characters/mine"): None,
     ("POST", "/api/games/{game_id}/characters"): {
         "mode": "quick",
         "class_id": "rogue",
         "species": "halfling",
         "concept": "Карманник, который мечтает о честной жизни",
     },
+    ("POST", "/api/games/{game_id}/characters/random-preview"): None,
     ("POST", "/api/games/{game_id}/characters/backstory-help"): {
         "class_id": "rogue",
         "species": "halfling",
@@ -55,7 +57,7 @@ async def row_counts(stand) -> dict[str, int]:
     async with stand.db() as session:
         return {
             model.__tablename__: await session.scalar(select(func.count()).select_from(model))
-            for model in (PlayerCharacter, PendingRoll, GamePlayer)
+            for model in (PlayerCharacter, GamePlayer)
         }
 
 

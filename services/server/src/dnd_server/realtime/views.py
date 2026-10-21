@@ -10,14 +10,26 @@
 Приватность. Лента отбирает сообщения по адресату (`all` или сам игрок), личное сообщение не
 показывается как «общее» ни при каких данных, тайные ходы и броски лежат в ленте с адресатом-автором.
 Журнал хода мастера (`dm_turn_logs`: результаты `get_location`, `get_npc`, `search_lore` с заметками
-мастера и тайнами NPC) и копия приключения игры сюда не попадают вовсе. Адресаты событий движка —
+мастера и тайнами NPC) сюда не попадает вовсе, а копия приключения игры — только публичными
+названиями: имена NPC бойцов и названия предметов, которые держит герой. Адресаты событий движка —
 id персонажей; в id игрока их переводит `audience_to_user`, и это единственное такое место.
 
 Сообщения ленты из событий хода мастера (`feed_entries`) строятся здесь же: что из событий
-движка становится строкой ленты и кому она видна. Точных HP монстров и КД целей в строках нет, а
-события без автора (находки, флаги) строк не дают вовсе: об этом игроки узнают из рассказа. Броски
-монстра, спрятанного от отряда, идут от имени «Кто-то невидимый» без имени и id бойца, как и сам
-монстр отсутствует в `combat_view`.
+движка становится строкой ленты и кому она видна. Точных HP монстров и КД монстров в строках нет;
+в карточке атаки монстра по герою есть КД героя-цели (решение владельца R2). События без автора
+(находки, флаги) строк не дают вовсе: об этом игроки узнают из рассказа. Броски монстра,
+спрятанного от отряда, идут от имени «Кто-то невидимый» без имени и id бойца, как и сам монстр
+отсутствует в `combat_view`.
+
+Боец-монстр, за которым стоит NPC приключения, называется в порядке хода и в карточках бросков
+именем NPC (`npc_fighter_names`), а не именем статблока; причина его броска от движка в карточке
+заменена названием броска, как у спрятанного: в ней бывает имя статблока. Скрытый монстр не
+называется вовсе.
+
+Числа листа (КД, бонусы навыков и спасбросков, Сл заклинаний, атаки оружием) считает движок:
+`derived_view` только раскладывает его ответы в блок `derived`, формул здесь нет и клиент их не
+повторяет. Так же движок решает, может ли боец-герой действовать (`can_act` в порядке хода): это
+тот вопрос, по которому сервер ждёт ход героя, и клиент правил не повторяет.
 
 Русские названия состояний и эффектов берутся из данных SRD движка (состояния, заклинания, умения
 классов) и из таблицы названий боевых меток движка (`MARK_NAMES_RU`, например «Помощь» для
@@ -26,6 +38,7 @@ id персонажей; в id игрока их переводит `audience_to
 
 import logging
 import math
+from collections import Counter
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -35,9 +48,24 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dnd_engine.adventure.schema import Adventure
-from dnd_engine.character import ActiveBuff, ActiveCondition, Character
-from dnd_engine.combat.engine import INVISIBLE, MARK_NAMES_RU
+from dnd_engine.abilities import ABILITY_NAMES_RU, SKILL_ABILITY, SKILL_NAMES_RU, Ability, Skill
+from dnd_engine.adventure.schema import Adventure, Item
+from dnd_engine.character import (
+    ActiveBuff,
+    ActiveCondition,
+    Character,
+    InventoryItem,
+    ability_mod,
+    armor_class,
+    passive_perception,
+    prof_bonus,
+    save_bonus,
+    skill_bonus,
+    spell_attack_bonus,
+    spell_save_dc,
+    weapon_attack,
+)
+from dnd_engine.combat.engine import INVISIBLE, MARK_NAMES_RU, can_act
 from dnd_engine.combat.model import Combatant
 from dnd_engine.content import SrdContent
 from dnd_engine.events import (
@@ -51,6 +79,7 @@ from dnd_engine.events import (
     RollEvent,
 )
 from dnd_engine.state import GameState
+from dnd_engine.tools.lore import item_holder
 from dnd_server.db.models import (
     AUDIENCE_ALL,
     ActionStatus,
@@ -179,14 +208,52 @@ def is_hidden_monster(fighter: Combatant) -> bool:
     return fighter.kind == "monster" and any(c.id == INVISIBLE for c in fighter.conditions)
 
 
-def combat_view(state: GameState, srd: SrdContent) -> dict[str, Any] | None:
+def npc_fighter_names(state: GameState, adventure: Adventure) -> dict[str, str]:
+    """Публичные имена бойцов-монстров, за которыми стоит NPC приключения: id бойца → имя NPC.
+
+    У боя в приключении нет `npc_id`, связь идёт через статблок и место, как у движка, когда он
+    отмечает павших NPC. Боец называется именем NPC, только если связь однозначна: в бою ровно
+    один монстр (спрятанные считаются) с этим статблоком и ровно один живой NPC с этим статблоком
+    сейчас в локации отряда (с учётом переходов NPC в мире). Иначе остаётся имя статблока.
+    Спрятанный монстр не называется: имя NPC выдало бы засаду. Кроме имени от NPC ничего не
+    берётся."""
+    combat = state.combat
+    if combat is None:
+        return {}
+    monsters = [f for f in combat.combatants.values() if f.kind == "monster"]
+    per_statblock = Counter(fighter.ref for fighter in monsters)
+    npcs_here = [
+        npc
+        for npc in adventure.npcs.values()
+        if npc.statblock is not None
+        and state.world.npc_alive.get(npc.id, True)
+        and state.world.npc_location.get(npc.id, npc.location_id) == state.location_id
+    ]
+    names: dict[str, str] = {}
+    for fighter in monsters:
+        if is_hidden_monster(fighter) or per_statblock[fighter.ref] != 1:
+            continue
+        candidates = [npc for npc in npcs_here if npc.statblock == fighter.ref]
+        if len(candidates) == 1:
+            names[fighter.id] = candidates[0].name
+    return names
+
+
+def combat_view(state: GameState, srd: SrdContent, adventure: Adventure) -> dict[str, Any] | None:
     """Бой для всех: порядок, текущий ход, зоны с бойцами. Монстры описаны словами, без чисел.
 
     Спрятавшегося монстра в ответе нет вовсе — ни в порядке хода, ни в зоне: имя и положение
-    выдали бы засаду. Если сейчас его ход, `current_id` пуст. Спрятавшийся герой виден отряду."""
+    выдали бы засаду. Если сейчас его ход, `current_id` пуст. Спрятавшийся герой виден отряду.
+    Монстр, за которым стоит NPC, назван его именем (`npc_fighter_names`).
+
+    У героя есть `can_act`: способен ли он действовать (на ногах и не парализован, оглушён и так
+    далее). Это тот же вопрос движка (`engine.can_act`), по которому сервер решает, ждать ли ход
+    героя (`dm.combat_flow.waiting_hero`) и принимать ли его «Готов»: очередь может стоять на
+    герое, который не ходит, и клиент не должен открывать ему поле хода. У монстров признака нет."""
     combat = state.combat
     if combat is None:
         return None
+    npc_names = npc_fighter_names(state, adventure)
     fighters = [
         fighter
         for fighter in (combat.combatants[fighter_id] for fighter_id in combat.order)
@@ -196,7 +263,7 @@ def combat_view(state: GameState, srd: SrdContent) -> dict[str, Any] | None:
     for fighter in fighters:
         base = {
             "id": fighter.id,
-            "name": fighter.name,
+            "name": npc_names.get(fighter.id, fighter.name),
             "kind": fighter.kind,
             "side": fighter.side,
             "zone_id": fighter.zone_id,
@@ -215,6 +282,8 @@ def combat_view(state: GameState, srd: SrdContent) -> dict[str, Any] | None:
                 "hp": hero.hp if hero is not None else None,
                 "hp_max": hero.hp_max if hero is not None else None,
                 "conditions": _effects(hero.conditions if hero is not None else [], srd),
+                # Героя нет в отряде (рассинхрон состояния): ходить некому, а движок на нём упал бы.
+                "can_act": hero is not None and can_act(state, fighter.id),
             }
         )
     in_turn = 0 <= combat.turn_index < len(combat.order)
@@ -236,18 +305,119 @@ def combat_view(state: GameState, srd: SrdContent) -> dict[str, Any] | None:
     }
 
 
-def character_view(character: Character, srd: SrdContent) -> dict[str, Any]:
+def character_view(
+    character: Character, srd: SrdContent, adventure: Adventure, state: GameState | None
+) -> dict[str, Any]:
     """Лист персонажа. Уходит только его владельцу (`character_event`, снимок игрока).
 
     Состояния (`conditions`) и эффекты (`buffs`) проходят через белый список блока отряда
     (`_effects`: id, название, срок). Без этого лист выдавал бы `source` и `source_id`, а в них id
     спрятанного монстра, который опутал героя: монстра нет ни в порядке хода, ни в зонах боя, и лист
-    не должен называть его вместо них (решение D7). Остальные поля листа идут как есть."""
+    не должен называть его вместо них (решение D7). В снаряжении после вещей персонажа стоят
+    предметы приключения, которые он держит (`_inventory_view`); `state` — состояние игры, а в лобби
+    его нет. Остальные поля персонажа идут как есть, а числа, которые из них выводит движок, — в
+    блоке `derived` (`derived_view`)."""
     return {
-        **character.model_dump(mode="json", exclude={"conditions", "buffs"}),
+        **character.model_dump(mode="json", exclude={"conditions", "buffs", "inventory"}),
+        "inventory": _inventory_view(character, adventure, state),
         "conditions": _effects(character.conditions, srd),
         "buffs": _effects(character.buffs, srd),
+        "derived": derived_view(character, srd),
     }
+
+
+def _inventory_view(
+    character: Character, adventure: Adventure, state: GameState | None
+) -> list[dict[str, Any]]:
+    """Снаряжение героя: его вещи в его порядке, затем предметы приключения, которые он держит.
+
+    Движок кладёт в `Character.inventory` только вещи SRD; предмет приключения числится за героем
+    в `world.item_holders`, поэтому строки предметов приключения строятся по нему
+    (`_held_adventure_items`). У такой строки рядом с `item_id` стоит `name` из копии приключения
+    игры: справочник создания героя знает только предметы SRD, и без названия клиент показал бы
+    id (`chest-key`). Только название: описание, держатель и прочее из приключения в лист не
+    попадают. Предмет приключения один, поэтому `qty` равно 1 и он не надет. У вещей SRD ключа
+    `name` нет."""
+    lines = [entry.model_dump(mode="json") for entry in character.inventory]
+    if state is not None:  # в лобби состояния игры нет, и предметов приключения у героев тоже
+        lines += [
+            {**InventoryItem(item_id=item.id).model_dump(mode="json"), "name": item.name}
+            for item in _held_adventure_items(state, adventure, character.id)
+        ]
+    return lines
+
+
+def _held_adventure_items(state: GameState, adventure: Adventure, character_id: str) -> list[Item]:
+    """Предметы приключения в руках героя по порядку id; ушедшие, лежащие в мире и чужие не в счёт.
+
+    Кто держит предмет, решает `item_holder` движка: переопределение мира (`give_item`,
+    `take_item`, расход в бою) и держатель из приключения. Мастер читает ту же правду в контексте
+    хода (`dm.context._carried_adventure_items`): фильтр повторяет её, а совпадение листа и
+    контекста держит тест `test_the_sheet_lists_the_same_items_as_the_context_of_the_master`."""
+    holder = f"character:{character_id}"
+    return [
+        item
+        for item in sorted(adventure.items.values(), key=lambda item: item.id)
+        if item_holder(state, adventure, item.id) == holder
+    ]
+
+
+def derived_view(character: Character, srd: SrdContent) -> dict[str, Any]:
+    """Числа листа, посчитанные движком по живому персонажу: клиент ничего не считает (инвариант
+    «а»). Сервер только называет значения: русские названия берутся из таблиц движка, порядок —
+    порядок перечислений `Ability` и `Skill`. Заклинательных чисел у героя без заклинаний нет
+    (`None`). В блоке нет источников эффектов, чужих листов и чисел монстров."""
+    return {
+        "armor_class": armor_class(character, srd),
+        "proficiency_bonus": prof_bonus(character),
+        "passive_perception": passive_perception(character),
+        "abilities": [
+            {
+                "id": ability.value,
+                "name": ABILITY_NAMES_RU[ability],
+                "modifier": ability_mod(character, ability),
+                "save_bonus": save_bonus(character, ability),
+            }
+            for ability in Ability
+        ],
+        "skills": [
+            {
+                "id": skill.value,
+                "name": SKILL_NAMES_RU[skill],
+                "ability": SKILL_ABILITY[skill].value,
+                "bonus": skill_bonus(character, skill),
+            }
+            for skill in Skill
+        ],
+        "spell_save_dc": spell_save_dc(character, srd),
+        "spell_attack_bonus": spell_attack_bonus(character, srd),
+        "attacks": _attacks(character, srd),
+    }
+
+
+def _attacks(character: Character, srd: SrdContent) -> list[dict[str, Any]]:
+    """Атаки оружием из инвентаря в его порядке; `equipped` отличает надетое от запасного.
+    Предметы, которых нет в SRD или которые не оружие (броня, наборы, предметы приключения),
+    атакой не считаются."""
+    attacks = []
+    for entry in character.inventory:
+        item = srd.items.get(entry.item_id)
+        if item is None or item.weapon is None:
+            continue
+        attack = weapon_attack(character, entry.item_id, srd)
+        attacks.append(
+            {
+                "item_id": attack.item_id,
+                "name": attack.name,
+                "equipped": entry.equipped,
+                "bonus": attack.bonus,
+                "damage": attack.damage,
+                "damage_type": attack.damage_type,
+                "range": attack.range,
+                "ability": attack.ability.value,
+            }
+        )
+    return attacks
 
 
 def feed_item(message: Message) -> dict[str, Any]:
@@ -291,15 +461,19 @@ def party_event(state: GameState, srd: SrdContent) -> dict[str, Any]:
     return {"type": "party", "party": party_view(state, srd)}
 
 
-def combat_event(state: GameState, srd: SrdContent) -> dict[str, Any]:
-    return {"type": "combat", "combat": combat_view(state, srd)}
+def combat_event(state: GameState, srd: SrdContent, adventure: Adventure) -> dict[str, Any]:
+    return {"type": "combat", "combat": combat_view(state, srd, adventure)}
 
 
-def character_event(character: Character, srd: SrdContent) -> dict[str, Any]:
-    return {"type": "character", "character": character_view(character, srd)}
+def character_event(
+    character: Character, srd: SrdContent, adventure: Adventure, state: GameState | None
+) -> dict[str, Any]:
+    return {"type": "character", "character": character_view(character, srd, adventure, state)}
 
 
-def state_events(state: GameState, srd: SrdContent) -> list[tuple[dict[str, Any], str]]:
+def state_events(
+    state: GameState, srd: SrdContent, adventure: Adventure
+) -> list[tuple[dict[str, Any], str]]:
     """События после нового состояния игры: пары `(событие, адресат)` для `Hub.send`.
 
     Отряд и бой уходят всем, лист персонажа — только его игроку. У персонажа без игрока листа
@@ -307,11 +481,12 @@ def state_events(state: GameState, srd: SrdContent) -> list[tuple[dict[str, Any]
     """
     deliveries: list[tuple[dict[str, Any], str]] = [
         (party_event(state, srd), AUDIENCE_ALL),
-        (combat_event(state, srd), AUDIENCE_ALL),
+        (combat_event(state, srd, adventure), AUDIENCE_ALL),
     ]
     for character in state.party.values():
         if character.player_id is not None:
-            deliveries.append((character_event(character, srd), character.player_id))
+            sheet = character_event(character, srd, adventure, state)
+            deliveries.append((sheet, character.player_id))
     return deliveries
 
 
@@ -382,7 +557,9 @@ def feed_entries(
     бросает под именем из приключения, а в `data` карточки его id нет (решение D9). Бросок монстра,
     спрятанного в любом из двух состояний, идёт без имени и id бойца (`UNSEEN_ACTOR`): `combat_view`
     прячет такого монстра целиком, и лента не должна выдать засаду. Скрывается с запасом: событий
-    между состояниями здесь нет, а лишняя безымянная карточка безвреднее раскрытой засады. Адресат
+    между состояниями здесь нет, а лишняя безымянная карточка безвреднее раскрытой засады. У такого
+    монстра и у бойца под именем NPC причина броска от движка (`data.reason`) заменена названием
+    броска: в ней стоит имя по статблоку («Инициатива: Фанатик культа»). Адресат
     броска и личного сообщения задан движком (id персонажа) и переводится в id игрока через
     `audience_to_user`; событие, адресата которого нет среди игроков, не пишется и не рассылается.
     Строки о предметах и вдохновении тайного героя уходят только ему. События без строки (находки,
@@ -391,13 +568,27 @@ def feed_entries(
     игрокам показывают словами и блоками отряда и боя."""
     # NPC приключения бросают в состязании (`contest`): в карточке только имя, без id из данных
     # приключения. Герой или боец с тем же id важнее, как и при поиске участника в движке.
-    fighters = _names(before, after)
+    # Боец, за которым стоит NPC, бросает под именем NPC, как назван в порядке хода (`combat_view`).
+    npc_named = npc_fighter_names(before, adventure) | npc_fighter_names(after, adventure)
+    fighters = _names(before, after) | npc_named
     npcs = {npc.id: npc.name for npc in adventure.npcs.values() if npc.id not in fighters}
     names = npcs | fighters
     hidden = _hidden_monsters(before, after)
+    monsters = _monsters(before, after)
     entries: list[FeedEntry] = []
     for event in events:
-        entry = _entry(event, after.party, names, hidden, npcs, adventure, srd, secret_actors)
+        entry = _entry(
+            event,
+            after.party,
+            names,
+            hidden,
+            npc_named.keys(),
+            monsters,
+            npcs,
+            adventure,
+            srd,
+            secret_actors,
+        )
         if entry is not None:
             entries.append(entry)
     return entries
@@ -411,6 +602,17 @@ def _names(*states: GameState) -> dict[str, str]:
             names |= {fighter.id: fighter.name for fighter in state.combat.combatants.values()}
         names |= {hero.id: hero.name for hero in state.party.values()}
     return names
+
+
+def _monsters(*states: GameState) -> set[str]:
+    """Id бойцов-монстров боя хотя бы в одном из состояний (в том числе спрятанных)."""
+    return {
+        fighter.id
+        for state in states
+        if state.combat is not None
+        for fighter in state.combat.combatants.values()
+        if fighter.kind == "monster"
+    }
 
 
 def _hidden_monsters(*states: GameState) -> set[str]:
@@ -429,6 +631,8 @@ def _entry(
     party: Mapping[str, Character],
     names: Mapping[str, str],
     hidden: Collection[str],
+    npc_named: Collection[str],
+    monsters: Collection[str],
     npcs: Collection[str],
     adventure: Adventure,
     srd: SrdContent,
@@ -436,7 +640,7 @@ def _entry(
 ) -> FeedEntry | None:
     match event:
         case RollEvent():
-            return _roll_entry(event, party, names, hidden, npcs)
+            return _roll_entry(event, party, names, hidden, npc_named, monsters, npcs)
         case PrivateMessageEvent(audience=audience, text=text):
             return _addressed(party, audience, MessageKind.PRIVATE, text, "личное сообщение")
         case MoveEvent(location_id=location_id):
@@ -488,6 +692,8 @@ def _roll_entry(
     party: Mapping[str, Character],
     names: Mapping[str, str],
     hidden: Collection[str],
+    npc_named: Collection[str],
+    monsters: Collection[str],
     npcs: Collection[str],
 ) -> FeedEntry | None:
     user_id = audience_to_user(party, event.audience)
@@ -497,7 +703,6 @@ def _roll_entry(
     roll = event.roll
     unseen = event.actor_id in hidden
     actor = UNSEEN_ACTOR if unseen else names.get(event.actor_id, event.actor_id)
-    # КД цели в карточку не идёт: у монстров он скрыт, игроки видят только попадание или промах.
     data: dict[str, Any] = {
         "actor_id": event.actor_id,
         "actor": actor,
@@ -513,17 +718,27 @@ def _roll_entry(
         "dc": event.dc,
         "success": event.success,
     }
+    # КД цели называется, только когда цель — герой (решение владельца R2): так атакует монстр, а
+    # движок бьёт лишь противоположную сторону. КД монстра скрыт, игроки видят только попадание
+    # или промах. Цель в событии не названа, поэтому её сторону определяет сторона бойца: бросок
+    # не монстра боя (герой, NPC, неизвестный) КД не получает ни при каких данных.
+    if event.target_ac is not None and event.actor_id in monsters:
+        data["target_ac"] = event.target_ac
     if unseen:
-        # Причина броска от движка бывает с именем бойца («Скрытность: Гоблин 2»): остаётся
-        # название броска.
         del data["actor_id"]
-        data["reason"] = event.label
     elif event.actor_id in npcs:
         # Id NPC из данных приключения (слаг вроде `cult-leader`) бывает откровеннее имени.
         del data["actor_id"]
+    if unseen or event.actor_id in npc_named:
+        # Причина броска от движка бывает с именем бойца по статблоку («Скрытность: Гоблин 2»,
+        # «Инициатива: Фанатик культа»). Боец идёт под другим именем (его не видно или за ним NPC),
+        # и причина выдала бы настоящее: остаётся название броска. Решает боец, а не вид броска.
+        data["reason"] = event.label
     text = f"{actor}: {event.label} — {roll.total}"
     if event.dc is not None:
         text += f" против Сл {event.dc}"
+    elif "target_ac" in data:
+        text += f" против КД {data['target_ac']}"
     if event.success is not None:
         hit, miss = ("попадание", "промах") if event.target_ac is not None else ("успех", "провал")
         text += f": {hit if event.success else miss}"
@@ -625,6 +840,15 @@ async def _feed(session: AsyncSession, game_id: str, user: User) -> list[dict[st
     return [feed_item(message) for message in reversed(list(rows))]
 
 
+def _combat_of(
+    adventure: Adventure, state: GameState | None, srd: SrdContent
+) -> dict[str, Any] | None:
+    """Блок боя снимка; приключение нужно для имён NPC в порядке хода."""
+    if state is None or state.combat is None:
+        return None
+    return combat_view(state, srd, adventure)
+
+
 async def snapshot_for(
     session: AsyncSession, user: User, game_id: str, *, srd: SrdContent
 ) -> dict[str, Any]:
@@ -635,6 +859,8 @@ async def snapshot_for(
     """
     game_out = await get_game(session, user, game_id)  # проверка участия и сводка лобби
     game = await session.get(Game, game_id)
+    # Копия приключения нужна листу (названия предметов, которые держит герой) и бою (имена NPC).
+    adventure = Adventure.model_validate(game.adventure_data)
     state = await _current_state(session, game)
     actions = await _turn_actions(session, game)
     mine = actions.get(user.id)
@@ -656,7 +882,9 @@ async def snapshot_for(
             if game.current_turn_id is not None
             else {}
         ),
-        "character": character_view(character, srd) if character is not None else None,
+        "character": (
+            character_view(character, srd, adventure, state) if character is not None else None
+        ),
         "action": (
             None
             if mine is None
@@ -668,6 +896,6 @@ async def snapshot_for(
             }
         ),
         "party": party_view(state, srd) if state is not None else [],
-        "combat": combat_view(state, srd) if state is not None else None,
+        "combat": _combat_of(adventure, state, srd),
         "feed": await _feed(session, game_id, user),
     }

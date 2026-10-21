@@ -224,7 +224,7 @@ async def test_turn_token_never_reaches_the_server_access_log(monkeypatch):
     monkeypatch.setenv("APP_ENV", "dev")
     calls: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **options: calls.append((app, options)))
-    main()  # настоящие параметры запуска сервера; сам сервер не стартует
+    main([])  # настоящие параметры запуска сервера; сам сервер не стартует, порт не занимается
     [(_, options)] = calls
     # Приложение собираем сами (нужен реестр токенов), остальные параметры берём у main() как есть.
     options = {name: value for name, value in options.items() if name != "factory"}
@@ -233,7 +233,7 @@ async def test_turn_token_never_reaches_the_server_access_log(monkeypatch):
 
     with captured_server_log() as server_log:
         config = uvicorn.Config(
-            app, **{**options, "port": 0, "log_config": None, "lifespan": "off"}
+            app, **{**options, "fd": None, "port": 0, "log_config": None, "lifespan": "off"}
         )
         async with (
             serving(config) as base_url,

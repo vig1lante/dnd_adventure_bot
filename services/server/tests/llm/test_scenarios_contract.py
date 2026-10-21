@@ -19,9 +19,17 @@ from dnd_engine.tools import build_registry
 from dnd_server.authoring import schemas
 from dnd_server.authoring.pipeline import STEPS, GenerationRequest, generate
 from dnd_server.authoring.schemas import Seeds
+from dnd_server.characters.flavor import BackstoryOut, PersonaOut
 from dnd_server.dm.weaving import WeavingOut
 from dnd_server.llm.base import JsonRequest, ProviderError, TurnRequest
-from dnd_server.llm.fake import FakeProvider, Scenario, ToolStep, load_scenario
+from dnd_server.llm.fake import (
+    FakeProvider,
+    Scenario,
+    ScenarioTurn,
+    TextStep,
+    ToolStep,
+    load_scenario,
+)
 
 # Конфтест сервера переходит во временную папку, поэтому путь считаем от файла теста.
 SCENARIOS_DIR = Path(__file__).resolve().parents[1] / "scenarios"
@@ -39,6 +47,8 @@ MANUAL_RUN_PLAYERS: dict[str, tuple[int, ...]] = {
     "failing.yaml": tuple(range(1, MAX_PC_NUMBER + 1)),
     "combat.yaml": (3,),
     "weaving.yaml": (3,),
+    # Сквозной тест Playwright (B8.7): шестеро игроков, зацепка у каждого.
+    "e2e_full.yaml": (6,),
 }
 
 SCHEMA_BY_STEP: dict[str, type[BaseModel]] = {
@@ -100,7 +110,9 @@ def generator_purposes(scenario: Scenario) -> list[str]:
 
 
 def test_the_scenarios_of_the_block_are_in_the_folder():
-    assert {"basic_round.yaml", "generator_demo.yaml"} <= {path.name for path in SCENARIO_FILES}
+    assert {"basic_round.yaml", "generator_demo.yaml", "e2e_full.yaml"} <= {
+        path.name for path in SCENARIO_FILES
+    }
 
 
 @pytest.mark.parametrize("path", SCENARIO_FILES, ids=lambda path: path.name)
@@ -155,6 +167,157 @@ async def test_every_turn_calls_tools_the_engine_accepts_and_then_runs_out(path)
     else:
         with pytest.raises(ProviderError, match="сценарий исчерпан"):
             await provider.run_turn(EMPTY_TURN, tools)
+
+
+@pytest.mark.parametrize("name", ["combat.yaml", "e2e_full.yaml"])
+def test_combat_scenario_engages_the_skeleton_before_each_of_its_strikes(name):
+    # Рукопашная атака бьёт только вовлечённого противника, а после start_combat не вовлечён никто
+    # (B7.manual): без своего вовлечения скелет в ручном прогоне всегда получал отказ движка.
+    scenario = load_scenario(SCENARIOS_DIR / name)
+    strikes = 0
+
+    for turn in scenario.turns:
+        steps = [step for step in turn.steps if isinstance(step, ToolStep)]
+        for position, step in enumerate(steps):
+            if step.tool != "monster_action":
+                continue
+            strikes += 1
+            (target,) = step.args["target_ids"]
+            engaged = [
+                earlier
+                for earlier in steps[:position]
+                if earlier.tool == "move"
+                and earlier.args.get("actor_id") == step.args["monster_id"]
+                and earlier.args.get("engage") == target
+            ]
+            assert engaged, f"{step.args['monster_id']} бьёт {target} без вовлечения"
+    assert strikes  # в сценарии есть атака скелета, иначе проверка ничего не проверяла
+
+
+# --- сквозной сценарий Playwright «6 игроков» (B8.7) ---
+#
+# `e2e_full.yaml` играет настоящий сервер с `FakeProvider` под браузерами шестерых игроков, а кубы и
+# инициатива настоящие (`SystemRng`). Тест Playwright (`services/webapp/e2e/six-players.spec.ts`)
+# рассчитывает на порядок ходов мастера из этого файла: ниже он закреплён, чтобы правка сценария не
+# разошлась с тестом молча.
+
+E2E_SCENARIO = SCENARIOS_DIR / "e2e_full.yaml"
+ALL_HEROES = [f"$pc{number}" for number in range(1, MAX_PC_NUMBER + 1)]
+# Предел итераций инструментов за ход мастера (`dm.turn`); сценарий держится заметно ниже.
+TOOL_STEPS_LIMIT = 20
+
+
+def e2e_turns() -> list[ScenarioTurn]:
+    return load_scenario(E2E_SCENARIO).turns
+
+
+def tool_steps(turn: ScenarioTurn) -> list[ToolStep]:
+    return [step for step in turn.steps if isinstance(step, ToolStep)]
+
+
+def first_turn_with(turns: list[ScenarioTurn], tool: str) -> int:
+    return next(
+        index for index, turn in enumerate(turns) if any(s.tool == tool for s in tool_steps(turn))
+    )
+
+
+async def e2e_weaving() -> list:
+    provider = FakeProvider(load_scenario(E2E_SCENARIO), pc_ids=PC_IDS)
+    out = await provider.complete_json(
+        JsonRequest(system="", prompt="", purpose="weaving"), WeavingOut
+    )
+    return out.hooks
+
+
+async def test_e2e_scenario_weaves_a_hook_for_each_of_the_six_heroes():
+    hooks = await e2e_weaving()
+
+    assert [hook.character_id for hook in hooks] == list(PC_IDS)
+    # Связь с миром приключения есть у каждого: сервер не просит вплетение повторно.
+    assert all(hook.npc_links or hook.location_links for hook in hooks)
+
+
+async def test_e2e_hooks_have_goals_that_do_not_contain_one_another():
+    # Тест Playwright ищет цель героя у него на экране и не должен находить её у остальных пятерых.
+    goals = [hook.personal_goal for hook in await e2e_weaving()]
+
+    assert all(goals)
+    for goal in goals:
+        assert [other for other in goals if goal in other] == [goal]
+
+
+async def test_e2e_scenario_describes_quick_heroes_and_their_backstories():
+    scenario = load_scenario(E2E_SCENARIO)
+    provider = FakeProvider(scenario)
+
+    persona = await provider.complete_json(
+        JsonRequest(system="", prompt="", purpose="character.flavor"), PersonaOut
+    )
+    backstory = await provider.complete_json(
+        JsonRequest(system="", prompt="", purpose="character.backstory"), BackstoryOut
+    )
+
+    assert persona.name
+    assert backstory.backstory
+
+
+def test_e2e_scenario_ends_every_turn_with_a_story_and_stays_under_the_tool_limit():
+    for number, turn in enumerate(e2e_turns()):
+        last = turn.steps[-1]
+        assert isinstance(last, TextStep), f"ход {number} без рассказа в конце"
+        assert last.text.strip(), f"ход {number}: пустой рассказ"
+        assert len(tool_steps(turn)) < TOOL_STEPS_LIMIT, f"ход {number}: слишком много вызовов"
+
+
+def test_e2e_scenario_opens_the_game_with_a_story_only():
+    opening = e2e_turns()[0]
+
+    assert {step.tool for step in tool_steps(opening)} <= {"chronicle"}
+
+
+def test_e2e_first_round_rolls_for_the_second_hero_in_public_and_the_third_in_secret():
+    # Игрок 3 сдаёт тайный ход, игрок 2 — обычный: бросок героя 3 виден только ему, героя 2 — всем.
+    turn = e2e_turns()[1]
+    checks = [step.args["character_id"] for step in tool_steps(turn) if step.tool == "request_check"]
+    damaged = [step.args["character_id"] for step in tool_steps(turn) if step.tool == "damage"]
+
+    assert checks == ["$pc2", "$pc3"]
+    # Урон остаётся на герое до привала: так видно, что длинный отдых вернул здоровье.
+    assert damaged == ["$pc2"]
+
+
+def test_e2e_scenario_fights_in_two_master_calls_whoever_acts_first():
+    # Инициатива настоящая, поэтому тест не знает, кто ходит первым: герой или скелет. Бой всегда
+    # занимает ровно два вызова мастера после начала сцены, и сцену кончает второй. Первый
+    # зовёт «Уклоняется» за каждого героя (сработает у того, чей ход сейчас), а скелет вступает
+    # в бой и бьёт, если ходит в этом вызове.
+    turns = e2e_turns()
+    start = first_turn_with(turns, "start_combat")
+    end = first_turn_with(turns, "end_scene")
+    camp = first_turn_with(turns, "start_camp")
+
+    assert end == start + 2
+    assert start < end < camp
+    first_call, ending_call = turns[start + 1], turns[end]
+    assert all(step.tool != "end_scene" for step in tool_steps(first_call))
+    dodging = [
+        step.args["actor_id"]
+        for step in tool_steps(first_call)
+        if step.tool == "combat_action" and step.args["action"] == "dodge"
+    ]
+    assert sorted(dodging) == sorted(ALL_HEROES)
+    # Сцену закрывает только второй вызов: до него бой виден на экране.
+    assert [step.tool for step in tool_steps(ending_call)].count("end_scene") == 1
+
+
+def test_e2e_camp_is_followed_by_the_morning_and_then_by_a_template_round():
+    turns = e2e_turns()
+    camp = first_turn_with(turns, "start_camp")
+
+    morning = turns[camp + 1]
+    # Конец привала: длинный отдых делает сервер, а не инструмент; мастер только рассказывает.
+    assert {step.tool for step in tool_steps(morning)} <= {"chronicle"}
+    assert turns[-1].repeat  # ход-шаблон на случай лишних вызовов после перезапуска сервера
 
 
 @pytest.mark.parametrize("path", SCENARIO_FILES, ids=lambda path: path.name)

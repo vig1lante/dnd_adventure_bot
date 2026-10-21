@@ -1,0 +1,104 @@
+/* Стили только страницы превью (подключается её модулем, в прод-сборку не попадает). */
+
+.preview-note {
+  color: var(--color-text-muted);
+}
+
+.preview-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.preview-section__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.preview-section__title::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--color-border-strong), transparent);
+}
+
+.preview-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.preview-display {
+  font-family: var(--font-display);
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  color: var(--color-heading);
+}
+
+.preview-swatches,
+.preview-icons {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(6rem, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.preview-swatches li,
+.preview-icons li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.preview-icons li {
+  color: var(--color-accent-text);
+}
+
+.preview-swatch {
+  width: 100%;
+  height: 2.75rem;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.preview-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* Три кнопки выбора темы должны помещаться в одну строку телефона. */
+.preview-switch {
+  padding-inline: var(--space-3);
+}
+
+.preview--wide {
+  max-width: 72rem;
+}
+
+.preview-both {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  gap: var(--space-4);
+}
+
+/* Тема внутри блока: свой фон и цвет текста, как у страницы. */
+.preview-scope {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  color: var(--color-text);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}

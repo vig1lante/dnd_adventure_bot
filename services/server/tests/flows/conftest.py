@@ -276,12 +276,22 @@ class Stand:
     async def random(self, player: Player, game_id: str) -> httpx.Response:
         return await self.create_character(player, game_id, {"mode": "random"})
 
-    async def roll_abilities(self, player: Player, game_id: str) -> list[int]:
+    async def random_abilities(
+        self, player: Player, game_id: str, class_id: str = "fighter"
+    ) -> dict[str, int]:
+        """«Распределить случайно»: раскладка 27 очков от сервера (покупка очков)."""
         response = await self.call(
-            player, "POST", f"/api/games/{game_id}/characters/roll-abilities"
+            player,
+            "POST",
+            f"/api/games/{game_id}/characters/random-abilities",
+            json={"class_id": class_id},
         )
         assert response.status_code == 200, response.text
-        return response.json()["values"]
+        assert response.json()["method"] == "point_buy"
+        return response.json()["scores"]
+
+    async def my_character(self, player: Player, game_id: str) -> httpx.Response:
+        return await self.call(player, "GET", f"/api/games/{game_id}/characters/mine")
 
     async def game(self, player: Player, game_id: str) -> dict[str, Any]:
         response = await self.call(player, "GET", f"/api/games/{game_id}")

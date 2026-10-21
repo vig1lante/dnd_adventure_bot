@@ -1,4 +1,5 @@
-"""Персонажи (план B6.4): опции формы, бросок характеристик, три режима создания, описание от модели.
+"""Персонажи (план B6.4, B8.s3): опции формы, случайная раскладка очков, три режима создания,
+выбор игрока, описание от модели.
 
 Приложение работает на настоящей SQLite после миграций (фикстуры `settings`, `db` из
 `tests/conftest.py`) и с выполненным стартом (`lifespan` грузит каталог приключений из временной
@@ -10,6 +11,7 @@
 
 import asyncio
 import json
+import logging
 import re
 import shutil
 from collections.abc import AsyncIterator
@@ -26,18 +28,20 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dnd_engine.abilities import Ability
-from dnd_engine.character import Character
+from dnd_engine.character import Character, Persona
 from dnd_engine.conditions import ZERO_HP_SOURCE
 from dnd_engine.content import load_srd
 from dnd_engine.creation import (
     FIGHTING_STYLES,
+    POINT_BUY_BUDGET,
+    POINT_BUY_COST,
     UNNAMED_CHARACTER_NAME,
     CharacterChoices,
     build_character,
     class_spell_options,
     quick_character,
     random_character,
-    roll_ability_set,
+    random_point_buy,
 )
 from dnd_engine.rng import SeededRng
 from dnd_server.app import create_app
@@ -52,12 +56,13 @@ from dnd_server.characters.flavor import (
     SHORT_TEXT_MAX_CHARS,
     PersonaOut,
 )
+from dnd_server.characters.previews import MAX_PREVIEWS, PREVIEW_WINDOW_S, RandomPreviews
 from dnd_server.config import Settings
+from dnd_server.db.base import Base
 from dnd_server.db.models import (
     Game,
     GamePhase,
     GamePlayer,
-    PendingRoll,
     PlayerCharacter,
     User,
 )
@@ -212,8 +217,18 @@ async def create(
     return await world.http.post(characters_url(game_id), headers=player.headers, json=body)
 
 
-async def roll(world: World, player: Player, game_id: str) -> httpx.Response:
-    return await world.http.post(characters_url(game_id, "/roll-abilities"), headers=player.headers)
+async def random_abilities(
+    world: World, player: Player, game_id: str, class_id: str = "fighter", **extra: Any
+) -> httpx.Response:
+    return await world.http.post(
+        characters_url(game_id, "/random-abilities"),
+        headers=player.headers,
+        json={"class_id": class_id, **extra},
+    )
+
+
+async def my_character(world: World, player: Player, game_id: str) -> httpx.Response:
+    return await world.http.get(characters_url(game_id, "/mine"), headers=player.headers)
 
 
 async def backstory_help(world: World, player: Player, game_id: str, **body: Any) -> httpx.Response:
@@ -245,7 +260,7 @@ def quick_body(**changes: Any) -> dict[str, Any]:
 
 
 def detailed_choices(**changes: Any) -> dict[str, Any]:
-    """Легальный выбор воина-дварфа с покупкой очков (27 из 27); он же — перестановка набора."""
+    """Легальный выбор воина-дварфа с покупкой очков (27 из 27)."""
     choices: dict[str, Any] = {
         "name": "Торин",
         "species": "dwarf",
@@ -291,13 +306,6 @@ async def stored_player(
 ) -> GamePlayer:
     async with db() as session:
         return await session.get(GamePlayer, (game_id, user_id))
-
-
-async def stored_roll(
-    db: async_sessionmaker[AsyncSession], game_id: str, user_id: str
-) -> PendingRoll | None:
-    async with db() as session:
-        return await session.get(PendingRoll, (game_id, user_id))
 
 
 async def start_playing(db: async_sessionmaker[AsyncSession], game_id: str) -> None:
@@ -586,55 +594,195 @@ async def test_a_character_built_only_from_the_options_is_legal(world, class_id)
     assert response.json()["character"]["class_id"] == class_id
 
 
-# --- бросок характеристик ---
+# --- случайная раскладка очков (решение владельца R9) ---
 
 
-async def test_rolling_saves_the_servers_set_and_returns_it(world):
+def tables_snapshot_sync(connection: Any) -> dict[str, list[Any]]:
+    return {
+        table.name: sorted(map(repr, connection.execute(table.select()).fetchall()))
+        for table in Base.metadata.sorted_tables
+    }
+
+
+async def database_rows(world: World) -> dict[str, list[Any]]:
+    """Все строки всех таблиц: «ничего не записано» проверяется целиком, а не по одной таблице."""
+    async with world.db() as session:
+        return await (await session.connection()).run_sync(tables_snapshot_sync)
+
+
+async def test_random_abilities_returns_the_engines_layout_in_ability_order(world):
     game, host, _ = await make_game(world)
     world.app.state.rng = SeededRng(7)
 
-    response = await roll(world, host, game["id"])
+    response = await random_abilities(world, host, game["id"], "wizard")
 
     assert response.status_code == 200, response.text
-    values = response.json()["values"]
-    assert values == roll_ability_set(SeededRng(7))
-    saved = await stored_roll(world.db, game["id"], host.id)
-    assert saved.values == values
+    body = response.json()
+    expected = random_point_buy(SeededRng(7), load_srd(), "wizard")
+    assert body == {"method": "point_buy", "scores": {a.value: expected[a] for a in Ability}}
+    assert list(body["scores"]) == [a.value for a in Ability]  # порядок ответа не зависит от класса
 
 
-async def test_rolling_again_overwrites_the_set(world):
+async def test_random_abilities_are_a_legal_point_buy_of_exactly_27_points(world):
     game, host, _ = await make_game(world)
-    first = (await roll(world, host, game["id"])).json()["values"]
-    second = (await roll(world, host, game["id"])).json()["values"]
+    options = await get_options(world, host)
+    assert options["point_buy"]["budget"] == POINT_BUY_BUDGET == 27
 
-    assert first != second
-    async with world.db() as session:
-        rows = list(await session.scalars(select(PendingRoll)))
-    assert [row.values for row in rows] == [second]
+    for class_id in sorted(load_srd().classes):
+        for _ in range(10):
+            response = await random_abilities(world, host, game["id"], class_id)
+            scores = response.json()["scores"]
+
+            assert set(scores) == {a.value for a in Ability}
+            assert sum(POINT_BUY_COST[value] for value in scores.values()) == 27
+            assert all(8 <= value <= 15 for value in scores.values())
 
 
-async def test_the_client_cannot_choose_the_rolled_numbers(world):
+async def test_random_abilities_give_the_main_ability_of_the_class_14_or_15(world):
+    game, host, _ = await make_game(world)
+    srd = load_srd()
+
+    for class_id, cls in srd.classes.items():
+        for _ in range(8):
+            scores = (await random_abilities(world, host, game["id"], class_id)).json()["scores"]
+
+            main = cls.ability_priority[0].value
+            assert scores[main] in (14, 15) and scores[main] == max(scores.values()), class_id
+
+
+async def test_the_server_accepts_its_own_random_abilities_for_a_hero(world):
+    game, host, _ = await make_game(world)
+    scores = (await random_abilities(world, host, game["id"])).json()
+
+    response = await create(
+        world,
+        host,
+        game["id"],
+        detailed_body(method=scores["method"], base_scores=scores["scores"]),
+    )
+
+    assert response.status_code == 201, response.text
+    final = response.json()["character"]["scores"]
+    # Прибавка предыстории (+2 Сила, +1 Телосложение) легла поверх выданных значений.
+    assert final["str"] == scores["scores"]["str"] + 2
+    assert final["con"] == scores["scores"]["con"] + 1
+    assert final["dex"] == scores["scores"]["dex"]
+
+
+async def test_random_abilities_write_nothing_and_tell_nobody(world):
+    game, host, [friend] = await make_game(world, friends=1)
+    await create(world, friend, game["id"], quick_body())
+    before = await database_rows(world)
+    world.broadcaster.sent.clear()
+
+    for _ in range(3):
+        assert (await random_abilities(world, host, game["id"])).status_code == 200
+
+    assert await database_rows(world) == before
+    assert world.broadcaster.sent == []
+    assert await stored_characters(world.db, game["id"]) != []  # чужой герой не тронут
+
+
+async def test_random_abilities_have_no_limit_of_presses(world):
+    game, host, _ = await make_game(world)
+
+    statuses = {(await random_abilities(world, host, game["id"])).status_code for _ in range(60)}
+
+    assert statuses == {200}  # не как у предпросмотра героя: запас очков у всех один и тот же
+
+
+async def test_every_press_asks_the_servers_generator_again(world):
+    game, host, _ = await make_game(world)
+    world.app.state.rng = SeededRng(3)
+    srd = load_srd()
+    expected_rng = SeededRng(3)
+
+    for _ in range(12):
+        response = await random_abilities(world, host, game["id"], "rogue")
+
+        # Каждое нажатие берёт следующие значения того же генератора сервера.
+        expected = random_point_buy(expected_rng, srd, "rogue")
+        assert response.json()["scores"] == {a.value: expected[a] for a in Ability}
+
+
+async def test_the_client_cannot_choose_the_numbers_of_random_abilities(world):
     game, host, _ = await make_game(world)
     world.app.state.rng = SeededRng(5)
 
+    forged = await random_abilities(
+        world, host, game["id"], scores={"str": 15, "dex": 15, "con": 15}, seed=1
+    )
+    honest = await random_abilities(world, host, game["id"])
+
+    assert forged.status_code == 422
+    assert honest.json()["scores"] == {
+        a.value: v for a, v in random_point_buy(SeededRng(5), load_srd(), "fighter").items()
+    }
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"class_id": ""}, {"class_id": "paladin"}, {"class_id": "к" * 65}, {"class_id": 7}],
+    ids=["no-class", "empty", "unknown-class", "long-class", "not-a-string"],
+)
+async def test_random_abilities_need_a_known_class(world, body):
+    game, host, _ = await make_game(world)
+
     response = await world.http.post(
-        characters_url(game["id"], "/roll-abilities"),
-        headers=host.headers,
-        json={"values": [18, 18, 18, 18, 18, 18], "seed": 1},
+        characters_url(game["id"], "/random-abilities"), headers=host.headers, json=body
     )
 
-    assert response.status_code == 200
-    assert response.json()["values"] == roll_ability_set(SeededRng(5))
+    assert response.status_code == 422
+    assert isinstance(response.json()["detail"], str)
+    assert "кккк" not in response.text  # чужой текст в ответе не повторяется
 
 
-async def test_each_player_has_their_own_pending_set(world):
-    game, host, [friend] = await make_game(world, friends=1)
+async def test_an_unknown_class_gets_the_list_of_problems_in_russian(world):
+    game, host, _ = await make_game(world)
 
-    mine = (await roll(world, host, game["id"])).json()["values"]
-    theirs = (await roll(world, friend, game["id"])).json()["values"]
+    response = await random_abilities(world, host, game["id"], "paladin")
 
-    assert (await stored_roll(world.db, game["id"], host.id)).values == mine
-    assert (await stored_roll(world.db, game["id"], friend.id)).values == theirs
+    body = response.json()
+    assert re.search("[а-яё]", body["detail"], re.IGNORECASE)
+    assert any("неизвестный класс" in problem for problem in body["problems"])
+
+
+async def test_random_abilities_do_not_call_the_model(world, monkeypatch):
+    game, host, _ = await make_game(world)
+    provider = ScriptedProvider()
+    use_provider(monkeypatch, provider)
+
+    await random_abilities(world, host, game["id"])
+
+    assert provider.requests == []
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+async def test_the_old_roll_route_is_gone_for_real_requests(world, method):
+    # Не только из описания OpenAPI: запрос игрока на прежний путь броска тоже ничего не находит,
+    # и бросок 4d6 не появляется под другим именем.
+    game, host, _ = await make_game(world)
+
+    response = await world.http.request(
+        method.upper(),
+        characters_url(game["id"], "/roll-abilities"),
+        headers=host.headers,
+        json={"class_id": "fighter"} if method == "post" else None,
+    )
+
+    assert response.status_code == 404, response.text
+    assert "scores" not in response.text
+
+
+async def test_creation_options_do_not_offer_the_roll_any_more(world):
+    _game, host, _ = await make_game(world)
+
+    options = await get_options(world, host)
+
+    # Способы характеристик в опциях: покупка очков и стандартный набор; ни броска, ни 4d6.
+    assert {"point_buy", "standard_array"} <= set(options)
+    text = json.dumps(options, ensure_ascii=False).lower()
+    assert "4d6" not in text and "rolled" not in text and "roll_" not in text
 
 
 # --- создание: подробный режим ---
@@ -670,31 +818,17 @@ async def test_detailed_standard_array_saves_a_legal_character(world):
     assert response.json()["character"]["scores"]["str"] == 17  # 15 + бонус предыстории 2
 
 
-async def test_detailed_roll_uses_the_set_the_server_rolled(world):
+@pytest.mark.parametrize(
+    "scores",
+    [
+        {"str": 15, "dex": 14, "con": 13, "int": 12, "wis": 10, "cha": 8},
+        {"str": 18, "dex": 18, "con": 18, "int": 18, "wis": 18, "cha": 18},
+    ],
+    ids=["legal-looking", "impossible"],
+)
+async def test_the_roll_method_is_refused_with_a_clear_problem(world, scores):
     game, host, _ = await make_game(world)
-    values = (await roll(world, host, game["id"])).json()["values"]
-    scores = dict(zip((a.value for a in Ability), values, strict=True))
-
-    response = await create(
-        world,
-        host,
-        game["id"],
-        detailed_body(
-            method="roll", base_scores=scores, background_bonus={"str": 1, "dex": 1, "con": 1}
-        ),
-    )
-
-    assert response.status_code == 201, response.text
-    final = response.json()["character"]["scores"]
-    assert final == {a: scores[a] + 1 if a in ("str", "dex", "con") else scores[a] for a in scores}
-
-
-async def test_detailed_roll_with_a_set_the_server_never_rolled_is_refused(world):
-    game, host, _ = await make_game(world)
-    rolled = (await roll(world, host, game["id"])).json()["values"]
-    forged = [15, 14, 13, 12, 10, 8]  # легальный набор, но не тот, что выпал
-    assert sorted(forged) != sorted(rolled)
-    scores = dict(zip((a.value for a in Ability), forged, strict=True))
+    world.broadcaster.sent.clear()
 
     response = await create(
         world, host, game["id"], detailed_body(method="roll", base_scores=scores)
@@ -703,41 +837,33 @@ async def test_detailed_roll_with_a_set_the_server_never_rolled_is_refused(world
     assert response.status_code == 422
     body = response.json()
     assert isinstance(body["detail"], str)
-    assert any("перестановкой набора" in problem for problem in body["problems"])
+    assert any(
+        "бросок характеристик больше не используется" in problem for problem in body["problems"]
+    )
     assert await stored_characters(world.db, game["id"]) == []
+    assert world.broadcaster.lobby_events() == []
 
 
-async def test_detailed_roll_without_rolling_first_is_refused(world):
+async def test_the_roll_method_does_not_replace_the_old_hero(world):
     game, host, _ = await make_game(world)
-    scores = dict(zip((a.value for a in Ability), [15, 14, 13, 12, 10, 8], strict=True))
+    first = (await create(world, host, game["id"], detailed_body())).json()["character"]
+    scores = {"str": 15, "dex": 14, "con": 13, "int": 12, "wis": 10, "cha": 8}
 
-    response = await create(
+    refused = await create(
         world, host, game["id"], detailed_body(method="roll", base_scores=scores)
     )
 
-    assert response.status_code == 422
-    assert any("нет выпавшего набора" in problem for problem in response.json()["problems"])
-    assert await stored_characters(world.db, game["id"]) == []
+    assert refused.status_code == 422
+    [row] = await stored_characters(world.db, game["id"])
+    assert row.data == first
 
 
-async def test_the_rolled_set_cannot_arrive_with_the_request(world):
+async def test_a_rolled_set_cannot_arrive_with_the_request_at_all(world):
     game, host, _ = await make_game(world)
-    await roll(world, host, game["id"])
     forged = [18, 16, 14, 12, 10, 8]
-    scores = dict(zip((a.value for a in Ability), forged, strict=True))
 
-    beside = await create(
-        world,
-        host,
-        game["id"],
-        {**detailed_body(method="roll", base_scores=scores), "rolled_set": forged},
-    )
-    inside = await create(
-        world,
-        host,
-        game["id"],
-        detailed_body(method="roll", base_scores=scores, rolled_set=forged),
-    )
+    beside = await create(world, host, game["id"], {**detailed_body(), "rolled_set": forged})
+    inside = await create(world, host, game["id"], detailed_body(rolled_set=forged))
 
     assert (beside.status_code, inside.status_code) == (422, 422)
     assert await stored_characters(world.db, game["id"]) == []
@@ -926,12 +1052,15 @@ async def test_endpoints_need_a_login(world):
     game, _host, _ = await make_game(world)
 
     calls = [
-        world.http.post(characters_url(game["id"], "/roll-abilities")),
+        world.http.post(
+            characters_url(game["id"], "/random-abilities"), json={"class_id": "rogue"}
+        ),
+        world.http.get(characters_url(game["id"], "/mine")),
         world.http.post(characters_url(game["id"]), json=quick_body()),
         world.http.post(characters_url(game["id"], "/backstory-help"), json={}),
     ]
 
-    assert [(await call).status_code for call in calls] == [401, 401, 401]
+    assert [(await call).status_code for call in calls] == [401, 401, 401, 401]
 
 
 async def test_a_stranger_gets_404_like_for_a_game_that_does_not_exist(world):
@@ -941,16 +1070,17 @@ async def test_a_stranger_gets_404_like_for_a_game_that_does_not_exist(world):
 
     for player_game in (game["id"], missing):
         responses = [
-            await roll(world, stranger, player_game),
+            await random_abilities(world, stranger, player_game),
+            await my_character(world, stranger, player_game),
             await create(world, stranger, player_game, quick_body()),
             await backstory_help(world, stranger, player_game),
         ]
-        assert [r.status_code for r in responses] == [404, 404, 404]
-    own = await roll(world, stranger, game["id"])
-    absent = await roll(world, stranger, missing)
-    assert own.json() == absent.json()
+        assert [r.status_code for r in responses] == [404, 404, 404, 404]
+    for call in (random_abilities, my_character):
+        own = await call(world, stranger, game["id"])
+        absent = await call(world, stranger, missing)
+        assert own.json() == absent.json()
     assert await stored_characters(world.db, game["id"]) == []
-    assert await stored_roll(world.db, game["id"], stranger.id) is None
 
 
 async def test_nothing_changes_after_the_game_left_the_lobby(world):
@@ -960,7 +1090,7 @@ async def test_nothing_changes_after_the_game_left_the_lobby(world):
     world.broadcaster.sent.clear()
 
     responses = [
-        await roll(world, host, game["id"]),
+        await random_abilities(world, host, game["id"]),
         await create(world, host, game["id"], quick_body()),
         await backstory_help(world, host, game["id"]),
     ]
@@ -970,6 +1100,257 @@ async def test_nothing_changes_after_the_game_left_the_lobby(world):
     [row] = await stored_characters(world.db, game["id"])
     assert row.data == before
     assert world.broadcaster.sent == []
+
+
+# --- выбор игрока при создании героя (решение владельца R10) ---
+#
+# Сервер хранит то, что игрок выбрал, рядом с героем и отдаёт это только владельцу героя
+# (`GET .../characters/mine`): форма «Изменить героя» открывается заполненной.
+
+QUICK_CHOICES = {"class_id": "fighter", "species": "human", "concept": CONCEPT, "name": None}
+# Ключи выбора игрока: в ответах, которые видят другие игроки, их быть не должно.
+CHOICE_MARKERS = frozenset({"choices", "base_scores", "background_bonus", "method"})
+
+
+def detailed_choices_as_stored(**changes: Any) -> dict[str, Any]:
+    """Выбор подробного режима так, как его хранит и отдаёт сервер: с полями по умолчанию."""
+    return CharacterChoices.model_validate(detailed_choices(**changes)).model_dump(mode="json")
+
+
+async def test_detailed_remembers_the_players_choice_and_gives_it_to_the_owner(world):
+    game, host, _ = await make_game(world)
+    created = (await create(world, host, game["id"], detailed_body())).json()
+
+    response = await my_character(world, host, game["id"])
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "mode": "detailed",
+        "character": created["character"],
+        "choices": detailed_choices_as_stored(),
+    }
+    [row] = await stored_characters(world.db, game["id"])
+    assert row.choices == {"mode": "detailed", "choices": detailed_choices_as_stored()}
+
+
+async def test_the_returned_detailed_choices_can_be_sent_back_to_make_the_same_hero(world):
+    game, host, _ = await make_game(world)
+    first = (await create(world, host, game["id"], detailed_body())).json()["character"]
+    choices = (await my_character(world, host, game["id"])).json()["choices"]
+
+    again = await create(world, host, game["id"], {"mode": "detailed", "choices": choices})
+
+    assert again.status_code == 201, again.text
+    second = again.json()["character"]
+    assert second["id"] != first["id"]
+    assert {**second, "id": ""} == {**first, "id": ""}
+
+
+async def test_quick_remembers_what_the_player_chose_not_what_the_model_invented(world):
+    game, host, _ = await make_game(world)
+    created = (await create(world, host, game["id"], quick_body())).json()
+
+    response = await my_character(world, host, game["id"])
+
+    assert created["character"]["name"] == FLAVOR_ANSWER["name"]  # имя придумала модель
+    assert response.json() == {
+        "mode": "quick",
+        "character": created["character"],
+        "choices": QUICK_CHOICES,  # а в выборе игрока имени не было
+    }
+    [row] = await stored_characters(world.db, game["id"])
+    assert row.choices == {"mode": "quick", "choices": QUICK_CHOICES}
+    assert row.data == created["character"]  # описание от модели записано, выбор остался прежним
+
+
+async def test_quick_remembers_the_name_the_player_gave(world):
+    game, host, _ = await make_game(world)
+    await create(world, host, game["id"], quick_body(name="Борис", class_id="rogue"))
+
+    body = (await my_character(world, host, game["id"])).json()
+
+    assert body["choices"] == {**QUICK_CHOICES, "name": "Борис", "class_id": "rogue"}
+
+
+async def test_random_remembers_only_the_mode(world, monkeypatch):
+    game, host, [friend] = await make_game(world, friends=1)
+    use_provider(monkeypatch, ScriptedProvider())
+    legacy = (await create(world, host, game["id"], {"mode": "random"})).json()
+    hero = await shown(world, friend, game["id"])
+    taken = (await take(world, friend, game["id"], hero["preview_id"])).json()
+
+    for player, created in ((host, legacy), (friend, taken)):
+        body = (await my_character(world, player, game["id"])).json()
+
+        assert body == {"mode": "random", "character": created["character"], "choices": None}
+    rows = {row.user_id: row.choices for row in await stored_characters(world.db, game["id"])}
+    assert rows == {
+        host.id: {"mode": "random", "choices": None},
+        friend.id: {"mode": "random", "choices": None},
+    }
+
+
+async def test_a_hero_made_before_the_choice_was_stored_gives_an_empty_mode_and_choice(world):
+    game, host, _ = await make_game(world)
+    created = (await create(world, host, game["id"], quick_body())).json()
+    async with world.db() as session:  # герой прежней ревизии базы: колонка выбора пуста
+        (await session.get(PlayerCharacter, created["character"]["id"])).choices = None
+        await session.commit()
+
+    response = await my_character(world, host, game["id"])
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"mode": None, "character": created["character"], "choices": None}
+
+
+# Сохранённый выбор читается строго, но формат выбора мог измениться после того, как герой записан.
+# Тогда форма «Изменить героя» открывается пустой, как у героя до миграции: ответ не 500, а сервер
+# пишет в журнал, чей это выбор, не пересказывая его.
+UNREADABLE_CHOICES = {
+    "подробный выбор с полем не того вида": lambda stored: {
+        "mode": "detailed",
+        "choices": {**stored, "base_scores": "не словарь"},
+    },
+    "быстрый выбор с лишним полем": lambda stored: {
+        "mode": "quick",
+        "choices": {**QUICK_CHOICES, "name": stored["name"], "прежнее_поле": 1},
+    },
+    "выбор не объект": lambda stored: {"mode": "detailed", "choices": [stored["name"]]},
+    "способ, которого уже нет": lambda stored: {
+        "mode": "прежний-способ",
+        "choices": {**QUICK_CHOICES, "name": stored["name"]},
+    },
+}
+
+
+@pytest.mark.parametrize("damage", UNREADABLE_CHOICES.values(), ids=list(UNREADABLE_CHOICES))
+async def test_a_stored_choice_that_can_no_longer_be_read_opens_the_form_empty_and_is_logged(
+    world, caplog, damage
+):
+    game, host, _ = await make_game(world)
+    marker = "Тайное-имя-выбора-5518"
+    created = (await create(world, host, game["id"], detailed_body(name=marker))).json()
+    async with world.db() as session:
+        row = await session.get(PlayerCharacter, created["character"]["id"])
+        row.choices = damage(row.choices["choices"])
+        await session.commit()
+
+    with caplog.at_level("WARNING", logger="dnd_server"):
+        response = await my_character(world, host, game["id"])
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"mode": None, "character": created["character"], "choices": None}
+    [record] = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert record.levelno == logging.WARNING and record.name == "dnd_server.characters.service"
+    assert game["id"] in record.getMessage() and created["character"]["id"] in record.getMessage()
+    assert marker not in caplog.text  # самого выбора в журнале нет
+
+
+async def test_a_readable_choice_is_not_logged_as_unreadable(world, caplog):
+    game, host, _ = await make_game(world)
+    await create(world, host, game["id"], quick_body(name="Борис"))
+
+    with caplog.at_level("WARNING", logger="dnd_server"):
+        response = await my_character(world, host, game["id"])
+
+    assert response.status_code == 200 and response.json()["choices"] is not None
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+async def test_a_player_without_a_hero_gets_404_with_a_russian_text(world):
+    game, host, [friend] = await make_game(world, friends=1)
+    await create(world, host, game["id"], quick_body())
+
+    response = await my_character(world, friend, game["id"])
+
+    assert response.status_code == 404
+    assert re.search("[а-яё]", response.json()["detail"], re.IGNORECASE)
+
+
+async def test_creating_again_overwrites_the_choice(world):
+    game, host, _ = await make_game(world)
+    sequence = [
+        (quick_body(name="Борис"), "quick", {**QUICK_CHOICES, "name": "Борис"}),
+        (detailed_body(), "detailed", detailed_choices_as_stored()),
+        ({"mode": "random"}, "random", None),
+        (quick_body(class_id="wizard"), "quick", {**QUICK_CHOICES, "class_id": "wizard"}),
+    ]
+
+    for body, mode, choices in sequence:
+        created = (await create(world, host, game["id"], body)).json()
+
+        mine = (await my_character(world, host, game["id"])).json()
+
+        assert (mine["mode"], mine["choices"]) == (mode, choices)
+        assert mine["character"] == created["character"]
+        assert len(await stored_characters(world.db, game["id"])) == 1  # прежняя строка заменена
+
+
+async def test_a_refused_creation_keeps_the_old_hero_and_his_choice(world):
+    game, host, _ = await make_game(world)
+    await create(world, host, game["id"], detailed_body())
+    before = (await my_character(world, host, game["id"])).json()
+    scores = {"str": 15, "dex": 14, "con": 13, "int": 12, "wis": 10, "cha": 8}
+
+    refused = [
+        await create(world, host, game["id"], quick_body(class_id="druid")),
+        await create(world, host, game["id"], detailed_body(method="roll", base_scores=scores)),
+        await create(world, host, game["id"], detailed_body(skills=[])),
+        await create(world, host, game["id"], {"mode": "random", "preview_id": "rp_" + "0" * 16}),
+    ]
+
+    assert [r.status_code for r in refused] == [422, 422, 422, 409]
+    assert (await my_character(world, host, game["id"])).json() == before
+
+
+async def test_the_choice_stays_when_the_model_could_not_describe_the_hero(world, tmp_path):
+    game, host, _ = await make_game(world)
+    use_scenario(world, write_scenario(tmp_path, {}))  # в сценарии нет ответа на character.flavor
+
+    created = (await create(world, host, game["id"], quick_body(name="Борис"))).json()
+
+    assert created["flavor_error"]
+    body = (await my_character(world, host, game["id"])).json()
+    assert body["choices"] == {**QUICK_CHOICES, "name": "Борис"}
+    assert body["character"] == created["character"]
+
+
+async def test_the_owner_still_reads_the_choice_after_the_game_has_started(world):
+    game, host, _ = await make_game(world)
+    created = (await create(world, host, game["id"], detailed_body())).json()
+    await start_playing(world.db, game["id"])
+
+    response = await my_character(world, host, game["id"])
+
+    assert response.status_code == 200, response.text
+    assert response.json()["choices"] == detailed_choices_as_stored()
+    assert response.json()["character"] == created["character"]
+
+
+async def test_nobody_gets_the_choice_of_another_player(world):
+    game, host, [friend, newcomer] = await make_game(world, friends=2)
+    marker = "Тайный-замысел-хоста-7261"
+    await create(world, host, game["id"], detailed_body(name=marker))
+    await create(world, friend, game["id"], quick_body(class_id="rogue", name="Друг"))
+    world.broadcaster.sent.clear()
+
+    mine_host = await my_character(world, host, game["id"])
+    mine_friend = await my_character(world, friend, game["id"])
+    mine_newcomer = await my_character(world, newcomer, game["id"])  # героя нет: чужого не дают
+
+    assert mine_host.json()["choices"]["name"] == marker
+    assert mine_friend.json()["choices"] == {**QUICK_CHOICES, "class_id": "rogue", "name": "Друг"}
+    assert mine_newcomer.status_code == 404
+    assert marker not in mine_friend.text + mine_newcomer.text
+    # Другие ответы сервера игрокам выбор не содержат вовсе: ни по составу, ни по рассылке лобби.
+    for player in (host, friend, newcomer):
+        summary = await world.http.get(f"/api/games/{game['id']}", headers=player.headers)
+        assert not CHOICE_MARKERS & set(re.findall(r'"(\w+)":', summary.text)), summary.text
+    created_again = await create(world, friend, game["id"], quick_body(class_id="rogue"))
+    assert marker not in created_again.text
+    sent = json.dumps(world.broadcaster.sent, ensure_ascii=False)
+    assert marker not in sent
+    assert not CHOICE_MARKERS & set(re.findall(r'"(\w+)":', sent)), sent
 
 
 # --- формат id персонажа ---
@@ -1636,8 +2017,11 @@ async def test_openapi_describes_the_character_routes(world):
     paths = response.json()["paths"]
     assert "/api/content/creation-options" in paths
     assert set(paths["/api/games/{game_id}/characters"]) == {"post"}
-    assert "/api/games/{game_id}/characters/roll-abilities" in paths
+    assert set(paths["/api/games/{game_id}/characters/random-abilities"]) == {"post"}
+    assert set(paths["/api/games/{game_id}/characters/mine"]) == {"get"}
+    assert "/api/games/{game_id}/characters/roll-abilities" not in paths
     assert "/api/games/{game_id}/characters/backstory-help" in paths
+    assert set(paths["/api/games/{game_id}/characters/random-preview"]) == {"post"}
 
 
 # --- предел вызовов модели из лобби (решение владельца B6.security) ---
@@ -1846,3 +2230,465 @@ async def test_every_model_call_is_logged_without_the_texts_of_the_player_or_the
     assert "character.backstory" in calls[0] and "character.flavor" in calls[1]
     for private in (concept, draft, FLAVOR_ANSWER["name"], FLAVOR_ANSWER["backstory"]):
         assert private not in caplog.text
+
+
+# --- случайный герой с предпросмотром (план B8.s0, решение владельца R1) ---
+#
+# «Бросить судьбу» и «Ещё раз» — `random-preview`: сервер бросает героя и запоминает его для этого
+# игрока и этой игры, ничего не записывая и не зовя нейронку. «Беру» — `mode: random` с
+# `preview_id`: создаётся ровно показанный герой, описание пишет нейронка, как в прежнем режиме.
+
+PREVIEW_ID_FORMAT = re.compile(r"rp_[0-9a-f]{16}")
+UNKNOWN_PREVIEW_ID = "rp_" + "0" * 16
+
+
+class Clock:
+    """Часы теста: время стоит, пока тест его не сдвинет."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def preview(world: World, player: Player, game_id: str) -> httpx.Response:
+    return await world.http.post(characters_url(game_id, "/random-preview"), headers=player.headers)
+
+
+async def shown(world: World, player: Player, game_id: str) -> dict[str, Any]:
+    response = await preview(world, player, game_id)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def take(world: World, player: Player, game_id: str, preview_id: str) -> httpx.Response:
+    return await create(world, player, game_id, {"mode": "random", "preview_id": preview_id})
+
+
+async def test_a_preview_shows_the_engines_hero_and_writes_nothing(world, monkeypatch):
+    game, host, _ = await make_game(world)
+    world.app.state.rng = SeededRng(11)
+    provider = ScriptedProvider()
+    factory_calls = use_provider(monkeypatch, provider)
+    world.broadcaster.sent.clear()
+
+    response = await preview(world, host, game["id"])
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert set(body) == {"preview_id", "character"}
+    assert PREVIEW_ID_FORMAT.fullmatch(body["preview_id"])
+    hero = Character.model_validate(body["character"])
+    expected = random_character(
+        SeededRng(11), load_srd(), taken_classes=set(), character_id=hero.id
+    ).model_copy(update={"player_id": host.id})
+    assert hero == expected  # все числа, навыки, заклинания и снаряжение — от движка
+    assert CHARACTER_ID_FORMAT.fullmatch(hero.id) and hero.id != host.id
+    assert hero.name == UNNAMED_CHARACTER_NAME and hero.persona == Persona()
+    # Ничего не записано, лобби не тронуто, до нейронки дело не дошло.
+    assert await stored_characters(world.db, game["id"]) == []
+    assert (await stored_player(world.db, game["id"], host.id)).character_id is None
+    assert world.broadcaster.sent == []
+    assert factory_calls == [] and provider.requests == []
+
+
+async def test_taking_creates_exactly_the_hero_that_was_shown(world, monkeypatch):
+    game, host, _ = await make_game(world)
+    provider = ScriptedProvider()
+    use_provider(monkeypatch, provider)
+    hero = await shown(world, host, game["id"])
+
+    response = await take(world, host, game["id"], hero["preview_id"])
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["flavor_error"] is None
+    created = Character.model_validate(body["character"])
+    seen = Character.model_validate(hero["character"])
+    assert created.id == seen.id and numbers_of(created) == numbers_of(seen)
+    # Имя и описание пишет нейронка уже после «Беру».
+    assert created.name == FLAVOR_ANSWER["name"]
+    assert created.persona.backstory == FLAVOR_ANSWER["backstory"].strip()
+    [(request, schema)] = provider.requests
+    assert request.purpose == "character.flavor" and request.cheap is True
+    assert schema is PersonaOut
+    [row] = await stored_characters(world.db, game["id"])
+    assert row.data == body["character"] and row.user_id == host.id
+
+
+async def test_taking_does_not_roll_the_hero_again(world):
+    game, host, _ = await make_game(world)
+    world.app.state.rng = SeededRng(5)
+    hero = await shown(world, host, game["id"])
+    world.app.state.rng = SeededRng(999)  # другие броски: заново герой вышел бы другим
+
+    response = await take(world, host, game["id"], hero["preview_id"])
+
+    assert response.status_code == 201, response.text
+    created = Character.model_validate(response.json()["character"])
+    assert numbers_of(created) == numbers_of(Character.model_validate(hero["character"]))
+
+
+async def test_taking_replaces_the_old_hero_like_any_other_creation(world):
+    game, host, [friend] = await make_game(world, friends=1)
+    kept = (await create(world, friend, game["id"], quick_body(class_id="rogue"))).json()
+    first = (await create(world, host, game["id"], quick_body())).json()["character"]
+    assert (await mark_ready(world, host, game["id"])).status_code == 200
+    hero = await shown(world, host, game["id"])
+    world.broadcaster.sent.clear()
+
+    response = await take(world, host, game["id"], hero["preview_id"])
+
+    assert response.status_code == 201, response.text
+    rows = {row.id for row in await stored_characters(world.db, game["id"])}
+    assert rows == {kept["character"]["id"], hero["character"]["id"]}
+    assert first["id"] not in rows
+    player = await stored_player(world.db, game["id"], host.id)
+    assert (player.character_id, player.ready) == (hero["character"]["id"], False)
+    [event] = world.broadcaster.lobby_events()
+    me = next(p for p in event["game"]["players"] if p["user_id"] == host.id)
+    assert (me["has_character"], me["ready"]) == (True, False)
+
+
+async def test_a_preview_can_be_taken_only_once(world, monkeypatch):
+    game, host, _ = await make_game(world)
+    provider = ScriptedProvider()
+    use_provider(monkeypatch, provider)
+    hero = await shown(world, host, game["id"])
+    assert (await take(world, host, game["id"], hero["preview_id"])).status_code == 201
+    saved = [row.data for row in await stored_characters(world.db, game["id"])]
+    world.broadcaster.sent.clear()
+
+    again = await take(world, host, game["id"], hero["preview_id"])
+
+    assert again.status_code == 409, again.text
+    assert set(again.json()) == {"detail"} and says_in_russian(again)
+    assert [row.data for row in await stored_characters(world.db, game["id"])] == saved
+    assert world.broadcaster.sent == [] and len(provider.requests) == 1
+
+
+async def test_a_new_preview_cancels_the_old_one(world):
+    game, host, _ = await make_game(world)
+    first = await shown(world, host, game["id"])
+    second = await shown(world, host, game["id"])
+    assert first["preview_id"] != second["preview_id"]
+    assert first["character"]["id"] != second["character"]["id"]
+
+    old = await take(world, host, game["id"], first["preview_id"])
+
+    assert old.status_code == 409, old.text
+    assert await stored_characters(world.db, game["id"]) == []
+    fresh = await take(world, host, game["id"], second["preview_id"])
+    assert fresh.status_code == 201, fresh.text
+    assert fresh.json()["character"]["id"] == second["character"]["id"]
+
+
+async def test_every_player_has_their_own_live_preview(world):
+    game, host, [friend] = await make_game(world, friends=1)
+    mine = await shown(world, host, game["id"])
+    theirs = await shown(world, friend, game["id"])
+
+    # Предпросмотр друга не отменил мой, а мой id у друга не годится.
+    assert (await take(world, friend, game["id"], mine["preview_id"])).status_code == 409
+    assert (await take(world, host, game["id"], mine["preview_id"])).status_code == 201
+    assert (await take(world, friend, game["id"], theirs["preview_id"])).status_code == 201
+    ids = {row.id for row in await stored_characters(world.db, game["id"])}
+    assert ids == {mine["character"]["id"], theirs["character"]["id"]}
+
+
+async def test_a_foreign_or_unknown_preview_gets_one_and_the_same_refusal(world):
+    game, host, [friend] = await make_game(world, friends=1)
+    other_game, _other_host, _ = await make_game(world, host_login="dev-2", tg_base=2000)
+    joined = await world.http.post(
+        "/api/games/join", headers=host.headers, json={"code": other_game["code"]}
+    )
+    assert joined.status_code == 200
+    hero = await shown(world, host, game["id"])
+
+    refusals = [
+        await take(world, friend, game["id"], hero["preview_id"]),  # id чужого игрока
+        await take(world, host, other_game["id"], hero["preview_id"]),  # та же пара, другая игра
+        await take(world, host, game["id"], UNKNOWN_PREVIEW_ID),  # такого id не было вовсе
+    ]
+
+    assert [r.status_code for r in refusals] == [409, 409, 409]
+    assert len({r.text for r in refusals}) == 1 and says_in_russian(refusals[0])
+    assert hero["preview_id"] not in refusals[0].text
+    assert await stored_characters(world.db, game["id"]) == []
+    assert await stored_characters(world.db, other_game["id"]) == []
+    # Чужие попытки предпросмотр не расходуют.
+    assert (await take(world, host, game["id"], hero["preview_id"])).status_code == 201
+
+
+@pytest.mark.parametrize(
+    "preview_id",
+    [
+        "",
+        "rp_",
+        "rp_zzzzzzzzzzzzzzzz",
+        "rp_0123456789abcdef0",
+        "RP_0123456789ABCDEF",
+        "pc_0123456789abcdef",
+        "x" * 5000,
+        7,
+        ["rp_0123456789abcdef"],
+    ],
+)
+async def test_a_malformed_preview_id_is_a_422(world, preview_id):
+    game, host, _ = await make_game(world)
+
+    response = await create(world, host, game["id"], {"mode": "random", "preview_id": preview_id})
+
+    assert response.status_code == 422, response.text
+    assert set(response.json()) == {"detail"}
+    assert await stored_characters(world.db, game["id"]) == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"character": {"id": "pc_0123456789abcdef"}},
+        {"scores": {"str": 20}},
+        {"hp_max": 99},
+        {"seed": 1},
+        {"class_id": "wizard"},
+    ],
+)
+async def test_taking_accepts_nothing_but_the_preview_id(world, extra):
+    game, host, _ = await make_game(world)
+    hero = await shown(world, host, game["id"])
+
+    response = await create(
+        world, host, game["id"], {"mode": "random", "preview_id": hero["preview_id"], **extra}
+    )
+
+    assert response.status_code == 422, response.text
+    assert await stored_characters(world.db, game["id"]) == []
+    # Неудачный запрос предпросмотр не тратит.
+    assert (await take(world, host, game["id"], hero["preview_id"])).status_code == 201
+
+
+async def test_the_preview_route_needs_a_login(world):
+    game, _host, _ = await make_game(world)
+
+    response = await world.http.post(characters_url(game["id"], "/random-preview"))
+
+    assert response.status_code == 401
+
+
+async def test_a_stranger_gets_404_from_the_preview_like_for_a_game_that_does_not_exist(world):
+    game, host, _ = await make_game(world)
+    stranger = await add_player(world.db, "Чужой", tg_id=5000)
+    missing = "00000000-0000-0000-0000-000000000000"
+    hero = await shown(world, host, game["id"])
+
+    own = await preview(world, stranger, game["id"])
+    absent = await preview(world, stranger, missing)
+    taken = await take(world, stranger, game["id"], hero["preview_id"])
+
+    assert (own.status_code, absent.status_code, taken.status_code) == (404, 404, 404)
+    assert own.json() == absent.json() == taken.json()
+    assert await stored_characters(world.db, game["id"]) == []
+
+
+async def test_a_player_who_left_the_lobby_loses_the_preview(world):
+    game, _host, [friend] = await make_game(world, friends=1)
+    hero = await shown(world, friend, game["id"])
+    left = await world.http.post(f"/api/games/{game['id']}/leave", headers=friend.headers)
+    assert left.status_code == 204
+
+    responses = [
+        await preview(world, friend, game["id"]),
+        await take(world, friend, game["id"], hero["preview_id"]),
+    ]
+
+    assert [r.status_code for r in responses] == [404, 404]
+    assert await stored_characters(world.db, game["id"]) == []
+
+
+async def test_nothing_is_previewed_or_taken_after_the_game_left_the_lobby(world):
+    game, host, [friend] = await make_game(world, friends=1)
+    kept = (await create(world, host, game["id"], detailed_body())).json()["character"]
+    hero = await shown(world, friend, game["id"])
+    await start_playing(world.db, game["id"])
+    world.broadcaster.sent.clear()
+
+    responses = [
+        await preview(world, friend, game["id"]),
+        await take(world, friend, game["id"], hero["preview_id"]),
+    ]
+
+    assert [r.status_code for r in responses] == [409, 409]
+    assert all(set(r.json()) == {"detail"} and says_in_russian(r) for r in responses)
+    [row] = await stored_characters(world.db, game["id"])
+    assert row.data == kept
+    assert world.broadcaster.sent == []
+
+
+async def test_a_preview_prefers_the_class_nobody_has_yet(world):
+    game, host, friends = await make_game(world, friends=5)
+    taken = ["barbarian", "fighter", "rogue", "ranger", "cleric"]
+    for friend, class_id in zip(friends, taken, strict=True):
+        assert (
+            await create(world, friend, game["id"], quick_body(class_id=class_id))
+        ).status_code == 201
+    # Прежний класс самого игрока при новом броске занятым не считается.
+    assert (await create(world, host, game["id"], quick_body(class_id="wizard"))).status_code == 201
+
+    for seed in range(6):
+        world.app.state.rng = SeededRng(seed)
+        hero = await shown(world, host, game["id"])
+
+        assert hero["character"]["class_id"] == "wizard"
+
+
+async def test_the_taken_class_is_not_a_reason_to_refuse_a_shown_hero(world):
+    # Класс отряда — предпочтение при броске, а не правило: за время просмотра его мог занять друг.
+    game, host, [friend] = await make_game(world, friends=1)
+    hero = await shown(world, host, game["id"])
+    taken = await create(
+        world, friend, game["id"], quick_body(class_id=hero["character"]["class_id"])
+    )
+    assert taken.status_code == 201
+
+    response = await take(world, host, game["id"], hero["preview_id"])
+
+    assert response.status_code == 201, response.text
+    assert response.json()["character"]["class_id"] == hero["character"]["class_id"]
+
+
+async def test_previews_are_rate_limited_per_player_and_game(world):
+    clock = Clock()
+    world.app.state.random_previews = RandomPreviews(clock=clock)
+    game, host, [friend] = await make_game(world, friends=1)
+    for _ in range(MAX_PREVIEWS):
+        last = await shown(world, host, game["id"])
+    world.broadcaster.sent.clear()
+
+    refused = await preview(world, host, game["id"])
+
+    assert refused.status_code == 429, refused.text
+    assert set(refused.json()) == {"detail"} and says_in_russian(refused)
+    assert await stored_characters(world.db, game["id"]) == []
+    assert world.broadcaster.sent == []
+    # Предел личный; отказ не отменил последний показанный предпросмотр.
+    assert (await preview(world, friend, game["id"])).status_code == 200
+    clock.now += PREVIEW_WINDOW_S
+    assert (await take(world, host, game["id"], last["preview_id"])).status_code == 201
+    assert (await preview(world, host, game["id"])).status_code == 200
+
+
+async def test_taking_is_not_limited_by_the_preview_rate_and_does_not_reset_it(world, monkeypatch):
+    clock = Clock()
+    world.app.state.random_previews = RandomPreviews(clock=clock)
+    use_provider(monkeypatch, ScriptedProvider())
+    game, host, _ = await make_game(world)
+    for _ in range(MAX_PREVIEWS - 1):
+        await shown(world, host, game["id"])
+    last = await shown(world, host, game["id"])
+
+    taken = await take(world, host, game["id"], last["preview_id"])
+
+    assert taken.status_code == 201, taken.text
+    assert (await preview(world, host, game["id"])).status_code == 429
+
+
+async def test_previews_do_not_spend_the_model_limit_and_never_call_the_model(world, monkeypatch):
+    game, host, _ = await make_game(world)
+    provider = ScriptedProvider()
+    use_provider(monkeypatch, provider)
+    for _ in range(10):
+        await shown(world, host, game["id"])
+    assert provider.requests == []
+
+    for _ in range(MAX_MODEL_CALLS):
+        assert (await backstory_help(world, host, game["id"])).status_code == 200
+
+    assert (await backstory_help(world, host, game["id"])).status_code == 429
+    assert len(provider.requests) == MAX_MODEL_CALLS
+
+
+async def test_taking_waits_behind_the_one_model_call_of_the_player(world, monkeypatch):
+    game, host, _ = await make_game(world)
+    hero = await shown(world, host, game["id"])
+    provider = GatedProvider()
+    use_provider(monkeypatch, provider)
+    slow = asyncio.create_task(backstory_help(world, host, game["id"]))
+    await provider.wait_for_calls(1)
+    world.broadcaster.sent.clear()
+
+    refused = await asyncio.wait_for(take(world, host, game["id"], hero["preview_id"]), 5)
+
+    assert refused.status_code == 429, refused.text
+    assert await stored_characters(world.db, game["id"]) == []
+    assert world.broadcaster.lobby_events() == []
+    provider.release.set()
+    assert (await asyncio.wait_for(slow, 5)).status_code == 200
+    # Отказ предпросмотр не потратил: после ответа модели «Беру» проходит.
+    assert (await take(world, host, game["id"], hero["preview_id"])).status_code == 201
+
+
+async def test_after_the_model_limit_the_shown_hero_is_kept_without_a_description(
+    world, monkeypatch
+):
+    game, host, _ = await make_game(world)
+    provider = ScriptedProvider()
+    use_provider(monkeypatch, provider)
+    for _ in range(MAX_MODEL_CALLS):
+        assert (await backstory_help(world, host, game["id"])).status_code == 200
+    hero = await shown(world, host, game["id"])
+
+    response = await take(world, host, game["id"], hero["preview_id"])
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert "предел" in body["flavor_error"].lower()
+    created = Character.model_validate(body["character"])
+    assert numbers_of(created) == numbers_of(Character.model_validate(hero["character"]))
+    assert created.name == UNNAMED_CHARACTER_NAME and created.persona == Persona()
+    assert len(provider.requests) == MAX_MODEL_CALLS  # лишнего вызова нет
+
+
+async def test_a_model_failure_does_not_lose_the_shown_hero(world, tmp_path):
+    game, host, _ = await make_game(world)
+    hero = await shown(world, host, game["id"])
+    use_scenario(world, write_scenario(tmp_path, {}))  # в сценарии нет ответа на character.flavor
+
+    response = await take(world, host, game["id"], hero["preview_id"])
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert re.search("[а-яё]", body["flavor_error"], re.IGNORECASE)
+    created = Character.model_validate(body["character"])
+    assert numbers_of(created) == numbers_of(Character.model_validate(hero["character"]))
+    assert created.name == UNNAMED_CHARACTER_NAME
+    [row] = await stored_characters(world.db, game["id"])
+    assert row.data == body["character"]
+
+
+async def test_two_simultaneous_takes_of_one_preview_leave_exactly_one_hero(world, monkeypatch):
+    game, host, _ = await make_game(world)
+    use_provider(monkeypatch, ScriptedProvider())
+    hero = await shown(world, host, game["id"])
+
+    responses = await asyncio.gather(
+        take(world, host, game["id"], hero["preview_id"]),
+        take(world, host, game["id"], hero["preview_id"]),
+    )
+
+    statuses = sorted(r.status_code for r in responses)
+    assert statuses[0] == 201 and statuses[1] in (409, 429), [r.text for r in responses]
+    [row] = await stored_characters(world.db, game["id"])
+    assert row.id == hero["character"]["id"]
+
+
+async def test_the_legacy_random_mode_still_rolls_and_creates_at_once(world):
+    game, host, _ = await make_game(world)
+    world.app.state.rng = SeededRng(11)
+
+    response = await create(world, host, game["id"], {"mode": "random"})
+
+    assert response.status_code == 201, response.text
+    assert (await stored_player(world.db, game["id"], host.id)).character_id is not None
+    assert world.app.state.random_previews.current(game["id"], host.id) is None

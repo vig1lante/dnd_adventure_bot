@@ -1,0 +1,50 @@
+/*
+ * Токены, не зависящие от темы: шрифты, кегль, отступы, скругления, движение, фактуры.
+ * Цвета — в tokens.css. Здесь нельзя ссылаться на var(--color-*): такое значение
+ * вычислилось бы на :root и не поменялось бы внутри блока с другой темой.
+ */
+
+:root {
+  /* Заголовки — книжная антиква с «фэнтезийным» характером, текст — Alegreya. */
+  --font-display:
+    "Cormorant Garamond", "Alegreya", Georgia, "Times New Roman", serif;
+  --font-body: "Alegreya", Georgia, "Times New Roman", serif;
+
+  /* Кегль: база 17 px, рассказ мастера читают вслух — он крупнее. */
+  --text-xs: 0.8125rem;
+  --text-sm: 0.9375rem;
+  --text-base: 1.0625rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.625rem;
+  --text-narration: 1.3125rem;
+  --leading-tight: 1.2;
+  --leading-body: 1.5;
+  --leading-narration: 1.65;
+
+  /* Отступы */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  --radius-sm: 0.5rem;
+  --radius-md: 0.875rem;
+  --radius-lg: 1.25rem;
+  --radius-pill: 999px;
+
+  /* Нажимаемая область — не меньше 44 px (2.75rem при 16 px). */
+  --tap-size: 2.75rem;
+
+  /* Основная ширина — телефон 360–430 px; на широком экране колонка не растягивается. */
+  --app-max-width: 30rem;
+
+  /* Движение: мягкое и медленное. */
+  --ease-soft: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dur-quick: 160ms;
+  --dur-soft: 480ms;
+
+  /* Бумажный шум: серое зерно, сила задаётся --noise-opacity темы. */
+  --texture-noise: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n' x='0' y='0'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}

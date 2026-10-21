@@ -44,6 +44,7 @@ from dnd_engine.state import GameState, GameTime, RulesRef, Scene, SceneType, Sp
 from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.characters import service as characters_service
+from dnd_server.characters.previews import RandomPreviews
 from dnd_server.characters.service import new_character_id
 from dnd_server.config import HOST, PORT, Settings
 from dnd_server.db.models import (
@@ -68,7 +69,14 @@ from dnd_server.dm import provider as provider_module
 from dnd_server.dm import turn as turn_module
 from dnd_server.dm.provider import GameProviders, bridge_url, game_provider
 from dnd_server.dm.spotlight import SPOTLIGHT_HINT_AFTER, spotlight_hints, update_spotlight
-from dnd_server.dm.turn import Deps, TurnOutcome, regenerate_last_turn, run_dm_turn
+from dnd_server.dm.turn import (
+    Deps,
+    TurnOutcome,
+    failed_turn_refusal,
+    failure_text,
+    regenerate_last_turn,
+    run_dm_turn,
+)
 from dnd_server.games import service as games_service
 from dnd_server.games.service import Conflict, GameLocks, NotFound
 from dnd_server.llm.anthropic_api import AnthropicProvider
@@ -285,6 +293,12 @@ class World:
         async with self.db() as session:
             user = await session.get(User, self.players[key].user_id)
             return (await snapshot_for(session, user, self.game_id, srd=self.deps.srd))["feed"]
+
+    async def sheet_of(self, key: str) -> dict[str, Any]:
+        """Лист героя игрока в снимке, который тот получает при подключении."""
+        async with self.db() as session:
+            user = await session.get(User, self.players[key].user_id)
+            return (await snapshot_for(session, user, self.game_id, srd=self.deps.srd))["character"]
 
 
 @pytest.fixture(scope="module")
@@ -589,6 +603,7 @@ def test_character_help_asks_the_same_function_for_the_provider(monkeypatch, set
         turn_tokens=tokens,  # type: ignore[arg-type]
         srd=srd,
         rng=SeededRng(1),
+        previews=RandomPreviews(),
     )
     game = type("GameOutStub", (), {"provider": "fake", "model": None})()
 
@@ -859,6 +874,121 @@ async def test_a_found_item_of_a_public_turn_is_in_the_common_feed(world):
     line = next(m for m in await world.messages() if m.kind == MessageKind.SYSTEM)
     assert line.audience == "all"
     assert "Борис" in line.text
+
+
+# --- предметы приключения в листе героя: ход мастера, событие, снимок (проверка B8, fix 5) ---
+
+KEY_LINE = {"item_id": "chest-key", "qty": 1, "equipped": False, "name": "Запасной ключ Ульриха"}
+
+
+def live_sheets(world: World) -> dict[str, dict[str, Any]]:
+    """Последний лист, который получил каждый игрок событием `character` (id игрока -> лист)."""
+    return {who: payload["character"] for payload, who in world.broadcaster.of_type("character")}
+
+
+async def assert_snapshot_sheets_equal_live_ones(world: World) -> None:
+    sheets = live_sheets(world)
+    for key, player in world.players.items():
+        assert await world.sheet_of(key) == sheets[player.user_id], key
+
+
+async def test_an_item_the_master_gives_reaches_the_sheet_of_its_hero_in_the_event_and_the_snapshot(
+    world,
+):
+    world.use_scenario(
+        scenario_turn(
+            tool("give_item", item_id="chest-key", character_id="$pc2"),
+            tool("chronicle", entry="з"),
+            say("Итог."),
+        )
+    )
+    await world.act("boris", "Прошу ключ у Марты")
+
+    await world.run()
+
+    sheets = live_sheets(world)
+    assert sheets[world.boris.user_id]["inventory"][-1] == KEY_LINE
+    for key in ("alice", "vera"):
+        assert "chest-key" not in dump(sheets[world.players[key].user_id]), key
+    assert [line for line in (await world.sheet_of("boris"))["inventory"] if "name" in line] == [
+        KEY_LINE
+    ]
+    await assert_snapshot_sheets_equal_live_ones(world)
+
+
+async def test_an_item_the_master_passes_on_in_the_next_turn_moves_between_the_sheets(world):
+    world.use_scenario(
+        scenario_turn(
+            tool("give_item", item_id="chest-key", character_id="$pc2"),
+            tool("chronicle", entry="з"),
+            say("Один."),
+        ),
+        scenario_turn(
+            tool("give_item", item_id="chest-key", character_id="$pc1"),
+            tool("chronicle", entry="з"),
+            say("Два."),
+        ),
+    )
+    await world.run()
+    await world.act("alice", "Прошу ключ у Бориса")
+    world.broadcaster.sent.clear()
+
+    await world.run()
+
+    sheets = live_sheets(world)
+    assert sheets[world.alice.user_id]["inventory"][-1] == KEY_LINE
+    assert "chest-key" not in dump(sheets[world.boris.user_id])
+    await assert_snapshot_sheets_equal_live_ones(world)
+
+
+async def test_an_item_the_master_takes_back_leaves_the_sheet_in_the_event_and_the_snapshot(world):
+    world.use_scenario(
+        scenario_turn(
+            tool("give_item", item_id="chest-key", character_id="$pc2"),
+            tool("chronicle", entry="з"),
+            say("Один."),
+        ),
+        scenario_turn(
+            tool("take_item", item_id="chest-key", character_id="$pc2", to="gone"),
+            tool("chronicle", entry="з"),
+            say("Два."),
+        ),
+    )
+    await world.run()
+    assert KEY_LINE in (await world.sheet_of("boris"))["inventory"]
+    await world.act("boris", "Отдаю ключ Марте")
+    world.broadcaster.sent.clear()
+
+    await world.run()
+
+    assert all("chest-key" not in dump(sheet) for sheet in live_sheets(world).values())
+    await assert_snapshot_sheets_equal_live_ones(world)
+
+
+async def test_regenerate_takes_the_item_back_from_the_sheets_in_the_rolled_back_state(world):
+    world.use_scenario(
+        scenario_turn(
+            tool("give_item", item_id="chest-key", character_id="$pc2"),
+            tool("chronicle", entry="з"),
+            say("Старый рассказ."),
+        ),
+        scenario_turn(
+            tool("give_item", item_id="chest-key", character_id="$pc3"),
+            tool("chronicle", entry="з"),
+            say("Новый рассказ."),
+        ),
+    )
+    await world.run()
+    world.broadcaster.sent.clear()
+
+    await world.regenerate()
+
+    sheets = world.broadcaster.of_type("character")
+    rolled_back, renewed = sheets[:3], sheets[3:]
+    assert len(renewed) == 3  # откат и итог новой попытки — по листу на каждого игрока
+    assert all("chest-key" not in dump(payload) for payload, _ in rolled_back)
+    assert [who for payload, who in renewed if "chest-key" in dump(payload)] == [world.vera.user_id]
+    await assert_snapshot_sheets_equal_live_ones(world)
 
 
 async def test_findings_flags_and_damage_leave_no_lines_in_the_feed(world):
@@ -1482,6 +1612,70 @@ async def test_the_host_hears_that_the_master_failed_and_everybody_sees_the_phas
     feed = world.broadcaster.of_type("feed_item")
     assert [(p["item"]["kind"], who) for p, who in feed] == [("system", world.alice.user_id)]
     assert all("Мастер не справился" not in i["text"] for i in await world.feed_of("boris"))
+
+
+async def test_the_note_of_a_failed_round_says_that_the_moves_of_the_players_are_kept(
+    monkeypatch, world
+):
+    use_provider(monkeypatch, StubProvider(RuntimeError("баг")))
+
+    await world.run()
+
+    (note,) = [m for m in await world.messages() if m.kind == MessageKind.SYSTEM]
+    assert "Ходы игроков сохранены" in note.text
+
+
+async def test_the_note_of_a_failed_opening_speaks_of_the_start_and_not_of_player_moves(
+    monkeypatch, opening_world
+):
+    # У открытия игры ходов игроков нет: «ходы сохранены» только сбило бы хоста с толку.
+    use_provider(monkeypatch, StubProvider(RuntimeError("баг")))
+
+    outcome = await opening_world.run(TurnKind.OPENING)
+
+    assert outcome.status == TurnStatus.FAILED
+    (note,) = [m for m in await opening_world.messages() if m.kind == MessageKind.SYSTEM]
+    assert note.audience == opening_world.alice.user_id  # только хост
+    assert note.text == (
+        "Мастер не справился с началом игры: внутренняя ошибка сервера. Нажмите «Повторить»."
+    )
+    assert "игроков" not in note.text and "ходы" not in note.text.lower()
+
+
+@pytest.mark.parametrize(
+    ("kind", "note", "refusal"),
+    [
+        (
+            TurnKind.OPENING,
+            "Мастер не справился с началом игры: причина. Нажмите «Повторить».",
+            "Мастер не справился с началом игры: хост может нажать «Повторить».",
+        ),
+        (
+            TurnKind.CAMP_END,
+            "Мастер не справился с концом привала: причина. Нажмите «Повторить».",
+            "Мастер не справился с концом привала: хост может нажать «Повторить».",
+        ),
+        (
+            TurnKind.ROUND,
+            "Мастер не справился с ходом: причина. Ходы игроков сохранены — нажмите «Повторить».",
+            "Мастер не справился с ходом: ходы сохранены, хост может нажать «Повторить».",
+        ),
+        (
+            TurnKind.COMBAT,
+            "Мастер не справился с ходом: причина. Ходы игроков сохранены — нажмите «Повторить».",
+            "Мастер не справился с ходом: ходы сохранены, хост может нажать «Повторить».",
+        ),
+    ],
+    ids=["открытие игры", "конец привала", "раунд", "бой"],
+)
+def test_the_texts_of_a_failure_speak_of_player_moves_only_where_there_are_some(
+    kind, note, refusal
+):
+    # У открытия игры и конца привала ходов игроков нет (на привале только реплики у костра):
+    # «ходы сохранены» там было бы неправдой. Ход вида `kind` объясняют два текста: сообщение хосту
+    # и отказ игроку, который пытается сдать ход.
+    assert failure_text(kind, "причина") == note
+    assert failed_turn_refusal(kind) == refusal
 
 
 async def test_a_failed_turn_can_be_repeated_and_the_scenario_goes_on(world):

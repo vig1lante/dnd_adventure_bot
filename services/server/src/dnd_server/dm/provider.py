@@ -6,8 +6,10 @@
 `FakeProvider`, реестр токенов хода и адрес моста MCP задавались в одном месте. Сама сборка
 (`llm.factory.make_provider`) в сеть не ходит.
 
-Адрес моста — это адрес, по которому слушает сам сервер: `HOST` и `PORT` из настроек запуска.
-Мост MCP (процесс `claude_code_cli`) обращается по нему к внутреннему API сервера.
+Адрес моста — это адрес, по которому слушает сам сервер: `HOST` и порт процесса (`serving_port`:
+`PORT`, а при `dnd-server --port` — выбранный). Мост MCP (процесс `claude_code_cli`) обращается по
+нему к внутреннему API сервера и несёт в адресе токен хода, поэтому порт не должен расходиться
+с тем, на котором сервер слушает на самом деле.
 
 Ход мастера берёт провайдера из `GameProviders`: у `FakeProvider` очередь ходов сценария хранится
 в самом провайдере, и «Повторить» или следующий раунд должны получить следующий ход сценария, а не
@@ -17,7 +19,7 @@
 
 from collections.abc import Sequence
 
-from dnd_server.config import HOST, PORT, Settings
+from dnd_server.config import HOST, Settings, serving_port
 from dnd_server.llm.base import LLMProvider
 from dnd_server.llm.factory import make_provider
 from dnd_server.llm.internal_api import TurnTokens
@@ -25,7 +27,7 @@ from dnd_server.llm.internal_api import TurnTokens
 
 def bridge_url() -> str:
     """Адрес сервера для моста MCP: тот же, по которому слушает `dnd-server`."""
-    return f"http://{HOST}:{PORT}"
+    return f"http://{HOST}:{serving_port()}"
 
 
 def game_provider(

@@ -112,7 +112,14 @@ from dnd_server.dm.combat_flow import (
     waiting_hero,
 )
 from dnd_server.dm.text import safe_traceback
-from dnd_server.dm.turn import Deps, TurnOutcome, regenerate_last_turn, run_dm_turn
+from dnd_server.dm.turn import (
+    Deps,
+    TurnOutcome,
+    failed_turn_refusal,
+    failure_text,
+    regenerate_last_turn,
+    run_dm_turn,
+)
 from dnd_server.dm.weaving import begin_weaving
 from dnd_server.games.hooks import send_to_game
 from dnd_server.games.service import Conflict, Forbidden, GameError, Invalid, NotFound
@@ -312,9 +319,8 @@ async def _turn_for_action(
         case TurnPhase.RESOLVING:
             raise Conflict("Мастер разбирает ход: сейчас ходы не принимаются.")
         case TurnPhase.DM_FAILED:
-            raise Conflict(
-                "Мастер не справился с ходом: ходы сохранены, хост может нажать «Повторить»."
-            )
+            turn = await _current_turn(session, game)
+            raise Conflict(failed_turn_refusal(turn.kind))
         case TurnPhase.CAMP:
             raise Conflict("Сейчас привал: ходы не принимаются.")
         case _:
@@ -1162,13 +1168,13 @@ async def _fail_interrupted(flow: Flow, game_id: str) -> None:
         game = await session.scalar(select(Game).where(Game.id == game_id, _interrupted()))
         if game is None:
             return  # игру успели изменить: она уже не прервана
-        note_text = (
-            "Мастер не справился с началом игры: сервер был перезапущен во время вплетения "
-            "героев в историю. Нажмите «Повторить»."
-            if game.current_turn_id is None
-            else "Мастер не справился с ходом: сервер был перезапущен во время разбора. "
-            "Ходы игроков сохранены — нажмите «Повторить»."
-        )
+        if game.current_turn_id is None:  # вплетение шло или открытие не начиналось
+            note_text = failure_text(
+                TurnKind.OPENING, "сервер был перезапущен во время вплетения героев в историю"
+            )
+        else:
+            turn = await _current_turn(session, game)
+            note_text = failure_text(turn.kind, "сервер был перезапущен во время разбора")
         note = await _write_interrupted(
             flow, session, game, cause=SERVER_RESTARTED, note_text=note_text
         )

@@ -4,11 +4,17 @@
 выбора по правилам SRD и сам считает все числа (HP, ячейки, ресурсы). Быстрый и случайный
 режимы (`quick_character`, `random_character`) только собирают `CharacterChoices` и отдают их
 на ту же проверку. Все броски идут через переданный `Rng`.
+
+Характеристики героя задаются только в рамках 27 очков (решение владельца R9): покупкой очков или
+стандартным набором, который стоит те же 27. Броска `4d6kh3` нет; «Распределить случайно» —
+`random_point_buy`: случайная раскладка тех же 27 очков, где больше достаётся ключевым
+характеристикам класса.
 """
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
+from functools import cache
 from types import MappingProxyType
 from typing import NamedTuple
 
@@ -25,7 +31,6 @@ from dnd_engine.content import (
     SpellDef,
     SrdContent,
 )
-from dnd_engine.dice import roll
 from dnd_engine.rng import Rng
 
 CHARACTER_LEVEL = 3  # уровень всех персонажей среза
@@ -37,14 +42,6 @@ POINT_BUY_COST: Mapping[int, int] = MappingProxyType(
     {8: 0, 9: 1, 10: 2, 11: 3, 12: 4, 13: 5, 14: 7, 15: 9}
 )
 STANDARD_ARRAY = (15, 14, 13, 12, 10, 8)
-
-# Легальный бросок: шесть значений 4d6kh3 (от 3 до 18) с защитой баланса — сумма
-# модификаторов набора лежит в [+3, +7], границы включены.
-ROLLED_SET_SIZE = 6
-ROLLED_SCORE_MIN = 3
-ROLLED_SCORE_MAX = 18
-ROLLED_MODIFIER_SUM_MIN = 3
-ROLLED_MODIFIER_SUM_MAX = 7
 
 # Бонус предыстории: «+2 и +1» к двум характеристикам или «+1» к трём (по убыванию).
 MAJOR_MINOR_BONUS = (2, 1)
@@ -86,6 +83,9 @@ FIGHTING_STYLES: Mapping[str, FightingStyle] = MappingProxyType(
 class AbilityMethod(StrEnum):
     POINT_BUY = "point_buy"
     STANDARD_ARRAY = "standard_array"
+    # Бросок убран из создания (решение владельца R9). Значение осталось в перечне только затем,
+    # чтобы старый клиент получил от `build_character` понятную русскую проблему, а не безликую
+    # ошибку разбора; героя этим способом создать нельзя.
     ROLL = "roll"
 
 
@@ -116,33 +116,6 @@ class CharacterValidationError(ValueError):
         super().__init__(
             "Выбор персонажа недопустим:\n" + "\n".join(f"- {p}" for p in self.problems)
         )
-
-
-# --- бросок характеристик ---
-
-
-def _is_legal_rolled_set(scores: Sequence[int]) -> bool:
-    """Набор мог выпасть при броске: шесть целых значений 3…18 с суммой модификаторов в [+3, +7].
-
-    Единое правило легального броска: по нему `roll_ability_set` решает, принять ли набор,
-    а `build_character` проверяет набор, который сервер выдал игроку."""
-    if len(scores) != ROLLED_SET_SIZE:
-        return False
-    # Точное `int`: bool — подкласс int, но `True` не значение характеристики.
-    if not all(type(s) is int and ROLLED_SCORE_MIN <= s <= ROLLED_SCORE_MAX for s in scores):
-        return False
-    return ROLLED_MODIFIER_SUM_MIN <= sum(modifier(s) for s in scores) <= ROLLED_MODIFIER_SUM_MAX
-
-
-def roll_ability_set(rng: Rng) -> list[int]:
-    """Шесть раз `4d6kh3`; набор перебрасывается целиком, пока он не станет легальным."""
-    while True:
-        scores = [
-            roll("4d6kh3", rng=rng, reason="бросок характеристики").total
-            for _ in range(ROLLED_SET_SIZE)
-        ]
-        if _is_legal_rolled_set(scores):
-            return scores
 
 
 # --- проверки выбора: каждая возвращает список проблем (пустой — всё в порядке) ---
@@ -182,7 +155,15 @@ def _check_point_buy(scores: Mapping[Ability, int]) -> list[str]:
     return problems
 
 
-def _check_base_scores(choices: CharacterChoices, rolled_set: list[int] | None) -> list[str]:
+ROLL_REMOVED_PROBLEM = (
+    "бросок характеристик больше не используется: распределите 27 очков (покупка очков)"
+    " или возьмите стандартный набор"
+)
+
+
+def _check_base_scores(choices: CharacterChoices) -> list[str]:
+    if choices.method is AbilityMethod.ROLL:
+        return [ROLL_REMOVED_PROBLEM]
     scores = choices.base_scores
     if missing := [ability for ability in Ability if ability not in scores]:
         return ["не заданы характеристики: " + ", ".join(ABILITY_NAMES_RU[a] for a in missing)]
@@ -191,18 +172,6 @@ def _check_base_scores(choices: CharacterChoices, rolled_set: list[int] | None) 
             return _check_point_buy(scores)
         case AbilityMethod.STANDARD_ARRAY:
             return _check_permutation("стандартный набор", scores, STANDARD_ARRAY)
-        case AbilityMethod.ROLL:
-            if rolled_set is None:
-                return ["бросок: нет выпавшего набора (rolled_set)"]
-            # С нелегальным набором сверять перестановку бессмысленно: он не мог выпасть.
-            if not _is_legal_rolled_set(rolled_set):
-                return [
-                    f"бросок: набор {_numbers(rolled_set)} не мог выпасть — нужно"
-                    f" {ROLLED_SET_SIZE} целых значений от {ROLLED_SCORE_MIN} до"
-                    f" {ROLLED_SCORE_MAX}, сумма модификаторов — от +{ROLLED_MODIFIER_SUM_MIN}"
-                    f" до +{ROLLED_MODIFIER_SUM_MAX}"
-                ]
-            return _check_permutation("бросок", scores, rolled_set)
 
 
 def _check_background_bonus(bonus: Mapping[Ability, int], background: BackgroundDef) -> list[str]:
@@ -216,6 +185,8 @@ def _check_background_bonus(bonus: Mapping[Ability, int], background: Background
 
 
 def _check_score_cap(choices: CharacterChoices) -> list[str]:
+    if choices.method is AbilityMethod.ROLL:
+        return []  # значения отвергнутого способа не разбираем: причина уже названа одна
     return [
         f"{ABILITY_NAMES_RU[ability]}: итоговое значение {total} больше {MAX_ABILITY_SCORE}"
         for ability, base in choices.base_scores.items()
@@ -463,15 +434,10 @@ def _assemble(choices: CharacterChoices, content: SrdContent, character_id: str)
 
 
 def build_character(
-    choices: CharacterChoices,
-    content: SrdContent,
-    *,
-    rolled_set: list[int] | None = None,
-    character_id: str,
+    choices: CharacterChoices, content: SrdContent, *, character_id: str
 ) -> Character:
     """Проверяет выбор по правилам и собирает персонажа 3-го уровня.
 
-    `rolled_set` — набор, который сервер выбросил игроку (для способа `ROLL`).
     Нарушения не прерывают проверку: `CharacterValidationError.problems` содержит их все.
     """
     species = content.species.get(choices.species)
@@ -482,7 +448,7 @@ def build_character(
         *_unknown("вид", choices.species, content.species),
         *_unknown("класс", choices.class_id, content.classes),
         *_unknown("предыстория", choices.background, content.backgrounds),
-        *_check_base_scores(choices, rolled_set),
+        *_check_base_scores(choices),
         *_check_score_cap(choices),
     ]
     # Проверки, которым нужны данные записи, пропускаются, если запись не найдена.
@@ -592,6 +558,48 @@ def _shuffled[T](rng: Rng, items: Sequence[T]) -> list[T]:
         j = rng.randint(0, i)
         result[i], result[j] = result[j], result[i]
     return result
+
+
+# Первые позиции приоритета класса — ключевые характеристики: как и в `random_character`, они
+# получают лучшие значения раскладки, а остальные четыре делят оставшиеся в случайном порядке.
+KEY_ABILITY_COUNT = 2
+PRIMARY_ABILITY_MIN = 14  # основная характеристика получает 15 или 14
+
+
+@cache
+def _budget_layouts() -> tuple[tuple[int, ...], ...]:
+    """Все раскладки шести значений (по убыванию), стоящие ровно `POINT_BUY_BUDGET` очков,
+    с основной характеристикой не ниже `PRIMARY_ABILITY_MIN`. Строится из `POINT_BUY_COST`, поэтому
+    легальность по цене и диапазону следует из самой таблицы правил, а не из отдельной проверки."""
+    values = sorted(POINT_BUY_COST, reverse=True)
+    found: list[tuple[int, ...]] = []
+
+    def extend(prefix: tuple[int, ...], ceiling: int, left: int) -> None:
+        if len(prefix) == len(Ability):
+            if left == 0 and prefix[0] >= PRIMARY_ABILITY_MIN:
+                found.append(prefix)
+            return
+        for value in values:
+            if value <= ceiling and POINT_BUY_COST[value] <= left:
+                extend((*prefix, value), value, left - POINT_BUY_COST[value])
+
+    extend((), values[0], POINT_BUY_BUDGET)
+    return tuple(found)
+
+
+def random_point_buy(rng: Rng, content: SrdContent, class_id: str) -> dict[Ability, int]:
+    """Случайная раскладка `POINT_BUY` ровно на `POINT_BUY_BUDGET` очков для класса.
+
+    Раскладка выбирается равновероятно среди всех легальных, в которых основная характеристика
+    не ниже `PRIMARY_ABILITY_MIN`. Лучшее значение получает основная характеристика класса,
+    второе — вторая ключевая, остальные четыре значения раздаются остальным в случайном порядке.
+    Прибавку предыстории игрок выбирает отдельно: максимум после неё — 17, до 20 не дойти.
+    Неизвестный класс — `CharacterValidationError`."""
+    if problems := _unknown("класс", class_id, content.classes):
+        raise CharacterValidationError(problems)
+    layout = _choice(rng, _budget_layouts())
+    values = [*layout[:KEY_ABILITY_COUNT], *_shuffled(rng, layout[KEY_ABILITY_COUNT:])]
+    return _scores_by_priority(content.classes[class_id], values)
 
 
 def _random_skill_choices(

@@ -1,0 +1,270 @@
+import { render, screen, within } from "@testing-library/react";
+import type { GamePhase, TurnPhase } from "../api/types";
+import type { LiveConnection } from "../store/game";
+import { SERVER_TIME, gameView, phaseOf } from "./fixtures";
+import { StatusBar } from "./StatusBar";
+
+const NOW = Date.parse(SERVER_TIME);
+const at = (seconds: number) => new Date(NOW + seconds * 1000).toISOString();
+
+function renderBar(
+  turnPhase: TurnPhase | null,
+  options: {
+    game?: GamePhase;
+    phase?: GamePhase;
+    deadline?: string | null;
+    remaining?: number | null;
+    statuses?: Record<string, "writing" | "ready" | "pass">;
+    connection?: LiveConnection;
+  } = {},
+) {
+  const { game = "playing", phase = game, deadline = null } = options;
+  const view = gameView({
+    phase: phaseOf(turnPhase, {
+      phase,
+      deadline_at: deadline,
+      remaining_seconds: options.remaining ?? null,
+    }),
+    ...(options.statuses === undefined ? {} : { statuses: options.statuses }),
+  });
+  view.game = { ...view.game, phase: game, turn_phase: turnPhase };
+  return render(
+    <StatusBar
+      view={view}
+      clockOffsetMs={0}
+      connection={options.connection ?? "open"}
+    />,
+  );
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
+});
+
+describe("подпись фазы", () => {
+  test.each([
+    ["playing", "discussion", "Обсуждение"],
+    ["playing", "collecting", "Сбор ходов"],
+    ["playing", "resolving", "Мастер думает…"],
+    ["playing", "dm_failed", "Мастер не справился"],
+    ["playing", "combat_wait", "Бой"],
+    ["playing", "camp", "Привал"],
+    ["playing", null, "Игра идёт"],
+    // пауза важнее фазы хода
+    ["paused", "discussion", "Пауза"],
+    ["paused", "collecting", "Пауза"],
+    ["paused", "camp", "Пауза"],
+    // начало игры
+    ["weaving", null, "Мастер связывает ваши истории с миром…"],
+    ["weaving", "resolving", "Мастер связывает ваши истории с миром…"],
+    ["weaving", "dm_failed", "Мастер не справился с началом игры"],
+    ["lobby", null, "Ожидание начала игры"],
+    ["finished", null, "Игра завершена"],
+  ] as const)("%s / %s → «%s»", (game, turnPhase, label) => {
+    renderBar(turnPhase, { game });
+
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
+
+  test("подпись берётся из блока phase, а не из сводки игры: она обновляется своим событием", () => {
+    const view = gameView({ phase: phaseOf("collecting") });
+    view.game = { ...view.game, turn_phase: "discussion" };
+
+    render(<StatusBar view={view} clockOffsetMs={0} connection="open" />);
+
+    expect(screen.getByText("Сбор ходов")).toBeInTheDocument();
+    expect(screen.queryByText("Обсуждение")).toBeNull();
+  });
+});
+
+describe("значки игроков", () => {
+  const statuses = { u1: "writing", u2: "ready", u3: "pass" } as const;
+
+  const chip = (name: string): HTMLElement => {
+    const item = screen.getByText(name).closest("li");
+    if (item === null) throw new Error(`Нет значка игрока ${name}`);
+    return item;
+  };
+
+  test("обсуждение: у каждого игрока «Пишет», «Готов» или «Пас»", () => {
+    renderBar("discussion", { statuses });
+
+    expect(within(chip("Вика")).getByText("Пишет")).toBeInTheDocument();
+    expect(within(chip("Борис")).getByText("Готов")).toBeInTheDocument();
+    expect(within(chip("Мила")).getByText("Пас")).toBeInTheDocument();
+  });
+
+  test.each(["collecting", "dm_failed"] as const)(
+    "в фазе %s значки на месте",
+    (turnPhase) => {
+      renderBar(turnPhase, { statuses });
+
+      expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    },
+  );
+
+  test.each(["resolving", "combat_wait", "camp"] as const)(
+    "в фазе %s значков нет: чьи-то «готов» уже не про этот момент",
+    (turnPhase) => {
+      renderBar(turnPhase, { statuses });
+
+      expect(screen.queryByRole("listitem")).toBeNull();
+    },
+  );
+
+  test("игрок без статуса — имя без значка статуса", () => {
+    renderBar("discussion", { statuses: { u1: "ready" } });
+
+    expect(within(chip("Борис")).queryByText(/Пишет|Готов|Пас/)).toBeNull();
+    expect(within(chip("Вика")).getByText("Готов")).toBeInTheDocument();
+  });
+
+  test("имя игрока выводится как текст", () => {
+    const view = gameView();
+    view.game = {
+      ...view.game,
+      players: [{ ...view.game.players[0], name: "<b>Вика</b>" }],
+    };
+
+    const { container } = render(
+      <StatusBar view={view} clockOffsetMs={0} connection="open" />,
+    );
+
+    expect(container.querySelector("b")).toBeNull();
+    expect(container).toHaveTextContent("<b>Вика</b>");
+  });
+});
+
+describe("отсчёт в строке статуса", () => {
+  test("сбор ходов: время до срока по серверным часам, воск от collect_seconds", () => {
+    const { container } = renderBar("collecting", { deadline: at(60) });
+
+    expect(screen.getByRole("timer")).toHaveAccessibleName(
+      "До конца сбора 1:00",
+    );
+    const wax = container.querySelector(".ui-countdown__wax > span");
+    expect((wax as HTMLElement).style.width).toBe("50%"); // 60 из 120
+  });
+
+  test("бой («Поторопить»): воск от hurry_seconds", () => {
+    const { container } = renderBar("combat_wait", { deadline: at(30) });
+
+    expect(screen.getByRole("timer")).toHaveAccessibleName("Время на ход 0:30");
+    const wax = container.querySelector(".ui-countdown__wax > span");
+    expect((wax as HTMLElement).style.width).toBe("50%"); // 30 из 60
+  });
+
+  test("привал: воск от camp_seconds", () => {
+    const { container } = renderBar("camp", { deadline: at(75) });
+
+    expect(screen.getByRole("timer")).toHaveAccessibleName(
+      "До конца привала 1:15",
+    );
+    const wax = container.querySelector(".ui-countdown__wax > span");
+    expect((wax as HTMLElement).style.width).toBe("25%"); // 75 из 300
+  });
+
+  test("обсуждение без срока: отсчёта нет", () => {
+    renderBar("discussion");
+
+    expect(screen.queryByRole("timer")).toBeNull();
+  });
+
+  test("пауза: остаток стоит, есть метка", () => {
+    renderBar("collecting", {
+      game: "paused",
+      deadline: null,
+      remaining: 42,
+    });
+
+    expect(screen.getByRole("timer")).toHaveTextContent("0:42");
+    expect(screen.getAllByText("Пауза").length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("мастер думает: отсчёта нет", () => {
+    renderBar("resolving");
+
+    expect(screen.queryByRole("timer")).toBeNull();
+  });
+});
+
+describe("связь с игрой", () => {
+  const banner = () => screen.getByText("Переподключаемся…");
+
+  test("обрыв: «Переподключаемся…» внутри самой строки статуса, а не рядом с ней", () => {
+    const { container } = renderBar("discussion", {
+      connection: "reconnecting",
+    });
+
+    const bar = container.querySelector(".game-status");
+    expect(bar).not.toBeNull();
+    expect(bar).toContainElement(banner());
+    // Прилипает именно эта строка (position: sticky в game.css): плашка едет вместе с ней.
+    expect(bar).toContainElement(screen.getByText("Обсуждение"));
+  });
+
+  test("плашка — статус для читалки экрана, обычный текст без разметки", () => {
+    renderBar("discussion", { connection: "reconnecting" });
+
+    expect(banner()).toHaveAttribute("role", "status");
+    expect(banner().children).toHaveLength(0);
+    expect(screen.getAllByText("Переподключаемся…")).toHaveLength(1);
+  });
+
+  test.each(["open", "idle", "connecting"] as const)(
+    "связь %s: плашки нет",
+    (connection) => {
+      renderBar("discussion", { connection });
+
+      expect(screen.queryByText("Переподключаемся…")).toBeNull();
+    },
+  );
+
+  test("плашка не зависит от фазы: она и на сборе ходов, и в бою, и на привале, и на паузе", () => {
+    for (const [turnPhase, game] of [
+      ["collecting", "playing"],
+      ["combat_wait", "playing"],
+      ["camp", "playing"],
+      ["discussion", "paused"],
+    ] as const) {
+      const { unmount } = renderBar(turnPhase, {
+        game,
+        connection: "reconnecting",
+      });
+
+      expect(banner()).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  test("вернулась связь — плашка уходит, строка статуса остаётся", () => {
+    const view = gameView({ phase: phaseOf("collecting") });
+    const { rerender } = render(
+      <StatusBar view={view} clockOffsetMs={0} connection="reconnecting" />,
+    );
+    expect(banner()).toBeInTheDocument();
+
+    rerender(<StatusBar view={view} clockOffsetMs={0} connection="open" />);
+
+    expect(screen.queryByText("Переподключаемся…")).toBeNull();
+    expect(screen.getByText("Сбор ходов")).toBeInTheDocument();
+  });
+
+  test("плашка без движения: при «меньше движения» и без него в ней нет классов анимации", () => {
+    for (const reduce of [false, true]) {
+      vi.stubGlobal("matchMedia", (query: string) => ({
+        matches: query.includes("prefers-reduced-motion") && reduce,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }));
+      const { container, unmount } = renderBar("discussion", {
+        connection: "reconnecting",
+      });
+
+      expect(banner()).toBeInTheDocument();
+      expect(container.querySelector("[class*='ui-anim']")).toBeNull();
+      unmount();
+    }
+  });
+});

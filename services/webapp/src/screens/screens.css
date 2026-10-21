@@ -1,0 +1,352 @@
+/*
+ * Экраны «Мои игры» и лобби: поля форм, списки игроков и игр; строка атрибуции SRD под экраном.
+ * Только токены (tokens.css, theme.css) и элементы src/ui: своих цветов, шрифтов и
+ * анимаций здесь нет (это проверяет screens-style.test.ts). Движение остаётся за
+ * классами ui-anim-*; переходы ниже выключает общий блок prefers-reduced-motion.
+ */
+
+/* Общие мелочи экранов */
+.screen-muted {
+  color: var(--color-text-muted);
+}
+
+/*
+ * Плашка обрыва связи в лобби: строки статуса, как в игре, здесь нет, поэтому липнет сама панель.
+ * Вид тот же, что у строки статуса игры; движения нет. Составной селектор: стили src/ui
+ * подключаются позже этого файла и иначе вернули бы панели `position: relative`.
+ */
+.screen-sticky.ui-panel {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  padding: var(--space-2) var(--space-3);
+  box-shadow:
+    0 0.25rem 0.75rem var(--color-shadow),
+    inset 0 1px 0 var(--color-highlight);
+}
+
+.screen-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.screen-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+/* Атрибуция SRD под любым экраном: мелко, но читаемо; длинный адрес переносится */
+.app-attribution {
+  margin: 0;
+  padding-top: var(--space-3);
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+  border-top: 1px solid var(--color-border);
+}
+
+/* Поля форм */
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.form-field__label {
+  font-weight: 700;
+  color: var(--color-heading);
+}
+
+.form-field__input {
+  width: 100%;
+  min-height: var(--tap-size);
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-text);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.form-field__input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.form-field__input[aria-invalid="true"] {
+  border-color: var(--color-seal-text);
+  border-width: 2px;
+}
+
+.form-field__input:disabled {
+  opacity: 0.55;
+}
+
+.form-field__hint {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.form-field__error {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-seal-text);
+}
+
+/* Подробности отказа правил внутри сообщения об ошибке (ErrorAlert) */
+.form-problems {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-4);
+}
+
+/* Группа полей и выбор одного из вариантов */
+.form-group,
+.form-choices {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.form-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.form-legend {
+  padding: 0;
+  margin-bottom: var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-heading);
+}
+
+.form-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-height: var(--tap-size);
+  padding: var(--space-3);
+  cursor: pointer;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.form-choice input {
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin: 0.125rem 0 0;
+  accent-color: var(--color-accent);
+}
+
+.form-choice:has(input:checked) {
+  border-color: var(--color-accent);
+  border-width: 2px;
+}
+
+.form-choice--disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.form-choice__body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.form-choice__title {
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.form-choice__text {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.form-choice__text > span {
+  display: block;
+}
+
+/* Переключатель */
+.form-switch {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.form-switch__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--tap-size);
+  cursor: pointer;
+}
+
+.form-switch__label {
+  font-weight: 700;
+}
+
+.form-switch__input {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 3.25rem;
+  height: 1.875rem;
+  margin: 0;
+  cursor: pointer;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  transition: background var(--dur-quick) var(--ease-soft);
+}
+
+.form-switch__input::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0.25rem;
+  width: 1.25rem;
+  height: 1.25rem;
+  background: var(--color-text-muted);
+  border-radius: 50%;
+  transform: translateY(-50%);
+  transition: left var(--dur-quick) var(--ease-soft);
+}
+
+.form-switch__input:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.form-switch__input:checked::before {
+  left: calc(100% - 1.5rem);
+  background: var(--color-on-accent);
+}
+
+.form-switch__input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* «Мои игры» */
+.games-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.games-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.games-item__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: var(--space-1);
+}
+
+.games-item__title {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  color: var(--color-heading);
+  overflow-wrap: anywhere;
+}
+
+.games-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+}
+
+/* Лобби */
+.lobby-players {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lobby-player {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-height: var(--tap-size);
+}
+
+.lobby-player__name {
+  min-width: 0;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.lobby-player__tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.lobby-confirm {
+  flex-basis: 100%;
+  padding: var(--space-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-seal-text);
+  border-radius: var(--radius-sm);
+}
+
+.lobby-invite__code {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--color-accent-text);
+}
+
+.lobby-invite__link {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+  user-select: all;
+}

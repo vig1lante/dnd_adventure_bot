@@ -21,11 +21,13 @@ from dnd_server.bot.bot import running_bot
 from dnd_server.bot.handlers import BotDeps
 from dnd_server.bot.notify import Notifier
 from dnd_server.characters.api import router as characters_router
+from dnd_server.characters.previews import RandomPreviews
 from dnd_server.config import Settings, get_settings
 from dnd_server.db.session import create_database_directory, make_engine, make_sessionmaker
 from dnd_server.dm.provider import GameProviders
 from dnd_server.games.api import handle_game_error
 from dnd_server.games.api import router as games_router
+from dnd_server.games.providers import router as providers_router
 from dnd_server.games.service import GameError, GameLocks, JoinAttempts, ModelCalls
 from dnd_server.llm.internal_api import TurnTokens, build_internal_router
 from dnd_server.realtime.hub import Hub
@@ -161,6 +163,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Пределы тоже считаются в памяти процесса: сервер всегда один процесс (README), как и блокировки.
     app.state.model_calls = ModelCalls()
     app.state.join_attempts = JoinAttempts()
+    # Предпросмотры случайных героев (B8.s0) тоже живут в памяти процесса, с пределом частоты.
+    app.state.random_previews = RandomPreviews()
     app.state.hub = Hub()
     app.state.broadcaster = app.state.hub
     app.state.game_hooks = FlowHooks(app)
@@ -185,6 +189,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth_router)
     app.include_router(adventures_router)
     app.include_router(games_router)
+    app.include_router(providers_router)
     app.include_router(characters_router)
     app.include_router(turns_router)
     app.include_router(realtime_router)

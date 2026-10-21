@@ -75,8 +75,11 @@ def test_the_walk_sees_the_routers_of_every_part_of_the_block(env, route_table):
         "/api/games/{game_id}/start",
         "/api/content/creation-options",
         "/api/games/{game_id}/characters",
-        "/api/games/{game_id}/characters/roll-abilities",
+        "/api/games/{game_id}/characters/random-abilities",
+        "/api/games/{game_id}/characters/mine",
         "/api/games/{game_id}/characters/backstory-help",
+        "/api/games/{game_id}/characters/random-preview",
+        "/api/providers",
         "/ws/games/{game_id}",
     }
     only_in_dev = {

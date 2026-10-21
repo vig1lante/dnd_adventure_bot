@@ -1,0 +1,550 @@
+/*
+ * Базовые элементы src/ui: пергамент, дерево, сукно, сургуч и свеча.
+ * Только токены (tokens.css, theme.css) и CSS-фактуры. Анимации сюда не пишем:
+ * их задают классы ui-anim-* из global.css, которые компоненты снимают при
+ * prefers-reduced-motion.
+ */
+
+/* Иконки */
+.ui-icon {
+  flex: none;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* Карточка-пергамент */
+.ui-card {
+  position: relative;
+  isolation: isolate;
+  padding: var(--space-4);
+  color: var(--color-text);
+  background: linear-gradient(
+    180deg,
+    var(--color-surface-raised),
+    var(--color-surface)
+  );
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow:
+    0 0.375rem 1.125rem var(--color-shadow),
+    inset 0 1px 0 var(--color-highlight);
+}
+
+.ui-card::before,
+.ui-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image: var(--texture-noise);
+  border-radius: inherit;
+  opacity: var(--noise-opacity);
+  pointer-events: none;
+}
+
+.ui-section__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-2);
+  color: var(--color-accent-text);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.ui-section__title {
+  min-width: 0;
+}
+
+/* Панель: деревянная рама для групп управления или суконная плашка */
+.ui-panel {
+  position: relative;
+  isolation: isolate;
+  padding: var(--space-4);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 1px 0 var(--color-highlight);
+}
+
+.ui-panel--wood {
+  background: var(--color-header);
+}
+
+.ui-panel--cloth {
+  background:
+    repeating-linear-gradient(
+      45deg,
+      var(--color-highlight) 0,
+      var(--color-highlight) 1px,
+      transparent 1px,
+      transparent 4px
+    ),
+    var(--color-surface-alt);
+}
+
+/* Кнопки: не меньше 44 px по высоте и ширине */
+.ui-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: var(--tap-size);
+  min-width: var(--tap-size);
+  padding: var(--space-2) var(--space-5);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  transition:
+    transform var(--dur-quick) var(--ease-soft),
+    filter var(--dur-quick) var(--ease-soft),
+    box-shadow var(--dur-quick) var(--ease-soft);
+}
+
+.ui-button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+@media (hover: hover) {
+  .ui-button:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+}
+
+.ui-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.ui-button[aria-busy="true"] {
+  cursor: progress;
+}
+
+.ui-button--block {
+  display: flex;
+  width: 100%;
+}
+
+.ui-button--primary {
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+  box-shadow:
+    0 0.1875rem 0 var(--color-shadow),
+    inset 0 1px 0 var(--color-highlight);
+}
+
+.ui-button--secondary {
+  color: var(--color-text);
+  background: transparent;
+  border-color: var(--color-border-strong);
+}
+
+.ui-button--danger {
+  color: var(--color-on-seal);
+  background: var(--color-seal);
+  box-shadow:
+    0 0.1875rem 0 var(--color-shadow),
+    inset 0 1px 0 var(--color-highlight);
+}
+
+/* Плашки */
+.ui-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 1.5rem;
+  padding: 0 var(--space-3);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+}
+
+.ui-badge--neutral {
+  color: var(--color-text);
+  background: var(--color-surface-sunken);
+  border-color: var(--color-border);
+}
+
+.ui-badge--amber {
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+}
+
+.ui-badge--cloth {
+  color: var(--color-on-cloth);
+  background: var(--color-cloth);
+}
+
+.ui-badge--seal {
+  color: var(--color-on-seal);
+  background: var(--color-seal);
+}
+
+/* Отсчёт: свеча и воск, который тает */
+.ui-countdown {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  column-gap: var(--space-3);
+  row-gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.ui-countdown__flame {
+  display: grid;
+  place-items: center;
+  color: var(--color-accent-text);
+}
+
+.ui-countdown--paused .ui-countdown__flame {
+  color: var(--color-text-muted);
+}
+
+.ui-countdown__label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.ui-countdown__time {
+  font-family: var(--font-display);
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: lining-nums tabular-nums;
+  color: var(--color-heading);
+}
+
+.ui-countdown--urgent .ui-countdown__time {
+  color: var(--color-seal-text);
+}
+
+.ui-countdown__wax {
+  grid-column: 1 / -1;
+  height: 0.375rem;
+  overflow: hidden;
+  background: var(--color-hp-track);
+  border-radius: var(--radius-pill);
+}
+
+.ui-countdown__wax > span {
+  display: block;
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: inherit;
+  transition: width 1s linear;
+}
+
+/* Карточка броска */
+.ui-roll {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.ui-roll__die {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 4.5rem;
+  height: 4.5rem;
+  color: var(--color-accent-text);
+}
+
+.ui-roll__face {
+  position: absolute;
+  font-family: var(--font-display);
+  font-size: 1.375rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--color-heading);
+
+  /* Ореол цвета карточки: линии граней кубика не перечёркивают число. */
+  text-shadow:
+    0 0 0.25rem var(--color-surface),
+    0 0 0.25rem var(--color-surface),
+    0 0 0.375rem var(--color-surface);
+}
+
+.ui-roll__body {
+  min-width: 0;
+}
+
+.ui-roll__who {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.ui-roll__label {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  color: var(--color-heading);
+}
+
+.ui-roll__formula {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-1) 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.ui-roll__result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.ui-roll__total {
+  font-family: var(--font-display);
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--color-heading);
+}
+
+.ui-roll__rolls {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+/* «Только тебе»: запечатанное письмо */
+.ui-sealed {
+  position: relative;
+  isolation: isolate;
+  margin-top: var(--space-3);
+  padding: var(--space-5) var(--space-4) var(--space-4);
+  color: var(--color-text);
+  background: linear-gradient(
+    180deg,
+    var(--color-surface-raised),
+    var(--color-surface)
+  );
+  border: 1px dashed var(--color-seal-text);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0.25rem 0.875rem var(--color-shadow);
+}
+
+.ui-sealed__seal {
+  position: absolute;
+  top: -0.875rem;
+  right: var(--space-4);
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  color: var(--color-on-seal);
+  background: var(--color-seal);
+  border-radius: 50%;
+  box-shadow:
+    0 0.125rem 0.375rem var(--color-shadow),
+    inset 0 0.125rem 0.1875rem var(--color-highlight),
+    inset 0 -0.1875rem 0.375rem var(--color-shadow);
+}
+
+.ui-sealed__label {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-seal-text);
+}
+
+.ui-sealed__body {
+  font-style: italic;
+}
+
+/* Здоровье */
+.ui-hp {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.ui-hp__numbers {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.ui-hp__icon {
+  color: var(--color-seal-text);
+}
+
+.ui-hp__track {
+  height: 0.75rem;
+  overflow: hidden;
+  background: var(--color-hp-track);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+}
+
+.ui-hp__fill {
+  height: 100%;
+  border-radius: inherit;
+  transition: width var(--dur-soft) var(--ease-soft);
+}
+
+.ui-hp--high .ui-hp__fill {
+  background: var(--color-hp-high);
+}
+
+.ui-hp--mid .ui-hp__fill {
+  background: var(--color-hp-mid);
+}
+
+.ui-hp--low .ui-hp__fill {
+  background: var(--color-hp-low);
+}
+
+.ui-hp__text {
+  min-width: 3.5rem;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  font-variant-numeric: lining-nums tabular-nums;
+  text-align: right;
+}
+
+/* Жетон героя */
+.ui-avatar {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  font-family: var(--font-display);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--color-on-tone);
+  background: var(--ui-avatar-tone, var(--color-tone-1));
+  border: 2px solid var(--color-border-strong);
+  border-radius: 50%;
+  box-shadow: inset 0 1px 0 var(--color-highlight);
+  user-select: none;
+}
+
+.ui-avatar--sm {
+  width: 2rem;
+  height: 2rem;
+  font-size: var(--text-sm);
+}
+
+.ui-avatar--md {
+  width: 2.75rem;
+  height: 2.75rem;
+  font-size: var(--text-lg);
+}
+
+.ui-avatar--lg {
+  width: 4rem;
+  height: 4rem;
+  font-size: var(--text-xl);
+}
+
+.ui-avatar--tone-0 {
+  --ui-avatar-tone: var(--color-tone-1);
+}
+
+.ui-avatar--tone-1 {
+  --ui-avatar-tone: var(--color-tone-2);
+}
+
+.ui-avatar--tone-2 {
+  --ui-avatar-tone: var(--color-tone-3);
+}
+
+.ui-avatar--tone-3 {
+  --ui-avatar-tone: var(--color-tone-4);
+}
+
+.ui-avatar--tone-4 {
+  --ui-avatar-tone: var(--color-tone-5);
+}
+
+.ui-avatar--tone-5 {
+  --ui-avatar-tone: var(--color-tone-6);
+}
+
+/* Пустое состояние, загрузка, ошибка */
+.ui-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-5) var(--space-4);
+  text-align: center;
+}
+
+.ui-empty__icon {
+  color: var(--color-accent-text);
+}
+
+.ui-empty__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  color: var(--color-heading);
+}
+
+.ui-empty__text {
+  color: var(--color-text-muted);
+}
+
+.ui-empty__action {
+  margin-top: var(--space-3);
+}
+
+.ui-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-4);
+  color: var(--color-text-muted);
+}
+
+.ui-loading__icon {
+  color: var(--color-accent-text);
+}
+
+.ui-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  color: var(--color-text);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-left: 0.25rem solid var(--color-seal);
+  border-radius: var(--radius-sm);
+}
+
+.ui-alert__icon {
+  margin-top: 0.125rem;
+  color: var(--color-seal-text);
+}

@@ -1,0 +1,640 @@
+/*
+ * Экран игры: строка статуса, вкладки, лента, карточки бросков, поле хода, кнопки хоста,
+ * лист героя, отряд, бой (порядок хода и зоны) и привал. Только токены (tokens.css, theme.css) и элементы src/ui: своих
+ * цветов, шрифтов и анимаций здесь нет (это проверяет components-style.test.ts). Движение
+ * остаётся за классами ui-anim-*; переходы ниже выключает общий блок prefers-reduced-motion.
+ *
+ * Стили src/ui подключаются в main.tsx позже этого файла, поэтому, где здесь переопределяется
+ * элемент ui, селектор составной (.game-status.ui-panel): он весит больше и выигрывает.
+ */
+
+/* Связь: плашка своего положения не имеет, она стоит в прилипающей строке статуса (ниже) */
+.game-reconnecting {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-accent-text);
+  text-align: center;
+}
+
+.game-status .game-reconnecting {
+  padding-top: var(--space-1);
+  border-top: 1px dashed var(--color-border);
+}
+
+/* Строка статуса: прилипает к верху, пока листается лента, поэтому она компактная */
+.game-status.ui-panel {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  box-shadow:
+    0 0.25rem 0.75rem var(--color-shadow),
+    inset 0 1px 0 var(--color-highlight);
+}
+
+.game-status__phase {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  color: var(--color-heading);
+}
+
+/* Отсчёт в строке статуса: свеча, подпись и время в одну строку, без своей рамки */
+.game-status .ui-countdown {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  column-gap: var(--space-2);
+  row-gap: var(--space-1);
+}
+
+.game-status .ui-countdown__flame svg {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.game-status .ui-countdown > div:not(.ui-countdown__wax) {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.game-status .ui-countdown__label {
+  margin: 0;
+}
+
+.game-status .ui-countdown__time {
+  font-size: var(--text-lg);
+}
+
+/* Значки игроков */
+.game-players {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.game-players__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--tap-size);
+  padding: var(--space-1) var(--space-3) var(--space-1) var(--space-2);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+}
+
+.game-players__name {
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+/* Вкладки */
+.game-tabs {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.game-tab {
+  min-height: var(--tap-size);
+  padding: var(--space-2) var(--space-1);
+  font-family: var(--font-display);
+  font-size: var(--text-base);
+  font-weight: 700;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+}
+
+.game-tabs--dense .game-tab {
+  padding-inline: 0;
+  font-size: var(--text-xs);
+}
+
+.game-tab--active {
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+}
+
+.game-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.game-panel[hidden] {
+  display: none;
+}
+
+/* Лента */
+.feed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.feed-entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.feed-narration p {
+  overflow-wrap: anywhere;
+}
+
+.feed-system {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.feed-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+
+.feed-line strong {
+  color: var(--color-accent-text);
+}
+
+.feed-secret {
+  margin: 0;
+}
+
+/* Поле хода */
+.composer__stack,
+.sheet-stack,
+.host-panel__stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.composer__note,
+.camp__note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.composer__sealed-text {
+  margin: 0;
+  padding: var(--space-3);
+  white-space: pre-wrap;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+
+.composer__actions,
+.host-panel__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.composer__actions > .ui-button {
+  flex: 1 1 8rem;
+}
+
+/* Кнопки хоста */
+.host-panel__hint {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.host-panel__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-seal-text);
+  border-radius: var(--radius-sm);
+}
+
+.host-panel__confirm p {
+  margin: 0;
+}
+
+/* Лист героя */
+.sheet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.sheet-origin {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.sheet-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.sheet-stat {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.sheet-stat dt {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.sheet-stat dd {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-heading);
+  overflow-wrap: anywhere;
+}
+
+.sheet-effects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.sheet-abilities {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sheet-ability {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.sheet-ability__name {
+  font-weight: 700;
+  color: var(--color-heading);
+}
+
+.sheet-ability__mod {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  color: var(--color-accent-text);
+}
+
+.sheet-ability__score,
+.sheet-ability__save {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.sheet-ability__save {
+  grid-column: 1 / -1;
+}
+
+.sheet-skills,
+.sheet-list,
+.sheet-attacks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sheet-skill {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.sheet-skill__bonus {
+  min-width: 2.5rem;
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--color-accent-text);
+}
+
+.sheet-skill__name {
+  flex: 1;
+  min-width: 0;
+}
+
+.sheet-skill__mark {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.sheet-attack {
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.sheet-attack__head,
+.sheet-attack__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+}
+
+.sheet-attack__line {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.sheet-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  overflow-wrap: anywhere;
+}
+
+.sheet-persona {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.sheet-persona dt {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-accent-text);
+}
+
+.sheet-persona dd {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Отряд */
+.party {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.party-member {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.party-member__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--tap-size);
+}
+
+.party-member__name {
+  min-width: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-heading);
+  overflow-wrap: anywhere;
+}
+
+.party-member__me {
+  color: var(--color-text-muted);
+}
+
+.party-member__effects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+/* Подсказка на «Рассказе» в бою и на привале */
+.game-goto__text {
+  margin: 0 0 var(--space-3);
+  overflow-wrap: anywhere;
+}
+
+/* Бой: кто ходит */
+.combat-turn {
+  margin: 0;
+  padding: var(--space-3);
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-heading);
+  text-align: center;
+  overflow-wrap: anywhere;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+/* Порядок хода */
+.initiative,
+.zones,
+.zone__fighters,
+.camp-lines {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.initiative,
+.zones,
+.camp-lines {
+  gap: var(--space-2);
+}
+
+.initiative__item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.initiative__item--current {
+  border-color: var(--color-accent);
+  box-shadow: inset 0.25rem 0 0 var(--color-accent);
+}
+
+/* Плашка здоровья монстра не растягивается, шкала героя занимает всю ширину */
+.initiative__item .ui-hp,
+.initiative__head {
+  align-self: stretch;
+}
+
+.initiative__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-height: var(--tap-size);
+}
+
+.initiative__name {
+  min-width: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-heading);
+  overflow-wrap: anywhere;
+}
+
+.initiative__mark {
+  display: inline-flex;
+}
+
+.initiative__effects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+/* Зоны боя */
+.zone {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.zone__name {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  color: var(--color-heading);
+  overflow-wrap: anywhere;
+}
+
+.zone__fighters {
+  gap: var(--space-1);
+}
+
+.zone__fighter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+.zone__fighter-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.zone__empty {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+/* Привал */
+.camp__topic {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.camp__heading {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  color: var(--color-heading);
+}
+
+.camp__quiet {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.camp__stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.camp__count {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}

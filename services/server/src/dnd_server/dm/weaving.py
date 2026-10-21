@@ -74,7 +74,7 @@ from dnd_server.dm.text import (
     printable_line,
     safe_traceback,
 )
-from dnd_server.dm.turn import Deps, TurnOutcome, announcing, run_dm_turn
+from dnd_server.dm.turn import Deps, TurnOutcome, announcing, failure_text, run_dm_turn
 from dnd_server.games.hooks import send_to_game
 from dnd_server.games.service import Conflict, NotFound
 from dnd_server.llm.base import JsonRequest, LLMProvider
@@ -687,7 +687,7 @@ async def _abandon_safely(deps: Deps, game_id: str, reason: str) -> None:
     """`dm_failed` с сообщением хосту; если запись не удалась, игра всё равно выходит из «мастер
     думает» короткой отметкой без сообщения (диск полон, база занята). Не прошла и она — ERROR с id
     игры, а «Повторить» примет игру без живого разбора (`dm.turn.LiveRuns`)."""
-    note = f"Мастер не справился с началом игры: {reason}. Нажмите «Повторить»."
+    note = failure_text(TurnKind.OPENING, reason)
     try:
         await _abandon(deps, game_id, note)
     except Exception as exc:

@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, StatementError
 
 from dnd_engine.adventure.loader import load_adventure
@@ -29,7 +29,6 @@ from dnd_server.db.models import (
     GameStateSnapshot,
     Message,
     MessageKind,
-    PendingRoll,
     PlayerAction,
     PlayerCharacter,
     Turn,
@@ -198,6 +197,41 @@ async def test_character_is_saved_as_json_and_restores_the_engine_character(db, 
     assert Character.model_validate(saved.data) == hero
 
 
+async def test_the_choice_of_a_character_is_json_and_its_absence_is_sql_null(db, adventure, hero):
+    await save_host_and_game(db, adventure)
+    choice = {"mode": "quick", "choices": {"class_id": "rogue", "name": None}}
+    other = hero.model_copy(update={"id": "pc-other"})
+    async with db() as session:
+        session.add_all(
+            [
+                PlayerCharacter(
+                    id=hero.id,
+                    game_id="game-1",
+                    user_id="host",
+                    data=hero.model_dump(mode="json"),
+                    choices=choice,
+                ),
+                PlayerCharacter(
+                    id=other.id,
+                    game_id="game-1",
+                    user_id="host",
+                    data=other.model_dump(mode="json"),
+                ),
+            ]
+        )
+        await session.commit()
+
+    async with db() as session:
+        with_choice = await session.get(PlayerCharacter, hero.id)
+        without = await session.get(PlayerCharacter, other.id)
+        # Пустой выбор — настоящий NULL, а не JSON `null`: так же выглядят герои до миграции 0003.
+        empty = await session.scalar(select(func.count()).where(PlayerCharacter.choices.is_(None)))
+
+    assert with_choice.choices == choice
+    assert without.choices is None
+    assert empty == 1
+
+
 async def test_whole_game_is_read_back_after_upgrade(db, adventure, hero):
     state = make_state(adventure, hero)
     deadline = datetime(2026, 10, 19, 12, 30, tzinfo=UTC)
@@ -207,7 +241,11 @@ async def test_whole_game_is_read_back_after_upgrade(db, adventure, hero):
         await session.flush()
         session.add(
             PlayerCharacter(
-                id=hero.id, game_id="game-1", user_id="guest", data=hero.model_dump(mode="json")
+                id=hero.id,
+                game_id="game-1",
+                user_id="guest",
+                data=hero.model_dump(mode="json"),
+                choices={"mode": "random", "choices": None},
             )
         )
         await session.flush()
@@ -217,7 +255,6 @@ async def test_whole_game_is_read_back_after_upgrade(db, adventure, hero):
                     game_id="game-1", user_id="host", is_host=True, ready=True, joined_order=0
                 ),
                 GamePlayer(game_id="game-1", user_id="guest", character_id=hero.id, joined_order=1),
-                PendingRoll(game_id="game-1", user_id="guest", values=[15, 14, 13, 12, 10, 8]),
                 GameStateSnapshot.from_state(state),
                 Turn(
                     id="turn-1",
@@ -268,7 +305,7 @@ async def test_whole_game_is_read_back_after_upgrade(db, adventure, hero):
         players = (
             await session.scalars(select(GamePlayer).order_by(GamePlayer.joined_order))
         ).all()
-        roll = await session.get(PendingRoll, ("game-1", "guest"))
+        saved_hero = await session.get(PlayerCharacter, hero.id)
         turn = await session.get(Turn, "turn-1")
         action = await session.get(PlayerAction, ("turn-1", "guest"))
         message = await session.scalar(select(Message))
@@ -285,7 +322,7 @@ async def test_whole_game_is_read_back_after_upgrade(db, adventure, hero):
         ("host", True, True, None),
         ("guest", False, False, hero.id),
     ]
-    assert roll.values == [15, 14, 13, 12, 10, 8]
+    assert saved_hero.choices == {"mode": "random", "choices": None}
     assert (turn.kind, turn.status, turn.state_version_after) == (
         TurnKind.ROUND,
         TurnStatus.DONE,

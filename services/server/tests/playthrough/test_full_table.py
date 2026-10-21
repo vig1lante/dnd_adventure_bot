@@ -150,7 +150,9 @@ async def test_six_players_get_each_only_his_own_hook_and_secrets_in_one_round(
                 assert (GOAL6[owner] in text) == (owner == key), (owner, key)
             assert ("ПОЛНОЧЬ" in text) == (key == "boris")
             assert (PRIVATE_TO_GLEB in text) == (key == "gleb")
-            assert ("Ловкость рук" in text) == (key == "boris")  # тайный бросок только автору
+            # Тайный бросок только автору: метка — подпись карточки, а не название навыка (оно есть
+            # в листе каждого игрока).
+            assert ("Ловкость (Ловкость рук)" in text) == (key == "boris")
             for hidden in (*HIDDEN_FROM_PLAYERS, HIDDEN_EXIT_ID, *SERVER_SECRETS):
                 assert hidden not in text
 

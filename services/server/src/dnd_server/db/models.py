@@ -171,6 +171,11 @@ class PlayerCharacter(Base):
     game_id: Mapped[str] = mapped_column(ForeignKey("games.id"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     data: Mapped[dict[str, Any]]
+    # Выбор игрока при создании героя (миграция 0003, решение владельца R10): `{"mode": …,
+    # "choices": …}`. Для подробного режима `choices` — `CharacterChoices`, для быстрого — класс,
+    # вид, замысел и имя игрока, для случайного — пусто. У героев, созданных до миграции, колонка
+    # пуста. Отдаётся только владельцу героя (`GET .../characters/mine`), в снимки и лобби не идёт.
+    choices: Mapped[dict[str, Any] | None]
 
 
 class GamePlayer(Base):
@@ -183,16 +188,6 @@ class GamePlayer(Base):
     ready: Mapped[bool] = mapped_column(default=False)
     joined_order: Mapped[int]
     joined_at: Mapped[datetime] = mapped_column(default=utcnow)
-
-
-class PendingRoll(Base):
-    """Последний набор характеристик, который сервер бросил игроку для создания персонажа."""
-
-    __tablename__ = "pending_rolls"
-
-    game_id: Mapped[str] = mapped_column(ForeignKey("games.id"), primary_key=True)
-    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), primary_key=True)
-    values: Mapped[list[Any]]
 
 
 class GameStateSnapshot(Base):

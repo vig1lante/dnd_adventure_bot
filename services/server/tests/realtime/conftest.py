@@ -9,12 +9,16 @@
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import cache
+from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from dnd_engine.adventure.loader import load_adventure
+from dnd_engine.adventure.schema import Adventure
 from dnd_engine.character import ActiveBuff, ActiveCondition, Character, Persona
 from dnd_engine.combat.model import Combat, Combatant, Zone, ZoneLink
 from dnd_engine.content import SrdContent, load_srd
@@ -51,6 +55,7 @@ from dnd_server.db.models import (
 )
 
 SESSION_SECRET = "test-session-secret-0123456789-abcdefghij"
+DEMO_ADVENTURE_DIR = Path(__file__).resolve().parents[4] / "content" / "adventures" / "demo-crypt"
 SECRET_MARK = "ТАЙНА-"
 GAME_TITLE = "Склеп должника"
 DEADLINE = datetime(2030, 5, 1, 12, 30, 0, tzinfo=UTC)
@@ -91,12 +96,27 @@ class Seat:
     character: Character
 
 
+@cache
+def demo_adventure() -> Adventure:
+    return load_adventure(DEMO_ADVENTURE_DIR)
+
+
+def adventure_copy() -> dict[str, Any]:
+    """Копия приключения в строке игры (как её кладёт сервер) с ловушками в полях мастера."""
+    data = demo_adventure().model_dump(mode="json")
+    data["title"] = GAME_TITLE
+    data["locations"]["village"]["dm_notes"] = f"{SECRET_MARK}заметки-мастера"
+    data["npcs"]["marta"]["secret"] = f"{SECRET_MARK}секрет-npc"
+    return data
+
+
 @dataclass
 class Table:
     game_id: str
     seats: dict[str, Seat]
     state: GameState | None
     db: async_sessionmaker[AsyncSession]
+    adventure: Adventure
     messages: dict[str, int] = field(default_factory=dict)  # подпись сообщения -> его id
 
     @property
@@ -261,11 +281,7 @@ async def build_table(
                 code="ABC123",
                 adventure_id="demo-crypt",
                 host_user_id=seats["alice"].user_id,
-                adventure_data={
-                    "title": GAME_TITLE,
-                    "dm_notes": f"{SECRET_MARK}заметки-мастера",
-                    "npcs": {"warden": {"secret": f"{SECRET_MARK}секрет-npc"}},
-                },
+                adventure_data=adventure_copy(),
                 phase=GamePhase.PLAYING if playing else GamePhase.LOBBY,
                 turn_phase=TurnPhase.COLLECTING if playing else None,
                 deadline_at=DEADLINE if playing else None,
@@ -342,7 +358,7 @@ async def build_table(
             )
         await session.commit()
 
-    table = Table(game_id, seats, state, db)
+    table = Table(game_id, seats, state, db, demo_adventure())
     if playing:
         await seed_feed(table)
     return table

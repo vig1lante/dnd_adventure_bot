@@ -12,9 +12,8 @@ from typing import Any
 
 from sqlalchemy import select
 
-from dnd_engine.abilities import Ability
 from dnd_engine.adventure.loader import load_adventure
-from dnd_server.db.models import Game, GamePhase, PendingRoll, PlayerCharacter
+from dnd_server.db.models import Game, GamePhase, PlayerCharacter
 
 # tests/flows/test_restart.py -> flows -> tests -> server -> services -> корень
 DEMO_ADVENTURE_DIR = Path(__file__).resolve().parents[4] / "content" / "adventures" / "demo-crypt"
@@ -63,7 +62,10 @@ async def test_a_started_game_is_read_back_after_a_restart_though_its_folder_is_
         for player in (host, friend, other):
             snapshot = await second.snapshot(game["id"], player)
             assert without_clock(snapshot) == without_clock(snapshots_before[player.id])
-            assert snapshot["character"] == created[player.id]
+            # Лист в снимке — это созданный герой плюс числа движка (`derived`).
+            sheet = dict(snapshot["character"])
+            assert sheet.pop("derived")["armor_class"] > 0
+            assert sheet == created[player.id]
         # Каталог после перезапуска пуст, а игра на месте; новая игра на убранном приключении — нет.
         assert (await second.call(host, "GET", "/api/adventures")).json() == []
         assert (
@@ -89,15 +91,18 @@ async def test_a_started_game_is_read_back_after_a_restart_though_its_folder_is_
     assert {row.id: row.data for row in rows} == {c["id"]: c for c in created.values()}
 
 
-async def test_a_lobby_goes_on_after_a_restart_with_ready_marks_and_the_rolled_set(serve):
+async def test_a_lobby_goes_on_after_a_restart_with_ready_marks_and_the_choice_of_the_hero(serve):
     async with serve() as first:
         host, friend = [await first.dev_player(n) for n in (1, 2)]
         game = await first.new_game(host, **COUNTDOWNS)
         await first.join(friend, game["code"])
-        values = await first.roll_abilities(host, game["id"])
-        assert (await first.quick(friend, game["id"])).status_code == 201
+        assert (await first.detailed(host, game["id"])).status_code == 201
+        assert (await first.quick(friend, game["id"], name="Шустрик")).status_code == 201
         assert (await first.ready(friend, game["id"])).status_code == 200
         lobby_before = await first.game(host, game["id"])
+        mine_before = {
+            p.id: (await first.my_character(p, game["id"])).json() for p in (host, friend)
+        }
         first.assert_clean()
 
     async with serve() as second:
@@ -105,20 +110,44 @@ async def test_a_lobby_goes_on_after_a_restart_with_ready_marks_and_the_rolled_s
         # Отметка «Готов», наличие персонажа и длительности на месте.
         assert await second.game(host, game["id"]) == lobby_before
         assert [(p["name"], p["ready"], p["has_character"]) for p in lobby_before["players"]] == [
-            ("dev-1", False, False),
+            ("dev-1", False, True),
             ("dev-2", True, True),
         ]
-        # Набор, который сервер бросил до остановки, цел: по нему можно создать персонажа.
-        scores = dict(zip((a.value for a in Ability), values, strict=True))
+        # Выбор игрока пережил остановку: форма «Изменить героя» откроется заполненной.
+        for player in (host, friend):
+            mine = await second.my_character(player, game["id"])
+            assert mine.status_code == 200, mine.text
+            assert mine.json() == mine_before[player.id]
+        assert mine_before[host.id]["mode"] == "detailed"
+        assert mine_before[host.id]["choices"]["name"] == "Торин"
+        assert mine_before[friend.id]["choices"] == {
+            "class_id": "rogue",
+            "species": "halfling",
+            "concept": "Карманник, который мечтает о честной жизни",
+            "name": "Шустрик",
+        }
+        # После остановки «Распределить случайно» и замена героя работают как раньше.
+        scores = await second.random_abilities(host, game["id"], "wizard")
         created = await second.detailed(
             host,
             game["id"],
-            method="roll",
+            class_id="wizard",
+            skills=["arcana", "history"],
+            cantrips=["fire_bolt", "mage_hand", "ray_of_frost"],
+            prepared_spells=[
+                "magic_missile",
+                "mage_armor",
+                "burning_hands",
+                "thunderwave",
+                "scorching_ray",
+                "misty_step",
+            ],
+            fighting_style=None,
             base_scores=scores,
-            background_bonus={"str": 1, "dex": 1, "con": 1},
+            background_bonus={"str": 2, "con": 1},
         )
         assert created.status_code == 201, created.text
-        assert created.json()["character"]["scores"]["str"] == scores["str"] + 1
+        assert created.json()["character"]["scores"]["str"] == scores["str"] + 2
         assert (await second.ready(host, game["id"])).status_code == 200
         # Игра продолжается: старт после перезапуска переводит её в weaving и зовёт мастера.
         started = await second.call(host, "POST", f"/api/games/{game['id']}/start")
@@ -129,5 +158,10 @@ async def test_a_lobby_goes_on_after_a_restart_with_ready_marks_and_the_rolled_s
         second.assert_clean()
 
     async with second.db() as session:
-        roll = await session.get(PendingRoll, (game["id"], host.id))
-    assert roll.values == values  # набор не затёрт созданием персонажа
+        host_hero = await session.scalar(
+            select(PlayerCharacter).where(PlayerCharacter.user_id == host.id)
+        )
+    # Замена героя перезаписала выбор: в базе лежит новый выбор, а не прежний.
+    assert host_hero.choices["mode"] == "detailed"
+    assert host_hero.choices["choices"]["class_id"] == "wizard"
+    assert host_hero.choices["choices"]["base_scores"] == scores

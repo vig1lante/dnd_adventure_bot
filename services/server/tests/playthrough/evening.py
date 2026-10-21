@@ -104,8 +104,10 @@ OWN_SECRETS = {
         BORIS_SECRET_ACTION,
         BORIS_SECRET_COMBAT,
         PRIVATE_TO_BORIS,
-        "Ловкость рук",  # тайный бросок проверки
-        "Скрытность",  # тайный бросок в бою
+        # Метки — подписи карточек тайных бросков целиком: названия навыков («Ловкость рук»,
+        # «Скрытность») есть в листе каждого игрока (`derived.skills`) и меткой быть не могут.
+        "Ловкость (Ловкость рук)",  # тайный бросок проверки
+        "Борис: Скрытность — ",  # тайный бросок в бою
     ],
     "vera": [GOAL["vera"], HOOK_SECRET["vera"], BACKSTORY["vera"]],
 }
@@ -971,7 +973,9 @@ ROUTE_BODIES: dict[tuple[str, str], Any] = {
     ("GET", "/api/games/{game_id}"): None,
     ("POST", "/api/games/{game_id}/ready"): {"ready": True},
     ("POST", "/api/games/{game_id}/start"): None,
-    ("POST", "/api/games/{game_id}/characters/roll-abilities"): None,
+    ("POST", "/api/games/{game_id}/characters/random-abilities"): {"class_id": "rogue"},
+    ("GET", "/api/games/{game_id}/characters/mine"): None,
+    ("POST", "/api/games/{game_id}/characters/random-preview"): None,
     ("POST", "/api/games/{game_id}/characters"): {
         "mode": "quick",
         "class_id": "rogue",

@@ -35,7 +35,6 @@ from dnd_server.db.models import (
     Game,
     GamePhase,
     GamePlayer,
-    PendingRoll,
     PlayerCharacter,
     User,
     new_id,
@@ -457,7 +456,7 @@ async def start_game(
 async def leave_game(
     session: AsyncSession, user: User, game_id: str, *, locks: GameLocks, broadcaster: Broadcaster
 ) -> None:
-    """Игрок выходит из лобби вместе со своим персонажем и набором характеристик.
+    """Игрок выходит из лобби вместе со своим персонажем и выбором, по которому тот создан.
 
     Хост выйти не может (решение D2: передача роли хоста вне среза): игра без хоста осталась бы без
     того, кто её запускает."""
@@ -481,7 +480,7 @@ async def kick_player(
     locks: GameLocks,
     broadcaster: Broadcaster,
 ) -> GameOut:
-    """Хост исключает игрока из лобби: тот теряет персонажа и набор характеристик, место свободно.
+    """Хост исключает игрока из лобби: тот теряет персонажа и его выбор, место свободно.
 
     Исключённый может войти снова по коду как новичок: списка запретов в срезе нет."""
     async with locks.lock(game_id):
@@ -509,9 +508,6 @@ async def _remove_player(session: AsyncSession, game_id: str, user_id: str) -> N
         delete(PlayerCharacter).where(
             PlayerCharacter.game_id == game_id, PlayerCharacter.user_id == user_id
         )
-    )
-    await session.execute(
-        delete(PendingRoll).where(PendingRoll.game_id == game_id, PendingRoll.user_id == user_id)
     )
 
 

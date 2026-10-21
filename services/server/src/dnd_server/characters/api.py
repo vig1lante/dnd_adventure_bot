@@ -1,14 +1,20 @@
 """Маршруты персонажей (план B6.4): тонкая обёртка над `service`.
 
 От клиента принимается только выбор игрока: `CharacterChoices` (подробный режим), класс, вид и
-замысел (быстрый) или ничего (случайный). Готового `Character`, id персонажа и набора броска в
-телах запросов нет, а лишние поля отвергаются, так что их нельзя прислать по ошибке или нарочно.
+замысел (быстрый) или ничего (случайный; с id предпросмотра, который выдал сам сервер, — «Беру»).
+Готового `Character` и id персонажа в телах запросов нет, а лишние поля отвергаются, так что их
+нельзя прислать по ошибке или нарочно. Броска характеристик нет (решение владельца R9): вместо него
+`random-abilities` раскладывает 27 очков по классу героя, а `mine` отдаёт игроку его героя и выбор,
+по которому тот создан (R10).
 Длины текстов и списков ограничены: они уходят в базу, ленту мастера и запросы к модели.
 
 Ошибки правил (`CharacterValidationError`) и лобби (`GameError`) отдаёт общий обработчик
 `games.api.handle_game_error`: `{"detail": "<русский текст>", "problems": [...]}`. Отказ модели в
 «помоги написать» — 503, тайм-аут — 504, исчерпанный предел вызовов — 429, все с русским `detail`;
 второй одновременный вызов того же игрока отклоняет `ModelCalls` как `GameError` (тоже 429).
+
+Предпросмотр случайного героя (`random-preview`) модель не зовёт: он отвечает 409 вне лобби и 429
+при слишком частых бросках, а «Беру» с чужим, устаревшим или уже взятым `preview_id` — 409.
 """
 
 from typing import Annotated, Literal
@@ -35,7 +41,15 @@ from dnd_server.characters.flavor import (
     FlavorTimeout,
     FlavorUnavailable,
 )
-from dnd_server.characters.service import CreatedOut, CreationOptions, Deps
+from dnd_server.characters.previews import PREVIEW_ID_PATTERN
+from dnd_server.characters.service import (
+    CreatedOut,
+    CreationOptions,
+    Deps,
+    MineOut,
+    RandomAbilitiesOut,
+    RandomPreviewOut,
+)
 from dnd_server.games.api import (
     SessionDep,
     UserDep,
@@ -110,9 +124,14 @@ class QuickIn(BaseModel):
 
 
 class RandomIn(BaseModel):
+    """Случайный режим. Без `preview_id` герой бросается и сохраняется сразу (прежнее поведение);
+    с ним («Беру») создаётся герой, которого сервер показал в `random-preview`. Героя, чисел и
+    броска в теле нет, лишние поля отвергаются."""
+
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["random"]
+    preview_id: str | None = Field(default=None, pattern=PREVIEW_ID_PATTERN, max_length=19)
 
 
 CreateIn = Annotated[DetailedIn | QuickIn | RandomIn, Field(discriminator="mode")]
@@ -127,8 +146,12 @@ class BackstoryHelpIn(BaseModel):
     draft: str = Field(default="", max_length=DRAFT_MAX_CHARS)
 
 
-class RolledAbilitiesOut(BaseModel):
-    values: list[int]
+class RandomAbilitiesIn(BaseModel):
+    """«Распределить случайно»: нужен только класс героя, числа выбирает сервер."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    class_id: IdText
 
 
 # --- зависимости ---
@@ -147,6 +170,7 @@ def get_deps(connection: HTTPConnection) -> Deps:
         turn_tokens=get_turn_tokens(connection),
         srd=load_srd(),
         rng=connection.app.state.rng,
+        previews=connection.app.state.random_previews,
     )
 
 
@@ -163,11 +187,23 @@ async def creation_options(_user: UserDep, deps: DepsDep) -> CreationOptions:
     return service.creation_options(deps.srd)
 
 
-@router.post("/games/{game_id}/characters/roll-abilities")
-async def roll_abilities(
+@router.post("/games/{game_id}/characters/random-abilities")
+async def random_abilities(
+    game_id: str, body: RandomAbilitiesIn, user: UserDep, session: SessionDep, deps: DepsDep
+) -> RandomAbilitiesOut:
+    return await service.random_abilities(session, user, game_id, deps, class_id=body.class_id)
+
+
+@router.get("/games/{game_id}/characters/mine")
+async def my_character(game_id: str, user: UserDep, session: SessionDep) -> MineOut:
+    return await service.my_character(session, user, game_id)
+
+
+@router.post("/games/{game_id}/characters/random-preview")
+async def random_preview(
     game_id: str, user: UserDep, session: SessionDep, deps: DepsDep
-) -> RolledAbilitiesOut:
-    return RolledAbilitiesOut(values=await service.roll_abilities(session, user, game_id, deps))
+) -> RandomPreviewOut:
+    return await service.random_preview(session, user, game_id, deps)
 
 
 @router.post("/games/{game_id}/characters", status_code=201)
@@ -191,7 +227,9 @@ async def create_character(
                 name=body.name,
             )
         case RandomIn():
-            return await service.create_random(session, user, game_id, deps)
+            return await service.create_random(
+                session, user, game_id, deps, preview_id=body.preview_id
+            )
 
 
 @router.post("/games/{game_id}/characters/backstory-help")

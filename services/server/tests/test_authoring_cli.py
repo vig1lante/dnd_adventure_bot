@@ -27,7 +27,7 @@ from dnd_engine.adventure.validator import Issue, Report, validate
 from dnd_engine.content import MAX_YAML_BYTES, load_srd
 from dnd_server.authoring import cli
 from dnd_server.authoring.cli import format_report, main
-from dnd_server.dm import provider as provider_module
+from dnd_server.config import set_serving_port
 from dnd_server.llm.base import MAX_LOC_PART_CHARS, ProviderError
 from dnd_server.llm.fake import FakeProvider, load_scenario
 
@@ -621,13 +621,11 @@ def test_claude_code_cli_outside_dev_exits_with_2_without_starting_a_process(
     assert not (tmp_path / "out").exists()
 
 
-def test_claude_code_cli_gets_the_bridge_arguments_the_factory_requires(
-    model_calls, tmp_path, monkeypatch
-):
+def test_claude_code_cli_gets_the_bridge_arguments_the_factory_requires(model_calls, tmp_path):
     # Адрес один на весь сервер (`dm.provider.bridge_url`): у генератора своего литерала нет, он
-    # идёт за настройками запуска. Моста генератор не поднимает: он зовёт только complete_json,
+    # идёт за портом процесса. Моста генератор не поднимает: он зовёт только complete_json,
     # а адрес нужен фабрике.
-    monkeypatch.setattr(provider_module, "PORT", 9123)
+    set_serving_port(9123)  # после теста порт вернёт автофикстура `serving_port_reset`
 
     code = generate_into(tmp_path / "out", "--provider", "claude_code_cli")
 

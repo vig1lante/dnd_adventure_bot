@@ -48,7 +48,6 @@ from dnd_server.db.models import (
     Game,
     GamePlayer,
     GameStateSnapshot,
-    PendingRoll,
     PlayerCharacter,
     User,
 )
@@ -65,6 +64,7 @@ NOW = "2026-10-01 12:00:00.000000"
 SAVED_GAME_TESTS = {
     "0001": "test_a_game_saved_on_the_first_revision_is_read_after_upgrade_head",
     "0002": "test_a_game_saved_before_the_clock_column_keeps_counting_after_upgrade_head",
+    "0003": "test_a_game_saved_before_hero_choices_keeps_its_heroes_after_upgrade_head",
 }
 
 
@@ -234,7 +234,6 @@ async def test_a_game_saved_on_the_first_revision_is_read_after_upgrade_head(set
                 await session.scalars(select(GamePlayer).order_by(GamePlayer.joined_order))
             )
             rows = list(await session.scalars(select(PlayerCharacter)))
-            roll = await session.get(PendingRoll, (ids["game_id"], ids["Алиса"]))
             alice = await session.get(User, ids["Алиса"])
             # Состояние игры, листы персонажей и копия приключения разбираются в модели движка
             # без потерь: по копии мастер продолжит игру.
@@ -254,7 +253,8 @@ async def test_a_game_saved_on_the_first_revision_is_read_after_upgrade_head(set
                 (False, True),
                 (False, True),
             ]
-            assert roll.values == [15, 14, 13, 12, 10, 8]
+            # Героев прежних ревизий выбор игрока не записан: колонка пуста (миграция 0003).
+            assert [r.choices for r in rows] == [None, None, None]
             # Снимок для игрока строится из старых строк: отряд, бой, лента только со своим личным.
             view = await snapshot_for(session, alice, ids["game_id"], srd=load_srd())
         assert [m["name"] for m in view["party"]] == ["Алиса", "Борис", "Вера"]
@@ -313,4 +313,46 @@ async def test_a_game_saved_before_the_clock_column_keeps_counting_after_upgrade
         assert snapshot.to_state().model_dump(mode="json") == golden["state"]
         assert view["phase"]["phase"] == "playing" and view["phase"]["remaining_seconds"] is None
     finally:
+        await engine.dispose()
+
+
+async def test_a_game_saved_before_hero_choices_keeps_its_heroes_after_upgrade_head(
+    settings, migrate
+):
+    # Ревизия 0003 (B8.s3) убрала `pending_rolls` и добавила `characters.choices`: игра на ревизии
+    # 0002 с набором характеристик в брошенной таблице продолжает читаться теми же моделями, а
+    # герои отдают лист без выбора — форма «Изменить героя» у них пустая.
+    golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
+    adventure = json.loads(golden_adventures()[1].read_text(encoding="utf-8"))
+    await migrate("upgrade", "0002")
+    ids = insert_saved_game(sqlite_file(settings.database_url), golden, adventure)
+    await migrate("upgrade", "head")
+
+    engine = make_engine(settings.database_url)
+    db = make_sessionmaker(engine)
+    app = create_app(settings)
+    try:
+        async with db() as session:
+            game = await session.get(Game, ids["game_id"])
+            snapshot = await session.get(GameStateSnapshot, (ids["game_id"], game.state_version))
+            rows = list(await session.scalars(select(PlayerCharacter)))
+            alice = await session.get(User, ids["Алиса"])
+            view = await snapshot_for(session, alice, ids["game_id"], srd=load_srd())
+        assert snapshot.to_state().model_dump(mode="json") == golden["state"]
+        assert {r.id: r.data for r in rows} == golden["state"]["party"]
+        assert [r.choices for r in rows] == [None, None, None]
+        assert [m["name"] for m in view["party"]] == ["Алиса", "Борис", "Вера"]
+        token = SessionSigner.from_settings(settings).issue(ids["Алиса"])
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as http:
+            mine = await http.get(
+                f"/api/games/{ids['game_id']}/characters/mine",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert mine.status_code == 200, mine.text
+        body = mine.json()
+        assert (body["mode"], body["choices"]) == (None, None)
+        assert body["character"]["name"] == "Алиса"
+    finally:
+        await app.state.engine.dispose()
         await engine.dispose()

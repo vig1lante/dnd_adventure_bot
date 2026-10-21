@@ -393,7 +393,7 @@ async def test_state_events_reach_players_without_secrets_and_with_only_their_ow
     server, table, srd
 ):
     async with watching(server, table, "alice", "boris", "vera") as sockets:
-        for payload, audience in state_events(table.state, srd):
+        for payload, audience in state_events(table.state, srd, table.adventure):
             await server.hub.send(table.game_id, payload, audience)
 
         received = {key: await drain(ws) for key, ws in sockets.items()}
@@ -413,7 +413,7 @@ async def test_nothing_of_the_dm_turn_log_or_adventure_copy_is_ever_sent(server,
     assert len(logs) == 1 and SECRET_MARK in json.dumps(logs[0].trace, ensure_ascii=False)
 
     async with watching(server, table, "alice", "boris") as sockets:
-        for payload, audience in state_events(table.state, srd):
+        for payload, audience in state_events(table.state, srd, table.adventure):
             await server.hub.send(table.game_id, payload, audience)
         frames = [await drain(ws) for ws in sockets.values()]
 

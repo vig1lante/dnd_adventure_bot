@@ -1,7 +1,9 @@
-"""Миграции Alembic (план B6.1, B7.4): схемы создаются, откатываются и совпадают с моделями.
+"""Миграции Alembic (план B6.1, B7.4, B8.s3): схемы создаются, откатываются и совпадают с моделями.
 
 Ревизия 0001 — начальная схема; 0002 (B7.4) добавляет к играм колонку `clock_at` — отметку часов
-игры, из которой выводятся остаток отсчёта на паузе и время игры без пауз.
+игры, из которой выводятся остаток отсчёта на паузе и время игры без пауз; 0003 (B8.s3, решения
+владельца R9 и R10) убирает таблицу `pending_rolls` (броска характеристик больше нет) и добавляет
+персонажам колонку `choices` — выбор игрока при создании героя.
 
 Правило на будущее: каждая следующая миграция добавляет тест «игра с состоянием, сохранённая
 до миграции, читается после `upgrade`» (база на предыдущей ревизии, строки игры, `upgrade head`,
@@ -17,12 +19,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from alembic import command, op
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.config import main as alembic_main
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import JSON, inspect
+from sqlalchemy.exc import OperationalError
 
 from dnd_server.config import Settings, get_settings
 from dnd_server.db import models  # noqa: F401  (регистрирует таблицы в метаданных)
@@ -42,8 +46,7 @@ COLUMNS = {
         "started_at active_seconds clock_at created_at"
     ),
     "game_players": "game_id user_id character_id is_host ready joined_order joined_at",
-    "characters": "id game_id user_id data",
-    "pending_rolls": "game_id user_id values",
+    "characters": "id game_id user_id data choices",
     "game_states": "game_id version schema_version data created_at",
     "turns": "id game_id number kind status state_version_before state_version_after created_at",
     "player_actions": "turn_id user_id text secret inspiration status updated_at",
@@ -58,7 +61,6 @@ PRIMARY_KEYS = {
     "games": "id",
     "game_players": "game_id user_id",
     "characters": "id",
-    "pending_rolls": "game_id user_id",
     "game_states": "game_id version",
     "turns": "id",
     "player_actions": "turn_id user_id",
@@ -71,6 +73,7 @@ NULLABLE = {
     "users": "tg_id dev_login",
     "games": "turn_phase deadline_at current_turn_id provider model started_at clock_at",
     "game_players": "character_id",
+    "characters": "choices",
     "turns": "state_version_before state_version_after",
     "messages": "turn_id data",
     "dm_turn_logs": "model output usage duration_ms error",
@@ -82,8 +85,6 @@ FOREIGN_KEYS = {
     ("game_players", "character_id"): "characters",
     ("characters", "game_id"): "games",
     ("characters", "user_id"): "users",
-    ("pending_rolls", "game_id"): "games",
-    ("pending_rolls", "user_id"): "users",
     ("game_states", "game_id"): "games",
     ("turns", "game_id"): "games",
     ("player_actions", "turn_id"): "turns",
@@ -96,7 +97,7 @@ FOREIGN_KEYS = {
 JSON_COLUMNS = {
     ("games", "adventure_data"),
     ("characters", "data"),
-    ("pending_rolls", "values"),
+    ("characters", "choices"),
     ("game_states", "data"),
     ("messages", "data"),
     ("dm_turn_logs", "request"),
@@ -161,7 +162,7 @@ def test_migration_history_is_a_single_line_from_0001():
     script = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
 
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0002"]
+    assert script.get_heads() == ["0003"]
 
 
 # --- ревизия 0002: отметка часов игры ---
@@ -266,6 +267,305 @@ async def test_downgrade_to_the_first_revision_drops_the_column_and_keeps_the_ga
             connection.execute("UPDATE games SET phase = 'bogus'")
 
 
+# --- ревизия 0003: выбор игрока при создании героя, таблицы pending_rolls больше нет ---
+
+
+def schema_signature(inspector: Any) -> dict[str, Any]:
+    """Всё, что видно о схеме инспектору: колонки с типом и обязательностью, ключи, ограничения."""
+    return {
+        table: {
+            "columns": {
+                c["name"]: (str(c["type"]), c["nullable"]) for c in inspector.get_columns(table)
+            },
+            "pk": (
+                inspector.get_pk_constraint(table)["name"],
+                tuple(inspector.get_pk_constraint(table)["constrained_columns"]),
+            ),
+            "fks": sorted(
+                (fk["name"], tuple(fk["constrained_columns"]), fk["referred_table"])
+                for fk in inspector.get_foreign_keys(table)
+            ),
+            "unique": sorted(
+                (u["name"], tuple(u["column_names"]))
+                for u in inspector.get_unique_constraints(table)
+            ),
+            "checks": sorted(
+                (c["name"], c["sqltext"]) for c in inspector.get_check_constraints(table)
+            ),
+        }
+        for table in inspector.get_table_names()
+        if table != ALEMBIC_TABLE
+    }
+
+
+def insert_lobby_with_heroes(path: Path, *, with_roll: bool) -> None:
+    """Лобби с двумя героями прямым SQL по таблицам ревизии 0002; героев выбирал игрок, а у
+    таблицы `characters` на этой ревизии колонки `choices` ещё нет."""
+    with closing(sqlite3.connect(path)) as connection:
+        for user in ("host", "friend"):
+            connection.execute(
+                "INSERT INTO users (id, tg_id, dev_login, name, created_at)"
+                " VALUES (?, NULL, NULL, ?, ?)",
+                (user, user, NOW),
+            )
+        connection.execute(
+            "INSERT INTO games (id, code, adventure_id, host_user_id, adventure_data, phase,"
+            " state_version, collect_seconds, hurry_seconds, camp_seconds, active_seconds,"
+            " created_at) VALUES ('game-1', 'ABC123', 'demo-crypt', 'host', '{}', 'lobby', 0,"
+            " 90, 45, 200, 0, ?)",
+            (NOW,),
+        )
+        for number, user in enumerate(("host", "friend"), start=1):
+            connection.execute(
+                "INSERT INTO characters (id, game_id, user_id, data) VALUES (?, 'game-1', ?, ?)",
+                (f"pc-{number}", user, f'{{"id": "pc-{number}", "name": "Герой {number}"}}'),
+            )
+            connection.execute(
+                "INSERT INTO game_players (game_id, user_id, character_id, is_host, ready,"
+                " joined_order, joined_at) VALUES ('game-1', ?, ?, ?, 1, ?, ?)",
+                (user, f"pc-{number}", number == 1, number, NOW),
+            )
+        if with_roll:
+            connection.execute(
+                'INSERT INTO pending_rolls (game_id, user_id, "values") VALUES (?, ?, ?)',
+                ("game-1", "host", "[15, 14, 13, 12, 10, 8]"),
+            )
+        connection.commit()
+
+
+async def test_the_third_revision_drops_pending_rolls_and_adds_the_nullable_choices_column(
+    settings, migrate
+):
+    def columns(inspector: Any) -> dict[str, dict[str, Any]]:
+        return {
+            table: {c["name"]: c for c in inspector.get_columns(table)}
+            for table in inspector.get_table_names()
+            if table != ALEMBIC_TABLE
+        }
+
+    await migrate("upgrade", "0002")
+    before = await reflect(settings, columns)
+    await migrate("upgrade", "0003")
+    after = await reflect(settings, columns)
+
+    assert set(before) - set(after) == {"pending_rolls"}
+    assert set(after) <= set(before)
+    for table in after:
+        extra = set(after[table]) - set(before[table])
+        assert extra == ({"choices"} if table == "characters" else set()), table
+        assert set(before[table]) <= set(after[table]), table
+    assert after["characters"]["choices"]["nullable"] is True
+    assert isinstance(after["characters"]["choices"]["type"], JSON)
+
+
+async def test_games_and_heroes_saved_on_the_second_revision_survive_the_third(settings, migrate):
+    await migrate("upgrade", "0002")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=True)
+
+    await migrate("upgrade", "0003")
+
+    with closing(sqlite3.connect(path)) as connection:
+        games = list(connection.execute("SELECT id, code, phase, active_seconds FROM games"))
+        heroes = list(connection.execute("SELECT id, user_id, data, choices FROM characters"))
+        players = list(
+            connection.execute("SELECT user_id, character_id, ready FROM game_players ORDER BY 1")
+        )
+        tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master")}
+    assert games == [("game-1", "ABC123", "lobby", 0)]
+    # Герои целы, а выбор у них пуст: у героев прежних ревизий его не записывали.
+    assert heroes == [
+        ("pc-1", "host", '{"id": "pc-1", "name": "Герой 1"}', None),
+        ("pc-2", "friend", '{"id": "pc-2", "name": "Герой 2"}', None),
+    ]
+    assert players == [("friend", "pc-2", 1), ("host", "pc-1", 1)]
+    assert "pending_rolls" not in tables
+
+
+async def test_downgrade_to_the_second_revision_brings_pending_rolls_back_and_keeps_the_games(
+    settings, migrate
+):
+    await migrate("upgrade", "0002")
+    at_second = await reflect(settings, schema_signature)
+    await migrate("upgrade", "head")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("UPDATE characters SET choices = ?", ('{"mode": "random"}',))
+        connection.commit()
+
+    await migrate("downgrade", "0002")
+
+    # Схема вернулась к ревизии 0002 целиком: те же таблицы, колонки, ключи и ограничения.
+    assert await reflect(settings, schema_signature) == at_second
+    with closing(sqlite3.connect(path)) as connection:
+        heroes = list(connection.execute("SELECT id, user_id FROM characters ORDER BY 1"))
+        assert heroes == [("pc-1", "host"), ("pc-2", "friend")]
+        assert connection.execute("SELECT count(*) FROM game_players").fetchone() == (2,)
+        assert connection.execute("SELECT count(*) FROM pending_rolls").fetchone() == (0,)
+        # Возвращённая таблица работает как прежняя: ключ и внешние ключи на месте.
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            'INSERT INTO pending_rolls (game_id, user_id, "values") VALUES (?, ?, ?)',
+            ("game-1", "host", "[15, 14, 13, 12, 10, 8]"),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                'INSERT INTO pending_rolls (game_id, user_id, "values") VALUES (?, ?, ?)',
+                ("game-1", "host", "[8, 8, 8, 8, 8, 8]"),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                'INSERT INTO pending_rolls (game_id, user_id, "values") VALUES (?, ?, ?)',
+                ("no-such-game", "host", "[1]"),
+            )
+
+
+async def test_the_third_revision_can_be_applied_again_after_a_downgrade(settings, migrate):
+    await migrate("upgrade", "head")
+    after_first = await reflect(settings, schema_signature)
+    await migrate("downgrade", "0002")
+    await migrate("upgrade", "head")
+
+    assert await reflect(settings, schema_signature) == after_first
+
+
+# --- обрыв посреди миграции 0003 (B8.security.server.fix1) ---
+#
+# SQLite выполняет DROP TABLE и ADD COLUMN сразу и насовсем, а запись о ревизии появляется только
+# после обоих шагов. Обрыв между ними (база занята, кончилось место, процесс убит) оставляет базу
+# посередине: часть изменений сделана, ревизия прежняя. Повторный запуск обязан довести дело до
+# конца, а не падать на шаге, который уже сделан, и сохранённые игры остаются целыми.
+
+
+def break_operation(monkeypatch, name: str) -> None:
+    """Операция Alembic падает так, как падает запись в занятую базу или на полный диск."""
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise OperationalError(name, {}, sqlite3.OperationalError("database or disk is full"))
+
+    monkeypatch.setattr(op, name, broken)
+
+
+def set_recorded_revision(path: Path, revision: str) -> None:
+    """Подменяет запись о ревизии: база осталась такой, какой её сделали шаги другой ревизии."""
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("UPDATE alembic_version SET version_num = ?", (revision,))
+        connection.commit()
+
+
+def recorded_revision(path: Path) -> str:
+    with closing(sqlite3.connect(path)) as connection:
+        [(revision,)] = connection.execute("SELECT version_num FROM alembic_version")
+    return revision
+
+
+def saved_lobby(path: Path) -> list[Any]:
+    """Игра, герои и участники лобби, записанные `insert_lobby_with_heroes`."""
+    with closing(sqlite3.connect(path)) as connection:
+        return [
+            list(connection.execute("SELECT id, code, phase FROM games")),
+            list(connection.execute("SELECT id, user_id, data FROM characters ORDER BY 1")),
+            list(connection.execute("SELECT user_id, character_id FROM game_players ORDER BY 1")),
+        ]
+
+
+async def test_the_third_revision_is_repeated_after_a_failure_on_its_second_step(
+    settings, migrate, monkeypatch
+):
+    await migrate("upgrade", "0002")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=True)
+    saved = saved_lobby(path)
+    with monkeypatch.context() as broken:
+        break_operation(broken, "add_column")
+        with pytest.raises(OperationalError):
+            await migrate("upgrade", "head")
+    assert recorded_revision(path) == "0002"  # обрыв: ревизия не записана
+
+    await migrate("upgrade", "head")
+
+    assert recorded_revision(path) == "0003"
+    assert saved_lobby(path) == saved
+    await migrate("downgrade", "0002")
+    await migrate("upgrade", "head")  # и обычный путь после починки работает
+
+
+async def test_the_third_revision_is_repeated_when_its_changes_were_made_but_not_recorded(
+    settings, migrate
+):
+    await migrate("upgrade", "0002")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=True)
+    saved = saved_lobby(path)
+    await migrate("upgrade", "head")
+    done = await reflect(settings, schema_signature)
+    set_recorded_revision(path, "0002")  # процесс убит после обоих шагов, до записи ревизии
+
+    await migrate("upgrade", "head")
+
+    assert recorded_revision(path) == "0003"
+    assert await reflect(settings, schema_signature) == done
+    assert saved_lobby(path) == saved
+
+
+async def test_downgrade_of_the_third_revision_is_repeated_after_a_failure_on_its_second_step(
+    settings, migrate, monkeypatch
+):
+    await migrate("upgrade", "0002")
+    at_second = await reflect(settings, schema_signature)
+    await migrate("upgrade", "head")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+    with monkeypatch.context() as broken:
+        break_operation(broken, "create_table")
+        with pytest.raises(OperationalError):
+            await migrate("downgrade", "0002")
+    assert recorded_revision(path) == "0003"  # обрыв: откат не записан
+
+    await migrate("downgrade", "0002")
+
+    assert recorded_revision(path) == "0002"
+    assert await reflect(settings, schema_signature) == at_second
+    assert saved_lobby(path) == saved
+
+
+async def test_downgrade_of_the_third_revision_is_repeated_when_made_but_not_recorded(
+    settings, migrate
+):
+    await migrate("upgrade", "0002")
+    at_second = await reflect(settings, schema_signature)
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+    set_recorded_revision(path, "0003")  # откат сделан целиком, запись о нём не появилась
+
+    await migrate("downgrade", "0002")
+
+    assert recorded_revision(path) == "0002"
+    assert await reflect(settings, schema_signature) == at_second
+    assert saved_lobby(path) == saved
+
+
+def test_the_third_revision_prints_all_its_steps_in_sql_mode_without_a_database(
+    monkeypatch, capsys, settings, tmp_path
+):
+    # В режиме `--sql` базы нет и осмотреть её нельзя: печатаются обычные шаги ревизии подряд.
+    monkeypatch.setenv("DATABASE_URL", settings.database_url)
+    get_settings.cache_clear()
+    printed = {}
+    for name, revisions in (("upgrade", "0002:0003"), ("downgrade", "0003:0002")):
+        getattr(command, name)(Config(str(ALEMBIC_INI)), revisions, sql=True)
+        printed[name] = capsys.readouterr().out
+
+    assert "DROP TABLE IF EXISTS pending_rolls" in printed["upgrade"]
+    assert "ALTER TABLE characters ADD COLUMN choices JSON" in printed["upgrade"]
+    assert "ALTER TABLE characters DROP COLUMN choices" in printed["downgrade"]
+    assert "CREATE TABLE IF NOT EXISTS pending_rolls" in printed["downgrade"]
+    assert not (tmp_path / "data").exists()  # печать ничего не создаёт на диске
+
+
 # --- миграция совпадает с моделями и планом ---
 
 
@@ -344,4 +644,4 @@ def test_alembic_command_line_works_from_the_repo_root_and_the_service_folder(
         tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master")}
         [(revision,)] = connection.execute("SELECT version_num FROM alembic_version")
     assert TABLES <= tables
-    assert revision == "0002"
+    assert revision == "0003"

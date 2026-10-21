@@ -730,7 +730,7 @@ async def _announce_reserve(deps: Deps, game: Game, plan: _Plan) -> None:
     for message_id, audience in plan.withdrawn:
         await send_to_game(deps.broadcaster, game.id, feed_withdrawn_event(message_id), audience)
     if plan.rewound:
-        for event, audience in state_events(plan.state, deps.srd):
+        for event, audience in state_events(plan.state, deps.srd, plan.adventure):
             await send_to_game(deps.broadcaster, game.id, event, audience)
 
 
@@ -1060,7 +1060,7 @@ async def _announce_commit(
     """Рассылка после коммита: записи ленты, отряд, бой, листы, фаза и статусы нового хода."""
     for message in messages:
         await send_to_game(deps.broadcaster, game.id, feed_item_event(message), message.audience)
-    for event, audience in state_events(work, deps.srd):
+    for event, audience in state_events(work, deps.srd, plan.adventure):
         await send_to_game(deps.broadcaster, game.id, event, audience)
     await send_to_game(deps.broadcaster, game.id, phase_event(game, work))
     for user_id in plan.user_ids:
@@ -1136,6 +1136,33 @@ def _usage_json(result: TurnResult | None) -> dict[str, Any] | None:
     }
 
 
+# С чем мастер не справился, если у хода нет ходов игроков: у открытия игры их ещё нет, а на привале
+# есть только реплики у костра. Для остальных видов хода игроки ходы уже сдали.
+_NO_PLAYER_MOVES = {
+    TurnKind.OPENING: "с началом игры",
+    TurnKind.CAMP_END: "с концом привала",
+}
+
+
+def failure_text(mode: TurnKind, reason: str) -> str:
+    """Сообщение хосту о сбое хода вида `mode`. У открытия игры и конца привала ходов игроков нет,
+    поэтому говорить, что они сохранены, нельзя. Общий для сбоя хода, сбоя вплетения героев
+    (`dm.weaving`) и хода, прерванного перезапуском сервера (`turns.flow`)."""
+    subject = _NO_PLAYER_MOVES.get(mode)
+    if subject is not None:
+        return f"Мастер не справился {subject}: {reason}. Нажмите «Повторить»."
+    return f"Мастер не справился с ходом: {reason}. Ходы игроков сохранены — нажмите «Повторить»."
+
+
+def failed_turn_refusal(mode: TurnKind) -> str:
+    """Отказ игроку, который сдаёт ход, пока мастер не справился с ходом вида `mode`: о ходах
+    игроков говорит так же, как `failure_text`."""
+    subject = _NO_PLAYER_MOVES.get(mode)
+    if subject is not None:
+        return f"Мастер не справился {subject}: хост может нажать «Повторить»."
+    return "Мастер не справился с ходом: ходы сохранены, хост может нажать «Повторить»."
+
+
 async def _commit_failure(deps: Deps, plan: _Plan, attempts: list[_Attempt]) -> TurnOutcome:
     """Неудачный ход: журнал и `dm_failed`; состояние игры, снимки и ходы игроков не меняются."""
     last = attempts[-1]
@@ -1154,10 +1181,7 @@ async def _commit_failure(deps: Deps, plan: _Plan, attempts: list[_Attempt]) -> 
                 turn_id=plan.turn_id,
                 audience=game.host_user_id,
                 kind=MessageKind.SYSTEM,
-                text=(
-                    f"Мастер не справился с ходом: {reason}. "
-                    "Ходы игроков сохранены — нажмите «Повторить»."
-                ),
+                text=failure_text(plan.mode, reason),
             )
             session.add(note)
         await session.commit()

@@ -1,11 +1,19 @@
-"""Правила создания персонажей (план B6.4): опции формы, бросок, три режима, описание от модели.
+"""Правила создания персонажей (план B6.4, B8.s3): опции формы, случайная раскладка очков, три
+режима, выбор игрока, описание от модели.
 
 Слой не знает про HTTP: он принимает сессию базы, пользователя и зависимости (`Deps`), возвращает
 готовые ответы и отказывает исключениями `GameError` из лобби (`NotFound`, `Conflict`, `Invalid`;
 как они становятся кодами ответов, решает `games.api`). Числа персонажа считает только движок
 (`build_character`, `quick_character`, `random_character`): сервер сохраняет результат, а модель
-дописывает имя и текст. Клиент присылает выбор (`CharacterChoices`), но не персонажа и не набор
-броска: набор для способа `ROLL` берётся из `pending_rolls`, куда его положил сам сервер.
+дописывает имя и текст. Клиент присылает выбор (`CharacterChoices`), но не персонажа.
+
+Характеристики героя задаются только в рамках 27 очков (решение владельца R9): броска `4d6kh3` нет.
+«Распределить случайно» — `random_abilities`: сервер раскладывает те же 27 очков по классу героя
+(`random_point_buy`, свой генератор `deps.rng`), ничего не записывая и не ограничивая нажатия.
+
+Выбор игрока хранится вместе с героем (решение владельца R10, `PlayerCharacter.choices`) и отдаётся
+только ему самому (`my_character`): форма «Изменить героя» открывается заполненной. Новое создание
+заменяет героя вместе с выбором одной транзакцией. Выбор нигде, кроме `my_character`, не читается.
 
 Создание идёт в два приёма, чтобы ожидание модели не держало игру. Под блокировкой игры сервер
 проверяет игру, собирает и сохраняет персонажа (с замысла игрока, без описания) и рассылает лобби.
@@ -14,6 +22,12 @@
 если игра всё ещё в лобби и персонаж не заменён. Отказ модели и старт игры за время ожидания не
 отменяют персонажа: клиент получает его без описания и с `flavor_error`. Ответ 409 остаётся только
 тому запросу, чей персонаж уже заменён другим.
+
+Случайный герой создаётся двумя способами. Прежний (`mode: random` без `preview_id`) бросает героя
+и сразу сохраняет. Новый идёт в два шага (решение владельца R1): `random_preview` бросает героя и
+запоминает его (`RandomPreviews`), ничего не записывая и не зовя модель, а `mode: random` с
+`preview_id` («Беру») создаёт персонажа ровно из запомненного героя и дописывает описание, как
+обычно. Числа второго шага не бросаются заново.
 
 Вызовы модели из действий игрока платные, поэтому они ограничены (`ModelCalls`): у игрока в игре
 одновременно не больше одного вызова (второй запрос — 429 до любых изменений) и не больше
@@ -27,8 +41,9 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,7 +68,7 @@ from dnd_engine.creation import (
     class_spell_options,
     quick_character,
     random_character,
-    roll_ability_set,
+    random_point_buy,
 )
 from dnd_engine.rng import Rng
 from dnd_server.characters.flavor import (
@@ -67,8 +82,9 @@ from dnd_server.characters.flavor import (
     flavor_prompt,
     with_persona,
 )
+from dnd_server.characters.previews import RandomPreviews
 from dnd_server.config import Settings
-from dnd_server.db.models import Game, GamePhase, GamePlayer, PendingRoll, PlayerCharacter, User
+from dnd_server.db.models import Game, GamePhase, GamePlayer, PlayerCharacter, User
 from dnd_server.dm.provider import game_provider
 from dnd_server.games.hooks import Broadcaster, send_to_game
 from dnd_server.games.schemas import GameOut
@@ -78,6 +94,7 @@ from dnd_server.games.service import (
     GameLocks,
     Invalid,
     ModelCalls,
+    NotFound,
     get_game,
     lobby_event,
 )
@@ -314,6 +331,7 @@ class Deps:
     turn_tokens: TurnTokens | None
     srd: SrdContent
     rng: Rng
+    previews: RandomPreviews
 
 
 def _require_lobby(game: GameOut) -> None:
@@ -321,21 +339,28 @@ def _require_lobby(game: GameOut) -> None:
         raise Conflict("Игра уже началась: персонажа больше нельзя менять.")
 
 
-# --- бросок характеристик ---
+# --- случайная раскладка очков ---
 
 
-async def roll_abilities(session: AsyncSession, user: User, game_id: str, deps: Deps) -> list[int]:
-    """Бросает набор характеристик на сервере и запоминает его; новый бросок заменяет прежний."""
-    async with deps.locks.lock(game_id):
-        _require_lobby(await get_game(session, user, game_id))
-        values = roll_ability_set(deps.rng)
-        pending = await session.get(PendingRoll, (game_id, user.id))
-        if pending is None:
-            session.add(PendingRoll(game_id=game_id, user_id=user.id, values=values))
-        else:
-            pending.values = values
-        await session.commit()
-    return values
+class RandomAbilitiesOut(BaseModel):
+    method: Literal["point_buy"] = "point_buy"  # способ, в который клиент кладёт раскладку
+    scores: dict[Ability, int]  # базовые значения 8–15 ровно на 27 очков, до прибавки предыстории
+
+
+async def random_abilities(
+    session: AsyncSession, user: User, game_id: str, deps: Deps, *, class_id: str
+) -> RandomAbilitiesOut:
+    """«Распределить случайно»: раскладка 27 очков для класса героя, больше — ключевым
+    характеристикам класса. Бросает сервер (`deps.rng`); ничего не записывается и ничего не
+    рассылается, нажатия не ограничены: запас очков у всех игроков один и тот же. Права и фаза те
+    же, что у создания персонажа: участник игры, лобби. Блокировка игры не нужна: записи нет."""
+    _require_lobby(await get_game(session, user, game_id))
+    try:
+        layout = random_point_buy(deps.rng, deps.srd, class_id)
+    except CharacterValidationError as error:
+        raise Invalid("Неизвестный класс.", error.problems) from None
+    # Ключи идут в порядке характеристик, а не приоритета класса: ответ выглядит одинаково у всех.
+    return RandomAbilitiesOut(scores={ability: layout[ability] for ability in Ability})
 
 
 # --- создание персонажа ---
@@ -347,13 +372,86 @@ class Slot:
 
     character_id: str
     taken_classes: set[str]  # классы персонажей других игроков
-    rolled_set: list[int] | None  # набор, который сервер бросил этому игроку
 
 
 class CreatedOut(BaseModel):
     character: Character
     # Русский текст, если описание от модели не получилось; персонаж при этом сохранён.
     flavor_error: str | None
+
+
+# --- выбор игрока: что хранится рядом с героем и как возвращается владельцу ---
+
+Mode = Literal["detailed", "quick", "random"]
+
+
+class QuickChoices(BaseModel):
+    """Выбор игрока в быстром режиме: ровно то, что он прислал. Имя пусто, если игрок его не дал
+    (его придумала модель, и в выбор оно не входит)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    class_id: str
+    species: str
+    concept: str
+    name: str | None
+
+
+class MineOut(BaseModel):
+    """Свой герой игрока и выбор, по которому он создан.
+
+    `mode` и `choices` пусты у героя, созданного до миграции 0003 (выбор не записывался) и у героя,
+    чей сохранённый выбор уже не читается (`_mine`); у случайного героя пуст только `choices`.
+    `choices` — тело, которое клиент может отправить обратно в `POST .../characters`
+    (`mode: detailed` → `choices`; быстрый режим — поля выбора вместе с `mode: quick`)."""
+
+    mode: Mode | None
+    character: Character
+    choices: CharacterChoices | QuickChoices | None
+
+
+def _stored_choice(mode: Mode, choices: BaseModel | None) -> dict[str, Any]:
+    """Выбор игрока в том виде, в каком он лежит в `PlayerCharacter.choices`."""
+    return {"mode": mode, "choices": None if choices is None else choices.model_dump(mode="json")}
+
+
+def _mine(row: PlayerCharacter) -> MineOut:
+    """Герой и его выбор. Выбор читается строго, но модели выбора могли измениться после записи
+    героя: тогда ответ тот же, что у героя до миграции 0003 (способа и выбора нет, форма откроется
+    пустой), а не 500, и в журнал идёт предупреждение. Выбор в журнал не пишется: текст ошибки
+    pydantic пересказывает значения."""
+    character = Character.model_validate(row.data)
+    stored = row.choices or {}
+    mode, raw = stored.get("mode"), stored.get("choices")
+    try:
+        choices: CharacterChoices | QuickChoices | None = None
+        if raw is not None:
+            choices = (CharacterChoices if mode == "detailed" else QuickChoices).model_validate(raw)
+        return MineOut(mode=mode, character=character, choices=choices)
+    except ValidationError:
+        logger.warning(
+            "Сохранённый выбор героя %s игры %s не читается (формат выбора изменился): "
+            "форма «Изменить героя» откроется пустой.",
+            row.id,
+            row.game_id,
+        )
+        return MineOut(mode=None, character=character, choices=None)
+
+
+async def my_character(session: AsyncSession, user: User, game_id: str) -> MineOut:
+    """Герой игрока и его выбор для формы «Изменить героя». Только свой: строка героя берётся по
+    ссылке из строки самого игрока, чужой выбор отсюда не достать. Участнику своей игры отвечает в
+    любой фазе (чтение безвредно); не участнику игра неотличима от несуществующей (404)."""
+    await get_game(session, user, game_id)
+    player = await session.get(GamePlayer, (game_id, user.id))
+    row = (
+        None
+        if player.character_id is None
+        else await session.get(PlayerCharacter, player.character_id)
+    )
+    if row is None:
+        raise NotFound("У вас ещё нет героя в этой игре.")
+    return _mine(row)
 
 
 async def _taken_classes(session: AsyncSession, game_id: str, user_id: str) -> set[str]:
@@ -366,13 +464,11 @@ async def _taken_classes(session: AsyncSession, game_id: str, user_id: str) -> s
     return {data["class_id"] for data in rows}
 
 
-async def _rolled_set(session: AsyncSession, game_id: str, user_id: str) -> list[int] | None:
-    pending = await session.get(PendingRoll, (game_id, user_id))
-    return None if pending is None else list(pending.values)
-
-
-async def _store(session: AsyncSession, player: GamePlayer, character: Character) -> None:
-    """Новый персонаж заменяет прежнего одной транзакцией; отметка «Готов» сбрасывается."""
+async def _store(
+    session: AsyncSession, player: GamePlayer, character: Character, choice: dict[str, Any]
+) -> None:
+    """Новый персонаж заменяет прежнего вместе с выбором игрока одной транзакцией; отметка «Готов»
+    сбрасывается."""
     previous = player.character_id
     session.add(
         PlayerCharacter(
@@ -380,6 +476,7 @@ async def _store(session: AsyncSession, player: GamePlayer, character: Character
             game_id=player.game_id,
             user_id=player.user_id,
             data=character.model_dump(mode="json"),
+            choices=choice,
         )
     )
     await session.flush()  # внешний ключ: строка персонажа должна появиться раньше ссылки на неё
@@ -397,6 +494,7 @@ async def _store_new(
     game_id: str,
     deps: Deps,
     build: Callable[[Slot], Character],
+    choice: dict[str, Any],
 ) -> tuple[GameOut, Character]:
     """Под блокировкой игры: проверить игру, собрать персонажа, сохранить, разослать лобби."""
     async with deps.locks.lock(game_id):
@@ -406,7 +504,6 @@ async def _store_new(
         slot = Slot(
             character_id=new_character_id(),
             taken_classes=await _taken_classes(session, game_id, user.id),
-            rolled_set=await _rolled_set(session, game_id, user.id),
         )
         try:
             built = build(slot)
@@ -414,7 +511,7 @@ async def _store_new(
             raise Invalid("Персонаж не прошёл проверку правил.", error.problems) from None
         # Владелец нужен хабу: личное сообщение адресовано персонажу, а получает его игрок.
         character = built.model_copy(update={"player_id": user.id})
-        await _store(session, player, character)
+        await _store(session, player, character, choice)
         await send_to_game(
             deps.broadcaster, game_id, lobby_event(await get_game(session, user, game_id))
         )
@@ -427,17 +524,19 @@ async def _create(
     game_id: str,
     deps: Deps,
     build: Callable[[Slot], Character],
+    choice: dict[str, Any],
     *,
     describe: bool,
     keep_name: bool = False,
 ) -> CreatedOut:
-    """Общий ход создания: сохранить персонажа и, если нужно, дописать описание от модели.
+    """Общий ход создания: сохранить персонажа с выбором игрока и, если нужно, дописать описание
+    от модели.
 
     Место под вызов модели занимается до любых изменений: если игрок ещё ждёт прошлый ответ,
     запрос отклоняется (429), и персонаж остаётся прежним."""
     model_call = deps.model_calls.running(game_id, user.id) if describe else nullcontext()
     with model_call:
-        game, character = await _store_new(session, user, game_id, deps, build)
+        game, character = await _store_new(session, user, game_id, deps, build, choice)
         if not describe:
             return CreatedOut(character=character, flavor_error=None)
         return await _describe(session, user, game, deps, character, keep_name=keep_name)
@@ -449,11 +548,10 @@ async def create_detailed(
     """Подробный режим: игрок выбрал всё сам, движок проверяет выбор и считает числа."""
 
     def build(slot: Slot) -> Character:
-        return build_character(
-            choices, deps.srd, rolled_set=slot.rolled_set, character_id=slot.character_id
-        )
+        return build_character(choices, deps.srd, character_id=slot.character_id)
 
-    return await _create(session, user, game_id, deps, build, describe=False)
+    choice = _stored_choice("detailed", choices)
+    return await _create(session, user, game_id, deps, build, choice, describe=False)
 
 
 async def create_quick(
@@ -479,20 +577,72 @@ async def create_quick(
             character_id=slot.character_id,
         )
 
+    # В выбор идёт то, что прислал игрок: имя, которое придумает модель, в него не попадает.
+    choice = _stored_choice(
+        "quick", QuickChoices(class_id=class_id, species=species, concept=concept, name=name)
+    )
     return await _create(
-        session, user, game_id, deps, build, describe=True, keep_name=name is not None
+        session, user, game_id, deps, build, choice, describe=True, keep_name=name is not None
     )
 
 
-async def create_random(session: AsyncSession, user: User, game_id: str, deps: Deps) -> CreatedOut:
-    """Случайный режим: движок собирает персонажа из свободного класса, модель его описывает."""
+async def create_random(
+    session: AsyncSession,
+    user: User,
+    game_id: str,
+    deps: Deps,
+    *,
+    preview_id: str | None = None,
+) -> CreatedOut:
+    """Случайный режим: персонаж из свободного класса, модель его описывает.
+
+    Без `preview_id` движок бросает героя тут же (прежнее поведение). С `preview_id` («Беру»)
+    создаётся герой, которого сервер показал этому игроку в `random_preview`: броска нет, числа те
+    же. Предпросмотр расходуется под блокировкой игры в момент сборки, после проверок игры и места
+    под вызов модели; отказ раньше (игра не в лобби, 429) его не тратит. Если сохранение в базу
+    после этого оборвётся (500), игрок бросит судьбу ещё раз."""
 
     def build(slot: Slot) -> Character:
+        if preview_id is not None:
+            return deps.previews.take(game_id, user.id, preview_id)
         return random_character(
             deps.rng, deps.srd, taken_classes=slot.taken_classes, character_id=slot.character_id
         )
 
-    return await _create(session, user, game_id, deps, build, describe=True)
+    return await _create(
+        session, user, game_id, deps, build, _stored_choice("random", None), describe=True
+    )
+
+
+class RandomPreviewOut(BaseModel):
+    preview_id: str
+    # Лист героя, как его соберёт движок: имени и описания ещё нет, их пишет нейронка после «Беру».
+    character: Character
+
+
+async def random_preview(
+    session: AsyncSession, user: User, game_id: str, deps: Deps
+) -> RandomPreviewOut:
+    """Предпросмотр случайного героя: бросает сервер, в базу ничего не пишется, модель не зовётся.
+
+    Новый предпросмотр отменяет прежний игрока в этой игре. Класс берётся из ещё не занятых
+    отрядом, как у прежнего случайного режима; это предпочтение, а не правило, поэтому к «Беру»
+    занятость класса не проверяется заново. Права и фаза те же, что у создания персонажа: участник
+    игры, лобби. Частота бросков ограничена (`RandomPreviews.charge`, 429); проверка частоты идёт
+    после проверки участия, чтобы счётчики заводились только у настоящих игроков."""
+    _require_lobby(await get_game(session, user, game_id))
+    deps.previews.charge(game_id, user.id)
+    taken_classes = await _taken_classes(session, game_id, user.id)
+    try:
+        hero = random_character(
+            deps.rng, deps.srd, taken_classes=taken_classes, character_id=new_character_id()
+        )
+    except CharacterValidationError as error:
+        raise Invalid("Персонаж не прошёл проверку правил.", error.problems) from None
+    # Владелец проставляется так же, как при сохранении: «Беру» не меняет в листе ни одного поля.
+    hero = hero.model_copy(update={"player_id": user.id})
+    shown = deps.previews.put(game_id, user.id, hero)
+    return RandomPreviewOut(preview_id=shown.id, character=shown.character)
 
 
 # --- описание от модели ---

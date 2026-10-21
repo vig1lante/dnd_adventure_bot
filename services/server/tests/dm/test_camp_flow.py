@@ -1155,6 +1155,32 @@ async def test_a_failed_camp_end_keeps_the_camp_and_the_host_repeats_it_with_the
         assert [log.error is None for log in await table.logs()] == [False, True]
 
 
+async def test_a_failed_camp_end_does_not_tell_anybody_that_player_moves_are_kept(
+    camp, monkeypatch
+):
+    # На привале ходов игроков нет, только реплики у костра: и хост, и игрок, который пробует
+    # пасовать, слышат про конец привала, а не про «ходы сохранены».
+    use_provider(monkeypatch, StubProvider(ProviderError("сеть упала")))
+    async with camp() as table:
+        await table.line("alice", "Подкину дров.")
+
+        await table.host("camp-end")
+        await table.settle()
+
+        assert (await table.game()).turn_phase == TurnPhase.DM_FAILED
+        [note] = await table.messages(MessageKind.SYSTEM)
+        assert note.audience == table.user_id("alice")
+        assert note.text.startswith("Мастер не справился с концом привала: ")
+        assert note.text.endswith(". Нажмите «Повторить».")
+        refused = await table.pass_("boris")
+        assert refused.status_code == 409
+        assert refused.json()["detail"] == (
+            "Мастер не справился с концом привала: хост может нажать «Повторить»."
+        )
+        for text in (note.text, refused.json()["detail"]):
+            assert "игроков" not in text and "сохранен" not in text.lower()
+
+
 async def test_regenerate_after_the_morning_rolls_the_rest_back_and_makes_it_once_more(camp):
     async with camp() as table:
         await table.line("alice", "Подкину дров.")

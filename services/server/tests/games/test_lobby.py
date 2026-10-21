@@ -37,7 +37,6 @@ from dnd_server.db.models import (
     Game,
     GamePhase,
     GamePlayer,
-    PendingRoll,
     PlayerCharacter,
     User,
 )
@@ -1187,10 +1186,15 @@ async def test_a_failing_broadcaster_does_not_fail_the_change_and_is_logged(sett
 # --- выход и исключение из лобби (решение владельца S5, D2) ---
 
 
-async def give_roll(db: async_sessionmaker[AsyncSession], game_id: str, player: Player) -> None:
-    """Набор характеристик, который сервер бросил игроку для создания персонажа."""
+async def give_choice(db: async_sessionmaker[AsyncSession], game_id: str, player: Player) -> None:
+    """Выбор игрока при создании героя (B8.s3): он хранится вместе со строкой персонажа."""
     async with db() as session:
-        session.add(PendingRoll(game_id=game_id, user_id=player.id, values=[15, 14, 13, 12, 10, 8]))
+        row = await session.scalar(
+            select(PlayerCharacter).where(
+                PlayerCharacter.game_id == game_id, PlayerCharacter.user_id == player.id
+            )
+        )
+        row.choices = {"mode": "random", "choices": None}
         await session.commit()
 
 
@@ -1212,18 +1216,21 @@ async def stored_characters(db: async_sessionmaker[AsyncSession], game_id: str) 
         return set(rows)
 
 
-async def stored_rolls(db: async_sessionmaker[AsyncSession], game_id: str) -> set[str]:
+async def stored_choices(db: async_sessionmaker[AsyncSession], game_id: str) -> set[str]:
+    """Игроки, у чьих героев в базе лежит выбор."""
     async with db() as session:
         rows = await session.scalars(
-            select(PendingRoll.user_id).where(PendingRoll.game_id == game_id)
+            select(PlayerCharacter.user_id).where(
+                PlayerCharacter.game_id == game_id, PlayerCharacter.choices.is_not(None)
+            )
         )
         return set(rows)
 
 
-async def test_a_player_leaves_the_lobby_with_his_character_and_his_rolled_set(lobby):
+async def test_a_player_leaves_the_lobby_with_his_character_and_his_choice(lobby):
     game, host, (leaver, stayer) = await ready_lobby(lobby)
-    await give_roll(lobby.db, game["id"], leaver)
-    await give_roll(lobby.db, game["id"], stayer)
+    await give_choice(lobby.db, game["id"], leaver)
+    await give_choice(lobby.db, game["id"], stayer)
     lobby.broadcaster.sent.clear()
 
     response = await leave(lobby, game["id"], leaver)
@@ -1234,7 +1241,7 @@ async def test_a_player_leaves_the_lobby_with_his_character_and_his_rolled_set(l
     assert [row.user_id for row in rows] == [host.id, stayer.id]
     assert all(row.ready for row in rows)  # отметки остальных не тронуты
     assert await stored_characters(lobby.db, game["id"]) == {host.id, stayer.id}
-    assert await stored_rolls(lobby.db, game["id"]) == {stayer.id}
+    assert await stored_choices(lobby.db, game["id"]) == {stayer.id}
     # Остальные игроки узнают о выходе событием `lobby` с новым составом.
     [(game_id, payload, audience)] = lobby.broadcaster.sent
     assert (game_id, audience, payload["type"]) == (game["id"], "all", "lobby")
@@ -1333,10 +1340,10 @@ async def test_leaving_races_with_the_start_under_the_game_lock(lobby):
         )
 
 
-async def test_the_host_kicks_a_player_with_his_character_and_his_rolled_set(lobby):
+async def test_the_host_kicks_a_player_with_his_character_and_his_choice(lobby):
     game, host, (target, stayer) = await ready_lobby(lobby)
-    await give_roll(lobby.db, game["id"], target)
-    await give_roll(lobby.db, game["id"], stayer)
+    await give_choice(lobby.db, game["id"], target)
+    await give_choice(lobby.db, game["id"], stayer)
     lobby.broadcaster.sent.clear()
 
     response = await kick(lobby, game["id"], host, target.id)
@@ -1349,7 +1356,7 @@ async def test_the_host_kicks_a_player_with_his_character_and_his_rolled_set(lob
     assert [row.user_id for row in rows] == [host.id, stayer.id]
     assert all(row.ready for row in rows)
     assert await stored_characters(lobby.db, game["id"]) == {host.id, stayer.id}
-    assert await stored_rolls(lobby.db, game["id"]) == {stayer.id}
+    assert await stored_choices(lobby.db, game["id"]) == {stayer.id}
     [(game_id, payload, audience)] = lobby.broadcaster.sent
     assert (game_id, audience, payload) == (game["id"], "all", {"type": "lobby", "game": body})
     gone = await lobby.http.get(f"/api/games/{game['id']}", headers=target.headers)

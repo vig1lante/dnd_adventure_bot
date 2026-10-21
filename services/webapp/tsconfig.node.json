@@ -19,7 +19,12 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  /* Код, который работает в Node: конфиг Vite и тест этого конфига. Тест лежит */
-  /* здесь, а не в src, чтобы типы Node не попали в браузерный tsconfig.app.json. */
-  "include": ["vite.config.ts", "vite-config.test.ts"]
+  /* Код, который работает в Node: конфиги Vite и Playwright, тест конфига Vite и сквозные */
+  /* тесты e2e. Лежат здесь, а не в src, чтобы типы Node не попали в браузерный tsconfig.app.json. */
+  "include": [
+    "vite.config.ts",
+    "vite-config.test.ts",
+    "playwright.config.ts",
+    "e2e/**/*.ts"
+  ]
 }

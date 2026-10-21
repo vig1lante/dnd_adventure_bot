@@ -9,13 +9,14 @@ import json
 import re
 from collections import Counter
 from collections.abc import Sequence
+from itertools import combinations_with_replacement
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
 from dnd_engine import creation
-from dnd_engine.abilities import ABILITY_NAMES_RU, SKILL_NAMES_RU, Ability, Skill, modifier
+from dnd_engine.abilities import ABILITY_NAMES_RU, SKILL_NAMES_RU, Ability, Skill
 from dnd_engine.character import Character, Persona, armor_class
 from dnd_engine.content import SpellDef, SrdContent, load_srd
 from dnd_engine.creation import (
@@ -30,7 +31,7 @@ from dnd_engine.creation import (
     class_spell_options,
     quick_character,
     random_character,
-    roll_ability_set,
+    random_point_buy,
 )
 from dnd_engine.rng import ScriptedRng, SeededRng
 
@@ -135,27 +136,15 @@ def make_choices(base: str = "barbarian", **overrides: Any) -> CharacterChoices:
     return CharacterChoices(**(data | CHOICES[base] | overrides))
 
 
-def build(
-    srd: SrdContent,
-    base: str = "barbarian",
-    *,
-    rolled_set: list[int] | None = None,
-    **overrides: Any,
-) -> Character:
+def build(srd: SrdContent, base: str = "barbarian", **overrides: Any) -> Character:
     choices = make_choices(base, **overrides)
-    return build_character(choices, srd, rolled_set=rolled_set, character_id="pc-1")
+    return build_character(choices, srd, character_id="pc-1")
 
 
-def problems_of(
-    srd: SrdContent,
-    base: str = "barbarian",
-    *,
-    rolled_set: list[int] | None = None,
-    **overrides: Any,
-) -> list[str]:
+def problems_of(srd: SrdContent, base: str = "barbarian", **overrides: Any) -> list[str]:
     """Список проблем, с которыми `build_character` отклоняет выбор."""
     with pytest.raises(CharacterValidationError) as info:
-        build(srd, base, rolled_set=rolled_set, **overrides)
+        build(srd, base, **overrides)
     return info.value.problems
 
 
@@ -185,69 +174,173 @@ def test_choices_survive_json_round_trip():
     assert CharacterChoices.model_validate_json(choices.model_dump_json()) == choices
 
 
-# --- roll_ability_set ---
+# --- random_point_buy: «Распределить случайно» (решение владельца R9) ---
+
+KEY_ABILITIES = 2  # столько первых характеристик приоритета класса считаются ключевыми
 
 
-def dice_for(scores: list[int]) -> list[int]:
-    """Грани четырёх костей на каждую характеристику: три старшие дают нужную сумму,
-    четвёртая (отбрасываемая) — единица."""
-    dice: list[int] = []
-    for score in scores:
-        base, extra = divmod(score, 3)
-        dice += [base + 1] * extra + [base] * (3 - extra) + [1]
-    return dice
+def spent_points(scores: dict[Ability, int]) -> int:
+    return sum(POINT_BUY_COST[value] for value in scores.values())
 
 
-def modifier_sum(scores: list[int]) -> int:
-    return sum(modifier(score) for score in scores)
+@pytest.mark.parametrize("class_id", CLASS_IDS)
+def test_random_point_buy_is_always_a_legal_layout_of_exactly_27_points(srd, class_id):
+    for seed in range(1, 201):
+        scores = random_point_buy(SeededRng(seed), srd, class_id)
+
+        assert set(scores) == set(Ability), f"seed {seed}"
+        assert all(8 <= value <= 15 for value in scores.values()), f"seed {seed}: {scores}"
+        assert spent_points(scores) == POINT_BUY_BUDGET, f"seed {seed}: {scores}"
 
 
-def test_roll_ability_set_is_balanced_for_many_seeds():
-    for seed in range(200):
-        scores = roll_ability_set(SeededRng(seed))
+def legal_layouts() -> list[tuple[int, ...]]:
+    """Все способы потратить ровно 27 очков на шесть значений 8–15 (по убыванию).
 
-        assert len(scores) == 6, f"seed {seed}"
-        assert all(3 <= score <= 18 for score in scores), f"seed {seed}: {scores}"
-        assert 3 <= modifier_sum(scores) <= 7, f"seed {seed}: {scores}"
-
-
-def test_roll_ability_set_depends_on_rng():
-    results = {tuple(roll_ability_set(SeededRng(seed))) for seed in range(20)}
-
-    assert len(results) > 1
+    Считаем независимо от движка, перебором всех сочетаний, а не его функциями."""
+    return [
+        tuple(sorted(values, reverse=True))
+        for values in combinations_with_replacement(range(8, 16), 6)
+        if sum(POINT_BUY_COST[value] for value in values) == POINT_BUY_BUDGET
+    ]
 
 
-def test_roll_ability_set_keeps_three_highest_dice_of_four():
-    # Первая характеристика: кости 6, 5, 4, 1 -> 6 + 5 + 4 = 15, единица отброшена.
-    first_dice = [6, 5, 4, 1]
-    rng = ScriptedRng(first_dice + dice_for([14, 13, 12, 10, 8]))
+def test_there_are_62_legal_layouts_with_a_main_ability_of_14_or_more():
+    # Набор раскладок — решение владельца R9: все способы потратить ровно 27 очков, где лучшее
+    # значение не ниже 14. Исключены только три «ровные» раскладки, где оно не выше 13.
+    every = legal_layouts()
+    strong = [layout for layout in every if layout[0] >= 14]
 
-    assert roll_ability_set(rng) == [15, 14, 13, 12, 10, 8]
+    assert len(every) == 65 and len(strong) == 62
+    assert set(every) - set(strong) == {
+        (13, 13, 13, 12, 12, 12),
+        (13, 13, 13, 13, 12, 11),
+        (13, 13, 13, 13, 13, 10),
+    }
 
 
-def test_roll_ability_set_rerolls_whole_set_until_balanced():
-    too_low = dice_for([8] * 6)  # сумма модификаторов -6
-    too_high = dice_for([18] * 6)  # сумма модификаторов +24
-    good = dice_for([15, 14, 13, 12, 10, 8])  # сумма модификаторов +5
-    rng = ScriptedRng(too_low + too_high + good)
+@pytest.mark.parametrize("class_id", CLASS_IDS)
+def test_random_point_buy_draws_from_exactly_the_legal_layouts_with_a_strong_main_ability(
+    srd, class_id
+):
+    # Только поведение: на тысячах seed функция выдаёт все 62 раскладки и ничего кроме них. Так
+    # тест заметит и сужение выбора, и появление лишней раскладки, не зная внутреннего устройства.
+    strong = {layout for layout in legal_layouts() if layout[0] >= 14}
 
-    assert roll_ability_set(rng) == [15, 14, 13, 12, 10, 8]
+    drawn = {
+        tuple(sorted(random_point_buy(SeededRng(seed), srd, class_id).values(), reverse=True))
+        for seed in range(1, 3001)
+    }
+
+    assert drawn == strong
+
+
+@pytest.mark.parametrize("class_id", CLASS_IDS)
+def test_build_character_accepts_every_random_point_buy(srd, class_id):
+    bonus = CHOICES[class_id]["background_bonus"]
+
+    for seed in range(1, 101):
+        scores = random_point_buy(SeededRng(seed), srd, class_id)
+
+        character = build(srd, class_id, method=AbilityMethod.POINT_BUY, base_scores=scores)
+
+        assert character.scores == {a: scores[a] + bonus.get(a, 0) for a in Ability}, f"seed {seed}"
+
+
+@pytest.mark.parametrize("class_id", CLASS_IDS)
+def test_random_point_buy_gives_the_primary_ability_14_or_15_and_the_most_of_all(srd, class_id):
+    primary = srd.classes[class_id].ability_priority[0]
+
+    results = [random_point_buy(SeededRng(seed), srd, class_id) for seed in range(1, 201)]
+
+    assert all(scores[primary] == max(scores.values()) for scores in results)
+    assert {scores[primary] for scores in results} == {14, 15}  # обе границы встречаются
+
+
+@pytest.mark.parametrize("class_id", CLASS_IDS)
+def test_random_point_buy_gives_the_key_abilities_more_than_the_rest(srd, class_id):
+    priority = srd.classes[class_id].ability_priority
+    key, rest = priority[:KEY_ABILITIES], priority[KEY_ABILITIES:]
+
+    for seed in range(1, 201):
+        scores = random_point_buy(SeededRng(seed), srd, class_id)
+
+        assert scores[key[0]] >= scores[key[1]] >= max(scores[a] for a in rest), f"seed {seed}"
+
+
+@pytest.mark.parametrize("class_id", CLASS_IDS)
+def test_random_point_buy_deals_the_remaining_values_to_non_key_abilities_in_random_order(
+    srd, class_id
+):
+    # Ловит мутант «перемешать, затем отсортировать по приоритету класса»: он тратит те же
+    # обращения к генератору и даёт те же наборы значений, но первая неключевая характеристика
+    # у него всегда лучшая из четырёх, а последняя всегда худшая. Место значения определено
+    # только когда все четыре различны, поэтому равные значения пропускаем.
+    rest = srd.classes[class_id].ability_priority[KEY_ABILITIES:]
+    places: dict[Ability, set[int]] = {ability: set() for ability in rest}
+
+    for seed in range(1, 401):
+        scores = random_point_buy(SeededRng(seed), srd, class_id)
+        values = [scores[ability] for ability in rest]
+        if len(set(values)) < len(values):
+            continue
+        best_first = sorted(values, reverse=True)
+        for ability in rest:
+            places[ability].add(best_first.index(scores[ability]))
+
+    # Каждая неключевая характеристика на разных seed получает любое место: от лучшего (0)
+    # из оставшихся значений до худшего.
+    assert places == {ability: set(range(len(rest))) for ability in rest}
+
+
+def test_random_point_buy_follows_the_priority_of_the_class(srd):
+    # У волшебника главная — Интеллект, у варвара — Сила: тот же бросок кладёт максимум по-разному.
+    wizard = random_point_buy(SeededRng(5), srd, "wizard")
+    barbarian = random_point_buy(SeededRng(5), srd, "barbarian")
+
+    assert wizard[INT] == max(wizard.values())
+    assert barbarian[STR] == max(barbarian.values())
+    assert sorted(wizard.values()) == sorted(barbarian.values())  # набор тот же, места разные
+
+
+def test_random_point_buy_differs_between_seeds(srd):
+    layouts = {
+        tuple(random_point_buy(SeededRng(seed), srd, "wizard").items()) for seed in range(1, 51)
+    }
+    value_sets = {
+        tuple(sorted(random_point_buy(SeededRng(seed), srd, "wizard").values()))
+        for seed in range(1, 51)
+    }
+
+    assert len(layouts) > 30
+    assert len(value_sets) > 10  # меняются не только места, но и сами значения
+
+
+def test_random_point_buy_is_reproducible_for_the_same_seed(srd):
+    first = random_point_buy(SeededRng(9), srd, "rogue")
+    second = random_point_buy(SeededRng(9), srd, "rogue")
+
+    assert first == second
+
+
+def test_random_point_buy_takes_its_choices_from_the_given_rng(srd):
+    # Пустой ScriptedRng отказывает на первом же запросе: раскладка идёт именно через него.
     with pytest.raises(ValueError, match="закончилась"):
-        rng.randint(1, 6)  # все 72 кости использованы, лишних бросков не было
+        random_point_buy(ScriptedRng([]), srd, "wizard")
 
 
-@pytest.mark.parametrize(
-    ("rejected", "accepted"),
-    [
-        ([12, 12, 10, 10, 10, 10], [12, 12, 12, 10, 10, 10]),  # сумма 2 отклонена, 3 принята
-        ([14, 14, 14, 12, 12, 10], [14, 14, 12, 12, 12, 10]),  # сумма 8 отклонена, 7 принята
-    ],
-)
-def test_roll_ability_set_range_bounds_are_inclusive(rejected, accepted):
-    assert modifier_sum(rejected) in (2, 8)
-    assert modifier_sum(accepted) in (3, 7)
+def test_random_point_buy_with_an_unknown_class_is_a_validation_error(srd):
+    with pytest.raises(CharacterValidationError) as info:
+        random_point_buy(SeededRng(1), srd, "paladin")
 
-    assert roll_ability_set(ScriptedRng(dice_for(rejected) + dice_for(accepted))) == accepted
+    assert_problem(info.value.problems, "класс", "paladin")
+
+
+def test_random_point_buy_does_not_change_the_shared_srd_data(srd):
+    before = srd.model_dump(mode="json")
+
+    random_point_buy(SeededRng(3), srd, "cleric")
+
+    assert srd.model_dump(mode="json") == before
 
 
 # --- build_character: общий результат ---
@@ -303,6 +396,24 @@ def test_point_buy_spending_exactly_27_points_is_legal(srd):
     assert character.scores[DEX] == 15
 
 
+@pytest.mark.parametrize(
+    "spent",
+    [
+        {STR: 8, DEX: 8, CON: 8, INT: 8, WIS: 8, CHA: 8},  # 0 очков
+        {STR: 15, DEX: 8, CON: 8, INT: 8, WIS: 8, CHA: 8},  # 9 очков
+        {STR: 15, DEX: 15, CON: 14, INT: 8, WIS: 8, CHA: 8},  # 25 очков: два остались
+    ],
+)
+def test_point_buy_may_leave_points_unspent(srd, spent):
+    # «Не больше 27»: игрок, который не потратил всё, остаётся в правилах. Лишнего получить
+    # нельзя ни одним способом: потолок задаёт стоимость значений, а не обязанность тратить.
+    assert sum(POINT_BUY_COST[value] for value in spent.values()) < 27
+
+    character = build(srd, base_scores=spent)
+
+    assert character.scores[STR] >= spent[STR]
+
+
 def test_point_buy_spending_28_points_is_rejected(srd):
     spent = {STR: 15, DEX: 15, CON: 15, INT: 9, WIS: 8, CHA: 8}
     assert sum(POINT_BUY_COST[value] for value in spent.values()) == 28
@@ -356,142 +467,43 @@ def test_standard_array_rejects_anything_but_permutation(srd, values):
     assert_problem(problems, "стандартный набор", "15, 14, 13, 12, 10, 8")
 
 
-def test_rolled_set_accepts_any_permutation(srd):
-    rolled = [16, 15, 13, 12, 11, 9]
-    scores = dict(zip(Ability, reversed(rolled), strict=True))
-
-    character = build(srd, method=AbilityMethod.ROLL, base_scores=scores, rolled_set=rolled)
-
-    assert character.scores[CHA] == 16
+# --- build_character: бросок характеристик убран (решение владельца R9) ---
 
 
-def test_rolled_set_must_be_a_permutation_of_the_server_set(srd):
-    rolled = [16, 15, 13, 12, 11, 9]
-    claimed = dict(zip(Ability, [18, 15, 13, 12, 11, 9], strict=True))
-
-    problems = problems_of(srd, method=AbilityMethod.ROLL, base_scores=claimed, rolled_set=rolled)
-
-    assert_problem(problems, "бросок", "перестановкой")
-
-
-def test_roll_method_without_rolled_set_is_rejected(srd):
-    scores = dict(zip(Ability, [16, 15, 13, 12, 11, 9], strict=True))
-
+@pytest.mark.parametrize(
+    "scores",
+    [
+        dict(zip(Ability, (15, 14, 13, 12, 10, 8), strict=True)),  # набор, как у стандартного
+        dict(zip(Ability, (18, 18, 18, 19, 19, 19), strict=True)),  # недостижимые значения
+        # С прибавкой предыстории (+2 к Силе, +1 к Телосложению) Сила выходит за потолок 20.
+        dict(zip(Ability, (19, 19, 19, 19, 19, 19), strict=True)),
+        {STR: 15},  # не заданы остальные характеристики
+    ],
+    ids=["legal-looking", "impossible", "above-the-cap", "incomplete"],
+)
+def test_the_roll_method_is_refused_with_a_clear_russian_problem(srd, scores):
     problems = problems_of(srd, method=AbilityMethod.ROLL, base_scores=scores)
 
-    assert_problem(problems, "rolled_set")
+    # Причина одна и понятная: не «не заданы характеристики», не «нет выпавшего набора» и не
+    # «итоговое значение больше 20» — значения отвергнутого способа не разбираются вовсе.
+    assert problems == [creation.ROLL_REMOVED_PROBLEM]
+    assert_problem(problems, "бросок", "27 очков")
 
 
-# --- build_character: сам выпавший набор должен быть легальным броском ---
+def test_the_roll_method_is_reported_together_with_other_problems(srd):
+    scores = dict(zip(Ability, (15, 14, 13, 12, 10, 8), strict=True))
 
-GOOD_ROLLED_SET = [15, 14, 13, 12, 10, 8]  # сумма модификаторов +5
+    problems = problems_of(srd, method=AbilityMethod.ROLL, base_scores=scores, skills=[])
 
-# Граничные наборы: (набор, мог ли он выпасть из `roll_ability_set`). Их проверяют и
-# генератор, и `build_character`: у обоих одно правило легального броска.
-BOUNDARY_SETS = [
-    ([12, 12, 12, 10, 10, 10], True),  # сумма модификаторов 3 — нижняя граница
-    ([16, 15, 14, 12, 10, 8], True),  # сумма модификаторов 7 — верхняя граница
-    ([18, 15, 14, 10, 8, 3], True),  # крайние значения 18 и 3, сумма модификаторов 3
-    ([12, 12, 10, 10, 10, 10], False),  # сумма модификаторов 2
-    ([14, 14, 14, 12, 12, 10], False),  # сумма модификаторов 8
-    ([3] * 6, False),
-    ([18] * 6, False),
-]
-
-# Наборы, которые генератор выдать не может, но сервер (по ошибке) мог бы передать.
-IMPOSSIBLE_ROLLED_SETS = [
-    pytest.param([18, 18, 18, 19, 19, 19], id="nineteens"),
-    pytest.param([-50] * 6, id="negative-values"),
-    pytest.param([2, 15, 14, 13, 12, 12], id="below-3-sum-in-range"),
-    pytest.param([19, 13, 12, 10, 10, 10], id="above-18-sum-in-range"),
-    pytest.param([15, 14, 13, 12, 10], id="five-values"),
-    pytest.param([15, 14, 13, 12, 10, 8, 8], id="seven-values"),
-    pytest.param([], id="empty"),
-    pytest.param([15, 14, 13, 12, 10, True], id="bool-instead-of-int"),
-    pytest.param([15.0, 14, 13, 12, 10, 8], id="float-instead-of-int"),
-    pytest.param(["15", 14, 13, 12, 10, 8], id="str-instead-of-int"),
-]
-
-
-def rolled_choices(rolled: list, **overrides: Any) -> dict[str, Any]:
-    """Выбор способа `ROLL`, где игрок «честно» раскладывает присланный набор по порядку.
-
-    Если в наборе не шесть значений, недостающие берутся из `GOOD_ROLLED_SET`, чтобы
-    характеристики были заданы полностью и проверялся именно набор."""
-    scores = dict(zip(Ability, [*rolled, *GOOD_ROLLED_SET], strict=False))
-    return {"method": AbilityMethod.ROLL, "base_scores": scores, "rolled_set": rolled} | overrides
-
-
-@pytest.mark.parametrize(("rolled", "possible"), BOUNDARY_SETS)
-def test_build_character_accepts_exactly_the_sets_the_generator_can_produce(srd, rolled, possible):
-    if possible:
-        assert build(srd, **rolled_choices(rolled)).scores[STR] == rolled[0] + 2
-    else:
-        problems = problems_of(srd, **rolled_choices(rolled))
-        assert_problem(problems, "бросок", "не мог выпасть")
-
-
-@pytest.mark.parametrize(("rolled", "possible"), BOUNDARY_SETS)
-def test_roll_ability_set_keeps_exactly_the_sets_build_character_accepts(rolled, possible):
-    rng = ScriptedRng(dice_for(rolled) + dice_for(GOOD_ROLLED_SET))
-
-    assert roll_ability_set(rng) == (rolled if possible else GOOD_ROLLED_SET)
-
-
-@pytest.mark.parametrize("rolled", IMPOSSIBLE_ROLLED_SETS)
-def test_rolled_set_that_could_not_have_been_rolled_is_rejected(srd, rolled):
-    problems = problems_of(srd, **rolled_choices(rolled))
-
-    assert_problem(problems, "бросок", "не мог выпасть", "от 3 до 18")
-
-
-def test_exploit_set_with_nineteens_cannot_make_a_character_with_all_scores_19(srd):
-    rolled = [18, 18, 18, 19, 19, 19]
-
-    with pytest.raises(CharacterValidationError):
-        build(srd, **rolled_choices(rolled, background_bonus={DEX: 1, CON: 1, STR: 1}))
-
-
-def test_hostile_rolled_set_is_reported_together_with_other_problems(srd):
-    rolled = [-50] * 6
-
-    problems = problems_of(srd, **rolled_choices(rolled, skills=[], background_bonus={STR: 3}))
-
-    assert_problem(problems, "бросок", "не мог выпасть")
+    assert_problem(problems, "бросок")
     assert_problem(problems, "ровно 2")
-    assert_problem(problems, "бонус предыстории")
 
 
-def test_legal_rolled_set_still_reports_a_scores_mismatch(srd):
-    # Набор легален, но игрок заявил другие значения: по-прежнему проблема перестановки.
-    claimed = dict(zip(Ability, [18, 15, 13, 12, 11, 9], strict=True))
+def test_build_character_no_longer_takes_a_rolled_set(srd):
+    choices = make_choices("barbarian")
 
-    problems = problems_of(srd, **rolled_choices([16, 15, 13, 12, 11, 9], base_scores=claimed))
-
-    assert_problem(problems, "бросок", "перестановкой")
-
-
-@pytest.mark.parametrize("method", [AbilityMethod.POINT_BUY, AbilityMethod.STANDARD_ARRAY])
-@pytest.mark.parametrize("rolled", [[-50] * 6, [18, 18, 18, 19, 19, 19], None])
-def test_rolled_set_is_ignored_unless_the_method_is_roll(srd, method, rolled):
-    scores = (
-        CHOICES["barbarian"]["base_scores"]
-        if method == AbilityMethod.POINT_BUY
-        else dict(zip(Ability, STANDARD_ARRAY, strict=True))
-    )
-
-    character = build(srd, method=method, base_scores=scores, rolled_set=rolled)
-
-    assert character.class_id == "barbarian"
-
-
-def test_a_set_from_the_generator_is_always_accepted_as_rolled_set(srd):
-    for seed in range(200):
-        rolled = roll_ability_set(SeededRng(seed))
-
-        character = build(srd, **rolled_choices(sorted(rolled, reverse=True)))
-
-        assert character.scores[STR] == max(rolled) + 2, f"seed {seed}: {rolled}"
+    with pytest.raises(TypeError):
+        build_character(choices, srd, rolled_set=[15, 14, 13, 12, 10, 8], character_id="pc-1")
 
 
 # --- build_character: бонус предыстории ---
@@ -534,27 +546,32 @@ def test_illegal_background_bonus_is_rejected(srd, bonus):
 
 
 def test_final_score_above_20_is_rejected(srd):
-    rolled = [19, 14, 13, 12, 10, 8]
-    scores = dict(zip(Ability, rolled, strict=True))
+    # Покупка очков такого значения не даёт (проблема диапазона тоже названа), но предел 20 —
+    # правило SRD, и оно проверяется само, а не как следствие других проверок.
+    scores = dict(zip(Ability, [19, 14, 13, 12, 10, 8], strict=True))
 
-    problems = problems_of(
-        srd,
-        method=AbilityMethod.ROLL,
-        base_scores=scores,
-        background_bonus={STR: 2, DEX: 1},
-        rolled_set=rolled,
-    )
+    problems = problems_of(srd, base_scores=scores, background_bonus={STR: 2, DEX: 1})
 
     assert_problem(problems, ABILITY_NAMES_RU[STR], "21", "20")
 
 
-def test_final_score_of_exactly_20_is_legal(srd):
-    rolled = [18, 14, 13, 12, 10, 8]
-    scores = dict(zip(Ability, rolled, strict=True))
+def test_a_final_score_of_17_is_reachable_with_a_base_of_15_and_a_plus_2_bonus(srd):
+    scores = CHOICES["barbarian"]["base_scores"]
+    assert max(scores.values()) == 15
 
-    character = build(srd, method=AbilityMethod.ROLL, base_scores=scores, rolled_set=rolled)
+    character = build(srd, base_scores=scores, background_bonus={STR: 2, CON: 1})
 
-    assert character.scores[STR] == 20
+    assert max(character.scores.values()) == 17
+
+
+def test_a_base_of_16_cannot_be_bought_to_reach_18(srd):
+    # Выше 17 не подняться: больше 15 покупкой очков не получить, а прибавка предыстории — не
+    # больше +2 (ей посвящены тесты выше).
+    scores = CHOICES["barbarian"]["base_scores"] | {STR: 16}
+
+    problems = problems_of(srd, base_scores=scores, background_bonus={STR: 2, CON: 1})
+
+    assert_problem(problems, ABILITY_NAMES_RU[STR], "16", "вне диапазона")
 
 
 # --- build_character: навыки ---
@@ -1255,23 +1272,13 @@ def test_point_buy_range_error_names_both_borders(srd):
     assert_problem(problems_of(srd, base_scores=scores), "от 8 до 15")
 
 
-@pytest.mark.parametrize(("top", "legal"), [(18, True), (21, False)])
-def test_score_cap_applies_to_the_final_value_even_without_background_bonus(srd, top, legal):
-    # Бонус предыстории ложится на Лов и Тел, а выпавшее значение Силы остаётся как есть.
-    # Больше 18 при броске 4d6kh3 выпасть не может, поэтому легальна только граница 18.
-    rolled = [top, 14, 13, 12, 10, 8]
-    scores = dict(zip(Ability, rolled, strict=True))
-    overrides = {
-        "method": AbilityMethod.ROLL,
-        "base_scores": scores,
-        "background_bonus": {DEX: 2, CON: 1},
-        "rolled_set": rolled,
-    }
+def test_score_cap_applies_to_the_final_value_even_without_background_bonus(srd):
+    # Бонус предыстории ложится на Лов и Тел, а базовое значение Силы 21 остаётся как есть.
+    scores = dict(zip(Ability, [21, 14, 13, 12, 10, 8], strict=True))
 
-    if legal:
-        assert build(srd, **overrides).scores[STR] == top
-    else:
-        assert_problem(problems_of(srd, **overrides), ABILITY_NAMES_RU[STR], "21", "20")
+    problems = problems_of(srd, base_scores=scores, background_bonus={DEX: 2, CON: 1})
+
+    assert_problem(problems, ABILITY_NAMES_RU[STR], "21", "20")
 
 
 @pytest.mark.parametrize(
@@ -1313,20 +1320,18 @@ def test_class_feature_gained_after_level_3_is_not_available(srd):
 # --- вход не меняется, персонаж ничего не делит с выбором ---
 
 
-def test_build_character_leaves_choices_and_rolled_set_untouched(srd):
-    rolled = [16, 15, 13, 12, 11, 9]
+def test_build_character_leaves_choices_untouched(srd):
     choices = make_choices(
         "barbarian",
-        method=AbilityMethod.ROLL,
-        base_scores=dict(zip(Ability, reversed(rolled), strict=True)),
+        method=AbilityMethod.STANDARD_ARRAY,
+        base_scores=dict(zip(Ability, reversed(STANDARD_ARRAY), strict=True)),
         persona=Persona(concept="бывший стражник"),
     )
     choices_before = choices.model_copy(deep=True)
 
-    build_character(choices, srd, rolled_set=rolled, character_id="pc-1")
+    build_character(choices, srd, character_id="pc-1")
 
     assert choices == choices_before
-    assert rolled == [16, 15, 13, 12, 11, 9]
 
 
 @pytest.mark.parametrize("class_id", CLASS_IDS)
@@ -1366,26 +1371,6 @@ def test_random_character_does_not_change_taken_classes_and_ignores_unknown_ones
 
     assert taken == {"paladin", "rogue"}
     assert with_unknown == plain
-
-
-# --- стык броска характеристик и создания ---
-
-
-@pytest.mark.parametrize("class_id", CLASS_IDS)
-def test_every_rolled_set_builds_a_character_when_laid_out_by_class_priority(srd, class_id):
-    priority = srd.classes[class_id].ability_priority
-    bonus = CHOICES[class_id]["background_bonus"]
-
-    for seed in range(1, 41):
-        rolled = roll_ability_set(SeededRng(seed))
-        by_priority = dict(zip(priority, sorted(rolled, reverse=True), strict=True))
-
-        character = build(
-            srd, class_id, method=AbilityMethod.ROLL, base_scores=by_priority, rolled_set=rolled
-        )
-
-        assert sorted(character.scores[a] - bonus.get(a, 0) for a in Ability) == sorted(rolled)
-        assert all(3 <= score <= 20 for score in character.scores.values()), f"seed {seed}"
 
 
 # --- устойчивость к любым выборам ---
@@ -1542,4 +1527,6 @@ def test_unknown_enum_values_never_reach_build_character(field, value):
 
 
 def test_ability_method_values_are_the_strings_a_client_sends():
+    # «roll» остался в перечне только затем, чтобы старый клиент получил русскую проблему от
+    # `build_character`, а не безликую ошибку разбора; создавать героя этим способом нельзя.
     assert [method.value for method in AbilityMethod] == ["point_buy", "standard_array", "roll"]
