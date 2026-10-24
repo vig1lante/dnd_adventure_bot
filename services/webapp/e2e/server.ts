@@ -80,7 +80,10 @@ function serverPort(): number {
  * - `claude_code_cli`: в dev он остаётся в списке и выбирается (фабрика не проверяет путь), но
  *   `CLAUDE_CLI_PATH` указывает на несуществующий файл в папке стенда. Путь с каталогом в PATH
  *   не ищут, поэтому запуск хода кончается ошибкой «не удалось запустить claude», без процесса;
- * - модели (`LLM_MODEL`, `LLM_EFFORT`, `LLM_CHEAP_MODEL`) сброшены к значениям по умолчанию.
+ * - модели (`LLM_MODEL`, `LLM_EFFORT`, `LLM_CHEAP_MODEL`) и модель подписки Claude Code
+ *   (`CLAUDE_CLI_MODEL`, `CLAUDE_CLI_EFFORT`, `CLAUDE_CLI_CHEAP_MODEL`) сброшены к значениям по
+ *   умолчанию: пустое значение — «не задано», поэтому модель и усилия выбрал бы сам CLI, а форма
+ *   новой игры предлагает для него только псевдонимы `opus`, `sonnet`, `haiku`.
  * Ещё обнулены токен и имя бота (бот Telegram выключен) и задана своя временная база. Остальное
  * (PATH, HOME) наследуется, чтобы `uv` нашёл Python и кэш. Тест в `one-process.spec.ts` сверяет
  * эту функцию со списком переменных `.env.example`.
@@ -106,6 +109,9 @@ export function serverEnv(dataDir: string): NodeJS.ProcessEnv {
     LLM_EFFORT: "",
     LLM_CHEAP_MODEL: "",
     CLAUDE_CLI_PATH: path.join(dataDir, "claude-is-disabled-in-e2e"),
+    CLAUDE_CLI_MODEL: "",
+    CLAUDE_CLI_EFFORT: "",
+    CLAUDE_CLI_CHEAP_MODEL: "",
     WEBAPP_PUBLIC_URL: `http://${HOST}:${process.env.E2E_WEB_PORT ?? ""}`,
     COLLECT_SECONDS,
     HURRY_SECONDS,

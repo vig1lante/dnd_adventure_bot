@@ -19,7 +19,7 @@ export function SkillsStep({ draft, options, update }: StepProps) {
   return (
     <div className="screen-stack">
       {granted.length > 0 && (
-        <p className="char-note">{`Уже есть: ${granted.map(skillName).join(", ")}. Их дают предыстория и вид.`}</p>
+        <p className="char-note">{`Уже есть: ${granted.map(skillName).join(", ")}. Их дают предыстория и раса.`}</p>
       )}
       <CheckList
         legend={`Навыки класса: выберите ${cls.skill_choices}`}

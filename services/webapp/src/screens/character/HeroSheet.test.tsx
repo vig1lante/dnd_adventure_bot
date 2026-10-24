@@ -1,11 +1,11 @@
 import { render, screen } from "@testing-library/react";
-import { OPTIONS, previewHero } from "./fixtures";
+import { OPTIONS, OUTDATED_WORDS, previewHero } from "./fixtures";
 import { HeroSheet } from "./HeroSheet";
 
 const sheet = () => screen.getByRole("region", { name: "Лист героя" });
 
 describe("лист героя", () => {
-  test("названия берутся из правил сервера: класс, вид, предыстория, характеристики", () => {
+  test("названия берутся из правил сервера: класс, раса, предыстория, характеристики", () => {
     render(<HeroSheet character={previewHero()} options={OPTIONS} />);
 
     expect(screen.getByRole("heading", { name: "Плут" })).toBeInTheDocument();
@@ -21,6 +21,12 @@ describe("лист героя", () => {
       expect(sheet()).toHaveTextContent(name);
     }
     expect(sheet()).toHaveTextContent("Спасброски");
+  });
+
+  test("в листе нет устаревших слов: ни «вид», ни футов", () => {
+    render(<HeroSheet character={previewHero()} options={OPTIONS} />);
+
+    expect(sheet().textContent).not.toMatch(OUTDATED_WORDS);
   });
 
   test("значения характеристик показаны ровно такими, как пришли", () => {

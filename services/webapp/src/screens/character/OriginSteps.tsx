@@ -26,7 +26,7 @@ export function SpeciesStep({ draft, options, update }: StepProps) {
   return (
     <>
       <ChoiceList
-        legend="Вид"
+        legend="Раса"
         name="species"
         value={draft.species}
         choices={options.species.map((item) => ({

@@ -106,7 +106,7 @@ API_KEY = "sk-ant-api-SECRET-0123456789"
 BOT_TOKEN = "123456789:AAF-turn-bot-token-0123456789_abcdef"
 OPENAI_KEY = "sk-openai-SECRET-0123456789"
 SECRETS = (SESSION_SECRET, API_KEY, BOT_TOKEN, OPENAI_KEY)
-PLAYERS = (  # (ключ, имя, класс, вид)
+PLAYERS = (  # (ключ, имя, класс, раса)
     ("alice", "Алиса", "fighter", "human"),
     ("boris", "Борис", "rogue", "elf"),
     ("vera", "Вера", "cleric", "dwarf"),
@@ -515,6 +515,26 @@ def error_of(log: DmTurnLog) -> str:
 
 def dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def use_fake_claude(world: World, env: dict[str, str] | None = None, **settings: Any) -> None:
+    """Игра ведётся настоящим адаптером `claude_code_cli`, но вместо `claude` — имитатор из тестов.
+
+    `env` — переменные имитатора (`FAKE_CLAUDE_*`), `settings` — правки настроек сервера (модель
+    подписки и т. п.). Без `FAKE_CLAUDE_REPLIES` имитатор отвечает рассказом и называет в
+    `modelUsage` модель из `--model` (или `FAKE_CLAUDE_MODEL`)."""
+    lines = [f"python={shlex.quote(sys.executable)}", f"script={shlex.quote(str(FAKE_CLAUDE))}"]
+    lines += [f"export {name}={shlex.quote(value)}" for name, value in (env or {}).items()]
+    (world.tmp_path / "fake_claude.env").write_text("\n".join(lines) + "\n")
+    wrapper = world.tmp_path / "claude"
+    wrapper.symlink_to(FAKE_CLAUDE.with_name("fake_claude.sh"))
+    changes = {"llm_provider": "claude_code_cli", "claude_cli_path": str(wrapper), **settings}
+    world.deps = dataclasses.replace(
+        world.deps,
+        settings=world.deps.settings.model_copy(update=changes),
+        turn_tokens=TurnTokens(),
+        providers=GameProviders(),
+    )
 
 
 # --- провайдер игры и адрес моста (F3) ---
@@ -1122,20 +1142,10 @@ async def test_a_turn_that_could_not_build_its_provider_has_no_model_in_the_jour
     assert log.model is None
 
 
-async def test_the_cli_version_of_the_subscription_provider_reaches_the_journal(world, tmp_path):
+async def test_the_cli_version_of_the_subscription_provider_reaches_the_journal(world):
     # Настоящий адаптер `claude_code_cli`, но вместо `claude` — имитатор из тестов: версию CLI он
     # узнаёт при первом запуске, то есть уже после начала хода.
-    (tmp_path / "fake_claude.env").write_text(
-        f"python={shlex.quote(sys.executable)}\nscript={shlex.quote(str(FAKE_CLAUDE))}\n"
-    )
-    wrapper = tmp_path / "claude"
-    wrapper.symlink_to(FAKE_CLAUDE.with_name("fake_claude.sh"))
-    settings = world.deps.settings.model_copy(
-        update={"llm_provider": "claude_code_cli", "claude_cli_path": str(wrapper)}
-    )
-    world.deps = dataclasses.replace(
-        world.deps, settings=settings, turn_tokens=TurnTokens(), providers=GameProviders()
-    )
+    use_fake_claude(world)
 
     outcome = await world.run()
 
@@ -1145,6 +1155,219 @@ async def test_the_cli_version_of_the_subscription_provider_reaches_the_journal(
     assert log.request["cli_version"] == "9.9.9 (Claude Code)"
     assert (log.usage["input_tokens"], log.usage["output_tokens"]) == (11, 7)
     assert log.output == "Тени скрывают вас…"
+    assert log.model == "claude-fake-subscription"  # модель «подписки» имитатора из modelUsage
+
+
+async def test_the_journal_names_the_model_the_subscription_cli_actually_used(world):
+    # Спека §11: журнал пишет фактическую модель из `modelUsage` ответа CLI, а не псевдоним из
+    # настроек: имитатор «разворачивает» `opus` в полное имя, как это делает настоящий CLI.
+    use_fake_claude(world, {"FAKE_CLAUDE_MODEL": "claude-opus-test-9"}, claude_cli_model="opus")
+
+    outcome = await world.run()
+
+    assert outcome.status == TurnStatus.DONE
+    (log,) = await world.logs()
+    assert log.model == "claude-opus-test-9"
+
+
+async def test_the_model_of_the_game_reaches_the_cli_and_beats_the_environment(world):
+    # Модель, выбранная создателем игры, идёт из строки игры через провайдера игры в `--model`
+    # и сильнее CLAUDE_CLI_MODEL; дешёвая модель ход не ведёт. Имитатор называет в `modelUsage`
+    # ровно то, что получил в `--model`.
+    use_fake_claude(world, claude_cli_model="opus", claude_cli_cheap_model="haiku")
+    async with world.db() as session:
+        await session.execute(update(Game).where(Game.id == world.game_id).values(model="sonnet"))
+        await session.commit()
+
+    outcome = await world.run()
+
+    assert outcome.status == TurnStatus.DONE
+    (log,) = await world.logs()
+    assert (log.provider, log.model) == ("claude_code_cli", "sonnet")
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "game_model", "cli_model", "expected"),
+    [
+        # Игру создали без провайдера при LLM_PROVIDER=openai_compatible, потом владелец включил CLI.
+        pytest.param(None, "qwen2.5:14b", "opus", "opus", id="модель другого провайдера"),
+        pytest.param(None, "claude-opus-4@x", None, "claude-fake-subscription", id="без env"),
+        # Игра DND-1 с provider=claude_code_cli и моделью, присланной прямо в API.
+        pytest.param("claude_code_cli", "x:y", "sonnet", "sonnet", id="игра CLI из DND-1"),
+    ],
+)
+async def test_a_saved_game_with_a_model_the_cli_refuses_still_plays_on_the_model_of_the_env(
+    world, provider_name, game_model, cli_model, expected
+):
+    # Спека §11: модель игры → CLAUDE_CLI_MODEL → модель CLI по умолчанию. Модель игры, которую CLI
+    # не примет, пропускается: сохранённая игра продолжается, а не падает на каждом ходу.
+    use_fake_claude(world, claude_cli_model=cli_model)
+    async with world.db() as session:
+        await session.execute(
+            update(Game)
+            .where(Game.id == world.game_id)
+            .values(provider=provider_name, model=game_model)
+        )
+        await session.commit()
+
+    outcome = await world.run()
+
+    assert outcome.status == TurnStatus.DONE, outcome.error
+    (log,) = await world.logs()
+    assert (log.provider, log.model, log.error) == ("claude_code_cli", expected, None)
+
+
+async def test_a_failed_turn_after_a_good_one_names_no_model_in_the_journal(world):
+    # Провайдер игры один на все её ходы: модель удачного хода не достаётся журналу следующего,
+    # неудачного (спека §11 — журнал пишет модель, которой CLI провёл именно этот ход).
+    good = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "Тени скрывают вас…",
+        "modelUsage": {"claude-opus-test-9": {"outputTokens": 7}},
+    }
+    failed = {"type": "result", "subtype": "error_during_execution", "is_error": True}
+    use_fake_claude(
+        world,
+        {
+            "FAKE_CLAUDE_LOG": str(world.tmp_path / "fake_claude.log"),  # по нему идёт очередь
+            "FAKE_CLAUDE_REPLIES": json.dumps([json.dumps(good), json.dumps(failed)]),
+        },
+    )
+
+    first = await world.run()
+    second = await world.run()
+
+    assert (first.status, second.status) == (TurnStatus.DONE, TurnStatus.FAILED)
+    done, *failures = await world.logs()
+    assert done.model == "claude-opus-test-9"
+    assert failures and [log.model for log in failures] == [None] * len(failures)
+
+
+SILENT_REPLY = {  # CLI ответил, но без рассказа: попытка неудачна, а автоповтор допустим
+    "type": "result",
+    "subtype": "success",
+    "is_error": False,
+    "result": "",
+    "modelUsage": {"claude-first-test-1": {"outputTokens": 3}},
+}
+
+
+@pytest.mark.parametrize(
+    ("second_reply", "models"),
+    [
+        pytest.param(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "Тени скрывают вас…",
+                "modelUsage": {"claude-second-test-2": {"outputTokens": 7}},
+            },
+            ["claude-first-test-1", "claude-second-test-2"],
+            id="повтор удался",
+        ),
+        pytest.param(
+            {"type": "result", "subtype": "error_during_execution", "is_error": True},
+            ["claude-first-test-1", None],
+            id="повтор упал",
+        ),
+    ],
+)
+async def test_each_attempt_of_a_retried_turn_names_its_own_model_in_the_journal(
+    world, second_reply, models
+):
+    # Спека §11: модель в журнале — та, которой CLI провёл именно эту попытку. При автоповторе
+    # строка первой попытки не получает модель второй (или пустоту, если вторая упала).
+    use_fake_claude(
+        world,
+        {
+            "FAKE_CLAUDE_LOG": str(world.tmp_path / "fake_claude.log"),  # по нему идёт очередь
+            "FAKE_CLAUDE_REPLIES": json.dumps([json.dumps(SILENT_REPLY), json.dumps(second_reply)]),
+        },
+    )
+
+    outcome = await world.run()
+
+    assert outcome.attempts == 2
+    assert [log.model for log in await world.logs()] == models
+
+
+async def test_a_retry_on_a_provider_with_one_model_names_it_in_every_attempt(monkeypatch, world):
+    # Провайдеры API (`anthropic_api`, `openai_compatible`) держат одну модель на все запуски:
+    # запись модели по попыткам не должна её терять ни у оборванной, ни у удавшейся попытки.
+    provider = StubProvider(
+        narration("Оборвалось на полусло", stop_reason="max_tokens"), narration()
+    )
+    provider.model = "stub-model-1"
+    use_provider(monkeypatch, provider)
+
+    outcome = await world.run()
+
+    assert (outcome.status, outcome.attempts) == (TurnStatus.DONE, 2)
+    assert [log.model for log in await world.logs()] == ["stub-model-1", "stub-model-1"]
+
+
+async def test_a_cancelled_turn_names_the_model_its_provider_knows(monkeypatch, world):
+    # Отмена прерывает вызов модели: строка журнала называет модель, которую знает провайдер игры
+    # (у провайдеров API — модель запроса), как и до записи модели по попыткам.
+    provider = StubProvider(gate=asyncio.Event())
+    provider.model = "stub-model-1"
+    use_provider(monkeypatch, provider)
+    task = asyncio.create_task(world.run())
+    await asyncio.wait_for(provider.started.wait(), TIMEOUT_S)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [log.model for log in await world.logs()] == ["stub-model-1"]
+
+
+@pytest.mark.parametrize(("profanity", "line"), [(True, "Мат: разрешён"), (False, "Мат: запрещён")])
+async def test_the_context_of_the_turn_carries_the_profanity_flag_of_the_game(
+    monkeypatch, world, profanity, line
+):
+    provider = StubProvider()
+    use_provider(monkeypatch, provider)
+    async with world.db() as session:
+        await session.execute(
+            update(Game).where(Game.id == world.game_id).values(profanity=profanity)
+        )
+        await session.commit()
+
+    await world.run()
+
+    (request,) = provider.requests
+    assert line in request.context.splitlines()
+    (log,) = await world.logs()
+    assert line in log.request["context"].splitlines()  # журнал хранит тот же контекст
+
+
+@pytest.mark.parametrize("profanity", [True, False])
+async def test_the_profanity_flag_changes_neither_the_dice_nor_who_sees_a_secret_roll(
+    world, profanity
+):
+    # Флажок мата — только стиль речи: в обоих режимах один и тот же бросок движка с тем же
+    # итогом и Сл, а карточку броска тайного хода видит только его автор.
+    async with world.db() as session:
+        await session.execute(
+            update(Game).where(Game.id == world.game_id).values(profanity=profanity)
+        )
+        await session.commit()
+    world.use_scenario(scenario_turn(check("$pc1"), tool("chronicle", entry="з"), say("Итог.")))
+    world.with_rng(ScriptedRng([13]))
+    await world.act("alice", "Тайно крадусь", secret=True)
+
+    outcome = await world.run()
+
+    assert outcome.status == TurnStatus.DONE
+    roll = next(m for m in await world.messages() if m.kind == MessageKind.ROLL)
+    assert (roll.audience, roll.data["natural"], roll.data["dc"]) == (world.alice.user_id, 13, 15)
+    assert roll.data["total"] == 13 + roll.data["modifier"]
+    for key in ("boris", "vera"):
+        assert all(item["kind"] != "roll" for item in await world.feed_of(key))
 
 
 async def test_the_journal_never_holds_the_keys_of_the_server(monkeypatch, world):

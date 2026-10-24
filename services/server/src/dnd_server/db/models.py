@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import BigInteger, Enum, ForeignKey, String, Text
+from sqlalchemy import BigInteger, Enum, ForeignKey, String, Text, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from dnd_engine.state import GameState
@@ -138,6 +138,9 @@ class Game(Base):
     collect_seconds: Mapped[int]
     hurry_seconds: Mapped[int]
     camp_seconds: Mapped[int]
+    # Флажок «Мат и грубая речь» (миграция 0004, решение Р1): мастер и служебные роли получают его
+    # строкой «Мат: разрешён/запрещён». По умолчанию включён, и у старых игр тоже.
+    profanity: Mapped[bool] = mapped_column(default=True, server_default=true())
 
     started_at: Mapped[datetime | None]
     active_seconds: Mapped[int] = mapped_column(default=0)  # время игры без пауз, для темпа
@@ -173,7 +176,7 @@ class PlayerCharacter(Base):
     data: Mapped[dict[str, Any]]
     # Выбор игрока при создании героя (миграция 0003, решение владельца R10): `{"mode": …,
     # "choices": …}`. Для подробного режима `choices` — `CharacterChoices`, для быстрого — класс,
-    # вид, замысел и имя игрока, для случайного — пусто. У героев, созданных до миграции, колонка
+    # раса, замысел и имя игрока, для случайного — пусто. У героев, созданных до миграции, колонка
     # пуста. Отдаётся только владельцу героя (`GET .../characters/mine`), в снимки и лобби не идёт.
     choices: Mapped[dict[str, Any] | None]
 

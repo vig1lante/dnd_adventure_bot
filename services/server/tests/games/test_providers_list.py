@@ -329,25 +329,133 @@ async def test_an_unset_compatible_model_is_none_and_the_list_is_empty(settings,
     assert found["openai_compatible"]["models"] == []
 
 
-async def test_providers_that_ignore_the_model_do_not_offer_one(settings, db):
+async def test_the_scenario_stub_ignores_the_model_and_does_not_offer_one(settings, db):
     async with serve(settings, llm_model="claude-test-model-1") as http:
         found = await listing(http, db)
 
-    for provider_id in DEV_ONLY:
-        entry = found[provider_id]
-        assert (entry["default_model"], entry["models"], entry["accepts_model"]) == (
-            None,
-            [],
-            False,
+    entry = found["fake"]
+    assert (entry["default_model"], entry["models"], entry["accepts_model"]) == (None, [], False)
+
+
+# --- модель подписки claude_code_cli (DND-2 B1.2, спека §11) ---
+
+CLI_ALIASES = ["opus", "sonnet", "haiku"]
+
+
+async def test_claude_code_cli_offers_the_aliases_of_the_cli_and_no_default(settings, db):
+    async with serve(settings, llm_model="claude-test-model-1") as http:
+        found = await listing(http, db)
+
+    entry = found["claude_code_cli"]
+    assert (entry["accepts_model"], entry["models"], entry["default_model"]) == (
+        True,
+        CLI_ALIASES,
+        None,  # модель выберет сам CLI по подписке
+    )
+
+
+@pytest.mark.parametrize(
+    ("cli_model", "models"),
+    [
+        pytest.param("sonnet[1m]", [*CLI_ALIASES, "sonnet[1m]"], id="другая модель"),
+        pytest.param("sonnet", CLI_ALIASES, id="один из псевдонимов"),
+    ],
+)
+async def test_claude_code_cli_offers_the_model_of_the_environment_as_its_default(
+    settings, db, cli_model, models
+):
+    async with serve(settings, claude_cli_model=cli_model) as http:
+        found = await listing(http, db)
+
+    entry = found["claude_code_cli"]
+    assert (entry["models"], entry["default_model"]) == (models, cli_model)
+
+
+@pytest.mark.parametrize("cli_model", ["qwen2.5:14b", "[1m]", ".opus", "opus now"])
+async def test_a_model_of_the_environment_the_cli_refuses_is_not_on_offer(settings, db, cli_model):
+    # Такой CLAUDE_CLI_MODEL — ошибка настройки: провайдер недоступен, а в списке формы и в модели
+    # по умолчанию его нет — адаптер всё равно не пустит его в командную строку. Остаются только
+    # псевдонимы CLI, а модель по умолчанию пуста, как без CLAUDE_CLI_MODEL.
+    async with serve(settings, claude_cli_model=cli_model) as http:
+        found = await listing(http, db)
+
+    entry = found["claude_code_cli"]
+    assert (entry["available"], entry["models"], entry["default_model"]) == (
+        False,
+        CLI_ALIASES,
+        None,
+    )
+
+
+async def test_every_model_on_offer_for_claude_code_cli_creates_a_game(settings, db):
+    async with serve(settings, claude_cli_model="opus[1m]") as http:
+        found = await listing(http, db)
+        creator = await add_player(db, tg_id=CREATOR_TG_ID)
+
+        statuses = {
+            model: (
+                await http.post(
+                    "/api/games",
+                    headers=creator.headers,
+                    json={
+                        "adventure_id": "demo-crypt",
+                        "provider": "claude_code_cli",
+                        "model": model,
+                    },
+                )
+            ).status_code
+            for model in found["claude_code_cli"]["models"]
+        }
+
+    assert statuses == {model: 201 for model in [*CLI_ALIASES, "opus[1m]"]}
+
+
+@pytest.mark.parametrize(
+    ("changes", "variable"),
+    [
+        pytest.param({"claude_cli_effort": "turbo-LEAK"}, "CLAUDE_CLI_EFFORT", id="усилия"),
+        pytest.param(
+            {"claude_cli_cheap_model": "haiku LEAK"}, "CLAUDE_CLI_CHEAP_MODEL", id="дешёвая"
+        ),
+    ],
+)
+async def test_a_wrong_subscription_setting_makes_claude_code_cli_unavailable_as_its_games(
+    settings, db, changes, variable
+):
+    # «Доступен» и «игру создать получится» — одна проверка и с новыми CLAUDE_CLI_*: неверное
+    # значение закрывает провайдера, игра с ним — 422 с именем переменной, но без значения.
+    async with serve(settings, **changes) as http:
+        found = await listing(http, db)
+        creator = await add_player(db, tg_id=CREATOR_TG_ID)
+        created = await http.post(
+            "/api/games",
+            headers=creator.headers,
+            json={"adventure_id": "demo-crypt", "provider": "claude_code_cli", "model": "opus"},
         )
 
+    assert found["claude_code_cli"]["available"] is False
+    assert created.status_code == 422
+    assert variable in created.json()["detail"]
+    assert "LEAK" not in created.text and "LEAK" not in str(found)
 
-async def test_the_models_on_offer_pass_the_check_of_game_creation(settings, db):
+
+async def test_claude_code_cli_is_not_offered_in_prod_whatever_its_models(settings, db):
+    async with serve(settings, app_env="prod", claude_cli_model="opus") as http:
+        found = await listing(http, db)
+
+    assert "claude_code_cli" not in found
+
+
+# Модель по умолчанию — одна из предложенных при любом CLAUDE_CLI_MODEL, в том числе таком, что
+# адаптер CLI отвергает (тогда её нет ни в списке, ни в модели по умолчанию).
+@pytest.mark.parametrize("cli_model", ["sonnet[1m]", "qwen2.5:14b"])
+async def test_the_models_on_offer_pass_the_check_of_game_creation(settings, db, cli_model):
     async with serve(
         settings,
         llm_model="claude-test-model-1",
         openai_compat_model="local.model:7b",
         openai_compat_base_url=COMPAT_URL,
+        claude_cli_model=cli_model,
     ) as http:
         found = await listing(http, db)
 

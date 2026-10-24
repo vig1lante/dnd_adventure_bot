@@ -10,8 +10,10 @@
 создаётся. `ProviderError` из `base.py` остаётся ошибкой самого хода.
 
 Провайдер `claude_code_cli` собирается только при `APP_ENV=dev` (спека §2) — и для настроек по
-умолчанию, и для переопределения при создании игры. Ему не нужны модель, effort и дешёвая
-модель: версию модели задаёт подписка владельца.
+умолчанию, и для переопределения при создании игры. Модель подписки ему задают модель игры (она
+сильнее окружения, если CLI её примет) или CLAUDE_CLI_MODEL, CLAUDE_CLI_EFFORT и
+CLAUDE_CLI_CHEAP_MODEL (спека DND-2 §11); незаданное выбирает сам CLI. LLM_MODEL, LLM_EFFORT и
+LLM_CHEAP_MODEL — модели Anthropic API — ему не передаются.
 
 Клиенты SDK адрес, учётные данные и заголовки берут из настроек, а не из окружения процесса: SDK
 сами читают переменные владельца (`OPENAI_ORG_ID`, `ANTHROPIC_BASE_URL`, `*_CUSTOM_HEADERS`…), и
@@ -19,6 +21,7 @@
 `*_CUSTOM_HEADERS` отменить нельзя, поэтому сборка с такой переменной — `ConfigError`.
 """
 
+import logging
 import os
 from collections.abc import Sequence
 from urllib.parse import urlsplit
@@ -29,13 +32,16 @@ from pydantic import SecretStr, ValidationError
 
 from dnd_server.config import Settings
 from dnd_server.llm.anthropic_api import AnthropicProvider
-from dnd_server.llm.base import LLMProvider, schema_problems
-from dnd_server.llm.claude_code_cli import ClaudeCodeCliProvider
+from dnd_server.llm.base import LLMProvider, printable, schema_problems
+from dnd_server.llm.claude_code_cli import ClaudeCodeCliProvider, is_model_name
 from dnd_server.llm.fake import FakeProvider, UnreadableYaml, describe_os_error, load_scenario
 from dnd_server.llm.internal_api import TurnTokens
 from dnd_server.llm.openai_compatible import OpenAICompatibleProvider
 
+logger = logging.getLogger(__name__)
+
 PROVIDERS = ("fake", "anthropic_api", "openai_compatible", "claude_code_cli")
+MAX_LOGGED_MODEL_CHARS = 100  # имя модели игры в журнале сервера: из базы, длина ограничена
 
 # Пределы клиентов SDK заданы явно, а не берутся из умолчаний библиотек (у них 600 с). Тайм-аут
 # запроса не больше тайм-аута хода (`TurnRequest.timeout_s`, 180 с); он же ограничивает каждую
@@ -79,7 +85,7 @@ def make_provider(
         case "openai_compatible":
             return _openai_compatible(settings, model)
         case "claude_code_cli":
-            return _claude_code_cli(settings, turn_tokens, internal_url)
+            return _claude_code_cli(settings, model, turn_tokens, internal_url)
         case _:
             raise ConfigError(f"неизвестный провайдер {name!r}: допустимо одно из {PROVIDERS}")
 
@@ -167,7 +173,10 @@ def _openai_compatible(settings: Settings, model: str | None) -> OpenAICompatibl
 
 
 def _claude_code_cli(
-    settings: Settings, turn_tokens: TurnTokens | None, internal_url: str | None
+    settings: Settings,
+    model: str | None,
+    turn_tokens: TurnTokens | None,
+    internal_url: str | None,
 ) -> ClaudeCodeCliProvider:
     if settings.app_env != "dev":
         raise ConfigError("claude_code_cli доступен только в dev-режиме")
@@ -175,7 +184,37 @@ def _claude_code_cli(
         raise ConfigError(
             "провайдер claude_code_cli: нужны реестр токенов хода и адрес сервера для моста MCP"
         )
-    return ClaudeCodeCliProvider(turn_tokens, internal_url, cli_path=settings.claude_cli_path)
+    try:
+        return ClaudeCodeCliProvider(
+            turn_tokens,
+            internal_url,
+            cli_path=settings.claude_cli_path,
+            model=_cli_model(model, settings),
+            effort=settings.claude_cli_effort,
+            cheap_model=settings.claude_cli_cheap_model,
+        )
+    except ValueError as exc:
+        # Адаптер отвергает значение, которое нельзя пустить в командную строку CLI; самого значения
+        # в его сообщении нет.
+        raise ConfigError(f"провайдер claude_code_cli: {exc}") from None
+
+
+def _cli_model(model: str | None, settings: Settings) -> str | None:
+    """Модель хода `claude_code_cli` (спека §11): модель игры → CLAUDE_CLI_MODEL → выбор самого CLI.
+
+    Модель игры берётся, только если её примет адаптер (`is_model_name`). Список формы проверяется
+    лишь при создании игры и по провайдеру на тот момент: игру без провайдера могли создать под
+    другим LLM_PROVIDER с моделью вроде `qwen2.5:14b`, и после переключения на CLI её ходы не должны
+    падать. Такая модель пропускается с записью в журнал сервера; CLAUDE_CLI_MODEL — настройка
+    владельца, его проверяет адаптер, и ошибка остаётся ошибкой настройки."""
+    if model is not None and not is_model_name(model):
+        logger.warning(
+            "Модель «%s» не подходит для claude_code_cli: вместо неё берётся CLAUDE_CLI_MODEL "
+            "или модель CLI по умолчанию",
+            printable(model, MAX_LOGGED_MODEL_CHARS),
+        )
+        model = None
+    return model or settings.claude_cli_model
 
 
 def _refuse_custom_headers_from_environment(variable: str, recipient: str) -> None:

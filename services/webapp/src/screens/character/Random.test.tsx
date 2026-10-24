@@ -5,7 +5,7 @@ import type { Character } from "../../api/types";
 import { sessionToken } from "../../store/game";
 import { fakeServer, signInAs } from "../../test-setup";
 import type { FakeReply, RecordedCall } from "../../test-setup";
-import { OPTIONS, holdRequests, previewHero } from "./fixtures";
+import { OPTIONS, OUTDATED_WORDS, holdRequests, previewHero } from "./fixtures";
 import { Random } from "./Random";
 
 const PREVIEW = "POST /api/games/g1/characters/random-preview";
@@ -110,6 +110,15 @@ describe("до броска", () => {
     expect(server.calls).toHaveLength(0);
   });
 
+  test("пояснение до броска говорит о расе, устаревших слов нет", () => {
+    renderRandom();
+
+    expect(
+      screen.getByText(/Судьба бросит кубики: раса, класс/),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
+  });
+
   test("«Назад» возвращает к выбору способа", () => {
     const { onBack } = renderRandom();
 
@@ -130,7 +139,7 @@ describe("предпросмотр героя", () => {
     expect(call.url).toBe("/api/games/g1/characters/random-preview");
   });
 
-  test("лист героя по-русски: класс, вид, предыстория, числа, навыки, снаряжение", async () => {
+  test("лист героя по-русски: класс, раса, предыстория, числа, навыки, снаряжение", async () => {
     await rollFirst();
 
     expect(screen.getByRole("heading", { name: "Плут" })).toBeInTheDocument();

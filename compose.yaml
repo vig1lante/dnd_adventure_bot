@@ -8,6 +8,8 @@ services:
     build:
       context: .
       dockerfile: services/server/Dockerfile
+    # Всё из .env идёт как есть, в том числе модель подписки (CLAUDE_CLI_MODEL, CLAUDE_CLI_EFFORT,
+    # CLAUDE_CLI_CHEAP_MODEL): пустое значение — выбор самого CLI. Ниже переопределено только своё.
     env_file: .env
     environment:
       # Стенд всегда dev: claude_code_cli и dev-вход работают только в нём.

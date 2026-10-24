@@ -65,6 +65,7 @@ SAVED_GAME_TESTS = {
     "0001": "test_a_game_saved_on_the_first_revision_is_read_after_upgrade_head",
     "0002": "test_a_game_saved_before_the_clock_column_keeps_counting_after_upgrade_head",
     "0003": "test_a_game_saved_before_hero_choices_keeps_its_heroes_after_upgrade_head",
+    "0004": "test_a_game_saved_before_the_profanity_flag_allows_profanity_after_upgrade_head",
 }
 
 
@@ -88,13 +89,14 @@ def sqlite_file(database_url: str) -> str:
 
 
 def insert_saved_game(
-    path: str, golden: dict[str, Any], adventure: dict[str, Any]
+    path: str, golden: dict[str, Any], adventure: dict[str, Any], *, pending_roll: bool = True
 ) -> dict[str, str]:
     """Записывает игру в базу прямым SQL, как это сделал бы сервер прежней версии.
 
     Схема здесь — таблицы ревизии 0001 по их столбцам, а не нынешние модели: проверка в том, что
     нынешний код читает то, что записал не он. Копия приключения — образец `adventure`, а не
-    заглушка: её читает ход мастера. Возвращает id игры и игроков."""
+    заглушка: её читает ход мастера. Набор характеристик в `pending_rolls` пишется, пока таблица
+    есть (до ревизии 0003; `pending_roll=False` — на 0003 и позже). Возвращает id игры и игроков."""
     state = golden["state"]
     game_id = golden["game_id"]
     heroes = list(state["party"].values())
@@ -133,10 +135,11 @@ def insert_saved_game(
                 " joined_order, joined_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
                 (game_id, hero["player_id"], hero["id"], order == 1, order, NOW),
             )
-        db.execute(
-            'INSERT INTO pending_rolls (game_id, user_id, "values") VALUES (?, ?, ?)',
-            (game_id, heroes[0]["player_id"], json.dumps([15, 14, 13, 12, 10, 8])),
-        )
+        if pending_roll:
+            db.execute(
+                'INSERT INTO pending_rolls (game_id, user_id, "values") VALUES (?, ?, ?)',
+                (game_id, heroes[0]["player_id"], json.dumps([15, 14, 13, 12, 10, 8])),
+            )
         db.execute(
             "INSERT INTO game_states (game_id, version, schema_version, data, created_at)"
             " VALUES (?, ?, ?, ?, ?)",
@@ -353,6 +356,44 @@ async def test_a_game_saved_before_hero_choices_keeps_its_heroes_after_upgrade_h
         body = mine.json()
         assert (body["mode"], body["choices"]) == (None, None)
         assert body["character"]["name"] == "Алиса"
+    finally:
+        await app.state.engine.dispose()
+        await engine.dispose()
+
+
+async def test_a_game_saved_before_the_profanity_flag_allows_profanity_after_upgrade_head(
+    settings, migrate
+):
+    # Ревизия 0004 (DND-2 B1.2, решение Р1) завела обязательный флажок мата: игра на ревизии 0003
+    # продолжает читаться теми же моделями, и мат в ней разрешён — так решил владелец.
+    golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
+    adventure = json.loads(golden_adventures()[1].read_text(encoding="utf-8"))
+    await migrate("upgrade", "0003")
+    ids = insert_saved_game(
+        sqlite_file(settings.database_url), golden, adventure, pending_roll=False
+    )
+    await migrate("upgrade", "head")
+
+    engine = make_engine(settings.database_url)
+    db = make_sessionmaker(engine)
+    app = create_app(settings)
+    try:
+        async with db() as session:
+            game = await session.get(Game, ids["game_id"])
+            snapshot = await session.get(GameStateSnapshot, (ids["game_id"], game.state_version))
+            alice = await session.get(User, ids["Алиса"])
+            view = await snapshot_for(session, alice, ids["game_id"], srd=load_srd())
+        assert game.profanity is True
+        assert snapshot.to_state().model_dump(mode="json") == golden["state"]
+        assert view["game"]["profanity"] is True  # снимок игрока несёт флажок
+        token = SessionSigner.from_settings(settings).issue(ids["Алиса"])
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as http:
+            response = await http.get(
+                f"/api/games/{ids['game_id']}", headers={"Authorization": f"Bearer {token}"}
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["profanity"] is True
     finally:
         await app.state.engine.dispose()
         await engine.dispose()

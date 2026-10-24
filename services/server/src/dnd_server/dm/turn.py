@@ -421,6 +421,7 @@ class _Plan:
     adventure: Adventure
     provider_name: str | None
     model: str | None
+    profanity: bool  # флажок мата игры: строка «Мат: …» в контексте хода
     pc_ids: tuple[str, ...]
     host_user_id: str
     user_ids: tuple[str, ...]
@@ -612,6 +613,7 @@ async def _plan(
         adventure=adventure,
         provider_name=game.provider,
         model=game.model,
+        profanity=game.profanity,
         pc_ids=tuple(p.character_id for p in players if p.character_id),
         host_user_id=game.host_user_id,
         user_ids=tuple(p.user_id for p in players),
@@ -754,6 +756,9 @@ class _Attempt:
     # после неё (передача хода). По ним считается внимание к героям.
     story_events: list[Event] = field(default_factory=list)
     duration_ms: int = 0
+    # Модель, которую провайдер назвал сразу после вызова этой попытки (для журнала): у
+    # `claude_code_cli` она своя на каждый запуск, и после автоповтора провайдер помнит уже другую.
+    model: str | None = None
 
     def fail(self, reason: str, error: str, *, retry: bool = False) -> None:
         self.ok, self.retry, self.reason, self.error = False, retry, reason, error
@@ -801,6 +806,7 @@ def _prepare(deps: Deps, plan: _Plan) -> _Prepared:
             recent=plan.recent,
             pacing=plan.pacing,
             acting=plan.acting,
+            profanity=plan.profanity,
         ),
         base=base,
         base_events=tuple(base_events),
@@ -890,6 +896,7 @@ async def _attempt(
                 attempt.story_events = ctx.events[
                     len(prepared.base_events) : len(ctx.events) - len(settled)
                 ]
+    attempt.model = getattr(provider, "model", None)
     attempt.trace = list(executor.trace)
     if attempt.ok and prepared.base_events:
         # Длинный отдых сделал сервер, не модель: в журнале он стоит отдельной записью.
@@ -1084,16 +1091,17 @@ def _log_rows(deps: Deps, plan: _Plan, attempts: list[_Attempt]) -> list[DmTurnL
         provider_label = plan.provider.name
     else:
         provider_label = plan.provider_name or deps.settings.llm_provider
-    # Модель называет собранный провайдер: правило выбора живёт в фабрике, журнал его не повторяет.
-    # У провайдеров без своей модели (`fake`, `claude_code_cli`) и у хода, где провайдер не
-    # собрался, её нет.
+    # Модель называет собранный провайдер после каждой попытки (`_Attempt.model`): правило выбора
+    # живёт в фабрике, журнал его не повторяет. `claude_code_cli` называет модель запуска по
+    # `modelUsage` ответа; у `fake`, у упавшего запуска CLI и у хода, где провайдер не собрался,
+    # модели нет.
     return [
         DmTurnLog(
             game_id=plan.game_id,
             turn_id=plan.turn_id,
             attempt=plan.previous_attempts + attempt.number,
             provider=provider_label,
-            model=getattr(plan.provider, "model", None),
+            model=attempt.model,
             request=request,
             trace=_trace_json(attempt.trace),
             output=attempt.text if attempt.ok else None,
@@ -1259,4 +1267,6 @@ async def _record_cancellation(deps: Deps, plan: _Plan) -> None:
     """Ход отменён: попытка пишется как неудачная, игра выходит из `resolving`."""
     attempt = _Attempt(1)
     attempt.fail(REASON_CANCELLED, "CancelledError: задача хода отменена")
+    # Прерванный вызов модели: провайдер называет ту модель, что знает сейчас (у CLI — никакую).
+    attempt.model = getattr(plan.provider, "model", None)
     await asyncio.shield(_record_failure(deps, plan, [attempt]))

@@ -68,6 +68,7 @@ from dnd_server.dm.chronicle import (
     CHRONICLE_COMPRESS_AT,
     CHRONICLE_MAX_FAILURES,
     CHRONICLE_RETRY_AFTER,
+    SUMMARY_ASKED_CHARS,
     SUMMARY_MAX_CHARS,
     ChronicleOut,
     Compressions,
@@ -89,6 +90,7 @@ from dnd_server.llm.base import (
     schema_problems,
 )
 from dnd_server.llm.fake import FakeProvider, load_scenario
+from dnd_server.prompts import load
 from dnd_server.realtime.views import snapshot_for
 
 # tests/dm/test_chronicle_spotlight.py -> dm -> tests -> server -> services -> корень репозитория
@@ -762,6 +764,15 @@ def test_the_request_is_a_cheap_json_call_with_the_texts_only_as_data():
     assert not any(line.startswith(("#", "<<<")) for line in lines)  # заголовка не нарисовать
     assert json.loads(lines[-1]) == chronicle.entries  # записи: массив JSON в последней строке
     assert json.loads(lines[-3]) == chronicle.summary  # прежняя сводка: строка JSON
+
+
+def test_the_role_of_the_chronicler_comes_from_its_file_and_the_length_from_the_request():
+    # Промпт роли — файл пакета промптов (спека Р2); предел длины — подстановка кода в запросе.
+    request = compression_request(Chronicle(entries=["Запись."]))
+
+    assert request.system == load("chronicler")
+    assert f"не длиннее {SUMMARY_ASKED_CHARS} знаков" in request.prompt.splitlines()[0]
+    assert SUMMARY_ASKED_CHARS < SUMMARY_MAX_CHARS  # просим меньше жёсткого предела схемы
 
 
 def test_the_request_marks_the_missing_summary():

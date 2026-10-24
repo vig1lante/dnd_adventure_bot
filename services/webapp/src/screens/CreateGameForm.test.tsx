@@ -52,13 +52,14 @@ const OPENAI: ProviderOption = {
   accepts_model: true,
   is_default: false,
 };
+// Контракт блока B1: модель Claude Code выбирается только из списка сервера (псевдонимы CLI).
 const CLI: ProviderOption = {
   id: "claude_code_cli",
   title: "Claude Code на этом компьютере (только dev)",
   available: true,
   default_model: null,
-  models: [],
-  accepts_model: false,
+  models: ["opus", "sonnet", "haiku"],
+  accepts_model: true,
   is_default: false,
 };
 
@@ -377,10 +378,15 @@ describe("выбор провайдера и модели", () => {
   });
 
   test("провайдер без выбора модели: поля «Модель» нет, есть пояснение", async () => {
-    await loadedForm();
+    await loadedForm({
+      providers: [
+        ANTHROPIC,
+        { ...FAKE_NO_SCENARIO, available: true, is_default: false },
+      ],
+    });
 
     fireEvent.click(
-      screen.getByRole("radio", { name: /Claude Code на этом компьютере/ }),
+      screen.getByRole("radio", { name: /Заглушка по сценарию/ }),
     );
 
     expect(screen.queryByLabelText("Модель")).toBeNull();
@@ -564,6 +570,247 @@ describe("выбор провайдера и модели", () => {
       adventure_id: "demo-crypt",
       provider: "anthropic_api",
     });
+  });
+});
+
+describe("модель Claude Code на этом компьютере", () => {
+  const chooseCli = () =>
+    fireEvent.click(
+      screen.getByRole("radio", { name: /Claude Code на этом компьютере/ }),
+    );
+  const modelSelect = () => screen.getByRole("combobox", { name: "Модель" });
+  const optionNames = () =>
+    within(modelSelect())
+      .getAllByRole("option")
+      .map((option) => option.textContent);
+
+  test("модель выбирается из списка сервера, а не вводится текстом", async () => {
+    await loadedForm();
+
+    chooseCli();
+
+    expect(optionNames()).toEqual(["По умолчанию", "opus", "sonnet", "haiku"]);
+    expect(modelSelect()).toHaveValue("");
+    expect(screen.queryByRole("textbox", { name: "Модель" })).toBeNull();
+    expect(screen.queryByText(/сам выбирает модель/i)).toBeNull();
+  });
+
+  test("выбранная модель уходит на сервер", async () => {
+    const { server } = await loadedForm();
+
+    chooseCli();
+    fireEvent.change(modelSelect(), { target: { value: "sonnet" } });
+    submit();
+
+    await vi.waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0].body).toEqual({
+      adventure_id: "demo-crypt",
+      provider: "claude_code_cli",
+      model: "sonnet",
+    });
+  });
+
+  test("без выбора модели поле model не отправляется", async () => {
+    const { server } = await loadedForm();
+
+    chooseCli();
+    submit();
+
+    await vi.waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0].body).not.toHaveProperty("model");
+  });
+
+  test("модель по умолчанию сервера (CLAUDE_CLI_MODEL) выбрана заранее и сама не отправляется", async () => {
+    const { server } = await loadedForm({
+      providers: [
+        ANTHROPIC,
+        {
+          ...CLI,
+          default_model: "sonnet[1m]",
+          models: ["opus", "sonnet", "haiku", "sonnet[1m]"],
+        },
+      ],
+    });
+
+    chooseCli();
+
+    expect(modelSelect()).toHaveValue("sonnet[1m]");
+    expect(optionNames()).toEqual(["opus", "sonnet", "haiku", "sonnet[1m]"]);
+    submit();
+    await vi.waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0].body).toEqual({
+      adventure_id: "demo-crypt",
+      provider: "claude_code_cli",
+    });
+  });
+
+  test("другая модель вместо заданной по умолчанию уходит на сервер", async () => {
+    const { server } = await loadedForm({
+      providers: [ANTHROPIC, { ...CLI, default_model: "sonnet" }],
+    });
+
+    chooseCli();
+    fireEvent.change(modelSelect(), { target: { value: "haiku" } });
+    submit();
+
+    await vi.waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0].body).toMatchObject({ model: "haiku" });
+  });
+
+  test("вернули «По умолчанию» после выбора — поле model снова не уходит", async () => {
+    const { server } = await loadedForm();
+
+    chooseCli();
+    fireEvent.change(modelSelect(), { target: { value: "opus" } });
+    fireEvent.change(modelSelect(), { target: { value: "" } });
+    expect(modelSelect()).toHaveValue("");
+    submit();
+
+    await vi.waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0].body).toEqual({
+      adventure_id: "demo-crypt",
+      provider: "claude_code_cli",
+    });
+  });
+
+  test("выбор модели Claude Code не уходит с другим провайдером и ждёт возврата к нему", async () => {
+    const { server } = await loadedForm();
+    const chooseAnthropic = () =>
+      fireEvent.click(
+        screen.getByRole("radio", { name: /Claude через API Anthropic/ }),
+      );
+
+    chooseCli();
+    fireEvent.change(modelSelect(), { target: { value: "haiku" } });
+    chooseAnthropic();
+    // У Anthropic своё текстовое поле со своей моделью по умолчанию, списка CLI нет.
+    expect(screen.queryByRole("combobox", { name: "Модель" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Модель" })).toHaveValue(
+      "claude-opus-5-5",
+    );
+    chooseCli();
+    expect(modelSelect()).toHaveValue("haiku");
+    chooseAnthropic();
+    submit();
+
+    await vi.waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0].body).toEqual({ adventure_id: "demo-crypt" });
+  });
+
+  test("сервер сказал accepts_model: false — списка нет, пояснение, model не уходит", async () => {
+    const { server } = await loadedForm({
+      providers: [
+        ANTHROPIC,
+        { ...CLI, accepts_model: false, default_model: "sonnet" },
+      ],
+    });
+
+    chooseCli();
+
+    expect(screen.queryByLabelText("Модель")).toBeNull();
+    expect(
+      screen.getByText("Этот вариант сам выбирает модель."),
+    ).toBeInTheDocument();
+    submit();
+    await vi.waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0].body).toEqual({
+      adventure_id: "demo-crypt",
+      provider: "claude_code_cli",
+    });
+  });
+
+  test("модель не из списка сервера (список устарел): 422 с текстом сервера, выбор не сброшен, другая модель создаёт игру", async () => {
+    // Форма загрузила список, когда у сервера был CLAUDE_CLI_MODEL=sonnet[1m]; потом его убрали,
+    // и сервер принимает только псевдонимы. Отказ и его текст — как у `games.service.check_model`.
+    const REFUSAL =
+      "Модель для Claude Code — одна из списка: opus, sonnet, haiku.";
+    const { server } = await loadedForm({
+      providers: [
+        ANTHROPIC,
+        { ...CLI, models: ["opus", "sonnet", "haiku", "sonnet[1m]"] },
+      ],
+      create: (call) =>
+        (call.body as { model?: string }).model === "sonnet[1m]"
+          ? { status: 422, json: { detail: REFUSAL } }
+          : { status: 201, json: gameSummary({ id: "g-cli" }) },
+    });
+    const profanity = () =>
+      screen.getByRole("switch", { name: "Мат и грубая речь" });
+
+    chooseCli();
+    fireEvent.click(profanity());
+    fireEvent.change(modelSelect(), { target: { value: "sonnet[1m]" } });
+    submit();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(REFUSAL);
+    // Значение со скобками ушло ровно как в списке, вместе с выключенным матом.
+    expect(posted(server)[0].body).toEqual({
+      adventure_id: "demo-crypt",
+      provider: "claude_code_cli",
+      model: "sonnet[1m]",
+      profanity: false,
+    });
+    expect(useGame.getState().screen).not.toBe("lobby");
+    expect(profanity()).not.toBeChecked();
+    expect(modelSelect()).toHaveValue("sonnet[1m]");
+    expect(screen.getByRole("button", { name: "Создать" })).toBeEnabled();
+
+    fireEvent.change(modelSelect(), { target: { value: "sonnet" } });
+    submit();
+
+    await vi.waitFor(() =>
+      expect(useGame.getState()).toMatchObject({
+        screen: "lobby",
+        gameId: "g-cli",
+      }),
+    );
+    expect(posted(server)).toHaveLength(2);
+    expect(posted(server)[1].body).toEqual({
+      adventure_id: "demo-crypt",
+      provider: "claude_code_cli",
+      model: "sonnet",
+      profanity: false,
+    });
+  });
+});
+
+describe("мат и грубая речь", () => {
+  const profanity = () =>
+    screen.getByRole("switch", { name: "Мат и грубая речь" });
+
+  test("переключатель включён по умолчанию, флажок на сервер не уходит", async () => {
+    const { server } = await loadedForm();
+
+    expect(profanity()).toBeChecked();
+    submit();
+
+    await vi.waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0].body).toEqual({ adventure_id: "demo-crypt" });
+  });
+
+  test("выключенный мат уходит на сервер: profanity: false", async () => {
+    const { server } = await loadedForm();
+
+    fireEvent.click(profanity());
+    expect(profanity()).not.toBeChecked();
+    submit();
+
+    await vi.waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0].body).toEqual({
+      adventure_id: "demo-crypt",
+      profanity: false,
+    });
+  });
+
+  test("включённый обратно — снова как по умолчанию", async () => {
+    const { server } = await loadedForm();
+
+    fireEvent.click(profanity());
+    fireEvent.click(profanity());
+    submit();
+
+    await vi.waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0].body).not.toHaveProperty("profanity");
   });
 });
 

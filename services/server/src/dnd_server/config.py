@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     openai_compat_api_key: SecretStr | None = None
     openai_compat_model: str | None = None
     claude_cli_path: str = "claude"
+    # Модель подписки для `claude_code_cli` (спека §11, Р9): модель, уровень усилий и дешёвая модель
+    # служебных ролей. Пусто — выбирает сам CLI. Значения уходят в командную строку CLI, поэтому их
+    # проверяет адаптер при сборке (`llm.claude_code_cli`), а ошибка — `ConfigError` фабрики.
+    claude_cli_model: str | None = None
+    claude_cli_effort: str | None = None
+    claude_cli_cheap_model: str | None = None
     fake_llm_scenario: Path | None = None
 
     collect_seconds: int = Field(default=120, gt=0)

@@ -39,11 +39,17 @@ ALL_FIELDS_ENV = {
     "OPENAI_COMPAT_API_KEY": "env-openai-key",
     "OPENAI_COMPAT_MODEL": "env-openai-model",
     "CLAUDE_CLI_PATH": "/opt/claude",
+    "CLAUDE_CLI_MODEL": "sonnet[1m]",
+    "CLAUDE_CLI_EFFORT": "high",
+    "CLAUDE_CLI_CHEAP_MODEL": "haiku",
     "FAKE_LLM_SCENARIO": "scenarios/demo.yaml",
     "COLLECT_SECONDS": "11",
     "HURRY_SECONDS": "22",
     "CAMP_SECONDS": "33",
 }
+
+# Модель подписки для `claude_code_cli` (DND-2, спека §11, Р9).
+SUBSCRIPTION_VARIABLES = ("CLAUDE_CLI_MODEL", "CLAUDE_CLI_EFFORT", "CLAUDE_CLI_CHEAP_MODEL")
 
 # Намеренные отличия значений по умолчанию в коде от `.env.example` (отчёт B1.3):
 # код по умолчанию закрыт, шаблон для локальной разработки открывает dev-режим.
@@ -94,6 +100,32 @@ def test_defaults_are_closed_by_default():
     assert settings.llm_provider == "fake"
 
 
+def test_the_subscription_model_settings_are_unset_by_default():
+    # Пусто — модель, усилия и дешёвую модель выбирает сам CLI по подписке (спека §11, Р9).
+    settings = Settings()
+
+    assert (
+        settings.claude_cli_model,
+        settings.claude_cli_effort,
+        settings.claude_cli_cheap_model,
+    ) == (None, None, None)
+
+
+def test_the_template_lists_the_subscription_model_empty_so_the_cli_chooses_it():
+    # План B1.4: три переменные модели подписки есть в шаблоне и пусты, а пусто — «не задано».
+    template = {
+        line.partition("=")[0]: line.partition("=")[2]
+        for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+        if line.startswith("CLAUDE_CLI_")
+    }
+    settings = Settings(_env_file=ENV_EXAMPLE)
+
+    assert {name: template.get(name) for name in SUBSCRIPTION_VARIABLES} == dict.fromkeys(
+        SUBSCRIPTION_VARIABLES, ""
+    )
+    assert [getattr(settings, name.lower()) for name in SUBSCRIPTION_VARIABLES] == [None] * 3
+
+
 def test_env_example_template_enables_dev_with_placeholder_secret():
     settings = Settings(_env_file=ENV_EXAMPLE)
 
@@ -128,6 +160,9 @@ def test_every_field_is_read_from_its_uppercase_env_variable(monkeypatch):
         "openai_compat_api_key": "env-openai-key",
         "openai_compat_model": "env-openai-model",
         "claude_cli_path": "/opt/claude",
+        "claude_cli_model": "sonnet[1m]",
+        "claude_cli_effort": "high",
+        "claude_cli_cheap_model": "haiku",
         "fake_llm_scenario": Path("scenarios/demo.yaml"),
         "collect_seconds": 11,
         "hurry_seconds": 22,

@@ -15,7 +15,7 @@
       mechanical: false
     - id: breath_weapon
       name: Дыхание
-      summary: "Вместо одной атаки: конус 15 футов или линия 30 футов. Спасбросок Ловкости, Сл 8 + Тел + БМ; 1к10 урона типа предка, половина при успехе. Столько раз, каков бонус мастерства, до длинного отдыха."
+      summary: "Вместо одной атаки: конус 4,5 м или линия 9 м. Спасбросок Ловкости, Сл 8 + Тел + БМ; 1к10 урона типа предка, половина при успехе. Столько раз, каков бонус мастерства, до длинного отдыха."
       mechanical: true
     - id: damage_resistance
       name: Сопротивление урону
@@ -23,7 +23,7 @@
       mechanical: true
     - id: darkvision
       name: Тёмное зрение
-      summary: "Видит в темноте на 60 футов."
+      summary: "Видит в темноте на 18 м."
       mechanical: false
 - id: dwarf
   name: Дварф
@@ -33,7 +33,7 @@
   traits:
     - id: darkvision
       name: Тёмное зрение
-      summary: "Видит в темноте на 120 футов."
+      summary: "Видит в темноте на 36 м."
       mechanical: false
     - id: dwarven_resilience
       name: Дварфийская стойкость
@@ -45,7 +45,7 @@
       mechanical: true
     - id: stonecunning
       name: Знание камня
-      summary: "Бонусным действием даёт чувство вибрации на 60 футов на 10 минут, пока дварф стоит на камне или касается его. Раз за бонус мастерства до длинного отдыха."
+      summary: "Бонусным действием даёт чувство вибрации на 18 м на 10 минут, пока дварф стоит на камне или касается его. Раз за бонус мастерства до длинного отдыха."
       mechanical: false
 - id: elf
   name: Эльф
@@ -55,7 +55,7 @@
   traits:
     - id: darkvision
       name: Тёмное зрение
-      summary: "Видит в темноте на 60 футов."
+      summary: "Видит в темноте на 18 м."
       mechanical: false
     - id: elven_lineage
       name: Эльфийское наследие
@@ -81,7 +81,7 @@
   traits:
     - id: darkvision
       name: Тёмное зрение
-      summary: "Видит в темноте на 60 футов."
+      summary: "Видит в темноте на 18 м."
       mechanical: false
     - id: gnomish_cunning
       name: Гномья хитрость
@@ -157,7 +157,7 @@
       mechanical: false
     - id: darkvision
       name: Тёмное зрение
-      summary: "Видит в темноте на 120 футов."
+      summary: "Видит в темноте на 36 м."
       mechanical: false
     - id: relentless_endurance
       name: Неутомимость
@@ -171,7 +171,7 @@
   traits:
     - id: darkvision
       name: Тёмное зрение
-      summary: "Видит в темноте на 60 футов."
+      summary: "Видит в темноте на 18 м."
       mechanical: false
     - id: fiendish_legacy
       name: Наследие исчадий

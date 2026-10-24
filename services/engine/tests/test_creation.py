@@ -51,7 +51,7 @@ SPECIES_IDS = (
 )
 
 # Легальный выбор для каждого класса: покупка очков, бонус предыстории из её списка,
-# навыки без пересечения с навыками предыстории и вида.
+# навыки без пересечения с навыками предыстории и расы.
 CHOICES: dict[str, dict[str, Any]] = {
     "barbarian": {
         "species": "dwarf",
@@ -1016,9 +1016,9 @@ def test_unknown_ids_are_reported_together_with_independent_problems(srd):
         base_scores={STR: 18, DEX: 12, CON: 13, INT: 8, WIS: 10, CHA: 8},
     )
 
-    assert_problem(problems, "вид", "gnoll")
-    assert_problem(problems, "класс", "paladin")
-    assert_problem(problems, "предыстория", "pirate")
+    assert_problem(problems, "неизвестная раса", "gnoll")
+    assert_problem(problems, "неизвестный класс", "paladin")
+    assert_problem(problems, "неизвестная предыстория", "pirate")
     assert_problem(problems, ABILITY_NAMES_RU[STR], "18")
 
 
@@ -1132,8 +1132,8 @@ def test_quick_character_unknown_class_or_species_is_validation_error(srd):
     with pytest.raises(CharacterValidationError) as info:
         quick(srd, "paladin", "gnoll")
 
-    assert_problem(info.value.problems, "класс", "paladin")
-    assert_problem(info.value.problems, "вид", "gnoll")
+    assert_problem(info.value.problems, "неизвестный класс", "paladin")
+    assert_problem(info.value.problems, "неизвестная раса", "gnoll")
 
 
 def test_quick_character_does_not_bypass_validation(srd):
@@ -1284,9 +1284,9 @@ def test_score_cap_applies_to_the_final_value_even_without_background_bonus(srd)
 @pytest.mark.parametrize(
     ("field", "value", "word"),
     [
-        ("species", "gnoll", "вид"),
-        ("class_id", "paladin", "класс"),
-        ("background", "pirate", "предыстория"),
+        ("species", "gnoll", "неизвестная раса"),
+        ("class_id", "paladin", "неизвестный класс"),
+        ("background", "pirate", "неизвестная предыстория"),
     ],
 )
 def test_a_single_unknown_id_is_a_problem_and_does_not_break_other_checks(srd, field, value, word):

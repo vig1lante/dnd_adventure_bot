@@ -103,6 +103,7 @@ from dnd_engine.rest import (
 )
 from dnd_engine.rng import Rng
 from dnd_engine.state import GameState, Scene, SceneType
+from dnd_engine.units import meters_text
 
 # Особенности, черты и эффекты, на которые опирается бой (соответствие данным SRD проверяет тест).
 ALERT_FEAT = "alert"  # черта «Бдительный»: бонус мастерства к инициативе
@@ -2314,6 +2315,8 @@ def cast_spell(
 HIDE_DC = 15  # «Спрятаться»: проверка Ловкости (Скрытность) против Сл 15
 RAGE_ROUNDS = 10  # ярость длится минуту
 SPARK_OPTIONS = ("heal", "necrotic", "radiant")
+# Дальность Божественного канала — число SRD (30, «9 м»); в бою по зонам это «не далеко».
+CHANNEL_DIVINITY_RANGE = 30
 # Типы урона дыхания по предкам драконорождённого; предок в персонаже не хранится (B2.4).
 BREATH_DAMAGE_TYPES = ("acid", "cold", "fire", "lightning", "poison")
 DEFAULT_BREATH_TYPE = "fire"
@@ -2593,10 +2596,12 @@ def _steady_aim(a: _Act) -> list[Event]:
 
 
 def _channel_divinity_target(a: _Act) -> Combatant:
-    """Цель Божественного канала в 30 футах (расстояние не «далеко»)."""
+    """Цель Божественного канала в 9 м (расстояние не «далеко»)."""
     target = a.target()
     dist = distance(_active_combat(a.s), a.slot.id, target.id)
-    _require(dist != "far", f"{target.name} вне дальности (30 футов)")
+    _require(
+        dist != "far", f"{target.name} вне дальности ({meters_text(CHANNEL_DIVINITY_RANGE)})"
+    )
     return target
 
 

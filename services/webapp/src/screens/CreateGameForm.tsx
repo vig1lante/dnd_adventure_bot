@@ -8,7 +8,13 @@ import type {
 } from "../api/types";
 import { useGame } from "../store/game";
 import { Alert, Button, Card, Loading } from "../ui";
-import { ChoiceList, ErrorAlert, TextField } from "./fields";
+import {
+  ChoiceList,
+  ErrorAlert,
+  SelectField,
+  Switch,
+  TextField,
+} from "./fields";
 import type { Choice } from "./fields";
 import { useAction, useLoaded } from "./hooks";
 import "./screens.css";
@@ -94,23 +100,66 @@ function providerChoice(provider: ProviderOption): Choice {
   };
 }
 
+const MODEL_HINT = "Можно оставить как есть: возьмётся модель по умолчанию.";
+
+interface ModelFieldProps {
+  provider: ProviderOption;
+  value: string;
+  onChange: (model: string) => void;
+}
+
+// Claude Code на этом компьютере принимает модель только из списка сервера (псевдонимы CLI
+// и CLAUDE_CLI_MODEL), поэтому у него выбор из списка; остальным можно вписать любое имя.
+function ModelField({ provider, value, onChange }: ModelFieldProps) {
+  if (provider.id === LIVE_MODEL_PROVIDER) {
+    return (
+      <SelectField
+        label="Модель"
+        hint={MODEL_HINT}
+        // Пустой вариант нужен, только когда модели по умолчанию нет: тогда её выбирает сам CLI.
+        placeholder={
+          provider.default_model === null ? "По умолчанию" : undefined
+        }
+        value={value}
+        options={provider.models.map((name) => ({ value: name, label: name }))}
+        onChange={onChange}
+      />
+    );
+  }
+  return (
+    <TextField
+      label="Модель"
+      value={value}
+      placeholder={provider.default_model ?? undefined}
+      hint={MODEL_HINT}
+      autoComplete="off"
+      autoCapitalize="none"
+      spellCheck={false}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  );
+}
+
 interface FormInput {
   adventureId: string;
   provider: ProviderOption;
   model: string;
+  profanity: boolean;
   durations: Durations;
 }
 
 // На сервер уходит только отличающееся от его настроек: провайдер по умолчанию, модель
-// по умолчанию и незаданные длительности остаются за сервером.
+// по умолчанию, включённый мат и незаданные длительности остаются за сервером.
 function createBody({
   adventureId,
   provider,
   model,
+  profanity,
   durations,
 }: FormInput): CreateGameBody {
   const body: CreateGameBody = { adventure_id: adventureId };
   if (!provider.is_default) body.provider = provider.id;
+  if (!profanity) body.profanity = false;
   const modelName = model.trim();
   if (
     provider.accepts_model &&
@@ -145,6 +194,7 @@ function OptionsForm({ adventures, providers, onCancel }: OptionsFormProps) {
   );
   // Правка модели хранится по провайдерам: у каждого свои имена моделей.
   const [models, setModels] = useState<Record<string, string>>({});
+  const [profanity, setProfanity] = useState(true);
   const [durations, setDurations] = useState<Durations>(NO_DURATIONS);
 
   const provider = providers.find((item) => item.id === providerId) ?? null;
@@ -165,7 +215,7 @@ function OptionsForm({ adventures, providers, onCancel }: OptionsFormProps) {
     if (adventureId === null || provider === null || !ready || busy) return;
     await run(async () => {
       const game = await api.createGame(
-        createBody({ adventureId, provider, model, durations }),
+        createBody({ adventureId, provider, model, profanity, durations }),
       );
       show({ screen: "lobby", gameId: game.id });
     });
@@ -211,22 +261,22 @@ function OptionsForm({ adventures, providers, onCancel }: OptionsFormProps) {
         </p>
       )}
       {provider?.accepts_model === true && (
-        <TextField
-          label="Модель"
+        <ModelField
+          provider={provider}
           value={model}
-          placeholder={provider.default_model ?? undefined}
-          hint="Можно оставить как есть: возьмётся модель по умолчанию."
-          autoComplete="off"
-          autoCapitalize="none"
-          spellCheck={false}
-          onChange={(event) =>
-            setModels({ ...models, [provider.id]: event.target.value })
-          }
+          onChange={(value) => setModels({ ...models, [provider.id]: value })}
         />
       )}
       {provider !== null && !provider.accepts_model && (
         <p className="screen-muted">Этот вариант сам выбирает модель.</p>
       )}
+
+      <Switch
+        label="Мат и грубая речь"
+        hint="Мастер и NPC могут материться, но не в адрес игроков."
+        checked={profanity}
+        onChange={setProfanity}
+      />
 
       <fieldset className="form-group">
         <legend className="form-legend">Время на ходы (необязательно)</legend>
@@ -259,7 +309,7 @@ function OptionsForm({ adventures, providers, onCancel }: OptionsFormProps) {
   );
 }
 
-/** Форма новой игры: приключение, нейронка мастера и необязательные длительности. */
+/** Форма новой игры: приключение, нейронка мастера, флажок мата и необязательные длительности. */
 export function CreateGameForm({ onCancel }: { onCancel: () => void }) {
   const api = useApi();
   const loadOptions = useCallback(async () => {

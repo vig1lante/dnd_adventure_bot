@@ -700,8 +700,10 @@ def test_claude_cli_without_internal_url_is_config_error(internal_url):
         make_provider(cli_settings(), turn_tokens=TurnTokens(), internal_url=internal_url)
 
 
-def test_claude_cli_ignores_model_effort_and_cheap_model():
-    # Модель для CLI задаёт подписка: неверный LLM_EFFORT и модель игры сборку не ломают.
+def test_claude_cli_is_not_built_from_the_anthropic_llm_settings():
+    # LLM_MODEL, LLM_EFFORT и LLM_CHEAP_MODEL — настройки Anthropic API: у CLI свои CLAUDE_CLI_*
+    # (спека DND-2 §11), поэтому неверный для CLI LLM_EFFORT его сборку не ломает. Модель игры
+    # («host-model» — допустимое имя) CLI получает сам: она сильнее окружения.
     settings = cli_settings(llm_model="claude-x", llm_effort="turbo", llm_cheap_model="claude-y")
 
     provider = make_provider(
@@ -709,6 +711,57 @@ def test_claude_cli_ignores_model_effort_and_cheap_model():
     )
 
     assert provider.name == "claude_code_cli"
+
+
+@pytest.mark.parametrize(
+    ("game_model", "model"),
+    [
+        pytest.param(None, None, id="без модели игры"),
+        pytest.param("sonnet", "sonnet", id="модель игры"),
+    ],
+)
+def test_the_anthropic_llm_settings_never_reach_the_cli(spy, game_model, model):
+    # Модель, усилия и дешёвая модель CLI приходят только из CLAUDE_CLI_* и модели игры: LLM_*
+    # адаптеру CLI не передаются, а незаданное выбирает сам CLI.
+    providers = spy("ClaudeCodeCliProvider")
+    settings = cli_settings(llm_model="claude-x", llm_effort="high", llm_cheap_model="claude-y")
+
+    make_provider(settings, model=game_model, turn_tokens=TurnTokens(), internal_url=INTERNAL_URL)
+
+    call = providers.only
+    assert (call["model"], call["effort"], call["cheap_model"]) == (model, None, None)
+
+
+SUBSCRIPTION = {
+    "claude_cli_model": "opus",
+    "claude_cli_effort": "high",
+    "claude_cli_cheap_model": "haiku",
+}
+
+
+@pytest.mark.parametrize(
+    ("build", "app_env", "provider"),
+    [
+        pytest.param(cli_settings, "prod", None, id="LLM_PROVIDER"),
+        pytest.param(cli_settings, "", None, id="без APP_ENV"),  # пусто — «не задано», то есть prod
+        pytest.param(anthropic_settings, "prod", "claude_code_cli", id="переопределение игры"),
+    ],
+)
+def test_the_subscription_settings_do_not_open_claude_cli_in_prod(build, app_env, provider):
+    # Новые CLAUDE_CLI_* настраивают только dev-провайдера: в prod он закрыт, как и раньше.
+    # Настройки собираются в самом тесте: изоляция от окружения владельца действует только в нём.
+    settings = build(app_env=app_env, **SUBSCRIPTION)
+
+    with pytest.raises(ConfigError) as error:
+        make_provider(
+            settings,
+            provider=provider,
+            model="sonnet",
+            turn_tokens=TurnTokens(),
+            internal_url=INTERNAL_URL,
+        )
+
+    assert str(error.value) == CLAUDE_DEV_ONLY
 
 
 # --- общие правила ---

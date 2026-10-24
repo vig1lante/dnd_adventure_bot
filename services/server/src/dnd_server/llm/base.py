@@ -58,7 +58,10 @@ class JsonRequest:
     system: str
     prompt: str
     purpose: str  # "generator.concept", "weaving" и т. п.: по нему FakeProvider находит ответ
-    cheap: bool = False  # использовать LLM_CHEAP_MODEL, если задана
+    # Служебный запрос, которому хватит дешёвой модели: у `anthropic_api` — LLM_CHEAP_MODEL, если
+    # задана. У `claude_code_cli` все ответы по схеме — служебные роли спеки §11, и они идут на
+    # CLAUDE_CLI_CHEAP_MODEL независимо от признака.
+    cheap: bool = False
 
 
 @dataclass(frozen=True)

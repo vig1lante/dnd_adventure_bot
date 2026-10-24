@@ -5,7 +5,13 @@ import { sessionToken } from "../../store/game";
 import { fakeServer, signInAs } from "../../test-setup";
 import type { FakeReply, RecordedCall } from "../../test-setup";
 import type { QuickChoices } from "../../api/types";
-import { OPTIONS, STORED_QUICK, holdRequests, previewHero } from "./fixtures";
+import {
+  OPTIONS,
+  OUTDATED_WORDS,
+  STORED_QUICK,
+  holdRequests,
+  previewHero,
+} from "./fixtures";
 import { Quick } from "./Quick";
 
 const CREATE = "POST /api/games/g1/characters";
@@ -51,7 +57,7 @@ const submitButton = () =>
 
 function fillForm(concept = "Сбежавший из цирка акробат") {
   choose("Класс", "rogue");
-  choose("Вид", "human");
+  choose("Раса", "human");
   typeInto("Опиши героя одной строкой", concept);
 }
 
@@ -59,7 +65,7 @@ const posts = (server: { calls: RecordedCall[] }) =>
   server.calls.filter((call) => call.method === "POST");
 
 describe("форма быстрого героя", () => {
-  test("класс и вид выбираются из правил сервера, названия по-русски", () => {
+  test("класс и раса выбираются из правил сервера, названия по-русски", () => {
     renderQuick();
 
     const classes = within(screen.getByLabelText("Класс"));
@@ -68,7 +74,7 @@ describe("форма быстрого героя", () => {
     expect(
       classes.getByRole("option", { name: "Волшебник" }),
     ).toBeInTheDocument();
-    const species = within(screen.getByLabelText("Вид"));
+    const species = within(screen.getByLabelText("Раса"));
     expect(species.getByRole("option", { name: "Эльф" })).toBeInTheDocument();
     expect(
       screen.getByLabelText("Опиши героя одной строкой"),
@@ -76,18 +82,29 @@ describe("форма быстрого героя", () => {
     expect(screen.getByLabelText("Имя (необязательно)")).toBeInTheDocument();
   });
 
-  test("«Создать героя» неактивна, пока нет класса, вида и строки о герое", () => {
+  test("«Создать героя» неактивна, пока нет класса, расы и строки о герое", () => {
     renderQuick();
     expect(submitButton()).toBeDisabled();
 
     choose("Класс", "rogue");
     expect(submitButton()).toBeDisabled();
-    choose("Вид", "human");
+    choose("Раса", "human");
     expect(submitButton()).toBeDisabled();
     typeInto("Опиши героя одной строкой", "   ");
     expect(submitButton()).toBeDisabled();
     typeInto("Опиши героя одной строкой", "Акробат");
     expect(submitButton()).toBeEnabled();
+  });
+
+  test("в форме «Раса», а не «Вид»: устаревших слов нет ни в подписях, ни в списке", () => {
+    renderQuick();
+
+    expect(
+      within(screen.getByLabelText("Раса")).getByRole("option", {
+        name: "Выберите расу",
+      }),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
   });
 
   test("«Назад» возвращает к выбору способа", () => {
@@ -126,7 +143,7 @@ describe("отправка формы клавишей Enter", () => {
 });
 
 describe("отправка", () => {
-  test("уходит mode quick с классом, видом и замыслом; пустое имя не шлётся", async () => {
+  test("уходит mode quick с классом, расой и замыслом; пустое имя не шлётся", async () => {
     const { server, onCreated } = renderQuick();
     fillForm("  Сбежавший из цирка акробат ");
 
@@ -203,7 +220,7 @@ describe("отказы сервера", () => {
       status: 422,
       json: {
         detail: "Персонаж не прошёл проверку правил.",
-        problems: ["неизвестный класс: 'bard'", "неизвестный вид: 'orcish'"],
+        problems: ["неизвестный класс: 'bard'", "неизвестная раса: 'orcish'"],
       },
     });
     fillForm();
@@ -215,7 +232,7 @@ describe("отказы сервера", () => {
     const items = within(alert).getAllByRole("listitem");
     expect(items.map((item) => item.textContent)).toEqual([
       "неизвестный класс: 'bard'",
-      "неизвестный вид: 'orcish'",
+      "неизвестная раса: 'orcish'",
     ]);
     expect(onCreated).not.toHaveBeenCalled();
     expect(screen.getByLabelText("Опиши героя одной строкой")).toHaveValue(
@@ -269,7 +286,7 @@ describe("форма с прежним выбором («Изменить гер
     renderQuick(created(), { ...STORED_QUICK, name: "Тень" });
 
     expect(screen.getByLabelText("Класс")).toHaveValue("rogue");
-    expect(screen.getByLabelText("Вид")).toHaveValue("human");
+    expect(screen.getByLabelText("Раса")).toHaveValue("human");
     expect(screen.getByLabelText("Опиши героя одной строкой")).toHaveValue(
       "Вор-неудачник",
     );

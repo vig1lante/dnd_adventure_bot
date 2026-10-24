@@ -295,7 +295,7 @@ async function fillQuickForm(player: Player): Promise<void> {
   const { page, hero } = player;
   await button(page, "Быстро").click();
   await page.getByLabel("Класс", { exact: true }).selectOption(hero.classId);
-  await page.getByLabel("Вид", { exact: true }).selectOption(hero.species);
+  await page.getByLabel("Раса", { exact: true }).selectOption(hero.species);
   await page.getByLabel("Опиши героя одной строкой").fill(hero.concept);
   await page.getByLabel("Имя (необязательно)").fill(hero.name);
   await button(page, "Создать героя").click();

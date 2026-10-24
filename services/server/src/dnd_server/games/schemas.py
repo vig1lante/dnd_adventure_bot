@@ -23,12 +23,16 @@ CampSeconds = Annotated[StrictInt, Field(ge=30, le=900)]
 class CreateGameIn(BaseModel):
     adventure_id: str = Field(min_length=1, max_length=64)
     # Имена провайдера и модели ограничены по составу и длине: они уходят в базу, журналы и запросы
-    # к провайдеру. Подходит ли имя, решает фабрика провайдеров.
+    # к провайдеру. Квадратные скобки схема пускает только ради псевдонимов CLI (`sonnet[1m]`):
+    # подходит ли имя провайдеру, решают `games.service.check_model` и фабрика провайдеров. Первый
+    # знак — буква или цифра, то же правило у адаптера CLI (`llm.claude_code_cli.is_model_name`).
     provider: str | None = Field(default=None, pattern=r"^[a-z_]{1,32}$")
-    model: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,99}$")
+    model: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/@+\[\]-]{0,99}$")
     collect_seconds: CollectSeconds | None = None
     hurry_seconds: HurrySeconds | None = None
     camp_seconds: CampSeconds | None = None
+    # «Мат и грубая речь» (решение Р1): по умолчанию включён. Строгий: «false» и 0 — ошибка клиента.
+    profanity: StrictBool = True
 
 
 class JoinIn(BaseModel):
@@ -66,4 +70,5 @@ class GameOut(BaseModel):
     collect_seconds: int
     hurry_seconds: int
     camp_seconds: int
+    profanity: bool  # флажок мата игры: его видят мастер, служебные роли и лобби
     players: list[PlayerOut]

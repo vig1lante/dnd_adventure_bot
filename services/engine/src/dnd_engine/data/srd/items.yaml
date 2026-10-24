@@ -9,7 +9,7 @@
 # - Доспехи. base_ac — КД в доспехе; к нему прибавляется модификатор Ловкости, но не больше
 #   dex_cap (null — без предела, 0 — Ловкость не прибавляется: тяжёлый доспех). У щита base_ac —
 #   бонус к КД. Требование Силы кольчуги (13) движок не учитывает.
-# - Зелья лечения: своё или существа в пределах 5 футов. Движок тратит на них действие;
+# - Зелья лечения: своё или существа в пределах 1,5 м. Движок тратит на них действие;
 #   бонусным его делает только модуль «Специи BG3» (спека DND-1, §5.5).
 # - Предметы без механики (kind: gear, focus) нужны для инвентаря и рассказа мастера.
 
@@ -35,7 +35,7 @@
     damage_type: piercing
     properties: [finesse, light, thrown]
     range: melee
-  summary: "Лёгкий фехтовальный клинок; его можно метнуть на 20/60 футов."
+  summary: "Лёгкий фехтовальный клинок; его можно метнуть на 6/18 м."
 - id: quarterstaff
   name: Боевой посох
   name_en: Quarterstaff
@@ -68,7 +68,7 @@
     damage_type: piercing
     properties: [thrown, versatile]
     range: melee
-  summary: "Метательное копьё (20/60 футов). Двумя руками наносит 1к8 урона."
+  summary: "Метательное копьё (6/18 м). Двумя руками наносит 1к8 урона."
 - id: handaxe
   name: Ручной топор
   name_en: Handaxe
@@ -79,7 +79,7 @@
     damage_type: slashing
     properties: [light, thrown]
     range: melee
-  summary: "Лёгкий топорик; его можно метнуть на 20/60 футов."
+  summary: "Лёгкий топорик; его можно метнуть на 6/18 м."
 - id: javelin
   name: Метательное копьё
   name_en: Javelin
@@ -90,7 +90,7 @@
     damage_type: piercing
     properties: [thrown]
     range: melee
-  summary: "Копьё для метания на 30/120 футов, в ближнем бою тоже годится."
+  summary: "Копьё для метания на 9/36 м, в ближнем бою тоже годится."
 
 # --- простое дальнобойное оружие ---
 - id: light_crossbow
@@ -103,7 +103,7 @@
     damage_type: piercing
     properties: [ammunition, two_handed]
     range: far
-  summary: "Арбалет с болтами, дальность 80/320 футов."
+  summary: "Арбалет с болтами, дальность 24/96 м."
 - id: shortbow
   name: Короткий лук
   name_en: Shortbow
@@ -114,7 +114,7 @@
     damage_type: piercing
     properties: [ammunition, two_handed]
     range: far
-  summary: "Лук со стрелами, дальность 80/320 футов."
+  summary: "Лук со стрелами, дальность 24/96 м."
 
 # --- воинское оружие ближнего боя ---
 - id: shortsword
@@ -217,7 +217,7 @@
     damage_type: piercing
     properties: [ammunition, heavy, two_handed]
     range: far
-  summary: "Тяжёлый лук со стрелами, дальность 150/600 футов."
+  summary: "Тяжёлый лук со стрелами, дальность 45/180 м."
 
 # --- доспехи и щит ---
 - id: leather_armor
@@ -301,7 +301,7 @@
   name: Факел
   name_en: Torch
   kind: gear
-  summary: "Горит час: яркий свет на 20 футов и тусклый ещё на 20. Им можно ударить как простым оружием, цель получит 1 урона огнём."
+  summary: "Горит час: яркий свет на 6 м и тусклый ещё на 6 м. Им можно ударить как простым оружием, цель получит 1 урона огнём."
 - id: thieves_tools
   name: Воровские инструменты
   name_en: Thieves' Tools

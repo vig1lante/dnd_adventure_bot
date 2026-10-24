@@ -12,6 +12,7 @@ import {
 import type { FakeReply, RecordedCall } from "../../test-setup";
 import {
   OPTIONS,
+  OUTDATED_WORDS,
   STORED_DETAILED,
   STORED_QUICK,
   holdRequests,
@@ -110,6 +111,16 @@ describe("выбор способа", () => {
       screen.getByText(/Имя и описание придумает мастер/),
     ).toBeInTheDocument();
     expect(screen.getByText(/Судьба бросит кубики/)).toBeInTheDocument();
+  });
+
+  test("в пояснениях способов — «раса», а не «вид»", async () => {
+    renderPicker();
+
+    expect(
+      await screen.findByText(/Выберите всё сами: расу, класс/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Класс, раса и одна строка/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
   });
 
   test("«Назад в лобби» открывает лобби этой игры", async () => {
@@ -307,7 +318,7 @@ describe("изменить героя: прежний выбор", () => {
     expect(
       await screen.findByRole("heading", { name: "Подробный герой" }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/^Шаг 1 из 9/)).toHaveTextContent("Вид");
+    expect(screen.getByText(/^Шаг 1 из 9/)).toHaveTextContent("Раса");
     expect(screen.getByRole("radio", { name: /Эльф/ })).toBeChecked();
     walkToTheEnd();
     expect(screen.getByLabelText("Предыстория героя")).toHaveValue(
@@ -380,7 +391,7 @@ describe("изменить героя: прежний выбор", () => {
       await screen.findByRole("heading", { name: "Быстрый герой" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Класс")).toHaveValue("rogue");
-    expect(screen.getByLabelText("Вид")).toHaveValue("human");
+    expect(screen.getByLabelText("Раса")).toHaveValue("human");
     expect(screen.getByLabelText("Опиши героя одной строкой")).toHaveValue(
       "Вор-неудачник",
     );
@@ -462,7 +473,7 @@ describe("изменить героя: создать заново", () => {
     click("Подробно");
 
     await screen.findByRole("heading", { name: "Подробный герой" });
-    expect(screen.getByText(/^Шаг 1 из 9/)).toHaveTextContent("Вид");
+    expect(screen.getByText(/^Шаг 1 из 9/)).toHaveTextContent("Раса");
     expect(screen.queryByRole("radio", { checked: true })).toBeNull();
     expect(button("Далее")).toBeDisabled();
   });
@@ -476,7 +487,7 @@ describe("изменить героя: создать заново", () => {
 
     await screen.findByRole("heading", { name: "Быстрый герой" });
     expect(screen.getByLabelText("Класс")).toHaveValue("");
-    expect(screen.getByLabelText("Вид")).toHaveValue("");
+    expect(screen.getByLabelText("Раса")).toHaveValue("");
     expect(screen.getByLabelText("Опиши героя одной строкой")).toHaveValue("");
     expect(screen.getByLabelText("Имя (необязательно)")).toHaveValue("");
   });
@@ -510,7 +521,7 @@ describe("изменить героя: создать заново", () => {
     fireEvent.change(screen.getByLabelText("Класс"), {
       target: { value: "fighter" },
     });
-    fireEvent.change(screen.getByLabelText("Вид"), {
+    fireEvent.change(screen.getByLabelText("Раса"), {
       target: { value: "dwarf" },
     });
     fireEvent.change(screen.getByLabelText("Опиши героя одной строкой"), {
@@ -713,7 +724,7 @@ describe("после создания", () => {
     fireEvent.change(screen.getByLabelText("Класс"), {
       target: { value: "rogue" },
     });
-    fireEvent.change(screen.getByLabelText("Вид"), {
+    fireEvent.change(screen.getByLabelText("Раса"), {
       target: { value: "elf" },
     });
     fireEvent.change(screen.getByLabelText("Опиши героя одной строкой"), {

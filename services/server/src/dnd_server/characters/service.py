@@ -78,8 +78,8 @@ from dnd_server.characters.flavor import (
     FlavorUnavailable,
     PersonaOut,
     ask_model,
-    backstory_prompt,
-    flavor_prompt,
+    backstory_request,
+    flavor_request,
     with_persona,
 )
 from dnd_server.characters.previews import RandomPreviews
@@ -98,14 +98,11 @@ from dnd_server.games.service import (
     get_game,
     lobby_event,
 )
-from dnd_server.llm.base import LLMProvider, printable
+from dnd_server.llm.base import JsonRequest, LLMProvider, printable
 from dnd_server.llm.factory import ConfigError
 from dnd_server.llm.internal_api import TurnTokens
 
 logger = logging.getLogger(__name__)
-
-FLAVOR_PURPOSE = "character.flavor"
-BACKSTORY_PURPOSE = "character.backstory"
 
 # --- id персонажа ---
 
@@ -187,7 +184,7 @@ class SpeciesOption(BaseModel):
     name: str
     traits: list[FeatureOption]
     extra_skill: bool  # нужен навык на выбор (Умелость человека)
-    granted_skills: list[Skill]  # навыки, которые вид даёт сам
+    granted_skills: list[Skill]  # навыки, которые раса даёт сама
 
 
 class BackgroundOption(BaseModel):
@@ -567,7 +564,7 @@ async def create_quick(
     concept: str,
     name: str | None,
 ) -> CreatedOut:
-    """Быстрый режим: класс, вид и замысел игрока; имя придумает модель, если игрок его не дал."""
+    """Быстрый режим: класс, раса и замысел игрока; имя придумает модель, если игрок его не дал."""
 
     def build(slot: Slot) -> Character:
         return quick_character(
@@ -671,8 +668,7 @@ async def _ask[T: BaseModel](
     deps: Deps,
     game: GameOut,
     user: User,
-    purpose: str,
-    prompt: str,
+    request: JsonRequest,
     schema: type[T],
 ) -> T:
     """Запрос к модели игры от имени игрока; отказ пишется в журнал и идёт дальше как
@@ -700,15 +696,17 @@ async def _ask[T: BaseModel](
         # Тексты игрока и модели в журнал не идут: только кто, где, зачем и какой по счёту вызов.
         logger.info(
             "Вызов модели (%s): игра %s, игрок %s, вызов %d из %d.",
-            purpose,
+            request.purpose,
             game.id,
             user.id,
             number,
             MAX_MODEL_CALLS,
         )
-        return await ask_model(provider, purpose, prompt, schema)
+        return await ask_model(provider, request, schema)
     except FlavorUnavailable as failure:
-        logger.warning("Нейронка не дала текст (%s): игра %s: %s", purpose, game.id, failure.reason)
+        logger.warning(
+            "Нейронка не дала текст (%s): игра %s: %s", request.purpose, game.id, failure.reason
+        )
         raise
 
 
@@ -724,9 +722,9 @@ async def _describe(
     """Дописывает описание сохранённому персонажу. Блокировка игры здесь не держится, пока
     модель отвечает; отказ модели или старт игры за это время оставляют персонажа с замыслом,
     а клиент получает его с `flavor_error`: персонаж сохранён, поэтому 409 тут не нужен."""
-    prompt = flavor_prompt(character, deps.srd, name_given=keep_name)
+    request = flavor_request(character, deps.srd, name_given=keep_name, profanity=game.profanity)
     try:
-        persona = await _ask(session, deps, game, user, FLAVOR_PURPOSE, prompt, PersonaOut)
+        persona = await _ask(session, deps, game, user, request, PersonaOut)
     except FlavorUnavailable as failure:
         return CreatedOut(
             character=character,
@@ -787,8 +785,10 @@ async def backstory_help(
     if class_def is None:
         raise Invalid("Неизвестный класс.")
     if species_def is None:
-        raise Invalid("Неизвестный вид.")
-    prompt = backstory_prompt(class_def.name, species_def.name, concept, draft)
+        raise Invalid("Неизвестная раса.")
+    request = backstory_request(
+        class_def.name, species_def.name, concept, draft, profanity=game.profanity
+    )
     # Проверки выше отказывают раньше места под вызов: неверный запрос ничего не тратит.
     with deps.model_calls.running(game_id, user.id):
-        return await _ask(session, deps, game, user, BACKSTORY_PURPOSE, prompt, BackstoryOut)
+        return await _ask(session, deps, game, user, request, BackstoryOut)

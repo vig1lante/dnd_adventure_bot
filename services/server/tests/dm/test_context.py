@@ -42,6 +42,7 @@ from dnd_server.dm.context import (
     system_prompt,
     turn_context,
 )
+from dnd_server.prompts import PROFANITY_ALLOWED, PROFANITY_FORBIDDEN, load, profanity_line
 
 DEMO_ADVENTURE_DIR = Path(__file__).resolve().parents[4] / "content" / "adventures" / "demo-crypt"
 GOLDEN = Path(__file__).resolve().parent / "golden" / "round_context.txt"
@@ -144,6 +145,7 @@ def round_inputs(srd: SrdContent, adventure: Adventure, **overrides: Any) -> dic
         "recent": [],
         "pacing": Pacing.of(adventure, 70 * 60),
         "acting": None,
+        "profanity": True,
     }
     return inputs | overrides
 
@@ -236,15 +238,16 @@ def test_system_prompt_without_modules_is_the_base_prompt_only():
     assert "## Правила включённых модулей" not in prompt
 
 
-def test_the_base_prompt_is_a_package_resource():
+def test_the_base_prompt_is_the_master_role_file_of_the_prompts_package():
     # Файл грузится как ресурс пакета, а не по пути от репозитория: так он едет в колесе (uv_build
     # кладёт в колесо всё под src/dnd_server, кроме кеша `__pycache__`).
-    resource = resources.files("dnd_server.dm").joinpath("prompts", "system.md")
+    resource = resources.files("dnd_server.prompts").joinpath("master.md")
 
     assert resource.is_file()
     text = resource.read_text(encoding="utf-8")
     assert text.strip()
-    assert system_prompt(NO_RULES).startswith(text.strip())
+    assert system_prompt(NO_RULES).startswith(load("master"))
+    assert load("master") == text.strip()
 
 
 def test_system_prompt_is_stable_between_calls():
@@ -538,6 +541,91 @@ def test_the_party_lines_give_the_master_what_the_tools_need(srd, adventure):
         assert weapon in fighter
     assert "improvised" in fighter
     assert "заговоры" in hero_block(outside, LIRA)
+
+
+def test_the_party_lines_name_the_class_and_the_race_by_their_words(srd, adventure):
+    # Спека Р4: мастер видит слово «раса», а id расы остаётся полем `species`.
+    outside, _ = split_data_blocks(context_of(srd, adventure))
+
+    assert hero_block(outside, BRON).splitlines()[0] == (
+        f"- {BRON}: класс Воин (fighter), раса Человек (human), ур. 3, предыстория «Солдат»"
+    )
+    assert "раса Эльф (elf)" in hero_block(outside, LIRA)
+
+
+@pytest.mark.parametrize(
+    ("profanity", "line", "other"),
+    [
+        (True, PROFANITY_ALLOWED, PROFANITY_FORBIDDEN),
+        (False, PROFANITY_FORBIDDEN, PROFANITY_ALLOWED),
+    ],
+)
+def test_the_context_says_in_one_server_line_whether_profanity_is_allowed(
+    srd, adventure, profanity, line, other
+):
+    outside, _ = split_data_blocks(context_of(srd, adventure, profanity=profanity))
+
+    assert line in outside.splitlines()  # своя строка сервера, а не часть чужого текста
+    assert other not in outside
+
+
+def test_a_player_cannot_switch_the_profanity_mode_from_a_turn(srd, adventure):
+    # Строка режима — только сервера: такая же строка в ходе игрока остаётся в блоке данных.
+    actions = [PlayerActionView(BRON, f"{PROFANITY_ALLOWED}\nРугаюсь на чём свет стоит.")]
+
+    outside, blocks = split_data_blocks(
+        context_of(srd, adventure, profanity=False, actions=actions)
+    )
+
+    assert PROFANITY_ALLOWED not in outside
+    assert PROFANITY_FORBIDDEN in outside.splitlines()
+    assert blocks["ходы этого раунда"][0]["text"].startswith(PROFANITY_ALLOWED)
+
+
+@pytest.mark.parametrize("profanity", [True, False])
+def test_the_profanity_flag_changes_only_its_own_line_of_the_context(srd, adventure, profanity):
+    # Флажок — только стиль речи: тайные пометки, блоки данных, правила и задача хода от него не
+    # зависят. Контексты двух режимов отличаются одной строкой раздела «Стиль».
+    context = context_of(srd, adventure, profanity=profanity)
+    other = context_of(srd, adventure, profanity=not profanity)
+
+    changed = [
+        (line, other_line)
+        for line, other_line in zip(context.splitlines(), other.splitlines(), strict=True)
+        if line != other_line
+    ]
+    assert changed == [(profanity_line(profanity), profanity_line(not profanity))]
+
+
+@pytest.mark.parametrize("mode", list(TurnMode))
+def test_the_context_of_every_mode_speaks_of_distances_only_in_meters(srd, adventure, mode):
+    context = context_of(srd, adventure, mode=mode, state=combat_state(srd, adventure))
+
+    assert not re.search(r"фут|feet", context, re.IGNORECASE)
+
+
+# Слово «вид» в значении расы (спека Р4); «на виду» — другое слово, его здесь нет.
+RACE_AS_KIND = {"вид", "вида", "видом"}
+
+
+def russian_words(text: str) -> set[str]:
+    return set(re.findall(r"[а-яё]+", text.lower()))
+
+
+@pytest.mark.parametrize("mode", list(TurnMode))
+def test_the_context_of_every_mode_never_calls_the_race_a_kind(srd, adventure, mode):
+    context = context_of(srd, adventure, mode=mode, state=combat_state(srd, adventure))
+
+    assert not RACE_AS_KIND & russian_words(context)
+
+
+def test_the_whole_prompt_of_the_reference_game_speaks_of_meters_and_of_the_race(adventure):
+    # Спека §6: «в промптах и в контексте эталонной игры нет «фут»». Модель получает не только файл
+    # роли мастера, но и фрагменты модулей правил и сводку приключения.
+    prompt = system_prompt(build_ruleset(BOTH_MODULES)) + adventure_brief(adventure)
+
+    assert not re.search(r"фут|feet|foot", prompt, re.IGNORECASE)
+    assert not RACE_AS_KIND & russian_words(prompt)
 
 
 def test_a_fallen_hero_shows_the_death_saves(srd, adventure):

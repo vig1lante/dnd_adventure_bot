@@ -8,7 +8,10 @@
 - `FAKE_CLAUDE_LOG` — файл журнала (JSON-строка на каждый запуск): `argv`, окружение, `cwd`,
   файлы в `cwd`, содержимое `mcp.json` и `system.md`, `pid`. Без него журнал не пишется;
 - `FAKE_CLAUDE_REPLIES` — JSON-массив строк stdout; N-й запуск с `-p` печатает N-ю строку
-  (после последней повторяется последняя). По умолчанию — успешный ответ хода;
+  (после последней повторяется последняя). По умолчанию — успешный ответ хода с `modelUsage`;
+- `FAKE_CLAUDE_MODEL` — модель, которую ответ по умолчанию называет в `modelUsage` (так CLI
+  разворачивает псевдоним в полное имя); без неё — значение `--model`, а без флага —
+  `DEFAULT_MODEL`;
 - `FAKE_CLAUDE_EXIT` — код возврата (по умолчанию 0); `FAKE_CLAUDE_STDERR` — текст в stderr
   (`{url}` в нём заменяется адресом моста из `mcp.json`);
 - `FAKE_CLAUDE_VERSION_FAIL` — `--version` завершается ошибкой;
@@ -31,6 +34,7 @@ from pathlib import Path
 
 HANG_LIMIT_S = 60
 VERSION_TEXT = "9.9.9 (Claude Code)"
+DEFAULT_MODEL = "claude-fake-subscription"  # модель по умолчанию «подписки» имитатора
 DEFAULT_REPLY = {
     "type": "result",
     "subtype": "success",
@@ -104,10 +108,18 @@ def call_internal_api(argv: list[str]) -> None:
                 raise
 
 
-def reply_for_this_run() -> str:
+def default_reply(argv: list[str]) -> dict:
+    """Успешный ответ хода; `modelUsage` называет модель, которой «ответил» CLI."""
+    model = os.environ.get("FAKE_CLAUDE_MODEL") or option_value(argv, "--model") or DEFAULT_MODEL
+    usage = DEFAULT_REPLY["usage"]
+    model_usage = {"inputTokens": usage["input_tokens"], "outputTokens": usage["output_tokens"]}
+    return {**DEFAULT_REPLY, "modelUsage": {model: model_usage}}
+
+
+def reply_for_this_run(argv: list[str]) -> str:
     raw = os.environ.get("FAKE_CLAUDE_REPLIES")
     if raw is None:
-        return json.dumps(DEFAULT_REPLY, ensure_ascii=False)
+        return json.dumps(default_reply(argv), ensure_ascii=False)
     replies = json.loads(raw)
     return replies[min(prompt_runs_so_far() - 1, len(replies) - 1)]
 
@@ -136,7 +148,7 @@ def main() -> int:
     stderr_text = os.environ.get("FAKE_CLAUDE_STDERR")
     if stderr_text:
         print(stderr_text.replace("{url}", bridge_url(argv) or ""), file=sys.stderr)
-    print(reply_for_this_run())
+    print(reply_for_this_run(argv))
     return int(os.environ.get("FAKE_CLAUDE_EXIT", "0"))
 
 

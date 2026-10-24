@@ -7,8 +7,10 @@
 локальном порту. Живых моделей и внешней сети нет.
 """
 
+import ast
 import asyncio
 import json
+import logging
 import os
 import shlex
 import socket
@@ -21,10 +23,12 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+import dnd_server
 from dnd_server.app import create_app
 from dnd_server.config import Settings
+from dnd_server.games.schemas import CreateGameIn
 from dnd_server.llm.base import (
     MAX_TRACE_ARGS_CHARS,
     JsonRequest,
@@ -36,6 +40,7 @@ from dnd_server.llm.base import (
     Usage,
 )
 from dnd_server.llm.claude_code_cli import ClaudeCodeCliProvider, ToolRecorder
+from dnd_server.llm.factory import ConfigError, make_provider
 from dnd_server.llm.internal_api import TurnTokens
 
 FAKE_CLAUDE = Path(__file__).with_name("fake_claude.py")
@@ -98,13 +103,22 @@ class Harness:
         internal_url: str = "http://127.0.0.1:8000",
         stop_grace_s: float = 0.5,
         tokens: TurnTokens | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+        cheap_model: str | None = None,
         **cli_env: str,
     ) -> None:
         cli_path, self.log = make_cli(tmp_path, **cli_env)
         self.tokens = tokens if tokens is not None else TurnTokens()
         self.internal_url = internal_url
         self.provider = ClaudeCodeCliProvider(
-            self.tokens, internal_url, cli_path=cli_path, stop_grace_s=stop_grace_s
+            self.tokens,
+            internal_url,
+            cli_path=cli_path,
+            stop_grace_s=stop_grace_s,
+            model=model,
+            effort=effort,
+            cheap_model=cheap_model,
         )
 
     def entries(self) -> list[dict[str, Any]]:
@@ -584,7 +598,15 @@ async def test_run_turn_starts_cli_with_exact_flags(tmp_path):
     ]
     assert Path(argv[3]).resolve() == (cwd / "system.md").resolve()
     assert Path(argv[8]).resolve() == (cwd / "mcp.json").resolve()
-    for forbidden in ("--bare", "--resume", "--continue", "--disallowedTools", "--model"):
+    # Без CLAUDE_CLI_MODEL и CLAUDE_CLI_EFFORT модель и усилия выбирает сам CLI по подписке.
+    for forbidden in (
+        "--bare",
+        "--resume",
+        "--continue",
+        "--disallowedTools",
+        "--model",
+        "--effort",
+    ):
         assert forbidden not in argv
 
 
@@ -1266,3 +1288,462 @@ def test_provider_is_named_after_its_config_value(tmp_path):
     provider: LLMProvider = Harness(tmp_path).provider
 
     assert provider.name == "claude_code_cli"
+
+
+# --- модель подписки: --model, --effort и дешёвая модель (DND-2 B1.2, спека §11) ---
+
+MODEL_USAGE_REPLY = reply(
+    modelUsage={
+        "claude-opus-test-1": {"inputTokens": 900, "outputTokens": 120},
+        "claude-haiku-test-1": {"inputTokens": 50, "outputTokens": 5},
+    }
+)
+
+
+def flags_after_tools(argv: list[str]) -> list[str]:
+    """Аргументы между набором инструментов и `--permission-mode`: там стоят модель и усилия."""
+    start = argv.index("--strict-mcp-config") + 1
+    if "--allowedTools" in argv:
+        start = argv.index("--allowedTools") + 2
+    return argv[start : argv.index("--permission-mode")]
+
+
+async def test_run_turn_gives_the_cli_the_model_and_the_effort(tmp_path):
+    harness = Harness(tmp_path, model="opus", effort="high")
+
+    await harness.provider.run_turn(turn_request(), RecordingTools())
+
+    argv = harness.only_run()["argv"]
+    assert flags_after_tools(argv) == ["--model", "opus", "--effort", "high"]
+    assert argv[-4:] == ["--permission-mode", "dontAsk", "--output-format", "json"]
+
+
+@pytest.mark.parametrize(
+    ("model", "effort", "flags"),
+    [
+        pytest.param("sonnet", None, ["--model", "sonnet"], id="только модель"),
+        pytest.param(None, "low", ["--effort", "low"], id="только усилия"),
+        pytest.param(None, None, [], id="ничего"),
+    ],
+)
+async def test_only_the_settings_that_are_set_reach_the_cli(tmp_path, model, effort, flags):
+    harness = Harness(tmp_path, model=model, effort=effort)
+
+    await harness.provider.run_turn(turn_request(), RecordingTools())
+
+    assert flags_after_tools(harness.only_run()["argv"]) == flags
+
+
+@pytest.mark.parametrize("cheap", [True, False])
+async def test_every_answer_by_schema_goes_to_the_cheap_model_without_effort(tmp_path, cheap):
+    # Служебные роли (описание героя, вплетение, летопись, генератор) — ответы по схеме: у CLI
+    # они идут на CLAUDE_CLI_CHEAP_MODEL, какой бы признак `cheap` ни был у запроса (спека §11).
+    # Возможности дешёвой модели неизвестны, поэтому усилия ей не передаются.
+    answer = reply(result=json.dumps({"title": "Склеп", "danger": 3}))
+    harness = Harness(
+        tmp_path,
+        model="opus",
+        effort="high",
+        cheap_model="haiku",
+        FAKE_CLAUDE_REPLIES=json.dumps([answer]),
+    )
+
+    await harness.provider.complete_json(
+        JsonRequest(system="s", prompt="p", purpose="weaving", cheap=cheap), Hook
+    )
+
+    assert flags_after_tools(harness.only_run()["argv"]) == ["--model", "haiku"]
+
+
+# Ответы по схеме строят только модули служебных ролей спеки §11, а ход мастера — всегда
+# `run_turn`. На этом держится правило адаптера «ответ по схеме → дешёвая модель»: новый
+# `JsonRequest` в другом модуле (не служебная роль) должен сначала пересмотреть это правило.
+SERVICE_ROLE_MODULES = {
+    "authoring/pipeline.py",  # генератор приключений (cheap=True)
+    "characters/flavor.py",  # описание героя и «помоги написать» (cheap=True)
+    "dm/chronicle.py",  # летопись (cheap=True)
+    "dm/weaving.py",  # вплетение (cheap=False: у API — основная модель, у CLI — дешёвая по §11)
+}
+
+
+def test_only_the_service_roles_of_the_spec_build_answers_by_schema():
+    package = Path(dnd_server.__file__).parent
+
+    builders = {
+        path.relative_to(package).as_posix()
+        for path in package.rglob("*.py")
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "JsonRequest"
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        )
+    }
+
+    assert builders == SERVICE_ROLE_MODULES
+
+
+async def test_without_a_cheap_model_answers_by_schema_go_to_the_main_model(tmp_path):
+    answer = reply(result=json.dumps({"title": "Склеп", "danger": 3}))
+    harness = Harness(
+        tmp_path, model="opus", effort="high", FAKE_CLAUDE_REPLIES=json.dumps([answer])
+    )
+
+    await harness.provider.complete_json(
+        JsonRequest(system="s", prompt="p", purpose="chronicle", cheap=True), Hook
+    )
+
+    assert flags_after_tools(harness.only_run()["argv"]) == ["--model", "opus", "--effort", "high"]
+
+
+async def test_the_turn_never_goes_to_the_cheap_model(tmp_path):
+    harness = Harness(tmp_path, model="opus", cheap_model="haiku")
+
+    await harness.provider.run_turn(turn_request(), RecordingTools())
+
+    assert flags_after_tools(harness.only_run()["argv"]) == ["--model", "opus"]
+
+
+VALID_NAMES = ["opus", "claude-opus-4-1", "sonnet[1m]", "claude-3.5", "a" * 64]
+# Мусор, который нельзя пустить в командную строку CLI: опции, пробелы, переводы строк, управляющие
+# знаки, кириллица, слишком длинное имя и пустая строка.
+GARBAGE_NAMES = [
+    "",
+    "-opus",
+    "--dangerously-skip-permissions",
+    "opus sonnet",
+    "opus\n",
+    "opus\x1b[31m",
+    "сонет",
+    "opus;rm",
+    "opus=1",
+    "a" * 65,
+    "\nopus",
+    "opus\t",
+    "op\x00us",
+    "$(id)",
+    "../opus",
+]
+
+
+@pytest.mark.parametrize("name", VALID_NAMES)
+def test_a_model_name_of_the_allowed_shape_is_accepted(tmp_path, name):
+    harness = Harness(tmp_path, model=name, cheap_model=name)
+
+    assert harness.provider.name == "claude_code_cli"
+
+
+@pytest.mark.parametrize("field", ["model", "cheap_model"])
+@pytest.mark.parametrize("name", GARBAGE_NAMES)
+def test_a_model_name_outside_the_allowed_shape_is_refused_at_assembly(tmp_path, field, name):
+    with pytest.raises(ValueError) as error:
+        Harness(tmp_path, **{field: name})
+
+    assert name not in str(error.value) or name == ""  # значение в текст ошибки не попадает
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_every_effort_level_of_the_spec_is_accepted(tmp_path, effort):
+    assert Harness(tmp_path, effort=effort).provider.name == "claude_code_cli"
+
+
+@pytest.mark.parametrize("effort", ["", "turbo", "HIGH", "ultracode", "--max", "high "])
+def test_an_effort_outside_the_list_is_refused_at_assembly(tmp_path, effort):
+    with pytest.raises(ValueError, match="CLAUDE_CLI_EFFORT") as error:
+        Harness(tmp_path, effort=effort)
+
+    assert effort not in str(error.value) or effort == ""  # значение в текст ошибки не попадает
+
+
+# --- фактическая модель хода для журнала ---
+
+
+async def test_the_model_of_the_turn_is_the_main_one_from_model_usage(tmp_path):
+    harness = Harness(tmp_path, model="opus", FAKE_CLAUDE_REPLIES=json.dumps([MODEL_USAGE_REPLY]))
+    assert harness.provider.model is None  # до первого хода модель неизвестна
+
+    await harness.provider.run_turn(turn_request(), RecordingTools())
+
+    # Основная — модель с наибольшим выводом; служебные вызовы CLI (haiku) её не подменяют.
+    assert harness.provider.model == "claude-opus-test-1"
+
+
+async def test_an_answer_by_schema_does_not_change_the_model_of_the_turn(tmp_path):
+    answer = reply(
+        result=json.dumps({"title": "Склеп", "danger": 3}),
+        modelUsage={"claude-haiku-test-1": {"outputTokens": 9}},
+    )
+    harness = Harness(
+        tmp_path, cheap_model="haiku", FAKE_CLAUDE_REPLIES=json.dumps([MODEL_USAGE_REPLY, answer])
+    )
+
+    await harness.provider.run_turn(turn_request(), RecordingTools())
+    await harness.provider.complete_json(JsonRequest(system="s", prompt="p", purpose="x"), Hook)
+
+    assert harness.provider.model == "claude-opus-test-1"
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        pytest.param(None, id="нет поля"),
+        pytest.param({}, id="пусто"),
+        pytest.param([1, 2], id="не объект"),
+        pytest.param({"claude-x": "много"}, id="запись не объект"),
+        pytest.param({"claude-x": {"outputTokens": "много"}}, id="число не число"),
+    ],
+)
+async def test_an_unreadable_model_usage_leaves_the_model_unknown_but_the_turn_goes_on(
+    tmp_path, usage
+):
+    answer = reply() if usage is None else reply(modelUsage=usage)
+    harness = Harness(tmp_path, FAKE_CLAUDE_REPLIES=json.dumps([answer]))
+
+    result = await harness.provider.run_turn(turn_request(), RecordingTools())
+
+    assert result.text == "Тени скрывают вас…"
+    assert harness.provider.model is None
+
+
+# Провайдер игры один на все её ходы (`dm.provider.GameProviders`), поэтому модель прошлого хода
+# не должна доставаться журналу следующего: если CLI модель не назвал или ход не удался — `None`.
+
+
+async def test_a_turn_without_model_usage_does_not_keep_the_model_of_the_previous_turn(tmp_path):
+    harness = Harness(tmp_path, FAKE_CLAUDE_REPLIES=json.dumps([MODEL_USAGE_REPLY, reply()]))
+
+    await harness.provider.run_turn(turn_request(), RecordingTools())
+    first = harness.provider.model
+    await harness.provider.run_turn(turn_request(), RecordingTools())
+
+    assert (first, harness.provider.model) == ("claude-opus-test-1", None)
+
+
+async def test_a_failed_turn_does_not_keep_the_model_of_the_previous_turn(tmp_path):
+    # Ответ с ошибкой несёт `modelUsage`, но неудачный ход модель в журнал не называет.
+    failed = reply(
+        is_error=True,
+        subtype="error_during_execution",
+        modelUsage={"claude-sonnet-test-2": {"outputTokens": 50}},
+    )
+    harness = Harness(tmp_path, FAKE_CLAUDE_REPLIES=json.dumps([MODEL_USAGE_REPLY, failed]))
+    await harness.provider.run_turn(turn_request(), RecordingTools())
+
+    with pytest.raises(ProviderError):
+        await harness.provider.run_turn(turn_request(), RecordingTools())
+
+    assert harness.provider.model is None
+
+
+async def test_a_turn_over_the_tool_limit_does_not_name_a_model(tmp_path):
+    # Имитатор отвечает с `modelUsage` и после трёх вызовов: первый ход в лимит укладывается,
+    # второй — нет, и его модель журналу не достаётся.
+    app, tokens = dev_app()
+    calls = [{"name": "request_check", "args": {"dc": 15}}] * 3
+    async with live_server(app) as base_url:
+        harness = Harness(
+            tmp_path,
+            internal_url=base_url,
+            tokens=tokens,
+            model="opus",
+            FAKE_CLAUDE_TOOL_CALLS=json.dumps(calls),
+        )
+        await harness.provider.run_turn(turn_request(max_tool_iterations=5), RecordingTools())
+        first = harness.provider.model
+
+        with pytest.raises(ToolLoopExceeded):
+            await harness.provider.run_turn(turn_request(max_tool_iterations=2), RecordingTools())
+
+    assert (first, harness.provider.model) == ("opus", None)
+
+
+async def test_a_name_from_model_usage_is_made_safe_for_the_journal(tmp_path):
+    answer = reply(modelUsage={"claude\x1b[2K\r-" + "x" * 300: {"outputTokens": 1}})
+    harness = Harness(tmp_path, FAKE_CLAUDE_REPLIES=json.dumps([answer]))
+
+    await harness.provider.run_turn(turn_request(), RecordingTools())
+
+    model = harness.provider.model
+    assert model is not None and model.startswith("claude\\x1b[2K\\r-")
+    assert len(model) <= 100 and "\x1b" not in model
+
+
+async def test_the_fake_cli_reports_the_model_it_was_given_in_model_usage(tmp_path):
+    # Имитатор печатает `modelUsage` сам: модель из `--model`, а `FAKE_CLAUDE_MODEL` изображает
+    # CLI, который развернул псевдоним в полное имя.
+    (tmp_path / "given").mkdir()
+    (tmp_path / "resolved").mkdir()
+    given = Harness(tmp_path / "given", model="sonnet")
+    resolved = Harness(tmp_path / "resolved", model="opus", FAKE_CLAUDE_MODEL="claude-opus-9")
+
+    await given.provider.run_turn(turn_request(), RecordingTools())
+    await resolved.provider.run_turn(turn_request(), RecordingTools())
+
+    assert (given.provider.model, resolved.provider.model) == ("sonnet", "claude-opus-9")
+
+
+# --- сборка фабрикой: настройки, модель игры и ошибки настройки ---
+
+
+def cli_settings_for(tmp_path: Path, **changes: Any) -> Settings:
+    """Настройки dev-сервера с `claude_code_cli`, чей `claude` — обёртка над имитатором."""
+    cli_path, _log = make_cli(tmp_path)
+    return Settings(
+        app_env="dev", llm_provider="claude_code_cli", claude_cli_path=cli_path, **changes
+    )
+
+
+def runs_with_prompt(log: Path) -> list[dict[str, Any]]:
+    entries = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    return [entry for entry in entries if "-p" in entry["argv"]]
+
+
+async def test_the_factory_gives_the_cli_the_models_and_the_effort_of_the_settings(tmp_path):
+    settings = cli_settings_for(
+        tmp_path, claude_cli_model="opus", claude_cli_effort="high", claude_cli_cheap_model="haiku"
+    )
+    answer = reply(result=json.dumps({"title": "Склеп", "danger": 3}))
+    _cli_path, log = make_cli(tmp_path, FAKE_CLAUDE_REPLIES=json.dumps([reply(), answer]))
+
+    provider = make_provider(
+        settings, turn_tokens=TurnTokens(), internal_url="http://127.0.0.1:8000"
+    )
+    await provider.run_turn(turn_request(), RecordingTools())
+    await provider.complete_json(JsonRequest(system="s", prompt="p", purpose="chronicle"), Hook)
+
+    turn, by_schema = runs_with_prompt(log)
+    assert flags_after_tools(turn["argv"]) == ["--model", "opus", "--effort", "high"]
+    assert flags_after_tools(by_schema["argv"]) == ["--model", "haiku"]
+
+
+async def test_the_model_of_the_game_beats_the_model_of_the_environment(tmp_path):
+    settings = cli_settings_for(tmp_path, claude_cli_model="opus")
+    _cli_path, log = make_cli(tmp_path)
+
+    provider = make_provider(
+        settings, model="sonnet", turn_tokens=TurnTokens(), internal_url="http://127.0.0.1:8000"
+    )
+    await provider.run_turn(turn_request(), RecordingTools())
+
+    (run,) = runs_with_prompt(log)
+    assert flags_after_tools(run["argv"]) == ["--model", "sonnet"]
+
+
+@pytest.mark.parametrize(
+    ("changes", "variable"),
+    [
+        pytest.param({"claude_cli_model": "-x\x1b[31m"}, "CLAUDE_CLI_MODEL", id="модель"),
+        pytest.param(
+            {"claude_cli_cheap_model": "haiku now"}, "CLAUDE_CLI_CHEAP_MODEL", id="дешёвая"
+        ),
+        pytest.param({"claude_cli_effort": "turbo"}, "CLAUDE_CLI_EFFORT", id="усилия"),
+    ],
+)
+def test_garbage_in_the_settings_is_a_config_error_that_names_the_variable(
+    tmp_path, changes, variable
+):
+    settings = cli_settings_for(tmp_path, **changes)
+
+    with pytest.raises(ConfigError) as error:
+        make_provider(settings, turn_tokens=TurnTokens(), internal_url="http://127.0.0.1:8000")
+
+    assert variable in str(error.value)
+    assert str(error.value).startswith("провайдер claude_code_cli:")
+    for value in changes.values():
+        assert value not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "game_model", ["qwen2.5:14b", "claude-opus-4@x", "--dangerously-skip-permissions", "op\x1bus"]
+)
+@pytest.mark.parametrize(
+    ("cli_model", "flags"),
+    [
+        pytest.param("opus", ["--model", "opus"], id="CLAUDE_CLI_MODEL"),
+        pytest.param(None, [], id="модель CLI по умолчанию"),
+    ],
+)
+async def test_a_model_of_the_game_the_cli_refuses_gives_way_to_the_environment(
+    tmp_path, caplog, game_model, cli_model, flags
+):
+    # Спека §11: модель игры → CLAUDE_CLI_MODEL → по умолчанию CLI. Модель игры, которую CLI не
+    # примет (игру создали под другим провайдером), пропускается: сборка не падает, в командную
+    # строку она не идёт, а журнал сервера говорит, что взята модель окружения.
+    settings = cli_settings_for(tmp_path, claude_cli_model=cli_model)
+    _cli_path, log = make_cli(tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="dnd_server.llm.factory"):
+        provider = make_provider(
+            settings,
+            model=game_model,
+            turn_tokens=TurnTokens(),
+            internal_url="http://127.0.0.1:8000",
+        )
+    await provider.run_turn(turn_request(), RecordingTools())
+
+    (run,) = runs_with_prompt(log)
+    assert flags_after_tools(run["argv"]) == flags
+    assert game_model not in run["argv"]
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING
+    assert "CLAUDE_CLI_MODEL" in record.getMessage()
+    assert record.getMessage().isprintable()  # имя из базы печатается безопасно для терминала
+
+
+def test_a_wrong_model_of_the_environment_stays_a_config_error_behind_a_refused_game_model(
+    tmp_path,
+):
+    # Модель окружения — настройка владельца: её ошибка по-прежнему ошибка настройки, даже когда
+    # до неё дошло дело из-за неподходящей модели игры. Значений в тексте ошибки нет.
+    settings = cli_settings_for(tmp_path, claude_cli_model="-x LEAK")
+
+    with pytest.raises(ConfigError, match="CLAUDE_CLI_MODEL") as error:
+        make_provider(
+            settings,
+            model="qwen2.5:14b",
+            turn_tokens=TurnTokens(),
+            internal_url="http://127.0.0.1:8000",
+        )
+
+    assert "LEAK" not in str(error.value) and "qwen" not in str(error.value)
+
+
+@pytest.mark.parametrize("name", [".opus", "[1m]", "]opus", "-opus"])
+def test_a_model_name_starting_with_a_sign_is_refused_by_the_cli_as_by_the_game_form(
+    tmp_path, name
+):
+    # Первый знак имени модели — одно правило у адаптера и у схемы создания игры: буква или
+    # цифра. Иначе CLAUDE_CLI_MODEL из списка формы не прошёл бы схему и наоборот.
+    with pytest.raises(ValidationError):
+        CreateGameIn(adventure_id="demo-crypt", model=name)
+    with pytest.raises(ValueError):
+        Harness(tmp_path, model=name)
+
+
+@pytest.mark.parametrize("name", VALID_NAMES)
+def test_a_model_name_the_cli_accepts_passes_the_game_form(name):
+    assert CreateGameIn(adventure_id="demo-crypt", model=name).model == name
+
+
+async def test_answers_by_schema_also_get_only_the_allowlisted_environment(tmp_path, monkeypatch):
+    # Ответ по схеме идёт на дешёвую модель другим запуском CLI, но окружение у него то же:
+    # ключи сервера в процесс не попадают, а модель подписки приходит только аргументами.
+    for name, value in SECRET_ENV.items():
+        monkeypatch.setenv(name, value)
+    for name, value in (("CLAUDE_CLI_MODEL", "opus"), ("CLAUDE_CLI_CHEAP_MODEL", "haiku")):
+        monkeypatch.setenv(name, value)
+    answer = reply(result=json.dumps({"title": "Склеп", "danger": 3}))
+    harness = Harness(
+        tmp_path, model="opus", cheap_model="haiku", FAKE_CLAUDE_REPLIES=json.dumps([answer])
+    )
+
+    await harness.provider.complete_json(
+        JsonRequest(system="s", prompt="p", purpose="chronicle", cheap=True), Hook
+    )
+
+    run = harness.only_run()
+    assert flags_after_tools(run["argv"]) == ["--model", "haiku"]
+    assert not set(SECRET_ENV) & set(run["env"])
+    assert not [name for name in run["env"] if name.startswith("CLAUDE_CLI_")]
+    dumped = json.dumps(run["env"])
+    assert not any(value in dumped for value in SECRET_ENV.values())

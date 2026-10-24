@@ -65,6 +65,7 @@ GAME_FIELDS = {
     "collect_seconds",
     "hurry_seconds",
     "camp_seconds",
+    "profanity",
     "players",
 }
 PLAYER_FIELDS = {"user_id", "name", "is_host", "ready", "has_character"}
@@ -498,6 +499,188 @@ async def test_claude_code_cli_is_422_in_prod(settings, db, content_dir):
         assert response.status_code == 422
         assert "dev" in response.json()["detail"]
         assert await count_games(db) == 0
+
+
+@pytest.mark.parametrize(
+    ("body", "default"),
+    [
+        pytest.param({"provider": "claude_code_cli"}, "fake", id="переопределение игры"),
+        pytest.param({}, "claude_code_cli", id="LLM_PROVIDER"),
+    ],
+)
+async def test_in_prod_claude_code_cli_is_refused_as_dev_only_before_its_models_are_named(
+    settings, db, body, default
+):
+    # Сначала dev-ворота провайдера, потом модель: в prod отказ говорит «только dev» и не
+    # перечисляет модели CLI вместе с CLAUDE_CLI_MODEL — GET /api/providers их в prod тоже не
+    # показывает.
+    prod = settings.model_copy(
+        update={"app_env": "prod", "llm_provider": default, "claude_cli_model": "my-private-model"}
+    )
+    async with start_lobby(prod, db) as lobby:
+        creator = await add_player(db, "Создатель", tg_id=CREATOR_TG_ID)
+
+        response = await create_game(lobby, creator, model="opus2", **body)
+
+        assert response.status_code == 422
+        assert "dev" in response.json()["detail"]
+        assert "my-private-model" not in response.text
+        assert await count_games(db) == 0
+
+
+# --- модель подписки claude_code_cli (DND-2 B1.2, спека §11) ---
+
+
+@pytest.mark.parametrize("model", ["opus", "sonnet", "haiku"])
+async def test_claude_code_cli_takes_a_model_from_its_list_and_saves_it(lobby, model):
+    host = await add_host(lobby)
+
+    response = await create_game(lobby, host, provider="claude_code_cli", model=model)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["model"] == model
+    assert (await stored_game(lobby.db, response.json()["id"])).model == model
+
+
+async def test_claude_code_cli_takes_the_model_of_the_environment_even_with_brackets(
+    lobby, settings
+):
+    # Значение CLAUDE_CLI_MODEL входит в список формы, даже если общий вид имени его не пустил бы.
+    lobby.app.state.settings = settings.model_copy(update={"claude_cli_model": "sonnet[1m]"})
+    host = await add_host(lobby)
+
+    response = await create_game(lobby, host, provider="claude_code_cli", model="sonnet[1m]")
+
+    assert response.status_code == 201, response.text
+    assert response.json()["model"] == "sonnet[1m]"
+
+
+# «x:y» и «qwen2.5:14b» CLI не примет: у сохранённой игры фабрика такую модель пропускает, но
+# создать с ней новую игру нельзя — модель берётся только из списка формы.
+@pytest.mark.parametrize(
+    "model", ["claude-opus-5-5", "opus2", "sonnet[1m]", "-opus", "x:y", "qwen2.5:14b"]
+)
+async def test_claude_code_cli_refuses_a_model_outside_its_list(lobby, model):
+    host = await add_host(lobby)
+
+    response = await create_game(lobby, host, provider="claude_code_cli", model=model)
+
+    assert response.status_code == 422
+    assert isinstance(response.json()["detail"], str)
+    assert await count_games(lobby.db) == 0
+
+
+@pytest.mark.parametrize("model", ["opus2", "x:y"])
+async def test_in_dev_a_model_outside_the_list_is_refused_with_the_list(lobby, model):
+    # Провайдер проверяется первым, но в dev он собирается, и отказ по-прежнему называет список.
+    host = await add_host(lobby)
+
+    response = await create_game(lobby, host, provider="claude_code_cli", model=model)
+
+    assert response.status_code == 422
+    assert "одна из списка: opus, sonnet, haiku" in response.json()["detail"]
+
+
+async def test_the_model_list_applies_when_claude_code_cli_is_the_default_provider(lobby, settings):
+    lobby.app.state.settings = settings.model_copy(update={"llm_provider": "claude_code_cli"})
+    host = await add_host(lobby)
+
+    refused = await create_game(lobby, host, model="claude-opus-5-5")
+    accepted = await create_game(lobby, host, model="haiku")
+
+    assert refused.status_code == 422
+    assert accepted.status_code == 201, accepted.text
+
+
+async def test_brackets_in_a_model_name_stay_refused_for_other_providers(lobby, settings):
+    lobby.app.state.settings = settings.model_copy(
+        update={"anthropic_api_key": SecretStr(ANTHROPIC_TEST_KEY), "claude_cli_model": "x[1m]"}
+    )
+    host = await add_host(lobby)
+
+    response = await create_game(lobby, host, provider="anthropic_api", model="x[1m]")
+
+    assert response.status_code == 422
+    assert await count_games(lobby.db) == 0
+
+
+@pytest.mark.parametrize("default", ["anthropic_api", "fake"])
+async def test_brackets_stay_refused_when_another_provider_is_the_default(lobby, settings, default):
+    # Зеркало случая «claude_code_cli по умолчанию»: без `provider` в запросе модель проверяется
+    # по провайдеру окружения, и CLAUDE_CLI_MODEL со скобками ему не подходит.
+    lobby.app.state.settings = settings.model_copy(
+        update={
+            "llm_provider": default,
+            "anthropic_api_key": SecretStr(ANTHROPIC_TEST_KEY),
+            "claude_cli_model": "sonnet[1m]",
+        }
+    )
+    host = await add_host(lobby)
+
+    refused = await create_game(lobby, host, model="sonnet[1m]")
+    accepted = await create_game(lobby, host, model="sonnet")
+
+    assert refused.status_code == 422
+    assert "квадратных скобок" in refused.json()["detail"]
+    assert accepted.status_code == 201, accepted.text
+
+
+async def test_the_subscription_settings_do_not_open_claude_code_cli_in_prod(settings, db):
+    # Модель из списка формы проходит проверку модели, но провайдер в prod по-прежнему закрыт.
+    prod = settings.model_copy(
+        update={
+            "app_env": "prod",
+            "claude_cli_model": "opus",
+            "claude_cli_effort": "high",
+            "claude_cli_cheap_model": "haiku",
+        }
+    )
+    async with start_lobby(prod, db) as lobby:
+        creator = await add_player(db, "Создатель", tg_id=CREATOR_TG_ID)
+
+        response = await create_game(lobby, creator, provider="claude_code_cli", model="opus")
+
+        assert response.status_code == 422
+        assert "dev" in response.json()["detail"]
+        assert await count_games(db) == 0
+
+
+# --- мат и грубая речь (DND-2 B1.2, решение Р1) ---
+
+
+async def test_a_new_game_allows_profanity_by_default(lobby):
+    host = await add_host(lobby)
+
+    game = await new_game(lobby, host)
+
+    assert game["profanity"] is True
+    assert (await stored_game(lobby.db, game["id"])).profanity is True
+
+
+async def test_the_host_turns_profanity_off_and_everybody_in_the_game_sees_it(lobby):
+    host = await add_host(lobby)
+
+    game = await new_game(lobby, host, profanity=False)
+    friend = await joined_friend(lobby, game)
+
+    assert game["profanity"] is False
+    assert (await stored_game(lobby.db, game["id"])).profanity is False
+    summary = await lobby.http.get(f"/api/games/{game['id']}", headers=friend.headers)
+    assert summary.json()["profanity"] is False
+    mine = await lobby.http.get("/api/games", headers=friend.headers)
+    assert [g["profanity"] for g in mine.json()] == [False]
+    _game_id, payload, _audience = lobby.broadcaster.sent[-1]
+    assert payload["type"] == "lobby" and payload["game"]["profanity"] is False
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1, None, "да"])
+async def test_profanity_must_be_true_or_false(lobby, value):
+    host = await add_host(lobby)
+
+    response = await create_game(lobby, host, profanity=value)
+
+    assert response.status_code == 422
+    assert await count_games(lobby.db) == 0
 
 
 # --- длительности отсчётов ---

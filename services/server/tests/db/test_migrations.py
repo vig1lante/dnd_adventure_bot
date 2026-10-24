@@ -1,9 +1,11 @@
-"""Миграции Alembic (план B6.1, B7.4, B8.s3): схемы создаются, откатываются и совпадают с моделями.
+"""Миграции Alembic (план B6.1, B7.4, B8.s3, DND-2 B1.2): схемы создаются, откатываются и
+совпадают с моделями.
 
 Ревизия 0001 — начальная схема; 0002 (B7.4) добавляет к играм колонку `clock_at` — отметку часов
 игры, из которой выводятся остаток отсчёта на паузе и время игры без пауз; 0003 (B8.s3, решения
 владельца R9 и R10) убирает таблицу `pending_rolls` (броска характеристик больше нет) и добавляет
-персонажам колонку `choices` — выбор игрока при создании героя.
+персонажам колонку `choices` — выбор игрока при создании героя; 0004 (DND-2 B1.2, решение Р1)
+добавляет играм флажок мата `profanity`: обязательный, у старых игр — «разрешён».
 
 Правило на будущее: каждая следующая миграция добавляет тест «игра с состоянием, сохранённая
 до миграции, читается после `upgrade`» (база на предыдущей ревизии, строки игры, `upgrade head`,
@@ -25,7 +27,7 @@ from alembic.config import Config
 from alembic.config import main as alembic_main
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import JSON, inspect
+from sqlalchemy import JSON, Boolean, inspect
 from sqlalchemy.exc import OperationalError
 
 from dnd_server.config import Settings, get_settings
@@ -43,7 +45,7 @@ COLUMNS = {
     "games": (
         "id code adventure_id host_user_id adventure_data phase turn_phase deadline_at "
         "state_version current_turn_id provider model collect_seconds hurry_seconds camp_seconds "
-        "started_at active_seconds clock_at created_at"
+        "started_at active_seconds clock_at profanity created_at"
     ),
     "game_players": "game_id user_id character_id is_host ready joined_order joined_at",
     "characters": "id game_id user_id data choices",
@@ -162,7 +164,7 @@ def test_migration_history_is_a_single_line_from_0001():
     script = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
 
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0003"]
+    assert script.get_heads() == ["0004"]
 
 
 # --- ревизия 0002: отметка часов игры ---
@@ -480,15 +482,15 @@ async def test_the_third_revision_is_repeated_after_a_failure_on_its_second_step
     with monkeypatch.context() as broken:
         break_operation(broken, "add_column")
         with pytest.raises(OperationalError):
-            await migrate("upgrade", "head")
+            await migrate("upgrade", "0003")
     assert recorded_revision(path) == "0002"  # обрыв: ревизия не записана
 
-    await migrate("upgrade", "head")
+    await migrate("upgrade", "0003")
 
     assert recorded_revision(path) == "0003"
     assert saved_lobby(path) == saved
     await migrate("downgrade", "0002")
-    await migrate("upgrade", "head")  # и обычный путь после починки работает
+    await migrate("upgrade", "0003")  # и обычный путь после починки работает
 
 
 async def test_the_third_revision_is_repeated_when_its_changes_were_made_but_not_recorded(
@@ -498,11 +500,11 @@ async def test_the_third_revision_is_repeated_when_its_changes_were_made_but_not
     path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
     insert_lobby_with_heroes(path, with_roll=True)
     saved = saved_lobby(path)
-    await migrate("upgrade", "head")
+    await migrate("upgrade", "0003")
     done = await reflect(settings, schema_signature)
     set_recorded_revision(path, "0002")  # процесс убит после обоих шагов, до записи ревизии
 
-    await migrate("upgrade", "head")
+    await migrate("upgrade", "0003")
 
     assert recorded_revision(path) == "0003"
     assert await reflect(settings, schema_signature) == done
@@ -514,7 +516,7 @@ async def test_downgrade_of_the_third_revision_is_repeated_after_a_failure_on_it
 ):
     await migrate("upgrade", "0002")
     at_second = await reflect(settings, schema_signature)
-    await migrate("upgrade", "head")
+    await migrate("upgrade", "0003")
     path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
     insert_lobby_with_heroes(path, with_roll=False)
     saved = saved_lobby(path)
@@ -564,6 +566,140 @@ def test_the_third_revision_prints_all_its_steps_in_sql_mode_without_a_database(
     assert "ALTER TABLE characters DROP COLUMN choices" in printed["downgrade"]
     assert "CREATE TABLE IF NOT EXISTS pending_rolls" in printed["downgrade"]
     assert not (tmp_path / "data").exists()  # печать ничего не создаёт на диске
+
+
+# --- ревизия 0004: флажок мата у игры (DND-2 B1.2, решение Р1) ---
+
+
+def game_columns(inspector: Any) -> dict[str, dict[str, Any]]:
+    return {c["name"]: c for c in inspector.get_columns("games")}
+
+
+async def test_the_fourth_revision_only_adds_the_required_profanity_flag_to_games(
+    settings, migrate
+):
+    await migrate("upgrade", "0003")
+    before = await reflect(settings, schema_signature)
+    await migrate("upgrade", "0004")
+    after = await reflect(settings, schema_signature)
+    games = await reflect(settings, game_columns)
+
+    assert set(after) == set(before)
+    for table in before:
+        extra = set(after[table]["columns"]) - set(before[table]["columns"])
+        assert extra == ({"profanity"} if table == "games" else set()), table
+        assert {key: value for key, value in after[table].items() if key != "columns"} == {
+            key: value for key, value in before[table].items() if key != "columns"
+        }, table
+    assert games["profanity"]["nullable"] is False
+    assert isinstance(games["profanity"]["type"], Boolean)
+    assert games["profanity"]["default"] in ("1", "'1'", "true")
+
+
+async def test_games_saved_on_the_third_revision_allow_profanity_after_the_fourth(
+    settings, migrate
+):
+    await migrate("upgrade", "0003")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+
+    await migrate("upgrade", "0004")
+
+    with closing(sqlite3.connect(path)) as connection:
+        assert list(connection.execute("SELECT id, profanity FROM games")) == [("game-1", 1)]
+    assert saved_lobby(path) == saved
+
+
+async def test_a_game_created_after_the_fourth_revision_allows_profanity_by_default(
+    settings, migrate
+):
+    await migrate("upgrade", "head")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)  # строка без колонки: значение по умолчанию
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT profanity FROM games").fetchone() == (1,)
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("UPDATE games SET profanity = NULL")
+
+
+async def test_downgrade_to_the_third_revision_drops_the_flag_and_keeps_the_games(
+    settings, migrate
+):
+    await migrate("upgrade", "0003")
+    at_third = await reflect(settings, schema_signature)
+    await migrate("upgrade", "head")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("UPDATE games SET profanity = 0")
+        connection.commit()
+    saved = saved_lobby(path)
+
+    await migrate("downgrade", "0003")
+
+    assert await reflect(settings, schema_signature) == at_third
+    assert saved_lobby(path) == saved
+
+
+async def test_the_fourth_revision_can_be_applied_again_after_a_downgrade(settings, migrate):
+    await migrate("upgrade", "head")
+    after_first = await reflect(settings, schema_signature)
+    await migrate("downgrade", "0003")
+    await migrate("upgrade", "head")
+
+    assert await reflect(settings, schema_signature) == after_first
+
+
+async def test_the_fourth_revision_is_repeated_when_its_change_was_made_but_not_recorded(
+    settings, migrate
+):
+    # SQLite выполняет ADD COLUMN сразу и насовсем: обрыв до записи ревизии оставляет колонку.
+    await migrate("upgrade", "0003")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+    await migrate("upgrade", "0004")
+    done = await reflect(settings, schema_signature)
+    set_recorded_revision(path, "0003")
+
+    await migrate("upgrade", "0004")
+
+    assert recorded_revision(path) == "0004"
+    assert await reflect(settings, schema_signature) == done
+    assert saved_lobby(path) == saved
+
+
+async def test_downgrade_of_the_fourth_revision_is_repeated_when_made_but_not_recorded(
+    settings, migrate
+):
+    await migrate("upgrade", "0003")
+    at_third = await reflect(settings, schema_signature)
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+    set_recorded_revision(path, "0004")  # откат сделан целиком, запись о нём не появилась
+
+    await migrate("downgrade", "0003")
+
+    assert recorded_revision(path) == "0003"
+    assert await reflect(settings, schema_signature) == at_third
+    assert saved_lobby(path) == saved
+
+
+def test_the_fourth_revision_prints_its_steps_in_sql_mode_without_a_database(
+    monkeypatch, capsys, settings, tmp_path
+):
+    monkeypatch.setenv("DATABASE_URL", settings.database_url)
+    get_settings.cache_clear()
+    printed = {}
+    for name, revisions in (("upgrade", "0003:0004"), ("downgrade", "0004:0003")):
+        getattr(command, name)(Config(str(ALEMBIC_INI)), revisions, sql=True)
+        printed[name] = capsys.readouterr().out
+
+    assert "ALTER TABLE games ADD COLUMN profanity BOOLEAN DEFAULT 1 NOT NULL" in printed["upgrade"]
+    assert "ALTER TABLE games DROP COLUMN profanity" in printed["downgrade"]
+    assert not (tmp_path / "data").exists()
 
 
 # --- миграция совпадает с моделями и планом ---
@@ -644,4 +780,4 @@ def test_alembic_command_line_works_from_the_repo_root_and_the_service_folder(
         tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master")}
         [(revision,)] = connection.execute("SELECT version_num FROM alembic_version")
     assert tables >= TABLES
-    assert revision == "0003"
+    assert revision == "0004"

@@ -5,7 +5,7 @@ import { sessionToken } from "../../store/game";
 import { fakeServer, signInAs } from "../../test-setup";
 import type { FakeReply, RecordedCall } from "../../test-setup";
 import { Detailed } from "./Detailed";
-import { OPTIONS, holdRequests, previewHero } from "./fixtures";
+import { OPTIONS, OUTDATED_WORDS, holdRequests, previewHero } from "./fixtures";
 
 const CREATE = "POST /api/games/g1/characters";
 const RANDOM = "POST /api/games/g1/characters/random-abilities";
@@ -94,13 +94,13 @@ function assignAll(values: Record<keyof typeof ABILITY_NAMES, number>) {
 
 const SET = { str: 8, dex: 15, con: 14, int: 13, wis: 10, cha: 12 } as const;
 
-/** Шаги 1–3: вид, класс, предыстория. */
+/** Шаги 1–3: раса, класс, предыстория. */
 function chooseOrigin(
   species = /Эльф/,
   klass = /Плут/,
   background = /Преступник/,
 ) {
-  pick("Вид", species);
+  pick("Раса", species);
   next();
   pick("Класс", klass);
   next();
@@ -155,27 +155,27 @@ const posts = (server: { calls: RecordedCall[] }, route: string) =>
 // --- шаги выбора ---
 
 describe("путь по шагам", () => {
-  test("начинается с вида; «Далее» ждёт выбора, «Назад» на первом шаге выходит к способам", () => {
+  test("начинается с расы; «Далее» ждёт выбора, «Назад» на первом шаге выходит к способам", () => {
     const { onBack } = renderDetailed();
 
-    expect(progress()).toHaveTextContent("Шаг 1 из 9: Вид");
+    expect(progress()).toHaveTextContent("Шаг 1 из 9: Раса");
     expect(button("Далее")).toBeDisabled();
-    pick("Вид", /Эльф/);
+    pick("Раса", /Эльф/);
     expect(button("Далее")).toBeEnabled();
     click("Назад");
 
     expect(onBack).toHaveBeenCalledTimes(1);
   });
 
-  test("вид, класс и предыстория показаны названиями сервера с пояснениями", () => {
+  test("раса, класс и предыстория показаны названиями сервера с пояснениями", () => {
     renderDetailed();
 
-    const species = screen.getByRole("radiogroup", { name: "Вид" });
+    const species = screen.getByRole("radiogroup", { name: "Раса" });
     expect(within(species).getAllByRole("radio")).toHaveLength(3);
     expect(
       within(species).getByRole("radio", { name: /Острые чувства/ }),
     ).toBeInTheDocument();
-    pick("Вид", /Эльф/);
+    pick("Раса", /Эльф/);
     next();
     expect(progress()).toHaveTextContent("Шаг 2 из 9: Класс");
     expect(
@@ -189,11 +189,11 @@ describe("путь по шагам", () => {
     ).toBeInTheDocument();
   });
 
-  test("под списком — особенности именно выбранного вида и класса, а не соседних", () => {
+  test("под списком — особенности именно выбранной расы и класса, а не соседних", () => {
     renderDetailed();
     expect(screen.queryByText(/Внимательность\./)).toBeNull();
 
-    pick("Вид", /Эльф/);
+    pick("Раса", /Эльф/);
     const elfTrait = screen.getByText(/Острые чувства\./, {
       selector: "strong",
     });
@@ -202,7 +202,7 @@ describe("путь по шагам", () => {
       screen.queryByText(/Тёмное зрение\./, { selector: "strong" }),
     ).toBeNull();
 
-    pick("Вид", /Дварф/);
+    pick("Раса", /Дварф/);
     expect(
       screen.getByText(/Тёмное зрение\./, { selector: "strong" }),
     ).toBeInTheDocument();
@@ -220,14 +220,82 @@ describe("путь по шагам", () => {
     ).toBeNull();
   });
 
+  test("первый шаг называется «Раса»: устаревших слов на нём нет", () => {
+    renderDetailed();
+    pick("Раса", /Дварф/);
+
+    expect(
+      screen.getByRole("radiogroup", { name: "Раса" }),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
+  });
+
+  test("весь путь волшебника, все десять шагов: нигде нет ни «вид», ни футов", () => {
+    renderDetailed();
+    const shown: string[] = [];
+    // Шаг проверяется после выбора на нём: выбор открывает пояснения и особенности.
+    const checkStep = () => {
+      shown.push(progress().textContent ?? "");
+      expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
+    };
+
+    pick("Раса", /Эльф/);
+    checkStep();
+    next();
+    pick("Класс", /Волшебник/);
+    checkStep();
+    next();
+    pick("Предыстория", /Преступник/);
+    checkStep();
+    next();
+    click("Стандартный набор");
+    assignAll(SET);
+    checkStep();
+    next();
+    setSelect("Бонус +2", "dex");
+    setSelect("Бонус +1", "con");
+    checkStep();
+    next();
+    tick(/Навыки класса/, /Магия/);
+    tick(/Навыки класса/, /История/);
+    checkStep();
+    next();
+    tick(/Заговоры/, /Огненная стрела/);
+    tick(/Заговоры/, /Свет/);
+    tick(/Заклинания/, /Щит/);
+    tick(/Заклинания/, /Сон/);
+    checkStep();
+    next();
+    checkStep(); // снаряжение
+    next();
+    typeInto("Имя", "Мирра");
+    checkStep();
+    next();
+    checkStep(); // история героя
+
+    // Пока класс не выбран, шага заклинаний нет: шагов девять.
+    expect(shown).toEqual([
+      "Шаг 1 из 9: Раса",
+      "Шаг 2 из 10: Класс",
+      "Шаг 3 из 10: Предыстория",
+      "Шаг 4 из 10: Характеристики",
+      "Шаг 5 из 10: Бонус предыстории",
+      "Шаг 6 из 10: Навыки и выборы класса",
+      "Шаг 7 из 10: Заклинания",
+      "Шаг 8 из 10: Снаряжение",
+      "Шаг 9 из 10: Характер и внешность",
+      "Шаг 10 из 10: История героя",
+    ]);
+  });
+
   test("«Назад» возвращает на прошлый шаг, выбор сохраняется", () => {
     renderDetailed();
-    pick("Вид", /Дварф/);
+    pick("Раса", /Дварф/);
     next();
 
     click("Назад");
 
-    expect(progress()).toHaveTextContent("Шаг 1 из 9: Вид");
+    expect(progress()).toHaveTextContent("Шаг 1 из 9: Раса");
     expect(screen.getByRole("radio", { name: /Дварф/ })).toBeChecked();
   });
 
@@ -237,7 +305,7 @@ describe("путь по шагам", () => {
     expect(
       screen.getByText(/закончите выбор на этом шаге/),
     ).toBeInTheDocument();
-    pick("Вид", /Эльф/);
+    pick("Раса", /Эльф/);
     expect(screen.queryByText(/закончите выбор на этом шаге/)).toBeNull();
   });
 
@@ -253,7 +321,7 @@ describe("путь по шагам", () => {
     });
     renderDetailed();
     expect(scrollIntoView).not.toHaveBeenCalled();
-    pick("Вид", /Эльф/);
+    pick("Раса", /Эльф/);
 
     next();
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
@@ -264,7 +332,7 @@ describe("путь по шагам", () => {
 
   test("шаг заклинаний появляется только у заклинателя", () => {
     renderDetailed();
-    pick("Вид", /Эльф/);
+    pick("Раса", /Эльф/);
     next();
 
     pick("Класс", /Волшебник/);
@@ -786,12 +854,16 @@ describe("навыки и выборы класса", () => {
     bonusDexCon();
   }
 
-  test("то, что даёт предыстория и вид, показано отдельно и не выбирается", () => {
+  test("то, что даёт предыстория и раса, показано отдельно и не выбирается", () => {
     openSkills();
 
     expect(screen.getByText(/Уже есть/)).toHaveTextContent(
       "Ловкость рук, Скрытность, Внимательность",
     );
+    expect(screen.getByText(/Уже есть/)).toHaveTextContent(
+      "Их дают предыстория и раса.",
+    );
+    expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
     const group = screen.getByRole("group", { name: /Навыки класса/ });
     expect(
       within(group).queryByRole("checkbox", { name: /Скрытность/ }),
@@ -1176,7 +1248,7 @@ describe("«Помоги написать»", () => {
     return rendered;
   }
 
-  test("подставляет в поле текст от мастера и отправляет класс, вид, замысел и черновик", async () => {
+  test("подставляет в поле текст от мастера и отправляет класс, расу, замысел и черновик", async () => {
     const { server } = openBackstory();
 
     click("Помоги написать");

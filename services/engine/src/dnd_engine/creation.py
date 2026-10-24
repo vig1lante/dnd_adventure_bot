@@ -121,8 +121,9 @@ class CharacterValidationError(ValueError):
 # --- проверки выбора: каждая возвращает список проблем (пустой — всё в порядке) ---
 
 
-def _unknown(kind: str, value: str, table: Mapping[str, object]) -> list[str]:
-    return [] if value in table else [f"неизвестный {kind}: {value!r}"]
+def _unknown(problem: str, value: str, table: Mapping[str, object]) -> list[str]:
+    # Фраза приходит целиком («неизвестная раса»): прилагательное согласуется с родом слова.
+    return [] if value in table else [f"{problem}: {value!r}"]
 
 
 def _numbers(values: Sequence[int]) -> str:
@@ -207,7 +208,7 @@ def _granted_skills(species: SpeciesDef, background: BackgroundDef) -> dict[Skil
     granted = dict.fromkeys(background.skills, f"предыстория «{background.name}»")
     for trait in species.traits:
         if (skill := TRAIT_SKILLS.get(trait.id)) is not None:
-            granted.setdefault(skill, f"вид «{species.name}»")
+            granted.setdefault(skill, f"раса «{species.name}»")
     return granted
 
 
@@ -249,9 +250,9 @@ def _check_extra_skill(
     if not _has_trait(species, SKILLFUL_TRAIT):
         if extra is None:
             return []
-        return [f"extra_skill не нужен: вид «{species.name}» не даёт навык на выбор"]
+        return [f"extra_skill не нужен: раса «{species.name}» не даёт навык на выбор"]
     if extra is None:
-        return [f"вид «{species.name}» даёт навык на выбор: укажите extra_skill"]
+        return [f"раса «{species.name}» даёт навык на выбор: укажите extra_skill"]
     name = SKILL_NAMES_RU[extra]
     if extra in granted:
         return [f"дополнительный навык «{name}» уже даёт {granted[extra]}; выберите другой"]
@@ -445,9 +446,9 @@ def build_character(
     background = content.backgrounds.get(choices.background)
 
     problems = [
-        *_unknown("вид", choices.species, content.species),
-        *_unknown("класс", choices.class_id, content.classes),
-        *_unknown("предыстория", choices.background, content.backgrounds),
+        *_unknown("неизвестная раса", choices.species, content.species),
+        *_unknown("неизвестный класс", choices.class_id, content.classes),
+        *_unknown("неизвестная предыстория", choices.background, content.backgrounds),
         *_check_base_scores(choices),
         *_check_score_cap(choices),
     ]
@@ -482,7 +483,7 @@ def _first_free_skill(cls: ClassDef, held: Sequence[Skill]) -> Skill:
 
 
 def _quick_skills(cls: ClassDef, granted: Mapping[Skill, str]) -> list[Skill]:
-    """Навыки быстрого режима: `default_skills`, а те, что уже даны видом или предысторией
+    """Навыки быстрого режима: `default_skills`, а те, что уже даны расой или предысторией
     (например, Внимательность эльфа), заменяются следующими навыками из списка класса."""
     kept = [skill for skill in cls.default_skills if skill not in granted]
     replacements = [s for s in cls.skill_options if s not in granted and s not in kept]
@@ -504,11 +505,11 @@ def quick_character(
     concept: str,
     character_id: str,
 ) -> Character:
-    """Легальный персонаж по классу и виду: стандартный набор по приоритетам класса,
+    """Легальный персонаж по классу и расе: стандартный набор по приоритетам класса,
     предыстория, навыки и заклинания по умолчанию."""
     if problems := [
-        *_unknown("вид", species, content.species),
-        *_unknown("класс", class_id, content.classes),
+        *_unknown("неизвестная раса", species, content.species),
+        *_unknown("неизвестный класс", class_id, content.classes),
     ]:
         raise CharacterValidationError(problems)
     species_def = content.species[species]
@@ -595,7 +596,7 @@ def random_point_buy(rng: Rng, content: SrdContent, class_id: str) -> dict[Abili
     второе — вторая ключевая, остальные четыре значения раздаются остальным в случайном порядке.
     Прибавку предыстории игрок выбирает отдельно: максимум после неё — 17, до 20 не дойти.
     Неизвестный класс — `CharacterValidationError`."""
-    if problems := _unknown("класс", class_id, content.classes):
+    if problems := _unknown("неизвестный класс", class_id, content.classes):
         raise CharacterValidationError(problems)
     layout = _choice(rng, _budget_layouts())
     values = [*layout[:KEY_ABILITY_COUNT], *_shuffled(rng, layout[KEY_ABILITY_COUNT:])]

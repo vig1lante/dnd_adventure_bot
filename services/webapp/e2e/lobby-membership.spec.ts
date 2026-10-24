@@ -81,7 +81,7 @@ test("лобби: выход, возврат по коду и исключени
         .getByLabel("Класс", { exact: true })
         .selectOption("rogue");
       await friend.page
-        .getByLabel("Вид", { exact: true })
+        .getByLabel("Раса", { exact: true })
         .selectOption("halfling");
       await friend.page
         .getByLabel("Опиши героя одной строкой")

@@ -30,7 +30,7 @@ _ADV, _DIS = Advantage.ADVANTAGE, Advantage.DISADVANTAGE
 
 @dataclass(frozen=True)
 class ConditionEffects:
-    """Эффекты одного состояния; «вплотную» — атакующий на расстоянии 5 футов (вовлечён)."""
+    """Эффекты одного состояния; «вплотную» — атакующий на расстоянии 1,5 м (вовлечён)."""
 
     implies: tuple[str, ...] = ()  # другие состояния, которые оно включает по SRD
     own_attacks: Advantage = Advantage.NONE  # на броски атаки самого существа

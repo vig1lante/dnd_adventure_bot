@@ -10,7 +10,7 @@ export interface StepProps {
 }
 
 export const STEP_TITLES: Record<StepId, string> = {
-  species: "Вид",
+  species: "Раса",
   class: "Класс",
   background: "Предыстория",
   abilities: "Характеристики",

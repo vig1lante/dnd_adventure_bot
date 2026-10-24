@@ -1,11 +1,12 @@
 """Промпт мастера и контекст хода (спека §8.6, план B7.2).
 
 Запрос к модели собирается из трёх частей, и только третья меняется каждый ход:
-- `system_prompt` — стабильный промпт (`prompts/system.md`) и фрагменты включённых модулей правил;
+- `system_prompt` — стабильный промпт мастера (роль `master` пакета `dnd_server.prompts`) и
+  фрагменты включённых модулей правил;
 - `adventure_brief` — сводка приключения без заметок мастера по локациям: от них сводка менялась
   бы при любой правке, а кеш промпта держится на её стабильности;
-- `turn_context` — динамический контекст одного хода: летопись, мир, локация, отряд, бой,
-  подсказки внимания, прошлые ходы и ходы этого раунда.
+- `turn_context` — динамический контекст одного хода: режим мата игры, летопись, мир, локация,
+  отряд, бой, подсказки внимания, прошлые ходы и ходы этого раунда.
 
 Границы доверия в `turn_context`. Текст пишут игроки (ходы, реплики у костра, имя, внешность,
 предыстория и замысел героев) и сама модель (зацепки вплетения, прошлые рассказы): для мастера это
@@ -20,7 +21,6 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from importlib import resources
 from typing import Any
 
 from dnd_engine.adventure.schema import Adventure
@@ -35,12 +35,13 @@ from dnd_engine.tools.registry import ToolContext
 from dnd_server.db.models import TurnKind
 from dnd_server.dm.spotlight import spotlight_hints
 from dnd_server.dm.text import json_line, one_line
+from dnd_server.prompts import load, profanity_line
 
 # Режим хода мастера: открытие игры, раунд, боевой ход, конец привала. Тот же перечень, что у
 # `turns.kind` в базе, поэтому ход передаётся в контекст как есть.
 TurnMode = TurnKind
 
-# Границы блока данных игроков. На них ссылается и `prompts/system.md`: менять только вместе.
+# Границы блока данных игроков. На них ссылается и промпт мастера (`master.md`): менять только вместе.
 DATA_BEGIN = "<<<ДАННЫЕ ИГРОКОВ: {title}>>>"
 DATA_END = "<<<КОНЕЦ ДАННЫХ ИГРОКОВ>>>"
 
@@ -151,12 +152,8 @@ class Pacing:
 
 
 def system_prompt(rules: RuleSet) -> str:
-    """Стабильный промпт мастера: файл `system.md` и фрагменты включённых модулей правил.
-
-    Файл читается как ресурс пакета, поэтому он едет в колесе вместе с кодом. Читается при каждом
-    вызове: правка промпта владельцем подхватывается без перезапуска, а файл маленький."""
-    base = resources.files("dnd_server.dm").joinpath("prompts", "system.md")
-    parts = [base.read_text(encoding="utf-8").strip()]
+    """Стабильный промпт мастера: роль `master` пакета промптов и фрагменты включённых модулей."""
+    parts = [load("master")]
     parts += [fragment.strip() for fragment in rules.prompt_fragments]
     return "\n\n".join(parts) + "\n"
 
@@ -217,15 +214,18 @@ def turn_context(
     recent: Sequence[RecentTurn],
     pacing: Pacing,
     acting: Sequence[str] | None,
+    profanity: bool,
 ) -> str:
     """Динамический контекст хода мастера; `state` не меняется.
 
     `actions` — ходы раунда (в режиме `camp_end` — реплики героев у костра, в `opening` их нет),
     `recent` — последние ходы от старых к новым, `acting` — id бойцов, за которых мастер ходит в
-    боевом вызове. Контекст начинается с собственного заголовка: провайдер `claude_code_cli`
-    передаёт его одним аргументом `-p <контекст>`, и начало с «-» приняли бы за флаг."""
+    боевом вызове, `profanity` — флажок мата игры (строка раздела «Стиль»). Контекст начинается с
+    собственного заголовка: провайдер `claude_code_cli` передаёт его одним аргументом
+    `-p <контекст>`, и начало с «-» приняли бы за флаг."""
     sections = [
         f"# Контекст хода мастера (режим: {mode.value}, {_MODE_NAMES[mode]})\n{_READING_GUIDE}",
+        f"## Стиль\n{profanity_line(profanity)}",
         _chronicle_section(state),
         _world_section(state, adventure, pacing),
         _location_section(state, adventure, srd),
@@ -322,8 +322,8 @@ def _hero_lines(
 ) -> list[str]:
     background = srd.backgrounds[hero.background]
     lines = [
-        f"- {hero.id}: {srd.classes[hero.class_id].name} ({hero.class_id}), "
-        f"{srd.species[hero.species].name} ({hero.species}), ур. {hero.level}, "
+        f"- {hero.id}: класс {srd.classes[hero.class_id].name} ({hero.class_id}), "
+        f"раса {srd.species[hero.species].name} ({hero.species}), ур. {hero.level}, "
         f"предыстория «{background.name}»",
         f"  {_health(hero, with_inspiration)}",
         f"  оружие для attack: {_weapons(hero, srd)}",

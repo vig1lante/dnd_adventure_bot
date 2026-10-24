@@ -44,6 +44,7 @@ from dnd_server.db.models import (
 from dnd_server.dm.provider import game_provider
 from dnd_server.games.hooks import Broadcaster, send_to_game
 from dnd_server.games.schemas import CreateGameIn, GameOut, PlayerOut
+from dnd_server.llm.claude_code_cli import is_model_name
 from dnd_server.llm.factory import ConfigError
 from dnd_server.llm.internal_api import TurnTokens
 
@@ -60,6 +61,8 @@ MAX_MODEL_CALLS = 20
 # десяти отказов за десять минут новые попытки получают 429, пока старые не выйдут из окна.
 MAX_FAILED_JOINS = 10
 FAILED_JOIN_WINDOW_S = 600
+# Псевдонимы моделей CLI Claude Code, которые форма предлагает для `claude_code_cli` (спека §11).
+CLAUDE_CLI_ALIASES = ("opus", "sonnet", "haiku")
 
 
 class GameError(Exception):
@@ -247,6 +250,7 @@ async def _game_outs(session: AsyncSession, games: Sequence[Game]) -> list[GameO
             collect_seconds=game.collect_seconds,
             hurry_seconds=game.hurry_seconds,
             camp_seconds=game.camp_seconds,
+            profanity=game.profanity,
             players=players_by_game[game.id],
         )
         for game in games
@@ -303,6 +307,41 @@ def check_provider(
         raise Invalid(f"Провайдер мастера не подходит: {error}.") from None
 
 
+def claude_cli_default_model(settings: Settings) -> str | None:
+    """CLAUDE_CLI_MODEL как модель `claude_code_cli` по умолчанию; `None` — модель выберет сам CLI.
+
+    Значение, которое адаптер не пустит в командную строку, моделью не считается: это ошибка
+    настройки (провайдер недоступен), а не модель на выбор или по умолчанию."""
+    model = settings.claude_cli_model
+    return model if model and is_model_name(model) else None
+
+
+def claude_cli_models(settings: Settings) -> list[str]:
+    """Модели `claude_code_cli` на выбор в форме: псевдонимы CLI и CLAUDE_CLI_MODEL, если он
+    другой и годится (`claude_cli_default_model`, спека §11). Их же отдаёт `GET /api/providers`."""
+    models = list(CLAUDE_CLI_ALIASES)
+    default = claude_cli_default_model(settings)
+    if default and default not in models:
+        models.append(default)
+    return models
+
+
+def check_model(settings: Settings, provider: str | None, model: str | None) -> None:
+    """Отказывает (`Invalid`), если модель игры не подходит её провайдеру.
+
+    У `claude_code_cli` модель — только из списка формы (`claude_cli_models`): она уходит в
+    командную строку CLI. Остальным провайдерам квадратные скобки не нужны: схема запроса пускает их
+    лишь ради псевдонимов CLI, и здесь прежнее правило имени возвращается."""
+    if model is None:
+        return
+    if (provider or settings.llm_provider) == "claude_code_cli":
+        choices = claude_cli_models(settings)
+        if model not in choices:
+            raise Invalid(f"Модель для Claude Code — одна из списка: {', '.join(choices)}.")
+    elif "[" in model or "]" in model:
+        raise Invalid("В имени модели этого провайдера не может быть квадратных скобок.")
+
+
 async def _free_game_code(session: AsyncSession) -> str:
     for _attempt in range(CODE_ATTEMPTS):
         code = new_game_code()
@@ -329,7 +368,10 @@ async def create_game(
             "Это приключение нельзя использовать: в нём есть блокирующие ошибки.",
             blocking_problems(entry.report),
         )
+    # Сначала провайдер (его dev-ворота): в prod отказ для `claude_code_cli` не должен перечислять
+    # его модели вместе с CLAUDE_CLI_MODEL, которых `GET /api/providers` там не показывает.
     check_provider(settings, body.provider, body.model, turn_tokens)
+    check_model(settings, body.provider, body.model)
     game = Game(
         id=new_id(),
         code=await _free_game_code(session),
@@ -338,6 +380,7 @@ async def create_game(
         adventure_data=entry.adventure.model_dump(mode="json"),
         provider=body.provider,
         model=body.model,
+        profanity=body.profanity,
         # Длительности проверены схемой (не меньше 15), поэтому `or` берёт env только вместо `None`.
         collect_seconds=body.collect_seconds or settings.collect_seconds,
         hurry_seconds=body.hurry_seconds or settings.hurry_seconds,

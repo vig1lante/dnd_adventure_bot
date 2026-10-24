@@ -27,6 +27,7 @@ from dnd_engine.content import (
     load_srd,
 )
 from dnd_engine.dice import DiceSyntaxError, parse
+from dnd_engine.units import meters_text, meters_text_pair
 
 SRD_DIR = files("dnd_engine") / "data" / "srd"
 
@@ -1355,3 +1356,119 @@ def test_new_tables_have_russian_names_and_short_summaries(items, spells, monste
 
     assert [owner for owner, text in texts if not CYRILLIC.search(text)] == []
     assert [owner for owner, text in texts if len(text) > MAX_SUMMARY_LENGTH] == []
+
+
+# --- расстояния в текстах: метры с шагом 1,5 м (спека DND-2, Р3 и §18) ---
+
+# Метры с запятой; у оружия — пара «обычная/большая дальность»: «4,5 м», «24/96 м».
+METERS_IN_TEXT = re.compile(r"(\d+(?:,\d+)?)(?:/(\d+(?:,\d+)?))? м\b")
+
+
+def test_rewritten_distances_match_the_meters_rule(species, monsters):
+    goblin_bow = next(a for a in monsters["goblin_warrior"].actions if a.id == "shortbow")
+    elf_darkvision = next(t for t in species["elf"].traits if t.id == "darkvision")
+    breath = next(t for t in species["dragonborn"].traits if t.id == "breath_weapon")
+
+    assert "атака на 24/96 м." in goblin_bow.summary
+    assert elf_darkvision.summary == "Видит в темноте на 18 м."
+    assert "конус 4,5 м или линия 9 м." in breath.summary
+
+
+def test_every_distance_in_srd_texts_is_a_multiple_of_one_and_a_half_meters():
+    # Тексты SRD пишутся руками — риск опечаток (спека DND-2, §18). Любое расстояние SRD —
+    # целое число шагов по 1,5 м.
+    files_text = {t: (SRD_DIR / f"{t}.yaml").read_text(encoding="utf-8") for t in TABLE_MODELS}
+    distances = [
+        (table, value)
+        for table, text in files_text.items()
+        for match in METERS_IN_TEXT.finditer(text)
+        for value in match.groups()
+        if value
+    ]
+
+    assert distances, "в текстах SRD не найдено ни одного расстояния в метрах"
+    assert [d for d in distances if round(float(d[1].replace(",", ".")) * 10) % 15] == []
+
+
+# Расстояния из SRD 5.2.1 числами, как в правилах и в движке (скорость 30, лук 80/320). Текст
+# записи — их перевод функцией движка: опечатку в любой переписанной строке видно по её id.
+SRD_WEAPON_RANGES = {
+    "dagger": (20, 60),
+    "spear": (20, 60),
+    "handaxe": (20, 60),
+    "javelin": (30, 120),
+    "light_crossbow": (80, 320),
+    "shortbow": (80, 320),
+    "longbow": (150, 600),
+}
+SRD_MONSTER_RANGES = {
+    ("goblin_warrior", "shortbow"): (80, 320),
+    ("goblin_boss", "shortbow"): (80, 320),
+    ("skeleton", "shortbow"): (80, 320),
+    ("bandit", "light_crossbow"): (80, 320),
+    ("bandit_captain", "pistol"): (30, 90),
+    ("guard", "spear_thrown"): (20, 60),
+    ("bugbear_warrior", "light_hammer_thrown"): (20, 60),
+    ("ogre", "javelin_thrown"): (30, 120),
+}
+SRD_REACH = 10  # досягаемость атаки с флагом reach
+SRD_DARKVISION = {
+    "dragonborn": 60,
+    "dwarf": 120,
+    "elf": 60,
+    "gnome": 60,
+    "orc": 120,
+    "tiefling": 60,
+}
+
+
+def test_every_thrown_and_ranged_weapon_text_names_its_srd_range_in_meters(items):
+    ranged = {
+        item.id
+        for item in items.values()
+        if item.weapon and ("thrown" in item.weapon.properties or item.weapon.range == "far")
+    }
+
+    assert ranged == set(SRD_WEAPON_RANGES)
+    assert [
+        (item_id, items[item_id].summary)
+        for item_id, srd_range in SRD_WEAPON_RANGES.items()
+        if meters_text_pair(*srd_range) not in items[item_id].summary
+    ] == []
+
+
+def test_every_ranged_monster_attack_text_names_its_srd_range_in_meters(monsters):
+    actions = {(m.id, a.id): a for m in monsters.values() for a in m.actions}
+    ranged = {key for key, a in actions.items() if a.kind == "attack" and a.range != "melee"}
+
+    assert ranged == set(SRD_MONSTER_RANGES)
+    assert [
+        (key, actions[key].summary)
+        for key, srd_range in SRD_MONSTER_RANGES.items()
+        if meters_text_pair(*srd_range) not in actions[key].summary
+    ] == []
+
+
+def test_reach_attack_texts_name_the_reach_in_meters(monsters):
+    with_reach = [(m.id, a) for m in monsters.values() for a in m.actions if a.reach]
+
+    assert with_reach, "в данных нет атак с досягаемостью"
+    assert [
+        (monster_id, a.id)
+        for monster_id, a in with_reach
+        if not a.summary.startswith(f"Досягаемость {meters_text(SRD_REACH)}.")
+    ] == []
+
+
+def test_darkvision_texts_name_the_srd_distance_in_meters(species):
+    darkvision = {
+        species_id: trait.summary
+        for species_id, entry in species.items()
+        for trait in entry.traits
+        if trait.id == "darkvision"
+    }
+
+    assert darkvision == {
+        species_id: f"Видит в темноте на {meters_text(distance)}."
+        for species_id, distance in SRD_DARKVISION.items()
+    }

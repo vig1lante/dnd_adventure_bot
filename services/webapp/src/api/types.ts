@@ -61,6 +61,8 @@ export interface GameSummary {
   collect_seconds: number;
   hurry_seconds: number;
   camp_seconds: number;
+  /** Флажок «Мат и грубая речь»: его видят мастер и служебные роли нейронки. */
+  profanity: boolean;
   players: PlayerSummary[];
 }
 
@@ -84,6 +86,8 @@ export interface CreateGameBody {
   collect_seconds?: number;
   hurry_seconds?: number;
   camp_seconds?: number;
+  /** Без поля сервер включает мат (по умолчанию `true`). */
+  profanity?: boolean;
 }
 
 /** Вариант нейронки для игры из `GET /api/providers` (только создателям игр; секретов в нём нет). */
@@ -94,6 +98,7 @@ export interface ProviderOption {
   /** Игру с этим провайдером можно создать прямо сейчас (настроены ключи и адреса). */
   available: boolean;
   default_model: string | null;
+  /** Известные модели; у `claude_code_cli` сервер принимает `model` только из этого списка. */
   models: string[];
   /** Учитывает ли провайдер поле `model`; иначе модель задаёт он сам. */
   accepts_model: boolean;

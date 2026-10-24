@@ -229,8 +229,8 @@ async function createDetailedHero(host: Player) {
   await expectFitsPhone(page, "выбор способа создания героя");
   await button(page, "Подробно").click();
 
-  await pickCard(page, "Вид", /Дварф/);
-  await expectFitsPhone(page, "шаг «Вид»");
+  await pickCard(page, "Раса", /Дварф/);
+  await expectFitsPhone(page, "шаг «Раса»");
   await button(page, "Далее").click();
   await pickCard(page, "Класс", /Варвар/);
   await expectFitsPhone(page, "шаг «Класс»");
@@ -376,7 +376,7 @@ test("три способа создать героя на настоящем с
       await expect(page.getByText("Подробный герой")).toBeVisible();
       await expect(
         page
-          .getByRole("radiogroup", { name: "Вид" })
+          .getByRole("radiogroup", { name: "Раса" })
           .getByRole("radio", { name: /Дварф/ }),
       ).toBeChecked();
       await button(page, "Далее").click();
@@ -497,7 +497,7 @@ test("три способа создать героя на настоящем с
 
       await button(page, "Быстро").click();
       await page.getByLabel("Класс", { exact: true }).selectOption("rogue");
-      await page.getByLabel("Вид", { exact: true }).selectOption("halfling");
+      await page.getByLabel("Раса", { exact: true }).selectOption("halfling");
       await page.getByLabel("Опиши героя одной строкой").fill(FRIEND_CONCEPT);
       await button(page, "Создать героя").click();
       await expect(page.getByText("Ваш герой")).toBeVisible();
@@ -620,7 +620,7 @@ test("подробный волшебник: заклинания из наст�
     await button(page, "Создать персонажа").click();
     await button(page, "Подробно").click();
 
-    await pickCard(page, "Вид", /Эльф/);
+    await pickCard(page, "Раса", /Эльф/);
     await button(page, "Далее").click();
     await pickCard(page, "Класс", /Волшебник/);
     await button(page, "Далее").click();

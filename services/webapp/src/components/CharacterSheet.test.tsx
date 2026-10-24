@@ -2,7 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import { createApi } from "../api/client";
 import { ApiContext } from "../api/context";
 import type { Character, DerivedAbility } from "../api/types";
-import { OPTIONS } from "../screens/character/fixtures";
+import { OPTIONS, OUTDATED_WORDS } from "../screens/character/fixtures";
 import { sessionToken } from "../store/game";
 import { fakeServer, signInAs } from "../test-setup";
 import type { FakeReply } from "../test-setup";
@@ -41,13 +41,20 @@ function listItem(text: string, list = "listitem"): HTMLElement {
 }
 
 describe("шапка и здоровье", () => {
-  test("имя, а после загрузки правил — русские названия класса, вида и предыстории", async () => {
+  test("имя, а после загрузки правил — русские названия класса, расы и предыстории", async () => {
     renderSheet(sheetHero());
 
     expect(screen.getByRole("heading", { name: "Лира" })).toBeInTheDocument();
     expect(
       await screen.findByText("Плут · Эльф · Преступник · уровень 1"),
     ).toBeInTheDocument();
+  });
+
+  test("в листе нет устаревших слов: ни «вид», ни футов", async () => {
+    renderSheet(sheetHero());
+    await screen.findByText("Плут · Эльф · Преступник · уровень 1");
+
+    expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
   });
 
   test("правила не пришли — лист всё равно показан, с id вместо названий", async () => {

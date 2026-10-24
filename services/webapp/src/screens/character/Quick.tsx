@@ -15,7 +15,7 @@ import { CreatedNotice } from "./shared";
 import type { CharacterFormProps } from "./shared";
 
 /**
- * Быстрый герой: класс, вид и строка о герое; имя и описание пишет мастер. «Изменить героя»
+ * Быстрый герой: класс, раса и строка о герое; имя и описание пишет мастер. «Изменить героя»
  * открывает форму с прежним выбором (`initial`), иначе она пустая.
  */
 export function Quick({
@@ -71,8 +71,8 @@ export function Quick({
           onChange={setClassId}
         />
         <SelectField
-          label="Вид"
-          placeholder="Выберите вид"
+          label="Раса"
+          placeholder="Выберите расу"
           value={species}
           options={options.species.map(({ id, name }) => ({
             value: id,

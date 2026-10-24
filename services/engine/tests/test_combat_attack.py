@@ -603,7 +603,7 @@ def test_melee_attack_needs_a_target_engaged_with_the_attacker(srd, make_hero):
 
 
 def test_attack_reaches_beyond_engagement_with_a_reach_monster_in_the_same_zone(srd, make_hero):
-    # Воин-багбир: досягаемость 10 футов — бьёт врага в своей зоне, не вовлечённого с ним.
+    # Воин-багбир: досягаемость 3 м — бьёт врага в своей зоне, не вовлечённого с ним.
     same_zone = readied(battle(srd, [make_hero()], ("bugbear_warrior",)), "bugbear_warrior-1")
 
     after, events = strike(

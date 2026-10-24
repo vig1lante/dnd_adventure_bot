@@ -60,6 +60,7 @@ from dnd_engine.modules.base import (
 from dnd_engine.rest import end_buffs
 from dnd_engine.rng import ScriptedRng
 from dnd_engine.state import GameState, RulesRef, SceneType
+from dnd_engine.units import meters_text
 
 STR, DEX, CON, INT, WIS, CHA = Ability
 NONE, ADVANTAGE, DISADVANTAGE = Advantage.NONE, Advantage.ADVANTAGE, Advantage.DISADVANTAGE
@@ -605,7 +606,7 @@ def test_darts_need_one_target_or_one_target_per_dart(srd, make_wizard):
 
 
 def test_a_far_target_is_out_of_reach_of_a_near_spell(srd, make_wizard):
-    # Хранилище связано с залом связью «далеко»; Луч холода бьёт на 60 футов.
+    # Хранилище связано с залом связью «далеко»; Луч холода бьёт на 18 м.
     state = battle(srd, [make_wizard()], monster_zone="vault")
 
     refused_cast(srd, state, "ray_of_frost", [GOBLIN], "вне дальности")
@@ -2371,8 +2372,15 @@ def test_divine_spark_needs_a_valid_option_a_target_in_reach_and_a_use(srd, make
         target_id=GOBLIN,
         option="radiant",
     )
+    # Дальность в сообщении — в метрах, как весь текст для людей и модели (спека DND-2, Р3).
     refused_act(
-        srd, far, "divine_spark", "вне дальности", actor=CLERIC, target_id=GOBLIN, option="radiant"
+        srd,
+        far,
+        "divine_spark",
+        r"вне дальности \(9 м\)",
+        actor=CLERIC,
+        target_id=GOBLIN,
+        option="radiant",
     )
 
 
@@ -2429,6 +2437,18 @@ def test_preserve_life_needs_a_use_and_the_feature(srd, make_cleric, make_hero):
 
     refused_act(srd, spent, "preserve_life", "нет использований", actor=CLERIC, target_id=HERO)
     refused_act(srd, low, "preserve_life", "нет особенности", actor=CLERIC, target_id=HERO)
+
+
+def test_preserve_life_refuses_a_far_target_naming_the_range_in_meters(
+    srd, make_cleric, make_hero
+):
+    # Цель Сохранения жизни проверяется так же, как у Божественной искры: отказ — в метрах.
+    state = battle(srd, [make_cleric(), make_hero(hp=2)])
+    fighter(state, HERO).zone_id = "vault"
+
+    refused_act(
+        srd, state, "preserve_life", r"Герой вне дальности \(9 м\)", actor=CLERIC, target_id=HERO
+    )
 
 
 def dragonborn(make_hero, **overrides):
@@ -3204,6 +3224,19 @@ def test_ids_that_the_engine_relies_on_exist_in_the_srd_data(srd):
         assert feature in features and spell_id in srd.spells
         assert any(resource in cls.resources for cls in srd.classes.values())
     assert engine.INVISIBLE in srd.conditions and engine.RAGE_BUFF == "rage"
+
+
+def test_the_channel_divinity_range_in_refusals_matches_the_cleric_texts(srd):
+    # Отказ «вне дальности (9 м)» и тексты умений жреца называют одно расстояние (спека DND-2, Р3).
+    in_meters = meters_text(combat_engine.CHANNEL_DIVINITY_RANGE)
+    summaries = {f.id: f.summary for f in srd.classes["cleric"].features}
+
+    assert in_meters == "9 м"
+    assert [
+        feature_id
+        for feature_id in ("divine_spark", "turn_undead", "preserve_life")
+        if f"в {in_meters}" not in summaries[feature_id]
+    ] == []
 
 
 def srd_name_of(srd: SrdContent, effect_id: str) -> str | None:

@@ -142,12 +142,23 @@ async def snapshot_of(db: async_sessionmaker[AsyncSession], srd: SrdContent, tab
 # --- игра, фаза и игроки ---
 
 
+async def test_every_player_sees_the_profanity_flag_of_the_game_in_the_snapshot(db, srd, table):
+    async with db() as session:
+        (await session.get(Game, table.game_id)).profanity = False
+        await session.commit()
+
+    flags = [(await snapshot_of(db, srd, table, key))["game"]["profanity"] for key in table.seats]
+
+    assert flags == [False] * len(table.seats)
+
+
 async def test_snapshot_describes_game_phase_scene_host_and_server_time(db, srd, table):
     snapshot = await snapshot_of(db, srd, table, "alice")
 
     assert snapshot["type"] == "snapshot"
     assert snapshot["game"]["id"] == table.game_id
     assert snapshot["game"]["adventure_title"] == "Склеп должника"
+    assert snapshot["game"]["profanity"] is True  # флажок мата игры (решение Р1): по умолчанию да
     assert [p["name"] for p in snapshot["game"]["players"]] == ["Алиса", "Борис", "Вера"]
     assert snapshot["host_user_id"] == table.alice.user_id
     assert snapshot["phase"] == {

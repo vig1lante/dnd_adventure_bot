@@ -272,6 +272,9 @@ function LobbyBody({ gameId, game }: { gameId: string; game: GameSummary }) {
       {error !== null && <Alert>{error}</Alert>}
       <Card title={game.adventure_title} icon="scroll">
         {pitch !== undefined && <p>{pitch}</p>}
+        <p className="screen-muted">
+          {game.profanity ? "Мат: включён" : "Мат: выключен"}
+        </p>
       </Card>
 
       {isHost && <InviteCard game={game} />}

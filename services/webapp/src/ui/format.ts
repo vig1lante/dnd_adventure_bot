@@ -40,3 +40,15 @@ export function hpTone(current: number, max: number): HpTone {
   if (ratio > 0.25) return "mid";
   return "low";
 }
+
+/**
+ * Расстояние из футов сервера в метрах для игрока, как units.meters_text в движке: 5 футов = 1,5 м,
+ * дробь через запятую, без «,0» и без округления до десятых: 30 → «9 м», 2,5 → «0,75 м».
+ * Только запись, не правило.
+ */
+export function formatMeters(feet: number): string {
+  // × 3 / 10, а не × 0,3, и не больше шести значащих цифр — как формат `:g` движка: так хвост
+  // float (0,1 фт → 0,030000000000000006) не попадает в текст, а тексты двух сервисов совпадают.
+  const meters = Number(((feet * 3) / 10).toPrecision(6));
+  return `${String(meters).replace(".", ",")} м`;
+}

@@ -204,6 +204,29 @@ describe("подключение и состав лобби", () => {
     expect(await screen.findByText(PITCH)).toBeInTheDocument();
   });
 
+  test.each([
+    [true, "Мат: включён"],
+    [false, "Мат: выключен"],
+  ] as const)(
+    "флажок мата игры (profanity: %s) — «%s»",
+    async (profanity, text) => {
+      await openLobby({
+        game: lobbyOf([host(), boris(), lira()], { profanity }),
+      });
+
+      expect(screen.getByText(text)).toBeInTheDocument();
+    },
+  );
+
+  test("флажок мата виден и игроку, а не только хосту", async () => {
+    await openLobby({
+      as: "u2",
+      game: lobbyOf([host(), boris(), lira()], { profanity: false }),
+    });
+
+    expect(screen.getByText("Мат: выключен")).toBeInTheDocument();
+  });
+
   test("каталог не ответил: название на месте, завязки нет, ошибки нет", async () => {
     await openLobby({
       routes: {

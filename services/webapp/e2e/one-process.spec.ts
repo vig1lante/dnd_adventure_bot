@@ -99,12 +99,16 @@ noServerTest("окружение сервера стенда не ведёт к 
     expect(fs.existsSync(cli)).toBe(false);
 
     // Провайдер по умолчанию — заглушка; ключи, адреса и модели настоящих провайдеров пусты.
+    // Модель подписки Claude Code тоже пуста: в списке моделей формы только псевдонимы CLI.
     expect(env).toMatchObject({
       APP_ENV: "dev",
       LLM_PROVIDER: "fake",
       LLM_MODEL: "",
       LLM_EFFORT: "",
       LLM_CHEAP_MODEL: "",
+      CLAUDE_CLI_MODEL: "",
+      CLAUDE_CLI_EFFORT: "",
+      CLAUDE_CLI_CHEAP_MODEL: "",
       ANTHROPIC_API_KEY: "",
       OPENAI_COMPAT_API_KEY: "",
       OPENAI_COMPAT_BASE_URL: "",

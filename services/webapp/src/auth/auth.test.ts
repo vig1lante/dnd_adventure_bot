@@ -38,6 +38,7 @@ function gameSummary(overrides: Partial<GameSummary> = {}): GameSummary {
     collect_seconds: 120,
     hurry_seconds: 60,
     camp_seconds: 300,
+    profanity: true,
     players: [],
     ...overrides,
   };

@@ -26,7 +26,12 @@ from dnd_server.auth.deps import app_settings, require_game_creator
 from dnd_server.config import Settings
 from dnd_server.db.models import User
 from dnd_server.games.api import get_turn_tokens
-from dnd_server.games.service import Invalid, check_provider
+from dnd_server.games.service import (
+    Invalid,
+    check_provider,
+    claude_cli_default_model,
+    claude_cli_models,
+)
 from dnd_server.llm.internal_api import TurnTokens
 
 router = APIRouter(prefix="/api")
@@ -38,10 +43,12 @@ class ProviderInfo:
 
     id: str  # то же имя, что в `provider` запроса `POST /api/games` и в `llm.factory.PROVIDERS`
     title: str  # название для игрока по-русски
-    # Использует ли провайдер имя модели из игры: `claude_code_cli` и `fake` его игнорируют.
+    # Использует ли провайдер имя модели из игры: `fake` его игнорирует.
     accepts_model: bool
     dev_only: bool
     default_model: Callable[[Settings], str | None]
+    # Модели на выбор; без своего списка предлагается только модель по умолчанию.
+    models: Callable[[Settings], list[str]] | None = None
 
 
 # Порядок списка — порядок показа: сначала настоящие провайдеры, затем те, что нужны только в dev.
@@ -64,9 +71,12 @@ CATALOG = (
     ProviderInfo(
         id="claude_code_cli",
         title="Claude Code на этом компьютере (только dev)",
-        accepts_model=False,
+        accepts_model=True,
         dev_only=True,
-        default_model=lambda _settings: None,  # версию модели задаёт подписка владельца
+        # Пусто — модель выберет сам CLI по подписке владельца (спека §11); CLAUDE_CLI_MODEL,
+        # который CLI не примет, моделью по умолчанию не показывается.
+        default_model=claude_cli_default_model,
+        models=claude_cli_models,
     ),
     ProviderInfo(
         id="fake",
@@ -85,11 +95,13 @@ class ProviderOut(BaseModel):
     # не сказано и в журнал не пишется: причину (какую переменную окружения задать) называет ответ
     # на `POST /api/games` с этим провайдером, настройки описаны в README.
     available: bool
-    # Модель, которую провайдер возьмёт, если игра её не переопределит; пусто, если модели нет.
+    # Модель, которую провайдер возьмёт, если игра её не переопределит; пусто, если модели нет или
+    # её выбирает сам провайдер (`claude_code_cli` без CLAUDE_CLI_MODEL или с таким, что CLI не
+    # примет).
     default_model: str | None
-    # Модели на выбор, первая — по умолчанию. Сервер принимает и любое другое допустимое имя
-    # (`model` в `POST /api/games`), если `accepts_model`; чтобы взять модель по умолчанию, поле
-    # `model` можно не присылать.
+    # Модели на выбор. Если `accepts_model`, сервер принимает и любое другое допустимое имя (`model`
+    # в `POST /api/games`), кроме `claude_code_cli`: ему — только из этого списка. Чтобы взять
+    # модель по умолчанию, поле `model` можно не присылать.
     models: list[str]
     accepts_model: bool
     # Провайдер, которым игра ведётся без переопределения (`LLM_PROVIDER`). В prod заводской
@@ -113,12 +125,16 @@ def provider_out(
     info: ProviderInfo, settings: Settings, turn_tokens: TurnTokens | None
 ) -> ProviderOut:
     default_model = info.default_model(settings)
+    if info.models is not None:
+        models = info.models(settings)
+    else:
+        models = [default_model] if default_model else []
     return ProviderOut(
         id=info.id,
         title=info.title,
         available=_is_available(settings, info.id, turn_tokens),
         default_model=default_model,
-        models=[default_model] if default_model else [],
+        models=models,
         accepts_model=info.accepts_model,
         is_default=info.id == settings.llm_provider,
     )
