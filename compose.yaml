@@ -1,0 +1,50 @@
+# Локальный стенд одной командой: `docker compose up --build`, затем http://localhost:5173/?dev=dev-1
+# (README, раздел «Запуск в Docker Compose»). Это dev-режим для браузера: вход dev-1…6 и мастер —
+# Claude по подписке. Порт открыт только на этой машине (127.0.0.1); туннель к нему не подключать.
+name: dnd-adventure
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: services/server/Dockerfile
+    env_file: .env
+    environment:
+      # Стенд всегда dev: claude_code_cli и dev-вход работают только в нём.
+      APP_ENV: dev
+      CLAUDE_CLI_PATH: /home/app/.local/bin/claude
+      # Бот браузерному стенду не нужен: с токеном он стал бы опрашивать Telegram.
+      TELEGRAM_BOT_TOKEN: ""
+      WEBAPP_PUBLIC_URL: http://localhost:5173
+    volumes:
+      # База игр — та же папка data/, что и при запуске без Docker. Не запускайте оба сразу.
+      - ${DND_DATA_DIR:-./data}:/app/data
+      # Вход Claude Code в подписку (один раз, см. README) переживает пересборку образа.
+      - claude-config:/home/app/.claude
+    ports:
+      # Сеть сервера делит webapp: наружу выходит только Vite, он проксирует /api и /ws.
+      - "127.0.0.1:${DND_WEB_PORT:-5173}:5173"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  webapp:
+    build:
+      context: .
+      dockerfile: services/webapp/Dockerfile
+    # Общая сеть с сервером: прокси Vite ходит на 127.0.0.1:8000, а сервер слушает только
+    # localhost (config.HOST) и не виден ни в сети Docker, ни снаружи.
+    network_mode: service:server
+    depends_on:
+      server:
+        condition: service_healthy
+
+volumes:
+  claude-config:

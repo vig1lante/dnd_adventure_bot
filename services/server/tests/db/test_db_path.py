@@ -299,6 +299,15 @@ def test_opening_the_owner_database_from_a_test_is_refused_and_recorded(live_cal
     live_call_attempts.clear()
 
 
+def file_state(path: Path) -> tuple[int, int] | None:
+    """Размер и время изменения файла; `None` — файла нет."""
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return stat.st_size, stat.st_mtime_ns
+
+
 async def test_the_app_cannot_reach_the_owner_database_through_its_own_requests(
     live_call_attempts,
 ):
@@ -306,6 +315,9 @@ async def test_the_app_cannot_reach_the_owner_database_through_its_own_requests(
     # база, доходит до `sqlite3.connect` (через aiosqlite) и упирается в запрет. Старт приложения
     # (`lifespan`) здесь не нужен и не запускается: он создал бы папку `data/` владельца.
     existed = OWNER_DATABASE.parent.exists()
+    # У владельца может быть своя база: тест требует не её отсутствия, а того, что запрос её не
+    # создал и не изменил.
+    database_before = file_state(OWNER_DATABASE)
     app = create_app(Settings(app_env="dev", database_url=DEFAULT_URL))
     transport = httpx.ASGITransport(app=app)
 
@@ -316,7 +328,7 @@ async def test_the_app_cannot_reach_the_owner_database_through_its_own_requests(
 
     assert any(attempt.startswith("sqlite:") for attempt in live_call_attempts)
     assert OWNER_DATABASE.parent.exists() == existed
-    assert not OWNER_DATABASE.exists()
+    assert file_state(OWNER_DATABASE) == database_before
     live_call_attempts.clear()
 
 

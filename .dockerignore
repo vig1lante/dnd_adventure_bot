@@ -1,0 +1,22 @@
+# Контекст сборки — корень репозитория: в образы не попадают секреты, базы и локальные файлы.
+.git
+.idea
+.DS_Store
+.env
+.env.*
+!.env.example
+.venv
+.ruff_cache
+.pytest_cache
+**/__pycache__
+**/node_modules
+**/dist
+**/test-results
+**/playwright-report
+**/.vitest
+data
+docs
+loop-engineering
+loop-prompt.txt
+CLAUDE.md
+AGENTS.md
