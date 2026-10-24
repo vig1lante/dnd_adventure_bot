@@ -1,30 +1,37 @@
-"""CLI `dnd-generate`: приключение по короткому пожеланию (спека §6.3, план B5.6).
+"""CLI `dnd-generate`: приключение формата v2 по короткому пожеланию (спека DND-1 §6.3, план
+DND-1 B5.6; DND-2 §9, план B3.1).
 
     uv run dnd-generate --pitch "..." --hours 5 --players 6 --level 3 \\
-        [--seeds seeds.yaml] [--modules bg3_flavor,campfire] \\
+        [--seeds seeds.yaml] [--wishes wishes.yaml] [--modules bg3_flavor,campfire] \\
         [--provider ...] [--model ...] --out content/adventures/<slug>
 
-Код выхода 0 — приключение записано и в отчёте валидатора нет блокирующих ошибок. Код 2 — ошибка
-аргументов или настройки, отказ провайдера, непустая папка `--out` либо блокирующие ошибки,
-которые не ушли за три круга исправления (папка в этом случае записана: приключение можно
-доделать вручную). Всё, что можно проверить без модели, проверяется до первого вызова.
+Команда собирает черновик (`AuthoringDraft`): заказ из флагов, заготовки `--seeds` (любые разделы
+v2, все закреплены) и пожелания `--wishes` (`{шаг: текст}`), — и проходит генератор
+(`pipeline.generate`) по ролям вокруг заданного.
+
+Код выхода 0 — приключение записано и в отчёте проверки нет блокирующих ошибок. Код 2 — ошибка
+аргументов или настройки, файла заготовок или пожеланий, отказ провайдера, непустая папка `--out`
+либо блокирующие ошибки, которые не ушли за три круга исправления (папка в этом случае записана:
+приключение можно доделать вручную). Всё, что можно проверить без модели, проверяется до первого
+вызова.
 """
 
 import argparse
 import asyncio
 import math
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from dnd_engine.adventure.budget import XP_BUDGET_PER_CHARACTER
 from dnd_engine.adventure.loader import AdventureFormatError, dump_adventure
 from dnd_engine.adventure.validator import Report
 from dnd_engine.modules import MODULES
-from dnd_server.authoring.pipeline import GenerationRequest, generate
-from dnd_server.authoring.schemas import Seeds
+from dnd_server.authoring.draft import STEPS, AuthoringDraft, DraftSettings, Seeds, Wishes, seeded
+from dnd_server.authoring.pipeline import generate
 from dnd_server.config import Settings
 from dnd_server.dm.provider import bridge_url
 from dnd_server.llm.base import ProviderError, printable, schema_problems
@@ -37,6 +44,8 @@ EXIT_FAILED = 2  # то же значение, что у argparse для нев�
 
 MAX_PLAYERS = 6
 MAX_ERROR_CHARS = 1000
+
+_WISHES = TypeAdapter(Wishes)
 
 
 class CliError(Exception):
@@ -97,7 +106,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help=f"уровень героев, {levels[0]}-{levels[-1]} (по умолчанию 3)",
     )
     parser.add_argument(
-        "--seeds", type=Path, help="YAML с готовыми locations, npcs и items: они войдут как есть"
+        "--seeds",
+        type=Path,
+        help="YAML с заготовками любых разделов v2 (world, deities, factions, plot, locations, "
+        "npcs, relations, encounters, monsters, items, revelations): войдут как есть и закрепятся",
+    )
+    parser.add_argument(
+        "--wishes",
+        type=Path,
+        help=f"YAML с пожеланиями к шагам генератора «шаг: текст»; шаги: {', '.join(STEPS)}",
     )
     parser.add_argument(
         "--modules",
@@ -140,17 +157,38 @@ def _describe(exc: Exception) -> str:
     return str(exc)[:MAX_ERROR_CHARS]
 
 
-def _load_seeds(path: Path) -> Seeds:
+def _load[T](path: Path, what: str, validate: Callable[[Any], T]) -> T:
+    """Файл YAML автора, проверенный `validate`; любая ошибка — `CliError` без цитат из файла."""
     problem = None
     try:
         data = read_yaml(path)
-        seeds = Seeds.model_validate({} if data is None else data)
+        loaded = validate({} if data is None else data)
     except (OSError, UnicodeDecodeError, UnreadableYaml, ValidationError) as exc:
         problem = _describe(exc)
     if problem is not None:
         # Исключение поднимаем вне `except`: его причина и контекст хранят содержимое файла.
-        raise CliError(f"файл сидов {path}: {problem}")
-    return seeds
+        raise CliError(f"{what} {path}: {problem}")
+    return loaded
+
+
+def _load_seeds(path: Path) -> Seeds:
+    return _load(path, "файл сидов", Seeds.model_validate)
+
+
+def _load_wishes(path: Path) -> Wishes:
+    return _load(path, "файл пожеланий", _WISHES.validate_python)
+
+
+def _draft(args: argparse.Namespace, seeds: Seeds, wishes: Wishes) -> AuthoringDraft:
+    """Черновик заказа: настройки из флагов, пожелания по шагам и закреплённые заготовки."""
+    settings = DraftSettings(
+        pitch=args.pitch,
+        target_hours=args.hours,
+        party_size=args.players,
+        party_level=args.level,
+        modules=args.modules,
+    )
+    return seeded(AuthoringDraft(settings=settings, wishes=wishes), seeds)
 
 
 def _load_settings() -> Settings:
@@ -195,10 +233,11 @@ def _say(message: str) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    request = GenerationRequest(args.pitch, args.hours, args.players, args.level, args.modules)
     try:
         _require_free_folder(args.out)
         seeds = _load_seeds(args.seeds) if args.seeds else Seeds()
+        wishes = _load_wishes(args.wishes) if args.wishes else {}
+        draft = _draft(args, seeds, wishes)
         provider = make_provider(
             _settings_for(args.model),
             provider=args.provider,
@@ -210,7 +249,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             turn_tokens=TurnTokens(),
             internal_url=bridge_url(),
         )
-        result = asyncio.run(generate(provider, request, seeds, progress=_say))
+        result = asyncio.run(generate(provider, draft, _say))
         dump_adventure(result.adventure, args.out)
     except CliError as exc:
         return _fail(str(exc))
@@ -218,6 +257,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _fail(f"настройка провайдера: {exc}")
     except ProviderError as exc:
         return _fail(f"провайдер модели: {exc}")
+    except ValidationError as exc:
+        # Черновик проверяется при чтении файлов, так что сюда доходит только нарушенный инвариант
+        # сборки: строка без трассировки и без значений из данных (`schema_problems`).
+        return _fail(f"сборка приключения: {_describe(exc)}")
     except (OSError, AdventureFormatError) as exc:
         return _fail(f"не удалось записать приключение в {args.out}: {_describe(exc)}")
     print(format_report(result.report, args.hours))

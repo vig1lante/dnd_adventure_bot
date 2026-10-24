@@ -1,11 +1,12 @@
-"""Генератор и движок: стыки, которые тесты по отдельности не видят (план B5.6, спека §6.2, §6.3).
+"""Генератор и движок: стыки, которые тесты по отдельности не видят (план DND-1 B5.6, DND-2 B3.1).
 
 - `owner_step` получает проблемы настоящего валидатора, а не написанные вручную: если валидатор
   изменит `ref` или добавит код, маршрут к шагу-владельцу не должен сломаться молча;
 - результат `dnd-generate` читается загрузчиком и проверяется валидатором так же, как исходный,
   в том числе когда блокирующие ошибки остались и приключение доделывает человек;
 - установленная команда, как её запускает владелец (README, «Генерация приключения»).
-Живой модели нет: ответы шагов проигрывает `FakeProvider` по сценарию `generator_demo.yaml`.
+Живой модели нет: ответы шагов проигрывает `FakeProvider` по сценариям `generator_demo.yaml` и
+`generator_v2_demo.yaml` (маршруты проблем мира, богов, фракций, связей и тайн мест v2).
 """
 
 import copy
@@ -18,6 +19,7 @@ from typing import Any
 
 import pytest
 import yaml
+from generator_fakes import DEMO_SCENARIO, V2_SCENARIO, demo_draft, v2_draft
 
 from dnd_engine.adventure import validator
 from dnd_engine.adventure.loader import load_adventure
@@ -25,18 +27,9 @@ from dnd_engine.adventure.schema import Adventure
 from dnd_engine.adventure.validator import validate
 from dnd_engine.content import load_srd
 from dnd_server.authoring.cli import main
-from dnd_server.authoring.pipeline import GenerationRequest, generate, owner_step
-from dnd_server.authoring.schemas import Seeds
+from dnd_server.authoring.pipeline import generate, owner_step
 from dnd_server.llm.fake import FakeProvider, load_scenario
 
-DEMO_SCENARIO = Path(__file__).resolve().parents[1] / "scenarios" / "generator_demo.yaml"
-REQUEST = GenerationRequest(
-    pitch="Колокол в часовне звонит сам по ночам.",
-    hours=1,
-    players=6,
-    level=3,
-    modules=("bg3_flavor", "campfire"),
-)
 CLI_ARGS = ["--pitch", "Колокол звонит.", "--players", "6", "--level", "3"]
 CLI_MODULES = ["--modules", "bg3_flavor,campfire"]
 
@@ -46,8 +39,16 @@ Mutation = Callable[[dict[str, Any]], None]
 async def generated_data() -> dict[str, Any]:
     """Данные приключения, которое собрал генератор по демо-сценарию: исходник для поломок."""
     provider = FakeProvider(load_scenario(DEMO_SCENARIO))
-    result = await generate(provider, REQUEST, Seeds())
+    result = await generate(provider, demo_draft())
     assert not result.report.blocking
+    return result.adventure.model_dump(mode="json")
+
+
+async def generated_v2_data() -> dict[str, Any]:
+    """Данные приключения формата v2 по демо-сценарию v2: исходник для поломок мира и графа."""
+    provider = FakeProvider(load_scenario(V2_SCENARIO))
+    result = await generate(provider, v2_draft())
+    assert result.report.issues == []
     return result.adventure.model_dump(mode="json")
 
 
@@ -151,7 +152,7 @@ def npc_without_motive(data: dict[str, Any]) -> None:
 
 
 def important_npc_without_relations(data: dict[str, Any]) -> None:
-    data["relations"] = []  # связи NPC генератора после чтения лежат в общем графе (формат v2)
+    data["relations"] = []  # связи генератор пишет шагом relations в общий граф (формат v2)
     data["npcs"]["otto"]["statblock"] = "skeleton"
 
 
@@ -230,7 +231,7 @@ ROUTES: list[tuple[str, Mutation, str, str, str | None]] = [
         repeated_feature_id,
         "schema",
         "location:undercroft/feature:bell-rope",
-        "locations",
+        "location_contents",
     ),
     ("unknown module", unknown_rule_module, "schema", "adventure", None),
     ("no motive", npc_without_motive, "npc_without_motive", "npc:otto", "npcs"),
@@ -239,10 +240,16 @@ ROUTES: list[tuple[str, Mutation, str, str, str | None]] = [
         important_npc_without_relations,
         "npc_without_relations",
         "npc:otto",
-        "npcs",
+        "relations",
     ),
-    ("silent", silent_location, "empty_read_aloud", "location:chapel", "locations"),
-    ("no features", location_without_features, "no_features", "location:undercroft", "locations"),
+    ("silent", silent_location, "empty_read_aloud", "location:chapel", "location_contents"),
+    (
+        "no features",
+        location_without_features,
+        "no_features",
+        "location:undercroft",
+        "location_contents",
+    ),
     ("duration", long_game_for_a_short_wish, "duration_mismatch", "adventure", None),
 ]
 
@@ -252,9 +259,8 @@ def seed_exit_to_nowhere(data: dict[str, Any]) -> None:
 
 
 def seed_npc_relation_to_nowhere(data: dict[str, Any]) -> None:
-    # Связь v1 у Отто («Грета — kin для Отто») после чтения лежит в графе: теперь она ведёт от
-    # NPC, которого нет.
-    (relation,) = [rel for rel in data["relations"] if rel["b"] == "npc:otto"]
+    # Связь «Отто — kin для Греты» теперь ведёт от NPC, которого нет.
+    (relation,) = [rel for rel in data["relations"] if rel["id"] == "otto-kin-greta"]
     relation["a"] = "npc:lost-brother"
 
 
@@ -298,46 +304,52 @@ def seed_place_reveals_a_lost_item(data: dict[str, Any]) -> None:
     data["locations"]["chapel"]["features"][1]["reveals"] = [{"kind": "item", "id": "lost-relic"}]
 
 
+def seed_place_hides_an_item_lying_elsewhere(data: dict[str, Any]) -> None:
+    # Тайник часовни «прячет» медальон, а модель отдала его Грете в склеп.
+    data["locations"]["chapel"]["features"][1]["reveals"] = [{"kind": "item", "id": "wet-locket"}]
+
+
 def seed_place_reveals_a_lost_clue(data: dict[str, Any]) -> None:
     data["locations"]["chapel"]["features"][1]["reveals"] = [{"kind": "clue", "id": "lost-clue"}]
 
 
-# (имя, поломка, код, ref настоящего валидатора, id сидов, шаг-владелец или None)
-# Сид правит автор: чинится только то, что исправляют другие шаги. Ссылку в пустоту чинит шаг,
-# который создаёт цель ссылки; цель `owner_step` берёт из текста «ссылка '<вид>:…'» проблемы,
-# поэтому формат этого текста закреплён здесь на настоящем валидаторе.
+# (имя, поломка, код, ref настоящего валидатора, закрепления, шаг-владелец или None)
+# Закреплённое правит автор: чинится только то, что исправляют другие шаги. Ссылку в пустоту чинит
+# шаг, который создаёт цель ссылки; цель `owner_step` берёт из текста «ссылка '<вид>:…'»
+# проблемы, поэтому формат этого текста закреплён здесь на настоящем валидаторе.
 SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
     (
         "seed exit to nowhere",
         seed_exit_to_nowhere,
         "dangling_ref",
         "location:undercroft/exit:to-chapel",
-        {"undercroft"},
+        {"location:undercroft"},
         "locations",
     ),
     (
         "seed npc relation to nowhere",
         seed_npc_relation_to_nowhere,
         "dangling_ref",
-        "relation:greta-kin-otto",
-        {"otto"},
+        "relation:otto-kin-greta",
+        {"relation:otto-kin-greta"},
         "npcs",
     ),
-    ("seed npc in nowhere", npc_in_nowhere, "dangling_ref", "npc:otto", {"otto"}, "locations"),
+    ("seed npc in nowhere", npc_in_nowhere, "dangling_ref", "npc:otto", {"npc:otto"}, "locations"),
+    # Свой статблок с нужным id создаёт шаг encounters.
     (
         "seed npc statblock to nowhere",
         seed_npc_statblock_to_nowhere,
         "dangling_ref",
         "npc:otto",
-        {"otto"},
-        None,
+        {"npc:otto"},
+        "encounters",
     ),
     (
         "seed item held by a lost npc",
         seed_item_held_by_a_lost_npc,
         "dangling_ref",
         "item:wet-locket",
-        {"wet-locket"},
+        {"item:wet-locket"},
         "npcs",
     ),
     (
@@ -345,7 +357,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         item_held_in_nowhere,
         "dangling_ref",
         "item:undercroft-key",
-        {"undercroft-key"},
+        {"item:undercroft-key"},
         "locations",
     ),
     (
@@ -353,7 +365,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         seed_item_base_to_nowhere,
         "dangling_ref",
         "item:wet-locket",
-        {"wet-locket"},
+        {"item:wet-locket"},
         None,
     ),
     (
@@ -361,8 +373,8 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         seed_location_fight_to_nowhere,
         "dangling_ref",
         "location:undercroft",
-        {"undercroft"},
-        None,
+        {"location:undercroft"},
+        "encounters",
     ),
     # Замок сида на несуществующий ключ: предметы-ключи создаёт шаг items.
     (
@@ -370,7 +382,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         seed_lock_on_a_lost_key,
         "dangling_ref",
         "location:chapel/exit:to-undercroft",
-        {"chapel"},
+        {"location:chapel"},
         "items",
     ),
     (
@@ -378,17 +390,35 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         seed_place_reveals_a_lost_item,
         "dangling_ref",
         "location:chapel/feature:altar-niche",
-        {"chapel"},
+        {"location:chapel"},
         "items",
     ),
-    # Улику с заданным id шаг clues не придумает: ссылка остаётся в отчёте.
+    # Тайник закреплённой локации, а незакреплённый предмет лежит не там: его переносит шаг items,
+    # закреплённый предмет — никто.
+    (
+        "seed place hides an item lying elsewhere",
+        seed_place_hides_an_item_lying_elsewhere,
+        "dangling_ref",
+        "location:chapel/feature:altar-niche",
+        {"location:chapel"},
+        "items",
+    ),
+    (
+        "seed place hides a seed item lying elsewhere",
+        seed_place_hides_an_item_lying_elsewhere,
+        "dangling_ref",
+        "location:chapel/feature:altar-niche",
+        {"location:chapel", "item:wet-locket"},
+        None,
+    ),
+    # Улику с заданным id создаёт шаг clues: её место — уже в закреплённой локации.
     (
         "seed place reveals a lost clue",
         seed_place_reveals_a_lost_clue,
         "dangling_ref",
         "location:chapel/feature:altar-niche",
-        {"chapel"},
-        None,
+        {"location:chapel"},
+        "clues",
     ),
     # Ключ замка сида создал шаг items, но положил его недостижимо: сид не меняется, ключ
     # переносит items. Ключ-сид не переносит никто.
@@ -397,7 +427,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         key_behind_its_own_lock,
         "unreachable_key",
         "location:chapel/exit:to-undercroft",
-        {"chapel"},
+        {"location:chapel"},
         "items",
     ),
     (
@@ -405,7 +435,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         key_that_left_the_game,
         "unreachable_key",
         "location:chapel/exit:to-undercroft",
-        {"chapel"},
+        {"location:chapel"},
         "items",
     ),
     (
@@ -413,7 +443,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         place_locked_with_a_key_behind_the_door,
         "unreachable_key",
         "location:chapel/feature:altar-niche",
-        {"chapel"},
+        {"location:chapel"},
         "items",
     ),
     (
@@ -421,7 +451,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         key_behind_its_own_lock,
         "unreachable_key",
         "location:chapel/exit:to-undercroft",
-        {"chapel", "undercroft-key"},
+        {"location:chapel", "item:undercroft-key"},
         None,
     ),
     # Скрытый выход сида делит id с выходом другой локации: чужой выход переименует граф. Если все
@@ -431,7 +461,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         hidden_exit_with_the_id_of_another_exit,
         "schema",
         "location:undercroft/exit:to-chapel",
-        {"undercroft"},
+        {"location:undercroft"},
         "locations",
     ),
     (
@@ -439,7 +469,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         hidden_exit_with_the_id_of_another_exit,
         "schema",
         "location:undercroft/exit:to-chapel",
-        {"undercroft", "chapel"},
+        {"location:undercroft", "location:chapel"},
         None,
     ),
     (
@@ -447,7 +477,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         repeated_feature_id,
         "schema",
         "location:undercroft/feature:bell-rope",
-        {"undercroft"},
+        {"location:undercroft"},
         None,
     ),
     (
@@ -455,7 +485,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         location_without_features,
         "no_features",
         "location:undercroft",
-        {"undercroft"},
+        {"location:undercroft"},
         None,
     ),
     (
@@ -463,7 +493,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         chapel_without_exits,
         "no_path_to_finale",
         "location:undercroft",
-        {"undercroft"},
+        {"location:undercroft"},
         None,
     ),
     # Выход к сиду проводит граф: промпт locations просит «проведи к ним выходы».
@@ -472,7 +502,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         orphan_location,
         "unreachable_location",
         "location:well",
-        {"well"},
+        {"location:well"},
         "locations",
     ),
 ]
@@ -502,11 +532,11 @@ async def test_a_real_validator_issue_goes_to_its_owner_step(mutate, code, ref, 
 
 
 @pytest.mark.parametrize(
-    ("mutate", "code", "ref", "seed_ids", "step"),
+    ("mutate", "code", "ref", "locks", "step"),
     [pytest.param(*route[1:], id=route[0]) for route in SEED_ROUTES],
 )
 async def test_a_real_validator_issue_of_a_seed_goes_to_the_step_that_can_fix_it(
-    mutate, code, ref, seed_ids, step
+    mutate, code, ref, locks, step
 ):
     broken = copy.deepcopy(await generated_data())
     mutate(broken)
@@ -515,7 +545,121 @@ async def test_a_real_validator_issue_of_a_seed_goes_to_the_step_that_can_fix_it
 
     found = [issue for issue in report.issues if (issue.code, issue.ref) == (code, ref)]
     assert found, f"валидатор не выдал {code} {ref}: {[(i.code, i.ref) for i in report.issues]}"
-    assert owner_step(found[0], seed_ids) == step
+    assert owner_step(found[0], locks) == step
+
+
+def villain_nowhere(data: dict[str, Any]) -> None:
+    data["villain"] = "npc:ghost"
+
+
+def villain_god_nowhere(data: dict[str, Any]) -> None:
+    data["villain"] = "deity:ghost"
+
+
+def faction_leader_nowhere(data: dict[str, Any]) -> None:
+    data["factions"]["smugglers"]["leader"] = "npc:ghost"
+
+
+def faction_base_nowhere(data: dict[str, Any]) -> None:
+    data["factions"]["smugglers"]["base_location"] = "ghost-den"
+
+
+def avatar_nowhere(data: dict[str, Any]) -> None:
+    data["deities"]["selmara"]["avatar_statblock"] = "sea-avatar"
+
+
+def relation_end_nowhere(data: dict[str, Any]) -> None:
+    data["relations"][1]["a"] = "npc:ghost"
+
+
+def relation_to_itself(data: dict[str, Any]) -> None:
+    data["relations"][1]["b"] = data["relations"][1]["a"]
+
+
+def secret_reveals_a_lost_item(data: dict[str, Any]) -> None:
+    data["locations"]["lighthouse"]["secrets"][0]["reveals"] = [{"kind": "item", "id": "ghost"}]
+
+
+def secret_reveals_a_lost_clue(data: dict[str, Any]) -> None:
+    data["locations"]["lighthouse"]["secrets"][0]["reveals"] = [{"kind": "clue", "id": "ghost"}]
+
+
+def repeated_region(data: dict[str, Any]) -> None:
+    data["world"]["regions"][1]["id"] = "crow-cape"
+
+
+def custom_monster_in_armour_of_stars(data: dict[str, Any]) -> None:
+    data["monsters"]["ash-priest"]["ac"] = 99
+
+
+def statblock_nowhere(data: dict[str, Any]) -> None:
+    data["npcs"]["veran"]["statblock"] = "ghost-beast"
+
+
+# Разделы v2 (злодей, фракции, боги, связи, края, тайны мест, свои статблоки): (имя, поломка, код,
+# ref настоящего валидатора, шаг-владелец). Ссылку вперёд (цель создаёт более поздний шаг) чинит
+# создатель цели, ссылку назад — владелец ссылки.
+V2_ROUTES: list[tuple[str, Mutation, str, str, str | None]] = [
+    ("villain npc nowhere", villain_nowhere, "dangling_ref", "adventure", "npcs"),
+    ("villain god nowhere", villain_god_nowhere, "dangling_ref", "adventure", "plot"),
+    ("faction leader nowhere", faction_leader_nowhere, "dangling_ref", "faction:smugglers", "npcs"),
+    (
+        "faction base nowhere",
+        faction_base_nowhere,
+        "dangling_ref",
+        "faction:smugglers",
+        "locations",
+    ),
+    ("avatar nowhere", avatar_nowhere, "dangling_ref", "deity:selmara", "encounters"),
+    (
+        "relation end nowhere",
+        relation_end_nowhere,
+        "dangling_ref",
+        "relation:bram-rival-ilsa",
+        "relations",
+    ),
+    ("relation to itself", relation_to_itself, "schema", "relation:bram-rival-ilsa", "relations"),
+    (
+        "secret reveals a lost item",
+        secret_reveals_a_lost_item,
+        "dangling_ref",
+        "location:lighthouse/secret:drowned-keeper",
+        "items",
+    ),
+    (
+        "secret reveals a lost clue",
+        secret_reveals_a_lost_clue,
+        "dangling_ref",
+        "location:lighthouse/secret:drowned-keeper",
+        "clues",
+    ),
+    ("repeated region", repeated_region, "schema", "region:crow-cape", "world"),
+    (
+        "custom monster numbers",
+        custom_monster_in_armour_of_stars,
+        "schema",
+        "monster:ash-priest",
+        "encounters",
+    ),
+    ("statblock nowhere", statblock_nowhere, "dangling_ref", "npc:veran", "encounters"),
+]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "code", "ref", "step"),
+    [pytest.param(*route[1:], id=route[0]) for route in V2_ROUTES],
+)
+async def test_a_real_validator_issue_of_a_v2_section_goes_to_its_owner_step(
+    mutate, code, ref, step
+):
+    broken = copy.deepcopy(await generated_v2_data())
+    mutate(broken)
+
+    report = validate(Adventure.model_validate(broken), load_srd())
+
+    found = [issue for issue in report.issues if (issue.code, issue.ref) == (code, ref)]
+    assert found, f"валидатор не выдал {code} {ref}: {[(i.code, i.ref) for i in report.issues]}"
+    assert owner_step(found[0]) == step
 
 
 def test_every_code_the_validator_can_give_has_a_routing_case_above():

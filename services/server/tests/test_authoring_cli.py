@@ -1,4 +1,4 @@
-"""Тесты CLI `dnd-generate` (план B5.6, спека §6.3).
+"""Тесты CLI `dnd-generate` (план DND-1 B5.6, спека §6.3; DND-2 B3.1: заготовки v2 и пожелания).
 
 Провайдер всегда `FakeProvider` по сценарию `generator_demo.yaml`: ключей, сети и живых моделей
 нет. Фабрика провайдеров подменяется шпионом там, где нужно доказать, что модель не вызывалась
@@ -23,9 +23,10 @@ import pytest
 import yaml
 
 from dnd_engine.adventure.loader import load_adventure
+from dnd_engine.adventure.schema import Adventure
 from dnd_engine.adventure.validator import Issue, Report, validate
 from dnd_engine.content import MAX_YAML_BYTES, load_srd
-from dnd_server.authoring import cli
+from dnd_server.authoring import cli, pipeline
 from dnd_server.authoring.cli import format_report, main
 from dnd_server.config import set_serving_port
 from dnd_server.llm.base import MAX_LOC_PART_CHARS, ProviderError
@@ -110,6 +111,7 @@ def test_installed_dnd_generate_prints_help_with_every_option():
         "--players",
         "--level",
         "--seeds",
+        "--wishes",
         "--modules",
         "--out",
         "--provider",
@@ -167,11 +169,8 @@ def test_manual_command_writes_a_valid_adventure_and_exits_with_0(demo_env, tmp_
     ]
 
 
-def test_the_written_folder_is_format_v2_with_the_relations_of_the_npcs_in_the_graph(
-    demo_env, tmp_path
-):
-    # Модель отдаёт связи внутри NPC (форма шага npcs), а папка пишется в формате v2: связи — в
-    # `relations.yaml`, у NPC их нет, и загрузчик читает папку обратно с тем же графом (Р8).
+def test_the_written_folder_is_format_v2_with_the_world_factions_and_the_graph(demo_env, tmp_path):
+    # Связи пишет шаг relations, мир и фракции — свои шаги: папка v2 читается обратно с ними (Р8).
     out = tmp_path / "chapel-whispers"
 
     assert generate_into(out) == 0
@@ -181,10 +180,12 @@ def test_the_written_folder_is_format_v2_with_the_relations_of_the_npcs_in_the_g
     npcs = [yaml.safe_load(path.read_text(encoding="utf-8")) for path in (out / "npcs").iterdir()]
     assert manifest["format_version"] == 2
     assert all("relations" not in npc for npc in npcs)
-    # «Отто — родня для Греты» из связи v1 у Греты и обратная — из связи у Отто.
-    expected = {("npc:otto", "npc:greta", "kin"), ("npc:greta", "npc:otto", "kin")}
+    expected = {("npc:otto", "npc:greta", "kin")}
     assert {(rel["a"], rel["b"], rel["kind"]) for rel in graph} == expected
-    assert {(rel.a, rel.b, rel.kind) for rel in load_adventure(out).relations} == expected
+    adventure = load_adventure(out)
+    assert {(rel.a, rel.b, rel.kind) for rel in adventure.relations} == expected
+    assert adventure.world.history and set(adventure.factions) == {"fishers"}
+    assert (out / "factions" / "fishers.yaml").is_file()
 
 
 def test_empty_existing_out_folder_is_accepted(demo_env, tmp_path):
@@ -344,10 +345,175 @@ def test_seeds_option_keeps_seed_ids_and_writes_seeds_yaml(demo_env, tmp_path):
     assert load_adventure(out).npcs["warden"].name == "Смотритель"
 
 
+def test_seeds_of_any_v2_section_are_locked_and_written_unchanged(demo_env, tmp_path):
+    # Заготовки v2: мир (закрепляет шаг world целиком), бог и связь (каждая сущность закреплена).
+    deity = {
+        "id": "sea-mother",
+        "name": "Морская мать",
+        "title": "Хозяйка глубин",
+        "domains": ["море"],
+        "symbol": "Ракушка.",
+        "dogma": "Море берёт своё.",
+        "appearance": "Женщина из пены.",
+        "attitude_to_mortals": "Равнодушна.",
+    }
+    relation = {
+        "id": "otto-worships-sea-mother",
+        "a": "npc:otto",
+        "b": "deity:sea-mother",
+        "kind": "worships",
+        "mutual": False,
+    }
+    world = {"history": "Коса стоит на костях утопленников."}
+    seeds = tmp_path / "seeds.yaml"
+    seeds.write_text(
+        yaml.safe_dump(
+            {"world": world, "deities": [deity], "relations": [relation]}, allow_unicode=True
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+
+    code = generate_into(out, "--seeds", str(seeds))
+
+    assert code == 0
+    adventure = load_adventure(out)
+    assert adventure.world.history == world["history"]
+    assert adventure.deities["sea-mother"].model_dump(mode="json", exclude_defaults=True) == deity
+    assert relation["id"] in {rel.id for rel in adventure.relations}
+    assert yaml.safe_load((out / "seeds.yaml").read_text(encoding="utf-8")) == ["sea-mother"]
+
+
+V2_SCENARIO = DEMO_SCENARIO.with_name("generator_v2_demo.yaml")
+
+
+def seed_npc_with_relations(npc_id: str, location_id: str, *relations: dict[str, str]) -> dict:
+    """NPC заготовки в форме DND-1: связи лежат внутри NPC (`npcs[].relations`)."""
+    return {
+        "id": npc_id,
+        "name": "Смотритель",
+        "role": "сторож",
+        "appearance": "Седой.",
+        "manner": "Молчалив.",
+        "motive": "Сберечь покой мёртвых.",
+        "location_id": location_id,
+        "relations": list(relations),
+    }
+
+
+def write_seeds(tmp_path: Path, seeds: dict[str, Any]) -> Path:
+    path = tmp_path / "seeds.yaml"
+    path.write_text(yaml.safe_dump(seeds, allow_unicode=True), encoding="utf-8")
+    return path
+
+
+def test_v1_relations_of_a_seed_npc_reach_the_graph_and_stay_locked(demo_env, tmp_path):
+    # Р8 и README B2: связи сида-NPC в старой форме переходят в граф по правилам движка.
+    warden = seed_npc_with_relations(
+        "warden", "chapel", {"npc_id": "otto", "kind": "sibling", "note": "Старший брат."}
+    )
+    out = tmp_path / "out"
+
+    code = generate_into(out, "--seeds", str(write_seeds(tmp_path, {"npcs": [warden]})))
+
+    assert code == 0
+    adventure = load_adventure(out)
+    moved = next(rel for rel in adventure.relations if rel.id == "otto-kin-warden")
+    assert (moved.a, moved.b, moved.kind, moved.mutual) == ("npc:otto", "npc:warden", "kin", False)
+    assert moved.note == "брат или сестра; Старший брат."
+    npc_file = yaml.safe_load((out / "npcs" / "warden.yaml").read_text(encoding="utf-8"))
+    assert "relations" not in npc_file
+    assert yaml.safe_load((out / "seeds.yaml").read_text(encoding="utf-8")) == ["warden"]
+
+
+def test_a_v1_relation_of_a_seed_npc_wins_over_the_same_relation_of_the_model(
+    monkeypatch, tmp_path
+):
+    # Воспроизведение находки B3.2: Ильза из заготовки соперничает с Брамом, которого создаст
+    # модель; модель присылает свою связь с тем же id — побеждает закреплённая связь заготовки.
+    monkeypatch.setenv("FAKE_LLM_SCENARIO", str(V2_SCENARIO))
+    ilsa = seed_npc_with_relations("ilsa", "harbor", {"npc_id": "bram", "kind": "rival"})
+    out = tmp_path / "out"
+
+    code = generate_into(
+        out, "--hours", "2", "--seeds", str(write_seeds(tmp_path, {"npcs": [ilsa]}))
+    )
+
+    assert code == 0
+    [rival] = [rel for rel in load_adventure(out).relations if rel.id == "bram-rival-ilsa"]
+    assert (rival.note, rival.mutual) == ("", False)
+
+
+@pytest.mark.parametrize("npc_id", ["Брам!", "../bram"])
+def test_a_v1_relation_to_an_id_that_cannot_be_an_npc_exits_with_2_before_any_model_call(
+    npc_id, model_calls, tmp_path, capsys
+):
+    warden = seed_npc_with_relations("warden", "chapel", {"npc_id": npc_id, "kind": "rival"})
+
+    code = generate_into(
+        tmp_path / "out", "--seeds", str(write_seeds(tmp_path, {"npcs": [warden]}))
+    )
+
+    printed = capsys.readouterr()
+    assert code == 2
+    assert model_calls == []
+    lines = printed.err.splitlines()
+    assert len(lines) == 1 and lines[0].startswith("Ошибка: файл сидов ")
+    assert npc_id not in printed.err
+    assert not (tmp_path / "out").exists()
+
+
+def test_a_custom_statblock_whose_id_is_not_a_file_name_exits_with_2_before_any_model_call(
+    model_calls, tmp_path, capsys
+):
+    monster = {
+        "id": "Ash Priest",
+        "name": "Жрец",
+        "name_en": "Priest",
+        "cr": 1,
+        "xp": 200,
+        "ac": 12,
+        "hp": 20,
+        "hp_dice": "4d8",
+        "speed": 30,
+        "scores": {"str": 10, "dex": 10, "con": 10, "int": 10, "wis": 10, "cha": 10},
+        "actions": [{"id": "staff", "name": "Посох", "kind": "other"}],
+    }
+
+    code = generate_into(
+        tmp_path / "out", "--seeds", str(write_seeds(tmp_path, {"monsters": [monster]}))
+    )
+
+    assert code == 2
+    assert model_calls == []
+    assert "Ash Priest" not in capsys.readouterr().err
+
+
+def test_a_rejected_assembly_exits_with_2_without_a_traceback_or_input_values(
+    demo_env, monkeypatch, tmp_path, capsys
+):
+    # Последний барьер: если сборка приключения всё же отвергнет данные, команда отвечает строкой
+    # «Ошибка: …» и кодом 2, без трассировки и без значений из данных.
+    def rejecting(draft):
+        return Adventure.model_validate({"id": "sk-LEAK-assembly value"})
+
+    monkeypatch.setattr(pipeline, "to_adventure", rejecting)
+    out = tmp_path / "out"
+
+    code = generate_into(out)
+
+    printed = capsys.readouterr()
+    assert code == 2
+    assert printed.err.startswith("Ошибка: ")
+    assert "Traceback" not in printed.err
+    assert "sk-LEAK" not in printed.out + printed.err
+    assert not out.exists()
+
+
 @pytest.mark.parametrize(
     "content",
     [
-        "monsters: []",  # неизвестный раздел
+        "dragons: []",  # неизвестный раздел
         "npcs: [{id: warden}]",  # неполная сущность
         "npcs: что-то не то",
         "[1, 2",  # битый YAML
@@ -573,6 +739,154 @@ def test_seeds_that_are_a_folder_exit_with_2_naming_the_reason_without_errno(
     assert "[Errno 0]" not in error
 
 
+# --- пожелания по шагам (--wishes) ---
+
+
+@pytest.fixture
+def asked(monkeypatch):
+    """Запросы к модели: фабрика отдаёт `FakeProvider` демо, обёрнутый записью запросов."""
+    requests: list[Any] = []
+
+    class Recording:
+        name = "recording"
+
+        def __init__(self) -> None:
+            self._fake = FakeProvider(load_scenario(DEMO_SCENARIO))
+
+        async def complete_json(self, req, schema):
+            requests.append(req)
+            return await self._fake.complete_json(req, schema)
+
+    monkeypatch.setattr(cli, "make_provider", lambda settings, **kwargs: Recording())
+    return requests
+
+
+def write_wishes(tmp_path: Path, content: str) -> Path:
+    wishes = tmp_path / "wishes.yaml"
+    wishes.write_text(content, encoding="utf-8")
+    return wishes
+
+
+def test_wishes_reach_the_prompt_of_their_own_step_in_a_data_block(asked, tmp_path):
+    wishes = write_wishes(tmp_path, "world: Пусть будут пираты\nnpcs: Говорящий кот\n")
+
+    code = generate_into(tmp_path / "out", "--wishes", str(wishes))
+
+    assert code == 0
+    prompts = {request.purpose: request.prompt for request in asked}
+    assert '<данные>\n"Пусть будут пираты"\n</данные>' in prompts["generator.world"]
+    assert '<данные>\n"Говорящий кот"\n</данные>' in prompts["generator.npcs"]
+    assert "Говорящий кот" not in prompts["generator.world"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "dragons: Больше драконов",  # неизвестный шаг
+        "world: [1, 2]",  # пожелание не строка
+        "world: ''",  # пустое пожелание
+        "[1, 2",  # битый YAML
+        "- world",  # корень не словарь
+    ],
+)
+def test_broken_wishes_exit_with_2_before_any_model_call(content, model_calls, tmp_path, capsys):
+    wishes = write_wishes(tmp_path, content)
+
+    code = generate_into(tmp_path / "out", "--wishes", str(wishes))
+
+    printed = capsys.readouterr()
+    assert code == 2
+    assert model_calls == []
+    assert printed.out == ""
+    lines = printed.err.splitlines()
+    assert len(lines) == 1 and lines[0].startswith("Ошибка: файл пожеланий ")
+    assert "wishes.yaml" in lines[0]
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[sk-LEAK-wishes",  # битый YAML, секрет у ошибки
+        "world: !sk-LEAK-wishes 1",  # секрет в имени тега
+        "world: [sk-LEAK-wishes]",  # секрет вместо строки
+        "world: &sk-LEAK-wishes x",  # секрет в имени якоря
+    ],
+)
+def test_wishes_errors_never_quote_the_wishes_file(content, model_calls, tmp_path, capsys):
+    wishes = write_wishes(tmp_path, content)
+
+    code = generate_into(tmp_path / "out", "--wishes", str(wishes))
+
+    error = capsys.readouterr().err
+    assert code == 2
+    assert "wishes.yaml" in error
+    assert "sk-LEAK" not in error
+
+
+@pytest.mark.parametrize("key", HOSTILE_KEYS.values(), ids=HOSTILE_KEYS.keys())
+def test_wishes_with_an_unknown_step_of_terminal_escapes_print_it_escaped(
+    key, model_calls, tmp_path, capsys
+):
+    wishes = tmp_path / "wishes.yaml"
+    wishes.write_text(yaml.safe_dump({key: "пожелание"}, allow_unicode=True), encoding="utf-8")
+
+    code = generate_into(tmp_path / "out", "--wishes", str(wishes))
+
+    printed = capsys.readouterr()
+    assert code == 2
+    assert model_calls == []
+    assert printed.err.strip().isprintable()
+    assert "\\x1b" in printed.err
+
+
+def test_a_wish_of_2000_characters_reaches_its_prompt_whole(asked, tmp_path):
+    wish = "я" * 2000
+    wishes = write_wishes(tmp_path, f"npcs: {wish}\n")
+
+    code = generate_into(tmp_path / "out", "--wishes", str(wishes))
+
+    assert code == 0
+    [prompt] = [request.prompt for request in asked if request.purpose == "generator.npcs"]
+    assert f'<данные>\n"{wish}"\n</данные>' in prompt
+
+
+def test_a_wish_over_2000_characters_exits_with_2_without_quoting_it(model_calls, tmp_path, capsys):
+    wish = ("sk-LEAK-wish " * 200)[:2001]
+    wishes = write_wishes(tmp_path, yaml.safe_dump({"npcs": wish}, allow_unicode=True))
+
+    code = generate_into(tmp_path / "out", "--wishes", str(wishes))
+
+    printed = capsys.readouterr()
+    assert code == 2
+    assert model_calls == []
+    lines = printed.err.splitlines()
+    assert len(lines) == 1 and lines[0].startswith("Ошибка: файл пожеланий ")
+    assert "npcs" in lines[0]
+    assert "sk-LEAK" not in printed.out + printed.err
+    assert not (tmp_path / "out").exists()
+
+
+def test_missing_wishes_file_exits_with_2_before_any_model_call(model_calls, tmp_path, capsys):
+    code = generate_into(tmp_path / "out", "--wishes", str(tmp_path / "nope.yaml"))
+
+    assert code == 2
+    assert model_calls == []
+    assert "nope.yaml" in capsys.readouterr().err
+
+
+def test_wishes_error_keeps_neither_the_cause_nor_the_context(tmp_path):
+    wishes = write_wishes(tmp_path, "world: [sk-LEAK-wishes]")
+
+    with pytest.raises(cli.CliError) as error:
+        cli._load_wishes(wishes)
+
+    story = "".join(traceback.format_exception(error.value))
+    assert "sk-leak" not in story.lower()
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
 # --- папка вывода ---
 
 
@@ -763,8 +1077,8 @@ def test_texts_from_the_model_in_a_successful_run_never_carry_terminal_controls(
     def hostile_texts(answers):
         answers["generator.concept"]["title"] = "Шёпот\x1b]52;c;ZWNobyBwd25lZA==\x07"
         answers["generator.concept"]["pitch"] = "Завязка\x1b[2K\rПриключение записано"
-        for detail in answers["generator.location_detail"]:
-            detail["read_aloud"] = "Ветер\x1b[31mсвистит"
+        for contents in answers["generator.location_contents"]:
+            contents["read_aloud"] = "Ветер\x1b[31mсвистит"
 
     scenario = write_scenario(tmp_path / "hostile-texts.yaml", hostile_texts)
     monkeypatch.setenv("FAKE_LLM_SCENARIO", str(scenario))

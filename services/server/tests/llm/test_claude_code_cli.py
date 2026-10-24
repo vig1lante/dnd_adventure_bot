@@ -27,6 +27,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import dnd_server
 from dnd_server.app import create_app
+from dnd_server.authoring.draft import AuthoringDraft
+from dnd_server.authoring.steps import run_step
 from dnd_server.config import Settings
 from dnd_server.games.schemas import CreateGameIn
 from dnd_server.llm.base import (
@@ -41,6 +43,7 @@ from dnd_server.llm.base import (
 )
 from dnd_server.llm.claude_code_cli import ClaudeCodeCliProvider, ToolRecorder
 from dnd_server.llm.factory import ConfigError, make_provider
+from dnd_server.llm.fake import load_scenario
 from dnd_server.llm.internal_api import TurnTokens
 
 FAKE_CLAUDE = Path(__file__).with_name("fake_claude.py")
@@ -1359,7 +1362,7 @@ async def test_every_answer_by_schema_goes_to_the_cheap_model_without_effort(tmp
 # `run_turn`. На этом держится правило адаптера «ответ по схеме → дешёвая модель»: новый
 # `JsonRequest` в другом модуле (не служебная роль) должен сначала пересмотреть это правило.
 SERVICE_ROLE_MODULES = {
-    "authoring/pipeline.py",  # генератор приключений (cheap=True)
+    "authoring/steps.py",  # шаги генератора приключений по ролям (cheap=True)
     "characters/flavor.py",  # описание героя и «помоги написать» (cheap=True)
     "dm/chronicle.py",  # летопись (cheap=True)
     "dm/weaving.py",  # вплетение (cheap=False: у API — основная модель, у CLI — дешёвая по §11)
@@ -1381,6 +1384,48 @@ def test_only_the_service_roles_of_the_spec_build_answers_by_schema():
     }
 
     assert builders == SERVICE_ROLE_MODULES
+
+
+# Стык генератора и адаптера: шаги генератора (`authoring/steps.py`) — ответы по схеме, у CLI они
+# идут на дешёвую модель, а неподходящий ответ повторяется не больше двух раз.
+GENERATOR_V2_DEMO = Path(__file__).resolve().parents[1] / "scenarios" / "generator_v2_demo.yaml"
+
+
+def world_answer() -> str:
+    """Ответ CLI с ответом шага `world` из демо-сценария генератора v2."""
+    world = load_scenario(GENERATOR_V2_DEMO).json_answers["generator.world"]
+    return reply(result=json.dumps(world, ensure_ascii=False))
+
+
+async def test_a_generator_step_goes_to_the_cheap_model_of_the_cli(tmp_path):
+    harness = Harness(
+        tmp_path,
+        model="opus",
+        effort="high",
+        cheap_model="haiku",
+        FAKE_CLAUDE_REPLIES=json.dumps([world_answer()]),
+    )
+
+    draft = await run_step(harness.provider, AuthoringDraft(), "world")
+
+    assert draft.world is not None and draft.world.regions
+    assert flags_after_tools(harness.only_run()["argv"]) == ["--model", "haiku"]
+
+
+async def test_a_generator_step_retries_a_wrong_answer_at_most_twice(tmp_path):
+    wrong = reply(result=json.dumps({"history": ""}))  # пустая история не проходит схему шага
+    harness = Harness(
+        tmp_path,
+        cheap_model="haiku",
+        FAKE_CLAUDE_REPLIES=json.dumps([wrong, wrong, wrong, world_answer()]),
+    )
+
+    with pytest.raises(ProviderError):
+        await run_step(harness.provider, AuthoringDraft(), "world")
+
+    runs = harness.prompt_runs()
+    assert len(runs) == 3  # первая попытка и не больше двух повторов: четвёртый ответ не нужен
+    assert all(flags_after_tools(run["argv"]) == ["--model", "haiku"] for run in runs)
 
 
 async def test_without_a_cheap_model_answers_by_schema_go_to_the_main_model(tmp_path):

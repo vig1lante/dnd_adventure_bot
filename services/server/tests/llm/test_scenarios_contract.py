@@ -17,8 +17,9 @@ from dnd_engine.modules import build_ruleset
 from dnd_engine.state import RulesRef
 from dnd_engine.tools import build_registry
 from dnd_server.authoring import schemas
-from dnd_server.authoring.pipeline import STEPS, GenerationRequest, generate
-from dnd_server.authoring.schemas import Seeds
+from dnd_server.authoring.draft import AuthoringDraft, DraftSettings
+from dnd_server.authoring.pipeline import generate
+from dnd_server.authoring.steps import STEPS
 from dnd_server.characters.flavor import BackstoryOut, PersonaOut
 from dnd_server.dm.weaving import WeavingOut
 from dnd_server.llm.base import JsonRequest, ProviderError, TurnRequest
@@ -54,20 +55,33 @@ MANUAL_RUN_PLAYERS: dict[str, tuple[int, ...]] = {
 SCHEMA_BY_STEP: dict[str, type[BaseModel]] = {
     "concept": schemas.ConceptOut,
     "world": schemas.WorldOut,
+    "pantheon": schemas.PantheonOut,
+    "factions": schemas.FactionsOut,
+    "plot": schemas.PlotOut,
     "locations": schemas.LocationGraphOut,
-    "location_detail": schemas.LocationDetailOut,
+    "location_contents": schemas.LocationContentsOut,
     "npcs": schemas.NpcsOut,
+    "relations": schemas.RelationsOut,
     "encounters": schemas.EncountersOut,
     "items": schemas.ItemsOut,
     "clues": schemas.CluesOut,
 }
-GENERATOR_REQUEST = GenerationRequest(
-    pitch="Колокол в часовне звонит сам по ночам.",
-    hours=1,
-    players=6,
-    level=3,
-    modules=("bg3_flavor", "campfire"),
-)
+# Демо-сценарии генератора и длина игры в их заказе (часы): оба проходят генератор целиком.
+GENERATOR_DEMOS = {"generator_demo.yaml": 1, "generator_v2_demo.yaml": 2}
+
+
+def generator_draft(hours: float) -> AuthoringDraft:
+    """Заказ демо: 6 игроков, 3 уровень, модули bg3_flavor и campfire."""
+    settings = DraftSettings(
+        pitch="Колокол в часовне звонит сам по ночам.",
+        target_hours=hours,
+        party_size=6,
+        party_level=3,
+        modules=("bg3_flavor", "campfire"),
+    )
+    return AuthoringDraft(settings=settings)
+
+
 EMPTY_TURN = TurnRequest(system="", adventure_brief="", context="", tools=())
 
 
@@ -110,7 +124,7 @@ def generator_purposes(scenario: Scenario) -> list[str]:
 
 
 def test_the_scenarios_of_the_block_are_in_the_folder():
-    assert {"basic_round.yaml", "generator_demo.yaml", "e2e_full.yaml"} <= {
+    assert {"basic_round.yaml", *GENERATOR_DEMOS, "e2e_full.yaml"} <= {
         path.name for path in SCENARIO_FILES
     }
 
@@ -337,18 +351,22 @@ def test_the_steps_known_to_the_tests_are_the_steps_of_the_generator():
     assert set(SCHEMA_BY_STEP) == set(STEPS)
 
 
-def test_generator_demo_answers_every_step():
-    scenario = load_scenario(SCENARIOS_DIR / "generator_demo.yaml")
+@pytest.mark.parametrize("name", GENERATOR_DEMOS)
+def test_generator_demo_answers_every_step(name):
+    scenario = load_scenario(SCENARIOS_DIR / name)
 
     assert set(generator_purposes(scenario)) == {f"generator.{step}" for step in STEPS}
 
 
-async def test_generator_demo_leaves_no_answer_unused():
+@pytest.mark.parametrize(("name", "hours"), GENERATOR_DEMOS.items())
+async def test_generator_demo_leaves_no_answer_unused(name, hours):
     # Лишний ответ в сценарии прячет расхождение с генератором: он никогда не будет сыгран.
-    scenario = load_scenario(SCENARIOS_DIR / "generator_demo.yaml")
+    scenario = load_scenario(SCENARIOS_DIR / name)
     provider = CountingProvider(scenario)
 
-    await generate(provider, GENERATOR_REQUEST, Seeds())
+    result = await generate(provider, generator_draft(hours))
+
+    assert not result.report.blocking
 
     for purpose in generator_purposes(scenario):
         expected = len(answers_of(scenario, purpose))

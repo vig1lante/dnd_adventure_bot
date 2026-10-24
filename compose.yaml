@@ -1,6 +1,9 @@
 # Локальный стенд одной командой: `docker compose up --build`, затем http://localhost:5173/?dev=dev-1
 # (README, раздел «Запуск в Docker Compose»). Это dev-режим для браузера: вход dev-1…6 и мастер —
 # Claude по подписке. Порт открыт только на этой машине (127.0.0.1); туннель к нему не подключать.
+# Генератор приключений — отдельный сервис generator из профиля tools: `docker compose up` его не
+# поднимает, запуск — `docker compose run --rm generator dnd-generate …` (README, раздел
+# «Генерация приключения»).
 name: dnd-adventure
 
 services:
@@ -15,12 +18,18 @@ services:
       # Стенд всегда dev: claude_code_cli и dev-вход работают только в нём.
       APP_ENV: dev
       CLAUDE_CLI_PATH: /home/app/.local/bin/claude
+      # Каталог приключений — том ниже, а не копия из образа.
+      CONTENT_DIR: /app/content/adventures
       # Бот браузерному стенду не нужен: с токеном он стал бы опрашивать Telegram.
       TELEGRAM_BOT_TOKEN: ""
       WEBAPP_PUBLIC_URL: http://localhost:5173
     volumes:
       # База игр — та же папка data/, что и при запуске без Docker. Не запускайте оба сразу.
       - ${DND_DATA_DIR:-./data}:/app/data
+      # Приключения — папка content/adventures с диска, только на чтение: пишет в неё лишь
+      # генератор (сервис generator). Каталог сервер читает при старте, поэтому новое или
+      # исправленное приключение видно после `docker compose restart server`, без пересборки образа.
+      - ./content/adventures:/app/content/adventures:ro
       # Вход Claude Code в подписку (один раз, см. README) переживает пересборку образа.
       - claude-config:/home/app/.claude
     ports:
@@ -47,6 +56,31 @@ services:
     depends_on:
       server:
         condition: service_healthy
+        # Vite живёт в сети контейнера сервера: `docker compose restart server` перезапускает
+        # и его.
+        restart: true
+
+  generator:
+    # Тот же образ, что у сервера. Профиль tools: сервис запускается только явно, командой
+    # `docker compose run --rm generator dnd-generate …`; портов и базы игр у него нет.
+    profiles: [tools]
+    build:
+      context: .
+      dockerfile: services/server/Dockerfile
+    # Провайдер и модель — из .env, как у сервера; для пробы без модели README передаёт
+    # `-e LLM_PROVIDER=fake -e FAKE_LLM_SCENARIO=…`.
+    env_file: .env
+    environment:
+      # claude_code_cli (модель подписки) работает только в dev.
+      APP_ENV: dev
+      CLAUDE_CLI_PATH: /home/app/.local/bin/claude
+      # Генератору токен бота не нужен.
+      TELEGRAM_BOT_TOKEN: ""
+    volumes:
+      # Сюда dnd-generate пишет папку приключения (`--out content/adventures/<slug>`).
+      - ./content/adventures:/app/content/adventures
+      # Тот же вход в подписку, что у сервера.
+      - claude-config:/home/app/.claude
 
 volumes:
   claude-config:

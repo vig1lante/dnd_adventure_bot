@@ -1,31 +1,44 @@
-"""Схемы ответов модели на шагах генератора приключений (план B5.6) и формат файла сидов.
+"""Схемы ответов модели на шагах генератора приключений формата v2 (план DND-2 B3.1, спека §8, §9).
 
 Ответ модели — недоверенный ввод: схемы строгие (`extra="forbid"`), у строк и списков есть
 пределы, id подходят под шаблон схемы движка, Сл проверок берутся из таблицы 5/10/15/20/25/30
-(типы `EntityId`, `TableDC` и `CheckSpec` из `dnd_engine.adventure.schema`). Схемы описывают только
-то, что решает модель. Связи, которые следуют из других шагов (бой локации, улики места), и все
-числа правил собирает код; правила целостности (три улики, достижимость, бюджет боя) проверяет
-валидатор движка, поэтому схема допускает, например, открытие с одной уликой.
+(типы `EntityId`, `TableDC` и `CheckSpec` из `dnd_engine.adventure.schema`). Пределы числа сущностей
+(богов, фракций, локаций, NPC, связей, боёв, предметов) — это и есть ограничение размера мира,
+который строит генератор: контекст мастера не разрастается от сгенерированного приключения.
+
+Схемы описывают только то, что решает модель. Связи, которые следуют из других шагов (бой локации,
+улики места), и все числа правил собирает код; правила целостности (три улики, достижимость,
+бюджет боя, ссылки) проверяет валидатор движка, поэтому схема допускает, например, открытие с
+одной уликой. Исключение — свой статблок монстра (`EncountersOut.monsters`): это модель движка
+`MonsterDef` целиком, а её числа проверяет валидатор приключения.
 """
 
 from collections import Counter
 from collections.abc import Iterable
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 from dnd_engine.adventure.schema import (
     ID_PATTERN,
+    REF_KINDS,
     CheckSpec,
     EntityId,
-    Item,
-    Location,
-    Npc,
+    RelationKind,
     TableDC,
+    is_entity_id,
 )
 from dnd_engine.checks import VALID_DCS
+from dnd_engine.content import MonsterDef
 
-# Сл из таблицы движка текстом: её называют схема и промпты шагов.
+# Сл из таблицы движка текстом: её называют схема и промпты ролей.
 DC_VALUES = ", ".join(str(dc) for dc in sorted(VALID_DCS))
 
 # Пределы текстов: заголовок, одна строка и абзац. Ответ модели не должен раздувать файлы YAML.
@@ -33,18 +46,56 @@ Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max
 Line = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=300)]
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
 Direction = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)]
+# Необязательная строка (тайна, что знают игроки): пусто — поля нет.
+OptionalLine = Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)]
 
-# Замок выхода — только предмет-ключ: важное запирается предметом, а не флагом. Замка `flag:…`
-# (в том числе `flag:encounter:…`, который открывается уже в начале боя) схема не пропускает.
-LockRef = Annotated[str, StringConstraints(pattern=rf"^item:{ID_PATTERN[1:]}")]
+_ID_TAIL = ID_PATTERN[1:]  # шаблон id без «^»: хвост ссылки «вид:id»
+
+# Замок выхода и места — только предмет-ключ: важное запирается предметом, а не флагом. Замка
+# `flag:…` (в том числе `flag:encounter:…`, который открывается уже в начале боя) схема не пропускает.
+LockRef = Annotated[str, StringConstraints(pattern=rf"^item:{_ID_TAIL}")]
 # Держатель предмета в генераторе — локация или NPC; `gone` и персонажей в приключении нет.
-HolderRef = Annotated[str, StringConstraints(pattern=rf"^(location|npc):{ID_PATTERN[1:]}")]
+HolderRef = Annotated[str, StringConstraints(pattern=rf"^(location|npc):{_ID_TAIL}")]
 # Где лежит улика: место, NPC или предмет (локацию улика не называет).
-CluePlace = Annotated[str, StringConstraints(pattern=rf"^(feature|npc|item):{ID_PATTERN[1:]}")]
+CluePlace = Annotated[str, StringConstraints(pattern=rf"^(feature|npc|item):{_ID_TAIL}")]
+# Конец связи графа — NPC, фракция, бог или место (ссылка формата v2).
+EndRef = Annotated[str, StringConstraints(pattern=rf"^({'|'.join(REF_KINDS)}):{_ID_TAIL}")]
+# Злодей сюжета — NPC или бог; лидер фракции — NPC.
+VillainRef = Annotated[str, StringConstraints(pattern=rf"^(npc|deity):{_ID_TAIL}")]
+NpcRef = Annotated[str, StringConstraints(pattern=rf"^npc:{_ID_TAIL}")]
+
+
+def _file_name_id(monster: MonsterDef) -> MonsterDef:
+    # id своего статблока становится именем файла `monsters/<id>.yaml`. `Adventure` проверяет это
+    # только при сборке, то есть уже после всех вызовов модели; здесь — сразу, в схеме ответа и в
+    # черновике. В сообщении нет самого id: его выбирала модель или чужой файл.
+    if not is_entity_id(monster.id):
+        raise ValueError(f"id своего статблока не подходит под шаблон {ID_PATTERN}")
+    return monster
+
+
+# Свой статблок (модель движка `MonsterDef`) с id по шаблону id сущностей.
+CustomMonster = Annotated[MonsterDef, AfterValidator(_file_name_id)]
+
+MAX_DEITIES = 6
+MAX_FACTIONS = 6
+MAX_LOCATIONS = 12
+MAX_NPCS = 12
+MAX_RELATIONS = 24
+MAX_ENCOUNTERS = 8
+MAX_CUSTOM_MONSTERS = 3
+MAX_ITEMS = 20
 
 
 class _Out(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class _JournalOut(_Out):
+    """Поля дневника (спека §8, §12): что могут знать игроки, без тайн, и известно ли с начала."""
+
+    public: OptionalLine = Field(default="", description="Что могут знать игроки; без тайн")
+    known_at_start: bool = Field(default=False, description="Известно отряду с начала игры")
 
 
 def _require_unique(kind: str, ids: Iterable[str]) -> None:
@@ -57,13 +108,6 @@ def _require_unique(kind: str, ids: Iterable[str]) -> None:
 # --- generator.concept ---
 
 
-class ActOut(_Out):
-    id: EntityId
-    title: Name
-    summary: Text
-    key_scenes: list[Line] = Field(default_factory=list, max_length=6)
-
-
 class RevelationOut(_Out):
     id: EntityId
     statement: Text = Field(description="Вывод, к которому должны прийти игроки; без улик")
@@ -74,15 +118,13 @@ class ConceptOut(_Out):
     title: Name
     pitch: Text = Field(description="Завязка, которую расскажут игрокам; без тайн сюжета")
     tone: Line
-    acts: list[ActOut] = Field(min_length=1, max_length=5)
-    endings: list[Text] = Field(min_length=1, max_length=5)
+    journal_intro: Text = Field(description="Главное для дневника: завязка и цель отряда")
     revelations: list[RevelationOut] = Field(
         min_length=1, max_length=5, description="Улики к открытиям придумает отдельный шаг"
     )
 
     @model_validator(mode="after")
     def _unique_ids(self) -> Self:
-        _require_unique("acts", (act.id for act in self.acts))
         _require_unique("revelations", (revelation.id for revelation in self.revelations))
         return self
 
@@ -90,15 +132,97 @@ class ConceptOut(_Out):
 # --- generator.world ---
 
 
-class FactionOut(_Out):
+class RegionOut(_JournalOut):
+    id: EntityId
     name: Name
-    goal: Line
+    description: Text
+
+
+class RumorOut(_JournalOut):
+    text: Line
+    true: bool = Field(description="Правдив ли слух: знает только мастер")
 
 
 class WorldOut(_Out):
     history: Text
-    factions: list[FactionOut] = Field(default_factory=list, max_length=5)
-    rumors: list[Line] = Field(default_factory=list, max_length=8)
+    regions: list[RegionOut] = Field(default_factory=list, max_length=6)
+    rumors: list[RumorOut] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def _unique_ids(self) -> Self:
+        _require_unique("regions", (region.id for region in self.regions))
+        return self
+
+
+# --- generator.pantheon ---
+
+
+class DeityOut(_JournalOut):
+    id: EntityId
+    name: Name
+    title: Name
+    domains: list[Name] = Field(min_length=1, max_length=4)
+    symbol: Line
+    dogma: Line
+    appearance: Line
+    attitude_to_mortals: Line
+    secret: OptionalLine = ""
+    avatar_statblock: EntityId | None = Field(
+        default=None, description="id монстра SRD или своего статблока, если бог может явиться"
+    )
+
+
+class PantheonOut(_Out):
+    deities: list[DeityOut] = Field(max_length=MAX_DEITIES)
+
+    @model_validator(mode="after")
+    def _unique_ids(self) -> Self:
+        _require_unique("deities", (deity.id for deity in self.deities))
+        return self
+
+
+# --- generator.factions ---
+
+
+class FactionOut(_JournalOut):
+    id: EntityId
+    name: Name
+    goal: Line
+    methods: Line
+    leader: NpcRef | None = Field(default=None, description='Лидер: "npc:<id>"')
+    base_location: EntityId | None = Field(default=None, description="id локации базы")
+    secret: OptionalLine = ""
+    attitude_to_party: int = Field(default=0, ge=-3, le=3)
+
+
+class FactionsOut(_Out):
+    factions: list[FactionOut] = Field(max_length=MAX_FACTIONS)
+
+    @model_validator(mode="after")
+    def _unique_ids(self) -> Self:
+        _require_unique("factions", (faction.id for faction in self.factions))
+        return self
+
+
+# --- generator.plot ---
+
+
+class ActOut(_Out):
+    id: EntityId
+    title: Name
+    summary: Text
+    key_scenes: list[Line] = Field(default_factory=list, max_length=6)
+
+
+class PlotOut(_Out):
+    acts: list[ActOut] = Field(min_length=1, max_length=5)
+    endings: list[Text] = Field(min_length=1, max_length=5)
+    villain: VillainRef | None = Field(default=None, description='"npc:<id>" или "deity:<id>"')
+
+    @model_validator(mode="after")
+    def _unique_ids(self) -> Self:
+        _require_unique("acts", (act.id for act in self.acts))
+        return self
 
 
 # --- generator.locations ---
@@ -117,17 +241,17 @@ class ExitOut(_Out):
     )
 
 
-class LocationNodeOut(_Out):
+class LocationNodeOut(_JournalOut):
     id: EntityId
     name: Name
-    region: Line = ""
+    region: OptionalLine = ""
     exits: list[ExitOut] = Field(min_length=1, max_length=6)
 
 
 class LocationGraphOut(_Out):
     start_location: EntityId
     finale_location: EntityId
-    locations: list[LocationNodeOut] = Field(max_length=12)
+    locations: list[LocationNodeOut] = Field(max_length=MAX_LOCATIONS)
 
     @model_validator(mode="after")
     def _unique_ids(self) -> Self:
@@ -135,7 +259,14 @@ class LocationGraphOut(_Out):
         return self
 
 
-# --- generator.location_detail ---
+# --- generator.location_contents ---
+
+
+class HiddenItemOut(_Out):
+    """Находка тайника: предмет, который лежит внутри места (его создаст шаг items)."""
+
+    kind: Literal["item"]
+    id: EntityId
 
 
 class FeatureOut(_Out):
@@ -146,45 +277,58 @@ class FeatureOut(_Out):
         default=None,
         description="Проверка, которой достают находку места; без неё место просто есть",
     )
+    locked_by: LockRef | None = Field(default=None, description='Замок: "item:<id ключа>"')
+    reveals: list[HiddenItemOut] = Field(
+        default_factory=list, max_length=2, description="Тайник: предметы внутри места"
+    )
 
 
-class LocationDetailOut(_Out):
+class SecretRevealOut(_Out):
+    kind: Literal["clue", "item", "flag", "exit"]
+    id: EntityId
+
+
+class SecretOut(_Out):
+    id: EntityId = Field(description="Уникален во всём приключении")
+    text: Text = Field(description="Тайна места для мастера")
+    check: CheckSpec | None = Field(default=None, description="Проверка, которой её раскрывают")
+    reveals: list[SecretRevealOut] = Field(default_factory=list, max_length=3)
+
+
+class LocationContentsOut(_Out):
     read_aloud: Text = Field(description="Текст для чтения вслух; без тайн")
     dm_notes: Text | None = Field(default=None, description="Заметки мастера: тайны и тактика")
     features: list[FeatureOut] = Field(default_factory=list, max_length=5)
+    secrets: list[SecretOut] = Field(default_factory=list, max_length=3)
 
     @model_validator(mode="after")
     def _unique_ids(self) -> Self:
         _require_unique("features", (feature.id for feature in self.features))
+        _require_unique("secrets", (secret.id for secret in self.secrets))
         return self
 
 
 # --- generator.npcs ---
 
 
-class RelationOut(_Out):
-    npc_id: EntityId
-    kind: Direction = Field(description="Тип связи: sibling, parent, enemy, debtor…")
-    note: Line = ""
-
-
-class NpcOut(_Out):
+class NpcOut(_JournalOut):
     id: EntityId
     name: Name
     role: Line
     appearance: Line
     manner: Line
     motive: Line
-    secret: Line = ""
+    secret: OptionalLine = ""
     knows: list[Line] = Field(default_factory=list, max_length=6)
     attitude: int = Field(default=0, ge=-3, le=3)
-    relations: list[RelationOut] = Field(default_factory=list, max_length=5)
     location_id: EntityId
-    statblock: EntityId | None = Field(default=None, description="id монстра SRD, если NPC дерётся")
+    statblock: EntityId | None = Field(
+        default=None, description="id монстра SRD или своего статблока, если NPC дерётся"
+    )
 
 
 class NpcsOut(_Out):
-    npcs: list[NpcOut] = Field(max_length=12)
+    npcs: list[NpcOut] = Field(max_length=MAX_NPCS)
 
     @model_validator(mode="after")
     def _unique_ids(self) -> Self:
@@ -192,11 +336,39 @@ class NpcsOut(_Out):
         return self
 
 
+# --- generator.relations ---
+
+
+class RelationOut(_Out):
+    id: EntityId
+    a: EndRef
+    b: EndRef
+    kind: RelationKind = Field(description="Связь читается «a — kind для b»")
+    note: OptionalLine = ""
+    secret: bool = Field(default=False, description="Игроки о связи не знают")
+    mutual: bool = Field(default=True, description="Связь верна и в обратную сторону")
+
+    @model_validator(mode="after")
+    def _other_needs_a_note(self) -> Self:
+        if self.kind == "other" and not self.note:
+            raise ValueError("note: у связи kind other пояснение обязательно")
+        return self
+
+
+class RelationsOut(_Out):
+    relations: list[RelationOut] = Field(max_length=MAX_RELATIONS)
+
+    @model_validator(mode="after")
+    def _unique_ids(self) -> Self:
+        _require_unique("relations", (relation.id for relation in self.relations))
+        return self
+
+
 # --- generator.encounters ---
 
 
 class MonsterGroupOut(_Out):
-    monster_id: EntityId = Field(description="id монстра SRD из списка в запросе")
+    monster_id: EntityId = Field(description="id монстра SRD из списка или своего статблока")
     count: int = Field(ge=1, le=20)
 
 
@@ -206,23 +378,30 @@ class EncounterOut(_Out):
     trigger: Text
     tactics: Text
     monsters: list[MonsterGroupOut] = Field(min_length=1, max_length=4)
+    boss: bool = Field(default=False, description="Финальный или ключевой бой")
 
 
 class EncountersOut(_Out):
-    encounters: list[EncounterOut] = Field(max_length=8)
+    encounters: list[EncounterOut] = Field(max_length=MAX_ENCOUNTERS)
+    monsters: list[CustomMonster] = Field(
+        default_factory=list,
+        max_length=MAX_CUSTOM_MONSTERS,
+        description="Свои статблоки: только когда в SRD нет подходящего монстра",
+    )
 
     @model_validator(mode="after")
     def _unique_ids(self) -> Self:
         _require_unique("encounters", (encounter.id for encounter in self.encounters))
         # У локации один бой (`Location.encounter_id`).
         _require_unique("encounters.location_id", (e.location_id for e in self.encounters))
+        _require_unique("monsters", (monster.id for monster in self.monsters))
         return self
 
 
 # --- generator.items ---
 
 
-class ItemOut(_Out):
+class ItemOut(_JournalOut):
     id: EntityId
     name: Name
     description: Text
@@ -231,7 +410,7 @@ class ItemOut(_Out):
 
 
 class ItemsOut(_Out):
-    items: list[ItemOut] = Field(max_length=20)
+    items: list[ItemOut] = Field(max_length=MAX_ITEMS)
 
     @model_validator(mode="after")
     def _unique_ids(self) -> Self:
@@ -259,29 +438,4 @@ class CluesOut(_Out):
     @model_validator(mode="after")
     def _unique_ids(self) -> Self:
         _require_unique("revelations", (r.revelation_id for r in self.revelations))
-        return self
-
-
-# --- файл сидов (--seeds) ---
-
-
-class Seeds(_Out):
-    """Сущности, которые автор задал вручную: полные `Location`, `Npc` и `Item` движка.
-
-    Генератор встраивает их в приключение как есть, а их id пишет в `seeds.yaml`."""
-
-    locations: tuple[Location, ...] = ()
-    npcs: tuple[Npc, ...] = ()
-    items: tuple[Item, ...] = ()
-
-    @property
-    def ids(self) -> tuple[str, ...]:
-        return tuple(
-            entity.id for group in (self.locations, self.npcs, self.items) for entity in group
-        )
-
-    @model_validator(mode="after")
-    def _unique_ids(self) -> Self:
-        for kind in ("locations", "npcs", "items"):
-            _require_unique(kind, (entity.id for entity in getattr(self, kind)))
         return self

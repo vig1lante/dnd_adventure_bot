@@ -1,0 +1,392 @@
+# Сценарий FakeProvider для генератора приключений формата v2 (DND-2, B3.1): полный проход по всем
+# двенадцати шагам на 2 часа, 6 игроков, 3 уровень, модули bg3_flavor и campfire (запрос:
+# --hours 2 --players 6 --level 3 --modules bg3_flavor,campfire).
+# Приключение показывает всё, что строит генератор v2: мир с краями и слухами, богов, фракции с
+# лидерами и базами, сюжет со злодеем, граф связей (тайные и взаимные), тайник (место с находкой
+# предмета) и тайну места с проверкой, бой с боссом на своём статблоке и поля дневника
+# (`public`, `known_at_start`, `journal_intro`).
+# Ответы выбираются по purpose шага; generator.location_contents — по ответу на каждую локацию в
+# порядке графа (harbor, cliff-path, lighthouse, lamp-room). Повторов нет: проход без кругов
+# исправления, ни ошибок, ни предупреждений, оценка времени 133 минуты.
+json:
+  generator.concept:
+    id: crow-lighthouse
+    title: Маяк на Вороньем мысу
+    pitch: >-
+      Маяк на Вороньем мысу погас неделю назад, и с тех пор два корабля разбились о скалы.
+      Начальница гавани Ильза платит тому, кто снова зажжёт огонь и узнает, что стало со
+      смотрителем.
+    tone: морская готика с мрачным юмором
+    journal_intro: >-
+      Маяк на Вороньем мысу погас, корабли бьются о скалы. Ильза из гавани просит отряд зажечь
+      огонь и найти смотрителя.
+    revelations:
+      - id: ash-truth
+        statement: >-
+          Маяк погас не сам: жрец Веран из Пепельного круга превратил фонарную в алтарь
+          Пепельного и топит корабли, чтобы кормить своего бога.
+  generator.world:
+    history: >-
+      Вороний мыс — последний клочок суши перед открытым морем. Маяк стоит здесь триста лет, и его
+      огонь всегда считали даром Сельмары, хозяйки приливов. Старики говорят, что под маяком
+      когда-то жгли костры совсем другому богу.
+    regions:
+      - id: crow-cape
+        name: Вороний мыс
+        description: Скалистый мыс с рыбацкой гаванью внизу и маяком на вершине.
+        public: Скалистый мыс с гаванью и маяком.
+        known_at_start: true
+      - id: drowned-shoals
+        name: Утопленные мели
+        description: Подводные скалы у мыса, где разбиваются корабли, когда маяк не горит.
+        public: Мели у мыса, о которые бьются корабли.
+    rumors:
+      - text: Смотритель маяка сбежал с контрабандистами.
+        "true": false
+        known_at_start: true
+      - text: По ночам на маяке горит не огонь, а пепел.
+        "true": true
+  generator.pantheon:
+    deities:
+      - id: selmara
+        name: Сельмара
+        title: Хозяйка приливов
+        domains: [море, путь домой]
+        symbol: Раковина с жемчужиной-огоньком.
+        dogma: Держи огонь для тех, кто в море.
+        appearance: Высокая женщина в мокром плаще, с фонарём из перламутра.
+        attitude_to_mortals: Милостива к морякам и смотрителям, сурова к тем, кто грабит тонущих.
+        public: Богиня моря и маяков; ей молятся моряки.
+        known_at_start: true
+      - id: ashen-one
+        name: Пепельный
+        title: Тот, кто ест огни
+        domains: [пепел, голод]
+        symbol: Чёрная свеча без фитиля.
+        dogma: Каждый погасший огонь — пища.
+        appearance: Фигура из пепла, у которой вместо лица дым.
+        attitude_to_mortals: Считает людей дровами.
+        secret: Когда-то костры под маяком жгли ему; Сельмара погасила их и поставила маяк.
+        public: Забытый бог, о котором говорят шёпотом.
+  generator.factions:
+    factions:
+      - id: smugglers
+        name: Контрабандисты Вороньего мыса
+        goal: Возить товар мимо таможни и не попадаться.
+        methods: Тайные бухты, взятки и ложные огни на скалах.
+        leader: npc:bram
+        base_location: cliff-path
+        secret: Брам в долгу у Верана и уже показал ему дорогу к маяку.
+        public: Местные лодочники, которые не любят вопросов.
+      - id: ash-circle
+        name: Пепельный круг
+        goal: Погасить все огни побережья во славу Пепельного.
+        methods: Обряды, крушения кораблей и запугивание.
+        leader: npc:veran
+        base_location: lamp-room
+        secret: Круг — это Веран и горстка фанатиков, которых он подобрал после крушений.
+        attitude_to_party: -3
+  generator.plot:
+    acts:
+      - id: act-1
+        title: Тёмный маяк
+        summary: >-
+          Отряд приходит в гавань, говорит с Ильзой и узнаёт, что смотритель пропал. На тропе к
+          маяку видны серые следы, похожие на пепел.
+        key_scenes:
+          - Разговор с Ильзой у доски объявлений.
+          - Встреча с Брамом на тропе над обрывом.
+      - id: act-2
+        title: Утопленники на тропе
+        summary: >-
+          Мертвецы с разбитых кораблей выходят на тропу. В комнатах смотрителя отряд находит журнал
+          и ключ от фонарной.
+        key_scenes:
+          - Засада утопленников на тропе.
+          - Журнал смотрителя и тайник под половицей.
+      - id: act-3
+        title: Пепельный обряд
+        summary: >-
+          Наверху, в фонарной, Веран ведёт обряд над чашей маяка. Финальный бой с боссом — жрецом
+          и его фанатиками.
+        key_scenes:
+          - Ключ от фонарной и подъём по лестнице.
+          - Бой с Вераном у пепельного алтаря.
+    endings:
+      - Отряд побеждает Верана и снова зажигает маяк. Корабли возвращаются домой.
+      - Отряд разбивает алтарь, но Веран уходит в море. Маяк горит, а Пепельный круг затаился.
+    villain: npc:veran
+  generator.locations:
+    start_location: harbor
+    finale_location: lamp-room
+    locations:
+      - id: harbor
+        name: Гавань Вороньего мыса
+        region: Вороний мыс
+        public: Рыбацкая гавань у подножия мыса.
+        known_at_start: true
+        exits:
+          - id: to-cliff-path
+            to: cliff-path
+            direction: вверх
+            description: Узкая тропа поднимается на скалы.
+      - id: cliff-path
+        name: Тропа над обрывом
+        region: Вороний мыс
+        exits:
+          - id: to-harbor
+            to: harbor
+            direction: вниз
+            description: Тропа спускается к гавани.
+          - id: to-lighthouse
+            to: lighthouse
+            direction: к маяку
+            description: Тропа упирается в дверь маяка.
+      - id: lighthouse
+        name: Комнаты смотрителя
+        region: Вороний мыс
+        exits:
+          - id: out-to-path
+            to: cliff-path
+            direction: наружу
+            description: Дверь на тропу.
+          - id: to-lamp-room
+            to: lamp-room
+            direction: вверх
+            description: Винтовая лестница к запертой двери фонарной.
+            locked_by: item:lamp-key
+      - id: lamp-room
+        name: Фонарная
+        region: Вороний мыс
+        exits:
+          - id: down-to-rooms
+            to: lighthouse
+            direction: вниз
+            description: Лестница в комнаты смотрителя.
+  generator.location_contents:
+    - read_aloud: >-
+        Лодки скрипят у причала, пахнет рыбой и дёгтем. Над мысом чернеет башня маяка, и в ней не
+        горит ни огонька.
+      dm_notes: Ильза ждёт отряд у доски объявлений. Брам уже ушёл на тропу.
+      features:
+        - id: harbor-board
+          name: Доска объявлений
+          description: Объявление Ильзы о награде за огонь на маяке и список разбитых кораблей.
+    - read_aloud: >-
+        Тропа вьётся над обрывом. Ветер рвёт плащи, внизу ревут волны. На камнях серые разводы,
+        похожие на пепел.
+      dm_notes: >-
+        Утопленники поднимаются из-под обрыва, когда отряд проходит середину тропы. Брам курит у
+        валуна и притворяется, что ничего не видел.
+      features:
+        - id: ash-marks
+          name: Пепельные следы
+          description: Серые следы босых ног тянутся от обрыва к маяку.
+          check:
+            ability: wis
+            skill: survival
+            dc: 10
+    - read_aloud: >-
+        В комнатах смотрителя холодно. На столе раскрыт журнал, у стены стоит шкаф, а с лестницы
+        наверх тянет гарью.
+      dm_notes: >-
+        Смотритель Тобиас утонул: Веран столкнул его со скалы. Его кольцо лежит под половицей у
+        кровати.
+      features:
+        - id: keeper-logbook
+          name: Журнал смотрителя
+          description: Последние записи о гостях в сером, которые поднимались в фонарную.
+          check:
+            ability: int
+            skill: investigation
+            dc: 10
+        - id: keeper-cupboard
+          name: Шкаф смотрителя
+          description: За банками с маслом висит тяжёлый ключ.
+          reveals:
+            - kind: item
+              id: lamp-key
+      secrets:
+        - id: drowned-keeper
+          text: >-
+            Под половицей у кровати смотритель спрятал кольцо и записку: он знал, что за ним
+            придут.
+          check:
+            ability: wis
+            skill: perception
+            dc: 15
+          reveals:
+            - kind: item
+              id: keeper-ring
+            - kind: flag
+              id: keeper-fate
+    - read_aloud: >-
+        Фонарная залита серым светом. Линзы закопчены, а вместо огня в чаше тлеет пепел. Посреди
+        зала стоит человек в сером балахоне.
+      dm_notes: Веран начинает бой, как только отряд мешает обряду. Если разбить алтарь, фанатики теряют волю.
+      features:
+        - id: ash-altar
+          name: Пепельный алтарь
+          description: Чаша маяка, засыпанная пеплом и костями чаек.
+  generator.npcs:
+    npcs:
+      - id: ilsa
+        name: Ильза
+        role: начальница гавани
+        appearance: Крепкая женщина с обветренным лицом и связкой ключей на поясе.
+        manner: Говорит коротко, по-морскому, ругается, когда волнуется.
+        motive: Снова зажечь маяк, пока не разбился третий корабль.
+        secret: Она давно знает, что Брам возит контрабанду, и закрывает на это глаза.
+        knows:
+          - Смотритель Тобиас пропал неделю назад.
+        attitude: 1
+        location_id: harbor
+        public: Начальница гавани, которая наняла отряд.
+        known_at_start: true
+      - id: bram
+        name: Брам
+        role: контрабандист
+        appearance: Жилистый моряк с серьгой и сломанным носом.
+        manner: Шутит, когда врёт, и всё время смотрит на море.
+        motive: Расплатиться с Вераном и вернуть себе лодку.
+        secret: Это он провёл Верана к маяку в обмен на списанный долг.
+        knows:
+          - Люди в сером ходят к маяку по ночам.
+        location_id: cliff-path
+        public: Местный лодочник.
+      - id: veran
+        name: Веран
+        role: пепельный жрец
+        appearance: Худой человек в сером балахоне, кожа на руках в ожогах.
+        manner: Говорит мягко и торжественно, будто читает проповедь.
+        motive: Накормить Пепельного огнями всего побережья.
+        secret: Он сам когда-то выжил в крушении и поклялся мстить морю.
+        attitude: -3
+        location_id: lamp-room
+        statblock: ash-priest
+  generator.relations:
+    relations:
+      - id: ilsa-worships-selmara
+        a: npc:ilsa
+        b: deity:selmara
+        kind: worships
+        mutual: false
+      - id: bram-rival-ilsa
+        a: npc:bram
+        b: npc:ilsa
+        kind: rival
+        note: Ильза грозит отобрать у него причал.
+      - id: bram-debtor-veran
+        a: npc:bram
+        b: npc:veran
+        kind: debtor
+        note: Веран купил все его долги.
+        secret: true
+        mutual: false
+      - id: veran-worships-ashen-one
+        a: npc:veran
+        b: deity:ashen-one
+        kind: worships
+        secret: true
+        mutual: false
+      - id: selmara-enemy-ashen-one
+        a: deity:selmara
+        b: deity:ashen-one
+        kind: enemy
+        note: Сельмара погасила костры Пепельного.
+  generator.encounters:
+    encounters:
+      - id: drowned-ambush
+        location_id: cliff-path
+        trigger: Отряд доходит до середины тропы.
+        tactics: >-
+          Упыри лезут из-под обрыва и пытаются столкнуть героев вниз, зомби перекрывают тропу.
+        monsters:
+          - monster_id: ghoul
+            count: 4
+          - monster_id: zombie
+            count: 2
+      - id: ash-rite
+        location_id: lamp-room
+        trigger: Отряд мешает обряду или нападает на Верана.
+        tactics: >-
+          Веран держится у алтаря и бьёт волнами пепла, фанатик прикрывает его, культисты бросаются
+          на тех, кто ближе к лестнице.
+        boss: true
+        monsters:
+          - monster_id: ash-priest
+            count: 1
+          - monster_id: cultist_fanatic
+            count: 1
+          - monster_id: cultist
+            count: 6
+    monsters:
+      - id: ash-priest
+        name: Пепельный жрец
+        name_en: Ash Priest
+        cr: 5
+        xp: 1800
+        ac: 15
+        hp: 90
+        hp_dice: 12d8+36
+        speed: 30
+        scores: {str: 10, dex: 14, con: 16, int: 13, wis: 17, cha: 15}
+        saves: {wis: 6}
+        skills: {religion: 4}
+        immunities: [fire]
+        actions:
+          - id: multiattack
+            name: Серия ударов
+            kind: multiattack
+            multiattack: [ash-staff, ash-staff]
+          - id: ash-staff
+            name: Пепельный посох
+            kind: attack
+            attack_bonus: 6
+            damage: 1d8+2
+            damage_type: bludgeoning
+            secondary_damage: 2d6
+            secondary_damage_type: fire
+            summary: Дробящий урон 1к8 + 2 и ещё 2к6 огнём.
+          - id: ash-wave
+            name: Волна пепла
+            kind: save
+            save: dex
+            dc: 14
+            damage: 4d6
+            damage_type: fire
+            half_on_save: true
+            targets: 4
+            range: near
+            summary: Спасбросок Ловкости, Сл 14; огонь 4к6, при успехе половина.
+        traits:
+          - Пепел в крови — огонь не причиняет ему вреда.
+        tags: [humanoid]
+  generator.items:
+    items:
+      - id: lamp-key
+        name: Ключ от фонарной
+        description: Тяжёлый бронзовый ключ с якорем на головке.
+        holder: location:lighthouse
+      - id: keeper-ring
+        name: Кольцо смотрителя
+        description: Серебряное кольцо с раковиной Сельмары.
+        holder: location:lighthouse
+        public: Кольцо смотрителя маяка.
+      - id: ash-tome
+        name: Пепельный требник
+        description: Книга обрядов Пепельного, страницы пахнут гарью.
+        holder: npc:veran
+  generator.clues:
+    revelations:
+      - revelation_id: ash-truth
+        clues:
+          - id: clue-logbook
+            description: В журнале смотритель пишет о людях в сером, которые ночью поднимались в фонарную.
+            where: feature:keeper-logbook
+          - id: clue-ash
+            description: Пепельные следы ведут от обрыва прямо к маяку.
+            where: feature:ash-marks
+          - id: clue-bram
+            description: Брам проговаривается, что провёл к маяку жреца в сером в обмен на долг.
+            where: npc:bram
