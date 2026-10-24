@@ -1,4 +1,6 @@
-"""Загрузка и сохранение папки приключения (спека §6.1): структура, ошибки, безопасность."""
+"""Загрузка и сохранение папки приключения (спека §6.1, формат v2 — спека DND-2 §8): структура,
+ошибки, безопасность. Перевод v1 → v2 и файлы v2 по смыслу проверяет `test_adventure_v2`; здесь
+новые файлы и папки v2 проходят те же проверки безопасности, что и прежние."""
 
 import copy
 import os
@@ -24,6 +26,7 @@ def adventure_data() -> dict[str, Any]:
     """Приключение «сырыми» данными: все коллекции заполнены, тексты с коварными символами."""
     skeleton = load_srd().monsters["skeleton"]
     return {
+        "format_version": 2,
         "id": "demo-crypt",
         "title": "Склеп у деревни",
         "pitch": TRICKY_TEXT,
@@ -75,10 +78,38 @@ def adventure_data() -> dict[str, Any]:
                 "manner": "говорит коротко",
                 "motive": "найти брата",
                 "attitude": -2,
-                "relations": [{"npc_id": "fabian", "kind": "enemy"}],
                 "location_id": "village",
             }
         },
+        "world": {
+            "history": TRICKY_TEXT,
+            "regions": [{"id": "marsh", "name": "Болото", "description": TRICKY_TEXT}],
+            "rumors": [{"text": TRICKY_TEXT, "true": True}],
+        },
+        "deities": {
+            "hearth": {
+                "id": "hearth",
+                "name": "Хозяйка очага",
+                "title": "Богиня",
+                "domains": ["очаг"],
+                "symbol": "кружка",
+                "dogma": TRICKY_TEXT,
+                "appearance": "Тёплая.",
+                "attitude_to_mortals": "добра",
+            }
+        },
+        "factions": {
+            "guild": {
+                "id": "guild",
+                "name": "Гильдия",
+                "goal": "Цель.",
+                "methods": TRICKY_TEXT,
+                "leader": "npc:marta",
+            }
+        },
+        "relations": [
+            {"id": "marta-enemy-fabian", "a": "npc:marta", "b": "npc:fabian", "kind": "enemy"}
+        ],
         # Id, которые YAML без кавычек прочёл бы как bool или число: проверяют кавычки при записи.
         "items": {
             "key": {"id": "key", "name": "Ключ", "description": "Ржавый.", "holder": "gone"},
@@ -155,6 +186,10 @@ def test_dump_then_load_returns_equal_adventure(adventure: Adventure, folder: Pa
 def test_dump_writes_the_documented_folder_layout(folder: Path):
     assert relative_files(folder) == {
         "adventure.yaml",
+        "world.yaml",
+        "relations.yaml",
+        "deities/hearth.yaml",
+        "factions/guild.yaml",
         "locations/village.yaml",
         "locations/crypt.yaml",
         "npcs/marta.yaml",
@@ -174,6 +209,7 @@ def test_adventure_file_holds_everything_except_collections(folder: Path):
     assert top["id"] == "demo-crypt"
     assert top["rules"] == {"base": "srd-5.2", "modules": ["campfire"]}
     assert not top.keys() & {"locations", "npcs", "items", "encounters", "revelations", "monsters"}
+    assert not top.keys() & {"world", "relations", "deities", "factions"}
     assert "seeds" not in top
 
 
@@ -189,7 +225,8 @@ def test_dump_keeps_unicode_readable_and_field_order(folder: Path):
     text = (folder / "adventure.yaml").read_text(encoding="utf-8")
 
     assert "Склеп у деревни" in text  # allow_unicode: без \u-последовательностей
-    assert text.startswith("id: demo-crypt\n")  # sort_keys=False: поля в порядке схемы
+    # sort_keys=False: поля в порядке схемы, версия формата — первой строкой.
+    assert text.startswith("format_version: 2\nid: demo-crypt\n")
 
 
 def test_seeds_file_is_written_only_when_there_are_seeds(tmp_path: Path):
@@ -217,6 +254,8 @@ def test_optional_files_and_folders_may_be_missing(tmp_path: Path):
         "encounters": {},
         "revelations": {},
         "monsters": {},
+        "deities": {},
+        "factions": {},
         "seeds": [],
     }
     target = tmp_path / "small"
@@ -225,8 +264,9 @@ def test_optional_files_and_folders_may_be_missing(tmp_path: Path):
     loaded = load_adventure(target)
 
     # Пустые коллекции не создают папок (revelations.yaml лежит всегда), но читаются как пустые.
-    assert not (target / "npcs").exists()
+    assert not (target / "npcs").exists() and not (target / "deities").exists()
     assert loaded.npcs == {} and loaded.monsters == {} and loaded.seeds == ()
+    assert loaded.deities == {} and loaded.factions == {}
     assert set(loaded.locations) == {"village", "crypt"}
 
 
@@ -437,20 +477,21 @@ UNBUILDABLE_VALUES = {
     "float-не-число": "!!float abc",
     "смещение-пояса-вне-суток": "2001-12-14t21:59:43.10+99:00",
 }
-ENTITY_FOLDERS = ["locations", "npcs", "items", "encounters", "monsters"]
+ENTITY_FOLDERS = ["locations", "npcs", "items", "encounters", "monsters", "deities", "factions"]
 
 
 def write_file_with(folder: Path, name: str, value: str) -> None:
     """Файл `name` с одним значением `value`, формой подходящий своему месту в папке."""
-    is_list = name in ("revelations.yaml", "seeds.yaml")
+    is_list = name in ("revelations.yaml", "seeds.yaml", "relations.yaml")
     content = f"- {value}\n" if is_list else f"id: x\nattitude: {value}\n"
     (folder / name).write_text(content, encoding="utf-8")
 
 
+ROOT_FILES = ["adventure.yaml", "revelations.yaml", "seeds.yaml", "world.yaml", "relations.yaml"]
+
+
 @pytest.mark.parametrize("value", UNBUILDABLE_VALUES.values(), ids=UNBUILDABLE_VALUES.keys())
-@pytest.mark.parametrize(
-    "name", ["adventure.yaml", "npcs/marta.yaml", "revelations.yaml", "seeds.yaml"]
-)
+@pytest.mark.parametrize("name", [*ROOT_FILES, "npcs/marta.yaml", "deities/hearth.yaml"])
 def test_a_value_yaml_cannot_build_is_reported_with_the_file_path(
     folder: Path, name: str, value: str
 ):
@@ -463,9 +504,7 @@ def test_a_value_yaml_cannot_build_is_reported_with_the_file_path(
     assert len(problems[0]) < 300 and value not in problems[0]
 
 
-@pytest.mark.parametrize(
-    "name", ["adventure.yaml", "npcs/marta.yaml", "revelations.yaml", "seeds.yaml"]
-)
+@pytest.mark.parametrize("name", [*ROOT_FILES, "npcs/marta.yaml", "factions/guild.yaml"])
 def test_too_deep_nesting_is_reported_with_the_file_path(folder: Path, name: str):
     (folder / name).write_text("[" * 5000 + "]" * 5000, encoding="utf-8")
 
@@ -634,6 +673,10 @@ SYMLINK_FILES = [
     "adventure.yaml",
     "revelations.yaml",
     "seeds.yaml",
+    "world.yaml",
+    "relations.yaml",
+    "deities/hearth.yaml",
+    "factions/guild.yaml",
     "locations/village.yaml",
     "npcs/marta.yaml",
     "items/key.yaml",
@@ -681,9 +724,7 @@ def test_a_symlink_to_a_file_inside_the_folder_is_refused_too(folder: Path, read
     assert folder / "npcs" / "alias.yaml" not in reads
 
 
-@pytest.mark.parametrize(
-    "name", ["adventure.yaml", "revelations.yaml", "seeds.yaml", "npcs/x.yaml"]
-)
+@pytest.mark.parametrize("name", [*ROOT_FILES, "npcs/x.yaml", "deities/x.yaml"])
 def test_a_dangling_symlink_is_a_symlink_problem_not_a_missing_or_skipped_file(
     folder: Path, name: str
 ):
@@ -808,6 +849,9 @@ def test_yaml_anchors_and_aliases_are_rejected_with_the_file_path_and_line(
         ("locations/village.yaml", "x: &a 1\ny: *a\n"),
         ("revelations.yaml", "- &a x\n- *a\n"),
         ("seeds.yaml", "- &a x\n- *a\n"),
+        ("world.yaml", "x: &a 1\ny: *a\n"),
+        ("relations.yaml", "- &a x\n- *a\n"),
+        ("deities/hearth.yaml", "x: &a 1\ny: *a\n"),
     ],
 )
 def test_anchors_are_rejected_in_every_file_the_loader_reads(
@@ -884,7 +928,7 @@ def test_a_file_of_exactly_the_limit_is_read(folder: Path, adventure: Adventure)
     assert load_adventure(folder) == adventure
 
 
-@pytest.mark.parametrize("name", ["adventure.yaml", "revelations.yaml", "seeds.yaml"])
+@pytest.mark.parametrize("name", ROOT_FILES)
 def test_the_size_limit_applies_to_every_file_the_loader_reads(folder: Path, name: str):
     (folder / name).write_bytes(b"[]\n" + b"#" * MAX_YAML_BYTES)
 

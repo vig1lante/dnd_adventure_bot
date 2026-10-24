@@ -30,6 +30,7 @@ from urllib.parse import parse_qsl, urlencode
 import httpx
 import pytest
 import uvicorn
+from adventure_secrets import hidden_texts
 from fastapi import FastAPI
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -51,26 +52,10 @@ OUTSIDER_TG_ID = 701
 TIMEOUT_S = 5
 PONG = {"type": "pong"}
 
-# Поля приключения, которые игрок видеть не должен (тайны NPC, заметки мастера, что знают NPC), и
-# слова, по которым сервер не должен выдавать устройство приключения и журнал мастера.
-HIDDEN_ADVENTURE_FIELDS = ("secret", "dm_notes", "knows")
+# Слова, по которым сервер не должен выдавать устройство приключения и журнал мастера (тайные
+# тексты приключения собирает `hidden_texts`).
 HIDDEN_KEYS = ("adventure_data", "dm_turn_logs", "issues")
 HIDDEN_EXIT_ID = "to-crypt"  # скрытый выход демо-приключения: id называет отчёт валидатора
-
-
-def hidden_texts(node: Any) -> list[str]:
-    """Все строки полей `secret`, `dm_notes` и `knows` во вложенных данных приключения."""
-    found: list[str] = []
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key in HIDDEN_ADVENTURE_FIELDS:
-                found += [value] if isinstance(value, str) else [str(v) for v in value]
-            else:
-                found += hidden_texts(value)
-    elif isinstance(node, list):
-        for item in node:
-            found += hidden_texts(item)
-    return [text for text in found if text]
 
 
 def with_sentences(text: str) -> list[str]:

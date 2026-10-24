@@ -88,6 +88,11 @@ def trivial_fight(data: dict[str, Any]) -> None:
     data["encounters"]["ghoul-pack"]["monsters"] = [{"monster_id": "skeleton", "count": 1}]
 
 
+def trivial_boss_fight(data: dict[str, Any]) -> None:
+    trivial_fight(data)
+    data["encounters"]["ghoul-pack"]["boss"] = True
+
+
 def key_that_left_the_game(data: dict[str, Any]) -> None:
     data["items"]["undercroft-key"]["holder"] = "gone"
 
@@ -146,8 +151,7 @@ def npc_without_motive(data: dict[str, Any]) -> None:
 
 
 def important_npc_without_relations(data: dict[str, Any]) -> None:
-    for npc in data["npcs"].values():
-        npc["relations"] = []
+    data["relations"] = []  # связи NPC генератора после чтения лежат в общем графе (формат v2)
     data["npcs"]["otto"]["statblock"] = "skeleton"
 
 
@@ -178,6 +182,7 @@ ROUTES: list[tuple[str, Mutation, str, str, str | None]] = [
     ("unknown monster", unknown_monster, "unknown_monster", "encounter:ghoul-pack", "encounters"),
     ("deadly", deadly_fight, "encounter_too_hard", "encounter:ghoul-pack", "encounters"),
     ("trivial", trivial_fight, "encounter_too_easy", "encounter:ghoul-pack", "encounters"),
+    ("easy boss", trivial_boss_fight, "boss_too_easy", "encounter:ghoul-pack", "encounters"),
     (
         "lost key",
         key_that_left_the_game,
@@ -247,7 +252,10 @@ def seed_exit_to_nowhere(data: dict[str, Any]) -> None:
 
 
 def seed_npc_relation_to_nowhere(data: dict[str, Any]) -> None:
-    data["npcs"]["otto"]["relations"][0]["npc_id"] = "lost-brother"
+    # Связь v1 у Отто («Грета — kin для Отто») после чтения лежит в графе: теперь она ведёт от
+    # NPC, которого нет.
+    (relation,) = [rel for rel in data["relations"] if rel["b"] == "npc:otto"]
+    relation["a"] = "npc:lost-brother"
 
 
 def seed_npc_statblock_to_nowhere(data: dict[str, Any]) -> None:
@@ -311,7 +319,7 @@ SEED_ROUTES: list[tuple[str, Mutation, str, str, set[str], str | None]] = [
         "seed npc relation to nowhere",
         seed_npc_relation_to_nowhere,
         "dangling_ref",
-        "npc:otto",
+        "relation:greta-kin-otto",
         {"otto"},
         "npcs",
     ),

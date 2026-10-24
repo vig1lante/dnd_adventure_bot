@@ -29,12 +29,13 @@ from typing import Any
 
 import pytest
 import yaml
+from lore_trap import trap_lore
 from pydantic import SecretStr, ValidationError
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from dnd_engine.adventure.loader import load_adventure
-from dnd_engine.adventure.schema import Adventure
+from dnd_engine.adventure.loader import adventure_from_data, load_adventure
+from dnd_engine.adventure.schema import Adventure, Relation
 from dnd_engine.character import Character, Persona
 from dnd_engine.content import SrdContent, load_srd
 from dnd_engine.creation import quick_character
@@ -89,6 +90,8 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 DEMO_ADVENTURE_DIR = REPO_ROOT / "content" / "adventures" / "demo-crypt"
 SCENARIOS_DIR = Path(__file__).resolve().parents[1] / "scenarios"
 SERVER_SRC = REPO_ROOT / "services" / "server" / "src" / "dnd_server"
+# Копия приключения из игры DND-1 (формат v1): связи NPC лежат в самих NPC.
+ADVENTURE_V1 = REPO_ROOT / "services" / "server" / "tests" / "db" / "golden" / "adventure_v1.json"
 API_KEY = "sk-ant-api-SECRET-0123456789"
 BOT_TOKEN = "123456789:AAF-weaving-bot-token-0123456789_abcdef"
 SESSION_SECRET = "weaving-session-secret-0123456789-abcdefghij"
@@ -547,6 +550,149 @@ def test_the_request_names_npcs_with_motives_places_and_heroes_but_no_secrets_of
     for location in adventure.locations.values():
         assert " ".join(location.dm_notes.split()) not in prompt
         assert " ".join(location.read_aloud.split()) not in prompt
+
+
+# --- связи NPC в запросе: общий граф формата v2 ---
+
+
+def npc_lines(prompt: str) -> dict[str, dict[str, Any]]:
+    """Строки JSON раздела NPC запроса по id NPC."""
+    lines = prompt.splitlines()
+    start = lines.index("NPC (по строке JSON на каждого):") + 1
+    end = lines.index("Места (по строке JSON на каждое):")
+    return {(npc := json.loads(line))["id"]: npc for line in lines[start:end]}
+
+
+def with_relations(adventure: Adventure, *relations: dict[str, Any]) -> Adventure:
+    return adventure.model_copy(
+        update={"relations": tuple(Relation.model_validate(rel) for rel in relations)}
+    )
+
+
+def test_the_request_gives_the_relations_of_an_npc_from_the_graph(srd, adventure):
+    # Демо v2: связи лежат в общем графе, а поле связей у NPC пусто.
+    assert all(not npc.relations for npc in adventure.npcs.values())
+
+    npcs = npc_lines(
+        weaving_request(adventure, heroes_of(srd, "pc_aaa"), srd, profanity=True).prompt
+    )
+
+    # «Фабиан — должник Марты»: связь говорит Марте, кем ей приходится Фабиан (форма DND-1).
+    assert npcs["marta"]["relations"] == [{"npc_id": "fabian", "kind": "debtor"}]
+
+
+def test_a_v1_copy_of_a_game_keeps_the_relations_of_its_npcs_in_the_request(srd):
+    # Копия приключения из игры DND-1: связи лежали в NPC и при чтении переходят в граф. Раньше
+    # вплетение читало поле NPC и теряло их молча.
+    copy_v1 = adventure_from_data(json.loads(ADVENTURE_V1.read_text(encoding="utf-8")))
+
+    npcs = npc_lines(weaving_request(copy_v1, heroes_of(srd, "pc_aaa"), srd, profanity=True).prompt)
+
+    assert npcs["marta"]["relations"] == [{"npc_id": "fabian", "kind": "debtor"}]
+    # Вид v1 «creditor» стал other; пояснение связи в запрос не идёт, как и в DND-1.
+    assert npcs["fabian"]["relations"] == [{"npc_id": "marta", "kind": "other"}]
+
+
+V1_MARK = "ПОЯСНЕНИЕ-V1-"
+
+
+def test_no_note_of_a_v1_relation_goes_into_the_request_whatever_its_kind(srd):
+    # В v1 у связи не было признака тайны, а её пояснение DND-1 держал только для мастера. Вид вне
+    # словаря v2 («creditor», «blackmailer») при чтении становится `other`, а сам вид v1 уходит в
+    # начало пояснения: зацепку читает игрок, поэтому ни пояснение, ни вид из него в запрос не идут.
+    data = json.loads(ADVENTURE_V1.read_text(encoding="utf-8"))
+    npcs = data["npcs"]
+    npcs["marta"]["relations"].append(
+        {"npc_id": "fabian", "kind": "blackmailer", "note": "шантажирует её"}
+    )
+    for npc in npcs.values():
+        for relation in npc["relations"]:
+            relation["note"] = f"{V1_MARK}{relation['kind']}: {relation['note']}"
+    copy_v1 = adventure_from_data(data)
+
+    request = weaving_request(copy_v1, heroes_of(srd, "pc_aaa"), srd, profanity=True)
+
+    for text in (request.system, request.prompt):
+        assert V1_MARK not in text
+        assert "blackmailer" not in text and "creditor" not in text
+    # Сами связи в запросе есть: пояснения нет не потому, что связь пропала.
+    assert npc_lines(request.prompt)["marta"]["relations"] == [
+        {"npc_id": "fabian", "kind": "debtor"},
+        {"npc_id": "fabian", "kind": "other"},
+    ]
+
+
+def test_a_mutual_relation_goes_to_both_npcs_and_a_one_way_one_to_the_npc_it_tells_about(
+    srd, adventure
+):
+    lore = with_relations(
+        adventure,
+        {"id": "friends", "a": "npc:marta", "b": "npc:fabian", "kind": "friend"},
+        {"id": "debt", "a": "npc:fabian", "b": "npc:marta", "kind": "debtor", "mutual": False},
+    )
+
+    npcs = npc_lines(weaving_request(lore, heroes_of(srd, "pc_aaa"), srd, profanity=True).prompt)
+
+    assert npcs["marta"]["relations"] == [
+        {"npc_id": "fabian", "kind": "friend"},
+        {"npc_id": "fabian", "kind": "debtor"},
+    ]
+    assert npcs["fabian"]["relations"] == [{"npc_id": "marta", "kind": "friend"}]
+
+
+def test_a_secret_relation_and_relations_with_gods_factions_and_places_stay_out_of_the_request(
+    srd, adventure
+):
+    # Зацепку читает игрок: тайная связь — тайна, как секрет NPC; богов, фракций и мира в запросе
+    # нет вовсе (спека DND-2 §8: это данные мастера).
+    lore = with_relations(
+        adventure,
+        {
+            "id": "plot",
+            "a": "npc:fabian",
+            "b": "npc:marta",
+            "kind": "other",
+            "note": "ТАЙНАЯ-СВЯЗЬ: тайно влюблён",
+            "secret": True,
+        },
+        {"id": "faith", "a": "npc:marta", "b": "deity:veyla", "kind": "worships"},
+        {"id": "club", "a": "faction:regulars", "b": "npc:marta", "kind": "patron"},
+        {"id": "home", "a": "npc:marta", "b": "location:village", "kind": "seeks"},
+    )
+
+    prompt = weaving_request(lore, heroes_of(srd, "pc_aaa"), srd, profanity=True).prompt
+
+    assert "relations" not in npc_lines(prompt)["marta"]
+    assert "relations" not in npc_lines(prompt)["fabian"]
+    assert "ТАЙНАЯ-СВЯЗЬ" not in prompt
+    for ref in ("deity:veyla", "faction:regulars", "veyla", "regulars"):
+        assert ref not in prompt
+    for deity in lore.deities.values():
+        assert deity.name not in prompt
+    for faction in lore.factions.values():
+        assert faction.name not in prompt
+
+
+LORE_MARK = "МИР-МАСТЕРА-"
+
+
+def test_nothing_of_the_world_gods_factions_or_place_secrets_goes_into_the_request(srd, adventure):
+    # Каждый текст мира, богов, фракций, связей и тайн мест несёт метку; злодей — ссылка, его ищут
+    # по ключу. Открытые связи между NPC уходят только как `{npc_id, kind}`: пояснение не идёт ни у
+    # какого вида, даже у `other`, чей смысл в нём и лежит. В демо открытой `other` между NPC нет,
+    # поэтому она добавлена.
+    data = adventure.model_dump(mode="json")
+    data["relations"].append(
+        {"id": "open-other", "a": "npc:marta", "b": "npc:fabian", "kind": "other", "note": "-"}
+    )
+    trapped = adventure_from_data(trap_lore(data, LORE_MARK))
+
+    request = weaving_request(trapped, heroes_of(srd, "pc_aaa"), srd, profanity=True)
+
+    for text in (request.system, request.prompt):
+        assert LORE_MARK not in text
+    assert {"npc_id": "marta", "kind": "other"} in npc_lines(request.prompt)["fabian"]["relations"]
+    assert "villain" not in request.prompt and trapped.villain not in request.prompt
 
 
 def test_the_text_of_a_hero_goes_into_the_request_only_as_one_json_line(srd, adventure):
@@ -1124,6 +1270,27 @@ async def test_the_profanity_flag_of_the_game_reaches_the_weaving(
 
     [request] = stub.json_requests
     assert request.system.splitlines()[-1] == line
+
+
+async def test_a_game_with_a_v1_adventure_copy_weaves_its_heroes_with_the_relations_of_its_npcs(
+    monkeypatch, world
+):
+    # Игра DND-1, начатая до обновления сервера: в базе копия формата v1. Вплетение читает её
+    # (связи NPC приходят из графа), открытие играется по той же копии, сама копия не меняется.
+    golden = json.loads(ADVENTURE_V1.read_text(encoding="utf-8"))
+    await world.set_game(adventure_data=golden)
+    stub = StubProvider(good_weaving(world))
+    use_provider(monkeypatch, stub)
+
+    outcome = await world.run()
+
+    assert outcome is not None and outcome.status == TurnStatus.DONE
+    [request] = stub.json_requests
+    assert npc_lines(request.prompt)["marta"]["relations"] == [
+        {"npc_id": "fabian", "kind": "debtor"}
+    ]
+    assert set((await world.state(1)).pc_hooks) == {p.character_id for p in world.players.values()}
+    assert (await world.game()).adventure_data == golden
 
 
 async def test_on_reserved_is_called_once_before_the_model_is_asked(monkeypatch, world):

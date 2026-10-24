@@ -1,11 +1,19 @@
-"""Чтение и запись папки приключения (спека §6.1): `content/adventures/<slug>/`.
+"""Чтение и запись папки приключения (спека §6.1, формат v2 — спека DND-2 §8, Р8):
+`content/adventures/<slug>/`.
 
 Структура папки:
-- `adventure.yaml` — всё, кроме коллекций;
+- `adventure.yaml` — всё, кроме коллекций, мира и графа связей; первым полем `format_version`;
 - `locations/<id>.yaml`, `npcs/<id>.yaml`, `items/<id>.yaml`, `encounters/<id>.yaml`,
-  `monsters/<id>.yaml` — по файлу на сущность, имя файла равно `id` внутри;
+  `monsters/<id>.yaml`, `deities/<id>.yaml`, `factions/<id>.yaml` — по файлу на сущность, имя файла
+  равно `id` внутри;
 - `revelations.yaml` — список открытий;
+- `world.yaml` — мир (история, края, слухи), `relations.yaml` — список связей графа; в папке v2
+  оба обязательны, в папке v1 (без `format_version`) их нет;
 - `seeds.yaml` — необязательный список id сущностей, заданных автором вручную.
+
+Формат v1 переводится в v2 при проверке схемы (`schema.upgrade_v1`): связи из `npcs[].relations`
+переходят в граф. Поэтому папку v1 читает `load_adventure`, а копию приключения из игры
+(`games.adventure_data`) — `adventure_from_data`, и обе дают одно и то же. Запись — всегда v2.
 
 Загрузка читает безопасным разбором YAML без якорей и алиасов (`content.parse_yaml`), файлы не
 больше `content.MAX_YAML_BYTES`, и собирает ошибки по всем файлам сразу, с путями относительно
@@ -23,6 +31,7 @@
 в двойных кавычках, чтобы чтение вернуло ровно записанный текст.
 """
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -31,13 +40,19 @@ from pydantic import BaseModel, ValidationError
 
 from dnd_engine.adventure.schema import (
     COLLECTIONS,
+    FORMAT_VERSION,
     Adventure,
+    Deity,
     Encounter,
+    Faction,
     Item,
     Location,
     Npc,
+    Relation,
     Revelation,
+    WorldInfo,
     is_entity_id,
+    is_format_version,
 )
 from dnd_engine.content import (
     MAX_FIELD_LENGTH,
@@ -57,9 +72,11 @@ ENTITY_FOLDERS: dict[str, type[BaseModel]] = {
     "items": Item,
     "encounters": Encounter,
     "monsters": MonsterDef,
+    "deities": Deity,
+    "factions": Faction,
 }
-# Всё, что хранится не в adventure.yaml: коллекции и seeds.yaml.
-SEPARATE_KEYS = (*COLLECTIONS, "seeds")
+# Всё, что хранится не в adventure.yaml: коллекции, мир, граф связей и seeds.yaml.
+SEPARATE_KEYS = (*COLLECTIONS, "world", "relations", "seeds")
 
 
 class AdventureFormatError(ValueError):
@@ -142,6 +159,35 @@ def _read_yaml(file: Path, name: str, kind: type, problems: list[str]) -> Any | 
     return data
 
 
+def _read_document(
+    root: Path, name: str, kind: type, problems: list[str], *, required: bool
+) -> Any | None:
+    """`_read_yaml` для файла `name` в корне папки. Отсутствующий необязательный файл — `None` без
+    проблемы; битая символическая ссылка — проблема: `exists()` её не видит, а молчать нельзя."""
+    file = root / name
+    if not required and not file.exists() and not file.is_symlink():
+        return None
+    return _read_yaml(file, name, kind, problems)
+
+
+def _validated_entries[T: BaseModel](
+    name: str, entries: list[Any], model: type[T], problems: list[str]
+) -> list[tuple[int, T]]:
+    """Записи списка из файла `name`, проверенные моделью, с номерами (с единицы); проблема
+    называет номер записи."""
+    valid: list[tuple[int, T]] = []
+    for number, entry in enumerate(entries, start=1):
+        where = f"{name}, запись {number}"
+        if not isinstance(entry, dict):
+            problems.append(f"{where}: ожидался объект (словарь)")
+            continue
+        try:
+            valid.append((number, model.model_validate(entry)))
+        except ValidationError as exc:
+            problems += _describe_validation_error(where, exc)
+    return valid
+
+
 def _entity_files(root: Path, folder: str, problems: list[str]) -> list[Path]:
     """Файлы `<folder>/*.yaml` по порядку имён. Скрытые пропускаются, всё остальное, что не
     `*.yaml` (в том числе подпапка), — проблема с путём. Нет папки — нет и файлов."""
@@ -191,15 +237,7 @@ def _load_revelations(root: Path, problems: list[str]) -> dict[str, Revelation]:
     name = "revelations.yaml"
     entries = _read_yaml(root / name, name, list, problems)
     revelations: dict[str, Revelation] = {}
-    for number, entry in enumerate(entries or [], start=1):
-        if not isinstance(entry, dict):
-            problems.append(f"{name}, запись {number}: ожидался объект (словарь)")
-            continue
-        try:
-            revelation = Revelation.model_validate(entry)
-        except ValidationError as exc:
-            problems += _describe_validation_error(f"{name}, запись {number}", exc)
-            continue
+    for number, revelation in _validated_entries(name, entries or [], Revelation, problems):
         if revelation.id in revelations:
             problems.append(f"{name}, запись {number}: дубликат id {revelation.id!r}")
         else:
@@ -207,13 +245,32 @@ def _load_revelations(root: Path, problems: list[str]) -> dict[str, Revelation]:
     return revelations
 
 
+def _load_world(root: Path, required: bool, problems: list[str]) -> WorldInfo | None:
+    """Читает `world.yaml`; нет необязательного файла или он с ошибкой — `None`."""
+    name = "world.yaml"
+    raw = _read_document(root, name, dict, problems, required=required)
+    if raw is None:
+        return None
+    try:
+        return WorldInfo.model_validate(raw)
+    except ValidationError as exc:
+        problems += _describe_validation_error(name, exc)
+        return None
+
+
+def _load_relations(root: Path, required: bool, problems: list[str]) -> list[Relation] | None:
+    """Читает `relations.yaml`: список связей графа. Повтор id — забота валидатора (по видам)."""
+    name = "relations.yaml"
+    entries = _read_document(root, name, list, problems, required=required)
+    if entries is None:
+        return None
+    return [relation for _, relation in _validated_entries(name, entries, Relation, problems)]
+
+
 def _load_seeds(root: Path, problems: list[str]) -> tuple[str, ...]:
     """Читает необязательный `seeds.yaml`: список id сущностей, заданных автором."""
     name = "seeds.yaml"
-    # Битая ссылка `exists()` не видит, но пропускать её молча нельзя: это проблема с путём.
-    if not (root / name).exists() and not (root / name).is_symlink():
-        return ()
-    seeds = _read_yaml(root / name, name, list, problems)
+    seeds = _read_document(root, name, list, problems, required=False)
     if seeds is None:
         return ()
     if not all(isinstance(seed, str) for seed in seeds):
@@ -236,6 +293,12 @@ def load_adventure(path: Path) -> Adventure:
     }
     collections["revelations"] = _load_revelations(path, problems)
     collections["seeds"] = _load_seeds(path, problems)
+    # Мир и граф обязательны в папке v2; в папке v1 их нет, а связи придут из NPC.
+    v2 = top is not None and is_format_version(top.get("format_version"), FORMAT_VERSION)
+    if (world := _load_world(path, v2, problems)) is not None:
+        collections["world"] = world
+    if (relations := _load_relations(path, v2, problems)) is not None:
+        collections["relations"] = relations
     adventure = None
     if top is not None:
         problems += [
@@ -253,13 +316,30 @@ def load_adventure(path: Path) -> Adventure:
     return adventure
 
 
+def adventure_from_data(data: Mapping[str, Any]) -> Adventure:
+    """Приключение из готовых данных — копии в игре (`games.adventure_data`) или JSON — v1 или v2.
+
+    Данные v1 (без `format_version`) переводятся в v2. Бросает `AdventureFormatError` со всеми
+    проблемами, в том числе на данных не словарём."""
+    if not isinstance(data, Mapping):
+        raise AdventureFormatError(["adventure: ожидался объект (словарь)"])
+    try:
+        return Adventure.model_validate(dict(data))
+    except ValidationError as exc:
+        # `from None`: печать трассировки (журнал uvicorn) не тащит `ValidationError` с
+        # `input_value`; первопричина остаётся в `__context__` для `safe_traceback` сервера.
+        raise AdventureFormatError(_describe_validation_error("adventure", exc)) from None
+
+
 def dump_adventure(adventure: Adventure, path: Path) -> None:
-    """Записывает приключение в папку `path` (создаёт её); существующие файлы перезаписываются.
+    """Записывает приключение в папку `path` (создаёт её) в формате v2; существующие файлы
+    перезаписываются.
 
     Папка не очищается: файлы сущностей, которых в приключении больше нет, остаются на месте,
     поэтому вызывающий передаёт новую или пустую папку.
     """
-    data = adventure.model_dump(mode="json")
+    # Поле связей v1 у NPC после чтения всегда пусто: в файлах v2 его нет.
+    data = adventure.model_dump(mode="json", exclude={"npcs": {"__all__": {"relations"}}})
     documents: dict[str, Any] = {}
     unsafe: list[str] = []
     for folder in ENTITY_FOLDERS:
@@ -273,6 +353,8 @@ def dump_adventure(adventure: Adventure, path: Path) -> None:
     if unsafe:
         raise AdventureFormatError(unsafe)
     documents["revelations.yaml"] = list(data.pop("revelations").values())
+    documents["world.yaml"] = data.pop("world")
+    documents["relations.yaml"] = data.pop("relations")
     if seeds := data.pop("seeds"):
         documents["seeds.yaml"] = seeds
     documents["adventure.yaml"] = data

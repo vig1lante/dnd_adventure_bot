@@ -1,10 +1,12 @@
-"""Рукописное мини-приключение `demo-crypt` (план B4.4, спека §6.1–§6.2).
+"""Рукописное мини-приключение `demo-crypt` (план B4.4, спека §6.1–§6.2; формат v2 — спека DND-2 §8).
 
 Приключение — данные в `content/adventures/demo-crypt/`. На него опираются тесты инструментов
-мастера (скрытый выход, запертый сундук, поиск по лору, бой «Встающие кости»), поэтому здесь
-зафиксированы не только «валидатор доволен», но и те id и связи, которые эти тесты читают.
+мастера (скрытый выход, запертый сундук, поиск по лору, бой «Встающие кости», мир, боги, фракции и
+связи), поэтому здесь зафиксированы не только «валидатор доволен», но и те id и связи, которые эти
+тесты читают.
 """
 
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -17,13 +19,16 @@ from dnd_engine.content import SrdContent, load_srd
 
 # Предупреждения демо-приключения заданы явно: правка контента, которая добавит или уберёт
 # предупреждение, должна быть заметна в тесте. Оба боя из плана «слишком лёгкие» для шести героев
-# 3-го уровня (решение владельца B4.4), а оценка валидатора (116 мин) выше цели 1,5 ч больше
+# 3-го уровня (решение владельца B4.4): финальный бой с Фабианом — бой с боссом, поэтому о нём
+# валидатор говорит «легче высокой сложности». Оценка валидатора (116 мин) выше цели 1,5 ч больше
 # чем на 25%: формула считает полные 30 минут на каждый бой.
 EXPECTED_WARNINGS = {
     ("encounter_too_easy", "encounter:risen-bones"),
-    ("encounter_too_easy", "encounter:fabian-fight"),
+    ("boss_too_easy", "encounter:fabian-fight"),
     ("duration_mismatch", "adventure"),
 }
+# Футы в текстах не пишут: расстояния — в метрах (решение DND-2 B1).
+FEET = re.compile(r"фут|\bфт\b|\bfeet\b|\bfoot\b", re.IGNORECASE)
 
 # Текст приключения — данные, а не инструкции модели: фразы вроде этих в нём недопустимы.
 INSTRUCTION_MARKERS = (
@@ -47,6 +52,7 @@ def srd() -> SrdContent:
 
 
 def test_adventure_header_follows_the_plan(demo_adventure: Adventure):
+    assert demo_adventure.format_version == 2
     assert demo_adventure.id == "demo-crypt"
     assert "юмор" in demo_adventure.tone
     assert (demo_adventure.party_level, demo_adventure.party_size) == (3, 6)
@@ -92,6 +98,10 @@ def test_text_is_data_not_instructions_to_the_model(demo_adventure: Adventure):
     text = demo_adventure.model_dump_json().lower()
 
     assert [marker for marker in INSTRUCTION_MARKERS if marker in text] == []
+
+
+def test_text_has_no_feet(demo_adventure: Adventure):
+    assert FEET.findall(demo_adventure.model_dump_json()) == []
 
 
 # --- выходы ---
@@ -167,15 +177,19 @@ def test_marta_the_innkeeper_waits_in_the_village(demo_adventure: Adventure):
     marta = demo_adventure.npcs["marta"]
 
     assert (marta.location_id, marta.statblock) == ("village", None)
-    assert [(r.npc_id, r.kind) for r in marta.relations] == [("fabian", "debtor")]
     assert "брат" in marta.secret + marta.motive + " ".join(marta.knows)
 
 
 def test_fabian_the_failed_necromancer_is_the_creditors_debtor(demo_adventure: Adventure):
     fabian = demo_adventure.npcs["fabian"]
+    debt = next(r for r in demo_adventure.relations if r.id == "fabian-debtor-marta")
 
     assert (fabian.location_id, fabian.statblock) == ("crypt", "cultist_fanatic")
-    assert [(r.npc_id, r.kind) for r in fabian.relations] == [("marta", "creditor")]
+    assert (debt.a, debt.kind, debt.b, debt.mutual) == ("npc:fabian", "debtor", "npc:marta", False)
+
+
+def test_npc_relations_live_only_in_the_graph(demo_adventure: Adventure):
+    assert all(npc.relations == () for npc in demo_adventure.npcs.values())
 
 
 def test_the_word_debt_is_in_fabians_own_texts_for_lore_search(demo_adventure: Adventure):
@@ -260,3 +274,96 @@ def test_fight_zones_are_laid_out_so_that_enemies_start_apart_from_the_party(
     assert len(location.zones) >= 3
     assert location.links  # бойцы перемещаются только по связям между зонами
     assert encounter.pc_zone not in enemy_zones
+
+
+# --- формат v2: мир, боги, фракции, связи, тайна склепа, босс, злодей ---
+
+
+def test_the_world_is_brief_with_two_regions_and_true_and_false_rumors(demo_adventure: Adventure):
+    world = demo_adventure.world
+
+    assert 0 < len(world.history) <= 400  # краткая история: две-три фразы
+    assert [region.id for region in world.regions] == ["marshland", "barrow-hill"]
+    assert {rumor.true for rumor in world.rumors} == {True, False}
+
+
+def test_there_are_two_deities_and_two_factions(demo_adventure: Adventure):
+    assert set(demo_adventure.deities) == {"veyla", "ossmar"}
+    assert set(demo_adventure.factions) == {"regulars", "pale-candle"}
+    regulars = demo_adventure.factions["regulars"]
+    assert (regulars.leader, regulars.base_location) == ("npc:marta", "village")
+
+
+def test_the_graph_links_npcs_deities_and_factions(demo_adventure: Adventure):
+    assert [(r.id, r.a, r.kind, r.b, r.secret) for r in demo_adventure.relations] == [
+        ("fabian-debtor-marta", "npc:fabian", "debtor", "npc:marta", False),
+        ("marta-worships-veyla", "npc:marta", "worships", "deity:veyla", False),
+        ("fabian-other-pale-candle", "npc:fabian", "other", "faction:pale-candle", True),
+        ("regulars-seeks-fabian", "faction:regulars", "seeks", "npc:fabian", False),
+        ("ossmar-enemy-pale-candle", "deity:ossmar", "enemy", "faction:pale-candle", True),
+    ]
+
+
+def test_every_deity_and_faction_is_at_an_end_of_a_relation(demo_adventure: Adventure):
+    # Пропажа файла бога или фракции не пройдёт молча: связь с ним станет ссылкой в пустоту.
+    ends = {end for r in demo_adventure.relations for end in (r.a, r.b)}
+
+    assert {f"deity:{d}" for d in demo_adventure.deities} <= ends
+    assert {f"faction:{f}" for f in demo_adventure.factions} <= ends
+
+
+def test_the_crypt_keeps_a_secret_found_by_a_table_check(demo_adventure: Adventure):
+    [secret] = demo_adventure.locations["crypt"].secrets
+
+    assert secret.id == "empty-treasury"
+    assert secret.check is not None and secret.check.dc == 15
+    assert [(r.kind, r.id) for r in secret.reveals] == [("flag", "treasury-empty")]
+    assert all(not loc.secrets for loc in demo_adventure.locations.values() if loc.id != "crypt")
+
+
+def test_the_final_fight_is_the_boss_fight_and_fabian_is_the_villain(demo_adventure: Adventure):
+    assert demo_adventure.encounters["fabian-fight"].boss is True
+    assert demo_adventure.encounters["risen-bones"].boss is False
+    assert demo_adventure.villain == "npc:fabian"
+
+
+def test_the_journal_starts_with_the_hook_and_what_the_party_already_knows(
+    demo_adventure: Adventure,
+):
+    adventure = demo_adventure
+    known = {
+        *(f"location:{x.id}" for x in adventure.locations.values() if x.known_at_start),
+        *(f"npc:{x.id}" for x in adventure.npcs.values() if x.known_at_start),
+        *(f"item:{x.id}" for x in adventure.items.values() if x.known_at_start),
+        *(f"deity:{x.id}" for x in adventure.deities.values() if x.known_at_start),
+        *(f"faction:{x.id}" for x in adventure.factions.values() if x.known_at_start),
+        *(f"region:{x.id}" for x in adventure.world.regions if x.known_at_start),
+    }
+
+    assert "Марта" in adventure.journal_intro and adventure.journal_intro != adventure.pitch
+    assert known == {
+        "location:village",
+        "location:cemetery",
+        "npc:marta",
+        "deity:veyla",
+        "deity:ossmar",
+        "region:marshland",
+        "region:barrow-hill",
+    }
+    assert [rumor.known_at_start for rumor in adventure.world.rumors] == [True, False, False]
+
+
+def test_public_texts_do_not_give_away_secrets(demo_adventure: Adventure):
+    adventure = demo_adventure
+    entities = [
+        *adventure.locations.values(),
+        *adventure.npcs.values(),
+        *adventure.items.values(),
+        *adventure.deities.values(),
+        *adventure.factions.values(),
+    ]
+
+    assert all(entity.public.strip() for entity in entities)
+    # Тайна Фабиана («держит Ульриха в склепе») в его открытый текст не попала.
+    assert "Ульрих" not in adventure.npcs["fabian"].public
+    assert "мошенник" not in adventure.factions["pale-candle"].public

@@ -50,6 +50,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dnd_engine.abilities import ABILITY_NAMES_RU, SKILL_ABILITY, SKILL_NAMES_RU, Ability, Skill
+from dnd_engine.adventure.loader import adventure_from_data
 from dnd_engine.adventure.schema import Adventure, Item
 from dnd_engine.character import (
     ActiveBuff,
@@ -861,7 +862,7 @@ async def snapshot_for(
     game_out = await get_game(session, user, game_id)  # проверка участия и сводка лобби
     game = await session.get(Game, game_id)
     # Копия приключения нужна листу (названия предметов, которые держит герой) и бою (имена NPC).
-    adventure = Adventure.model_validate(game.adventure_data)
+    adventure = adventure_from_data(game.adventure_data)
     state = await _current_state(session, game)
     actions = await _turn_actions(session, game)
     mine = actions.get(user.id)

@@ -16,13 +16,19 @@
    `golden/game_state_v<N>.json`, а прежние файлы остаются: старые снимки должны читаться всегда.
    Образец записывается один раз кодом той версии (состояние игры с отрядом, боем и зацепками и
    лист персонажа из него) и потом не перезаписывается: его смысл в том, что он старше кода.
-3. Копия приключения: у неё нет версии формата, поэтому образец `golden/adventure_v<N>.json` (дамп
-   `model_dump(mode="json")` приключения `demo-crypt`) добавляет тот, кто меняет схему `Adventure`
-   несовместимо; прежние образцы остаются и читаются всегда. Падение теста чтения образца — сигнал,
-   что сохранённые игры перестали читаться: схему делают совместимой (значение по умолчанию,
-   прежнее имя поля), а не переписывают образец.
+3. Копия приключения хранится по поколениям формата: `golden/adventure_v<N>.json` — дамп
+   `model_dump(mode="json")` приключения `demo-crypt` тем кодом, который писал копии формата N.
+   `adventure_v1.json` — копия DND-1 (без `format_version`), `adventure_v2.json` — формат v2
+   (DND-2, решение Р8). Образец добавляет тот, кто меняет схему `Adventure` несовместимо; прежние
+   образцы остаются и читаются всегда — через `adventure_from_data` движка, единственный вход для
+   копий игр. Копия текущего формата читается и пишется без изменений, копия старого переводится
+   в текущий без потерь. Падение теста чтения образца — сигнал, что сохранённые игры перестали
+   читаться: схему делают совместимой (значение по умолчанию, перевод старого формата), а не
+   переписывают образец.
 """
 
+import ast
+import copy
 import json
 import re
 import sqlite3
@@ -33,28 +39,41 @@ from typing import Any
 
 import httpx
 import pytest
+import yaml
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import select
 
-from dnd_engine.adventure.schema import Adventure
+from dnd_engine.adventure.loader import adventure_from_data, load_adventure
+from dnd_engine.adventure.schema import FORMAT_VERSION
 from dnd_engine.character import Character
 from dnd_engine.content import load_srd
+from dnd_engine.rng import SeededRng
 from dnd_engine.state import GameState
 from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.db.models import (
     GAME_STATE_SCHEMA_VERSION,
+    DmTurnLog,
     Game,
     GamePlayer,
     GameStateSnapshot,
+    Message,
+    MessageKind,
     PlayerCharacter,
+    TurnKind,
+    TurnStatus,
     User,
 )
 from dnd_server.db.session import make_engine, make_sessionmaker, resolve_database_url
+from dnd_server.dm.turn import Deps, run_dm_turn
+from dnd_server.games.hooks import NullBroadcaster
+from dnd_server.games.service import GameLocks
 from dnd_server.realtime.views import snapshot_for
 
 TESTS = Path(__file__).resolve().parent
+SERVER_SRC = TESTS.parents[1] / "src" / "dnd_server"
+DEMO_ADVENTURE_DIR = TESTS.parents[3] / "content" / "adventures" / "demo-crypt"
 ALEMBIC_INI = TESTS.parents[1] / "alembic.ini"
 GOLDEN = TESTS / "golden"
 GOLDEN_NAME = re.compile(r"game_state_v(\d+)\.json")
@@ -193,16 +212,157 @@ def test_every_stored_adventure_copy_format_has_its_golden_file_and_old_ones_sta
     assert list(golden_adventures()) == list(range(1, len(golden_adventures()) + 1))
 
 
-@pytest.mark.parametrize("version", golden_adventures())
-def test_an_adventure_copy_of_each_stored_format_is_read_whole_by_the_current_code(version):
-    golden = json.loads(golden_adventures()[version].read_text(encoding="utf-8"))
+def golden_adventure(version: int) -> dict[str, Any]:
+    return json.loads(golden_adventures()[version].read_text(encoding="utf-8"))
 
-    adventure = Adventure.model_validate(golden)
 
-    # Круг «прочитать и записать» возвращает те же данные: ни одно поле старой копии не потеряно
+def test_the_newest_adventure_copy_sample_is_the_format_the_server_writes_now():
+    # Копию пишет создание игры (`model_dump` приключения из каталога): образец последнего
+    # поколения — ровно эта форма, с той же версией формата.
+    newest = max(golden_adventures())
+    written_now = load_adventure(DEMO_ADVENTURE_DIR).model_dump(mode="json")
+
+    assert newest == FORMAT_VERSION
+    assert golden_adventure(newest)["format_version"] == written_now["format_version"]
+    assert set(golden_adventure(newest)) == set(written_now)
+
+
+def test_an_adventure_copy_of_the_current_format_is_read_whole_by_the_current_code():
+    golden = golden_adventure(FORMAT_VERSION)
+
+    adventure = adventure_from_data(golden)
+
+    # Круг «прочитать и записать» возвращает те же данные: ни одно поле копии не потеряно
     # (в модели `extra="forbid"`, но переименованное поле с умолчанием исчезло бы молча) и не
     # добавлено новое.
     assert adventure.model_dump(mode="json") == golden
+
+
+def lost_fields(old: Any, new: Any, path: str = "") -> list[str]:
+    """Пути полей старой копии, которых в новой нет или у которых другое значение. Новые поля
+    новой копии не в счёт: это значения по умолчанию."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        return [
+            lost
+            for key, value in old.items()
+            for lost in (
+                lost_fields(value, new[key], f"{path}/{key}") if key in new else [f"{path}/{key}"]
+            )
+        ]
+    if isinstance(old, list) and isinstance(new, list) and len(old) == len(new):
+        return [
+            lost
+            for number, (was, now) in enumerate(zip(old, new, strict=True))
+            for lost in lost_fields(was, now, f"{path}/{number}")
+        ]
+    return [] if old == new else [path]
+
+
+@pytest.mark.parametrize("version", [v for v in golden_adventures() if v < FORMAT_VERSION])
+def test_an_adventure_copy_of_an_older_format_is_read_without_losing_anything(version):
+    golden = golden_adventure(version)
+    old = copy.deepcopy(golden)
+    moved = [  # связи v1 лежали в NPC, в v2 — в общем графе (решение Р8)
+        (owner, relation)
+        for owner, npc in old["npcs"].items()
+        for relation in npc.pop("relations", [])
+    ]
+
+    adventure = adventure_from_data(golden)
+    current = adventure.model_dump(mode="json")
+
+    assert current["format_version"] == FORMAT_VERSION
+    assert lost_fields(old, current) == []
+    assert moved, "в образце должны быть связи NPC"
+    for owner, relation in moved:
+        # Связь v1 у владельца говорит, кем ему приходится `npc_id`: «npc_id — kind для owner».
+        graph = [
+            rel
+            for rel in adventure.relations
+            if (rel.a, rel.b) == (f"npc:{relation['npc_id']}", f"npc:{owner}")
+        ]
+        assert len(graph) == 1 and relation["note"] in graph[0].note
+    assert golden == golden_adventure(version)  # чтение не меняет данные из базы
+    # Переведённая копия пишется в текущем формате и читается так же.
+    assert adventure_from_data(current) == adventure
+
+
+# Одно имя у копии приключения в строке игры: `games.adventure_data`.
+COPY_FIELD = "adventure_data"
+
+
+ENTRY_POINT, ONE_FIELD = "adventure_from_data", "одно поле"
+
+
+def copy_uses(source: str) -> list[str]:
+    """Как код берёт копию приключения игры (`<…>.adventure_data` на чтение), по одному ответу на
+    каждое место: `ENTRY_POINT` — копия идёт аргументом `adventure_from_data` (позиционно или по
+    имени), `ONE_FIELD` — читается одно её поле (`game.adventure_data["title"]`), иначе — само
+    выражение, в котором копия ушла дальше: в модель, в `**`, в переменную, в другую функцию.
+    Запись копии (`game.adventure_data = …`, `Game(adventure_data=…)`) — не чтение."""
+    tree = ast.parse(source)
+    parent = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    uses = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Attribute)
+            and node.attr == COPY_FIELD
+            and isinstance(node.ctx, ast.Load)
+        ):
+            continue
+        holder = parent[node]
+        call = parent[holder] if isinstance(holder, ast.keyword) and holder.arg else holder
+        passed = holder is not call or any(arg is node for arg in getattr(call, "args", ()))
+        if isinstance(holder, ast.Subscript) and holder.value is node:
+            uses.append(ONE_FIELD)
+        elif passed and isinstance(call, ast.Call) and ast.unparse(call.func) == ENTRY_POINT:
+            uses.append(ENTRY_POINT)
+        else:
+            uses.append(ast.unparse(holder))
+    return uses
+
+
+@pytest.mark.parametrize(
+    ("code", "use"),
+    [
+        ("adventure_from_data(game.adventure_data)", ENTRY_POINT),
+        ("adventure_from_data(data=game.adventure_data)", ENTRY_POINT),
+        ("title = game.adventure_data['title']", ONE_FIELD),
+        ("Adventure.model_validate(game.adventure_data)", None),
+        ("Adventure.model_validate(obj=game.adventure_data)", None),
+        ("Adventure(**game.adventure_data)", None),
+        ("adventure_from_data(**game.adventure_data)", None),
+        ("Adventure.model_validate_json(json.dumps(game.adventure_data))", None),
+        ("TypeAdapter(Adventure).validate_python(row.adventure_data)", None),
+        ("data = game.adventure_data", None),
+    ],
+)
+def test_the_search_for_readers_of_the_copy_tells_the_entry_point_from_any_other_reading(code, use):
+    # Страж ниже ищет не только `Adventure.model_validate(<копия>)`: любая другая форма разбора
+    # копии (распаковка, разбор JSON, адаптер типа, переменная) — тоже чтение мимо движка.
+    (found,) = copy_uses(code)
+
+    assert found == use if use is not None else found not in (ENTRY_POINT, ONE_FIELD)
+
+
+@pytest.mark.parametrize(
+    "code", ["game.adventure_data = adventure.model_dump()", "Game(adventure_data=dump)"]
+)
+def test_a_write_of_the_copy_is_not_a_reading(code):
+    assert copy_uses(code) == []
+
+
+def test_the_server_reads_every_adventure_copy_through_the_engine_entry_point():
+    # Копия игры бывает любого поколения формата: читает её только `adventure_from_data`
+    # движка, а не модель напрямую (B2.2, контракт блока 2); одно поле (название) можно взять.
+    uses = [
+        (path.name, use)
+        for path in sorted(SERVER_SRC.rglob("*.py"))
+        for use in copy_uses(path.read_text(encoding="utf-8"))
+    ]
+
+    assert ENTRY_POINT in {use for _, use in uses}, "сервер должен где-то читать копию приключения"
+    assert [(name, use) for name, use in uses if use not in (ENTRY_POINT, ONE_FIELD)] == []
 
 
 # --- миграции ---
@@ -239,10 +399,11 @@ async def test_a_game_saved_on_the_first_revision_is_read_after_upgrade_head(set
             rows = list(await session.scalars(select(PlayerCharacter)))
             alice = await session.get(User, ids["Алиса"])
             # Состояние игры, листы персонажей и копия приключения разбираются в модели движка
-            # без потерь: по копии мастер продолжит игру.
+            # без потерь: по копии мастер продолжит игру. Копия v1 лежит в базе как была и
+            # читается так же, как образец (перевод в v2 — при чтении).
             assert snapshot.to_state().model_dump(mode="json") == golden["state"]
-            stored_copy = Adventure.model_validate(game.adventure_data)
-            assert stored_copy.model_dump(mode="json") == adventure
+            assert game.adventure_data == adventure
+            assert adventure_from_data(game.adventure_data) == adventure_from_data(adventure)
             assert {r.id for r in rows} == set(golden["state"]["party"])
             assert [Character.model_validate(r.data).name for r in rows] == [
                 "Алиса",
@@ -284,6 +445,62 @@ async def test_a_game_saved_on_the_first_revision_is_read_after_upgrade_head(set
     finally:
         await app.state.engine.dispose()
         await engine.dispose()
+
+
+async def test_a_game_with_a_v1_adventure_copy_plays_a_master_round_after_upgrade_head(
+    settings, migrate, tmp_path
+):
+    # Игра DND-1: копия приключения формата v1, связи NPC лежат в самих NPC. После обновления
+    # мастер разбирает по ней раунд (FakeProvider): копия читается, а связи NPC приходят из графа.
+    golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
+    await migrate("upgrade", "0001")
+    ids = insert_saved_game(sqlite_file(settings.database_url), golden, golden_adventure(1))
+    await migrate("upgrade", "head")
+    narration = "Туман редеет, и у ворот кладбища видны свежие следы."
+    steps = [
+        {"tool": "get_npc", "args": {"npc_id": "marta"}},
+        {"tool": "chronicle", "args": {"entry": "Отряд осмотрел кладбище."}},
+        {"text": narration},
+    ]
+    scenario = tmp_path / "round.yaml"
+    scenario.write_text(yaml.safe_dump({"turns": [{"steps": steps}]}, allow_unicode=True), "utf-8")
+    engine = make_engine(settings.database_url)
+    db = make_sessionmaker(engine)
+    deps = Deps(
+        sessionmaker=db,
+        locks=GameLocks(),
+        broadcaster=NullBroadcaster(),
+        settings=settings.model_copy(
+            update={
+                "fake_llm_scenario": scenario,
+                "content_dir": tmp_path / "нет-такой-папки",  # приключение — только из копии
+            }
+        ),
+        turn_tokens=None,
+        srd=load_srd(),
+        rng=SeededRng(7),
+    )
+    try:
+        outcome = await run_dm_turn(ids["game_id"], mode=TurnKind.ROUND, deps=deps)
+        async with db() as session:
+            game = await session.get(Game, ids["game_id"])
+            (log,) = await session.scalars(select(DmTurnLog))
+            told = await session.scalars(
+                select(Message).where(Message.kind == MessageKind.NARRATION)
+            )
+            texts = [message.text for message in told]
+    finally:
+        await engine.dispose()
+
+    assert outcome.status == TurnStatus.DONE, log.error
+    assert game.state_version > golden["state"]["version"]
+    assert narration in texts
+    (npc_call,) = [call for call in log.trace if call["name"] == "get_npc"]
+    relations = json.loads(npc_call["result"])["relations"]  # в журнале результат — текст JSON
+    assert {(rel["a"], rel["b"]) for rel in relations} == {
+        ("npc:fabian", "npc:marta"),  # «Фабиан — должник Марты» из связи v1 у Марты
+        ("npc:marta", "npc:fabian"),  # «Марта — кредитор Фабиана» из связи v1 у Фабиана
+    }
 
 
 async def test_a_game_saved_before_the_clock_column_keeps_counting_after_upgrade_head(

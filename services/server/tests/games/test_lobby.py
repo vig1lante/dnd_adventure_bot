@@ -22,11 +22,12 @@ from typing import Any, NamedTuple
 
 import httpx
 import pytest
+from lore_trap import trap_lore
 from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from dnd_engine.adventure.loader import load_adventure
+from dnd_engine.adventure.loader import adventure_from_data, dump_adventure, load_adventure
 from dnd_engine.adventure.schema import Adventure
 from dnd_engine.content import load_srd
 from dnd_engine.creation import quick_character
@@ -1683,3 +1684,40 @@ async def test_a_refused_leave_or_kick_keeps_the_sockets_of_the_player(lobby):
     assert (await kick(lobby, game["id"], host, host.id)).status_code == 409  # себя нельзя
 
     assert hub.connections(game["id"]) == 2
+
+
+# --- мир приключения (данные мастера формата v2, спека DND-2 §8 «Видимость») ---
+
+LORE_MARK = "МИР-МАСТЕРА-"
+
+
+async def test_no_answer_of_the_catalog_and_the_lobby_carries_the_world_of_the_adventure(
+    settings, db
+):
+    # В каталоге — демо, где каждый текст мира, богов, фракций, связей и тайн мест несёт метку.
+    folder = settings.content_dir / "demo-crypt"
+    data = trap_lore(load_adventure(folder).model_dump(mode="json"), LORE_MARK)
+    shutil.rmtree(folder)
+    dump_adventure(adventure_from_data(data), folder)
+    async with start_lobby(settings, db) as lobby:
+        host = await add_host(lobby)
+        answers = [await lobby.http.get("/api/adventures", headers=host.headers)]
+        answers.append(await create_game(lobby, host))
+        game = answers[-1].json()
+        friend = await add_friend(lobby)
+        answers.append(await join(lobby, friend, game["code"]))
+        for player in (host, friend):
+            await give_character(db, game["id"], player)
+            answers.append(await mark_ready(lobby, game["id"], player))
+        answers.append(await lobby.http.get("/api/games", headers=friend.headers))
+        answers.append(await lobby.http.get(f"/api/games/{game['id']}", headers=friend.headers))
+        answers.append(
+            await lobby.http.post(f"/api/games/{game['id']}/start", headers=host.headers)
+        )
+        stored = await stored_game(db, game["id"])
+
+    assert [answer.status_code for answer in answers] == [200, 201, 200, 200, 200, 200, 200, 200]
+    assert LORE_MARK in json.dumps(stored.adventure_data, ensure_ascii=False)  # игра на этой копии
+    seen = [answer.text for answer in answers]
+    seen += [json.dumps(payload, ensure_ascii=False) for _, payload, _ in lobby.broadcaster.sent]
+    assert LORE_MARK not in " ".join(seen)

@@ -79,6 +79,8 @@ from dnd_server.turns.timers import ManualScheduler
 # tests/dm/test_camp_flow.py -> dm -> tests -> server -> services -> корень репозитория
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEMO_ADVENTURE_DIR = REPO_ROOT / "content" / "adventures" / "demo-crypt"
+# Копия приключения из игры DND-1 (формат v1): связи NPC лежат в самих NPC.
+ADVENTURE_V1 = REPO_ROOT / "services" / "server" / "tests" / "db" / "golden" / "adventure_v1.json"
 SESSION_SECRET = "camp-session-secret-0123456789-abcdefghij"
 TIMEOUT_S = 5
 T0 = datetime(2030, 5, 1, 12, 0, 0, tzinfo=UTC)
@@ -869,6 +871,30 @@ async def test_the_host_can_end_the_camp_before_the_countdown_and_the_timer_is_d
         await table.scheduler.advance(10 * CAMP_SECONDS)
         await table.settle()
         assert len(await table.logs()) == 1  # старый отсчёт второго хода не запустил
+
+
+async def test_a_game_with_a_v1_adventure_copy_ends_its_camp_with_the_morning(camp):
+    # Игра DND-1 у костра после обновления сервера: в базе копия формата v1. Конец привала читает
+    # её так же, как раунд, и длинный отдых с рассказом об утре проходит.
+    golden = json.loads(ADVENTURE_V1.read_text(encoding="utf-8"))
+    async with camp() as table:
+        async with table.db() as session:
+            await session.execute(
+                update(Game).where(Game.id == table.game_id).values(adventure_data=golden)
+            )
+            await session.commit()
+
+        response = await table.host("camp-end")
+
+        assert response.status_code == 200, response.text
+        await table.settle()
+        game = await table.game()
+        assert (game.turn_phase, game.adventure_data) == (TurnPhase.DISCUSSION, golden)
+        [log] = await table.logs()
+        assert log.error is None
+        rested = await table.state()
+        assert rested.party["alice"].hp == rested.party["alice"].hp_max
+        assert NARRATION_OF_THE_MORNING in [m.text for m in await table.messages()]
 
 
 async def test_the_countdown_and_the_button_together_call_the_master_once(camp):

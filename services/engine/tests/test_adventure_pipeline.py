@@ -295,9 +295,11 @@ def take_marta_motive(folder: Path) -> None:
 
 
 def isolate_fabian(folder: Path) -> None:
-    # Связь считается с любой стороны, поэтому убираем её у обоих: Фабиан со статблоком важен.
-    edit_yaml(folder / "npcs/fabian.yaml", lambda d: d.update(relations=[]))
-    edit_yaml(folder / "npcs/marta.yaml", lambda d: d.update(relations=[]))
+    # Связь считается с любого конца: убираем из графа все связи Фабиана, он со статблоком важен.
+    def drop_fabian(relations: list[dict[str, Any]]) -> None:
+        relations[:] = [r for r in relations if "npc:fabian" not in (r["a"], r["b"])]
+
+    edit_yaml(folder / "relations.yaml", drop_fabian)
 
 
 def gather_a_deadly_crowd(folder: Path) -> None:

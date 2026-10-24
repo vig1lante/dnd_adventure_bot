@@ -6,13 +6,14 @@
 """
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any, get_args
 
 import pytest
 
 from dnd_engine.abilities import Ability, Skill
-from dnd_engine.adventure.schema import Adventure
+from dnd_engine.adventure.schema import Adventure, RevealRef
 from dnd_engine.character import ActiveBuff, ActiveCondition, Character
 from dnd_engine.checks import VALID_DCS
 from dnd_engine.combat.model import Combat, Combatant, Zone
@@ -403,6 +404,43 @@ def test_reveal_refs_must_have_the_expected_shape(run, make_ctx, ref):
     assert outcome.result is None
     assert "ref" in outcome.error
     assert "x" * 50 not in outcome.error  # значение не эхом в ответ модели
+
+
+def test_a_secret_of_a_place_is_not_a_reveal_target_its_finding_is_set_by_the_master(
+    run, make_ctx, make_state, demo_adventure
+):
+    # Текущий контракт (формат v2): `reveal` знает только место, скрытый выход и улику, а находки
+    # тайны места (`secrets[].reveals`) движок сам не применяет. Тайну мастер раскрывает рассказом,
+    # а её флаг ставит `set_flag`.
+    ctx = make_ctx(make_state(location_id="crypt"))
+    [secret] = demo_adventure.locations["crypt"].secrets
+    [finding] = secret.reveals
+
+    refused = run(ctx, "reveal", ref=f"secret:{secret.id}")
+
+    assert refused.result is None and "ref" in refused.error
+    assert (ctx.state.world.revealed, ctx.state.world.flags, ctx.events) == ([], {}, [])
+    assert finding.kind == "flag"
+    assert run(ctx, "set_flag", name=finding.id).error is None
+    assert ctx.state.world.flags == {finding.id: True}
+
+
+# Чем мастер сам применяет находку тайны места каждого вида после удачной проверки.
+SECRET_FINDING_TOOLS = {"flag": "set_flag", "clue": "reveal", "exit": "reveal", "item": "give_item"}
+
+
+def test_get_location_tells_the_master_how_to_apply_every_finding_of_a_secret():
+    # Движок находки тайн не применяет, а модель видит только описание инструмента: для каждого
+    # вида находки там назван существующий инструмент (в одной части фразы с видом).
+    [spec] = [spec for spec in LORE_TOOLS if spec.name == "get_location"]
+    finding_kinds = get_args(RevealRef.model_fields["kind"].annotation)
+    world_tools = {spec.name for spec in WORLD_TOOLS}
+
+    assert set(SECRET_FINDING_TOOLS) == set(finding_kinds)
+    for kind, tool in SECRET_FINDING_TOOLS.items():
+        assert tool in world_tools
+        assert re.search(rf"\b{kind}\b[^,;]*\b{tool}\b", spec.description), (kind, tool)
+    assert "value" in spec.description  # флаг ставится с заданным значением
 
 
 def test_a_locked_chest_cannot_be_revealed_until_the_key_is_handed_over(

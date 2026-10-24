@@ -15,6 +15,7 @@
 
 import ast
 import asyncio
+import copy
 import dataclasses
 import json
 import logging
@@ -28,13 +29,15 @@ from typing import Any
 import pytest
 import uvicorn
 import yaml
+from adventure_secrets import hidden_texts
+from lore_trap import trap_lore
 from pydantic import SecretStr
 from sqlalchemy import select, update
 from sqlalchemy import text as raw_sql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from websockets.asyncio.client import connect
 
-from dnd_engine.adventure.loader import load_adventure
+from dnd_engine.adventure.loader import AdventureFormatError, adventure_from_data, load_adventure
 from dnd_engine.adventure.schema import Adventure
 from dnd_engine.character import Character
 from dnd_engine.content import SrdContent, load_srd
@@ -69,6 +72,7 @@ from dnd_server.dm import provider as provider_module
 from dnd_server.dm import turn as turn_module
 from dnd_server.dm.provider import GameProviders, bridge_url, game_provider
 from dnd_server.dm.spotlight import SPOTLIGHT_HINT_AFTER, spotlight_hints, update_spotlight
+from dnd_server.dm.text import safe_traceback
 from dnd_server.dm.turn import (
     Deps,
     TurnOutcome,
@@ -1626,21 +1630,6 @@ async def test_the_acting_fighters_are_in_the_journal_request(monkeypatch, world
 # --- тайна мастера не доходит до игроков ---
 
 
-def hidden_texts(node: Any) -> list[str]:
-    """Все тексты `dm_notes`, `secret` и `knows` на любой глубине данных приключения."""
-    found: list[str] = []
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key in ("dm_notes", "secret", "knows"):
-                found += [value] if isinstance(value, str) else [str(item) for item in value]
-            else:
-                found += hidden_texts(value)
-    elif isinstance(node, list):
-        for item in node:
-            found += hidden_texts(item)
-    return [text for text in found if text]
-
-
 def windows(text: str, size: int) -> list[str]:
     """Все куски текста длиной `size` (скользящее окно по всему тексту, а не по началу)."""
     flat = " ".join(text.split())
@@ -1680,6 +1669,99 @@ async def test_nothing_the_master_read_reaches_the_players(world):
     for key in world.players:
         seen.append(dump(await world.feed_of(key)))
     assert leaked(" ".join(seen), hidden) == []
+
+
+LORE_MARK = "МИР-МАСТЕРА-"
+
+
+async def test_the_journal_has_the_lore_around_the_party_and_the_players_get_none_of_it(
+    db, settings, srd, adventure, tmp_path
+):
+    # Каждый текст мира, богов, фракций, связей и тайн мест в копии игры несёт метку. У Марты (она
+    # в деревне, где отряд) есть и тайная связь: мастер должен видеть её с пометкой.
+    data = adventure.model_dump(mode="json")
+    data["relations"].append(
+        {
+            "id": "marta-kin-fabian",
+            "a": "npc:marta",
+            "b": "npc:fabian",
+            "kind": "kin",
+            "secret": True,
+        }
+    )
+    trapped = adventure_from_data(trap_lore(data, LORE_MARK))
+    world = await build_world(db, settings, srd, trapped, tmp_path)
+    world.use_scenario(
+        scenario_turn(
+            tool("get_world"),
+            tool("get_relations", ref="npc:marta"),
+            tool("chronicle", entry="Отряд расспросил Марту о старых богах."),
+            say("Марта пожимает плечами и наливает всем по кружке."),
+        )
+    )
+    await world.act("alice", "Расспрашиваю Марту о старых богах")
+
+    outcome = await world.run()
+
+    assert outcome.status == TurnStatus.DONE
+    (log,) = await world.logs()
+    # Журнал хода (`dm_turn_logs`) хранит контекст мастера с разделом мира и ответы инструментов.
+    lore = log.request["context"].split("## Мир приключения\n", 1)[1].split("\n## ", 1)[0]
+    for text in ("история-мира", "name-veyla", "name-regulars", "связь-fabian-debtor-marta"):
+        assert f"{LORE_MARK}{text}" in lore
+    (hidden,) = [line for line in lore.splitlines() if "связь-marta-kin-fabian" in line]
+    assert "тайная: игроки не знают" in hidden
+    assert f"{LORE_MARK}слух-" in dump(log.trace)  # get_world
+    # Игроку из этого не уходит ничего: ни рассказ, ни события, ни снимок, ни API игры.
+    seen = [message.text + dump(message.data) for message in await world.messages()]
+    seen += [dump(payload) for payload, _ in world.broadcaster.sent]
+    async with world.db() as session:
+        for player in world.players.values():
+            user = await session.get(User, player.user_id)
+            seen.append(dump(await snapshot_for(session, user, world.game_id, srd=srd)))
+    assert "Марта пожимает плечами" in " ".join(seen)
+    assert LORE_MARK not in " ".join(seen)
+
+
+# Значение из битой копии: ни в тексте ошибки, ни в журнале сервера его быть не должно.
+BROKEN_VALUE = "ЗНАЧЕНИЕ-ИЗ-КОПИИ"
+
+
+async def test_a_broken_adventure_copy_stops_the_turn_before_the_reserve_and_changes_nothing(
+    world,
+):
+    async with world.db() as session:
+        game = await session.get(Game, world.game_id)
+        data = copy.deepcopy(game.adventure_data)  # новый объект: иначе SQLAlchemy не увидит правки
+        data["world"]["history"] = {"текст": BROKEN_VALUE}
+        data["relations"].append(
+            {"id": "broken", "a": f"npc:{BROKEN_VALUE}", "b": "npc:marta", "kind": BROKEN_VALUE}
+        )
+        game.adventure_data = data
+        await session.commit()
+    await world.act("alice", "Иду вперёд")
+    messages_before = [message.id for message in await world.messages()]
+
+    with pytest.raises(AdventureFormatError) as failure:
+        await world.run()
+
+    # Ход не начался: резерв откатился целиком, игра ждёт хоста в той же фазе.
+    game = await world.game()
+    assert (game.turn_phase, game.state_version, game.current_turn_id) == (
+        TurnPhase.DISCUSSION,
+        1,
+        world.turn_id,
+    )
+    assert await world.snapshot_versions() == [1]
+    assert [(turn.id, turn.status) for turn in await world.turns()] == [
+        (world.turn_id, TurnStatus.OPEN)
+    ]
+    assert [message.id for message in await world.messages()] == messages_before
+    assert await world.logs() == [] and world.broadcaster.sent == []
+    # Текст ошибки и трассировка для журнала сервера говорят, где беда, но не несут значений входа.
+    assert failure.value.problems
+    for text in (str(failure.value), safe_traceback(failure.value, world.deps.settings)):
+        assert BROKEN_VALUE not in text and "input_value" not in text
 
 
 # --- неудачная попытка ---

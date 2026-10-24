@@ -1,9 +1,10 @@
 """Фабрика приключений для тестов валидатора (B4.3): всё собирается в памяти, без файлов.
 
-`make_adventure()` — «чистое» приключение: 3 локации, 2 NPC, 1 бой, 1 открытие с тремя уликами в
-разных локациях. Валидатор не находит в нём ни ошибок, ни предупреждений, поэтому любая проблема
-в тесте — результат правки, которую тест сам внёс. Чтобы изменить вложенное поле, берут «сырые»
-данные из `adventure_data()`, правят их и собирают `Adventure.model_validate(data)`.
+`make_adventure()` — «чистое» приключение формата v2: 3 локации, 2 NPC, 1 бой, 1 открытие с тремя
+уликами в разных локациях; мир, бог, фракция, граф связей, секрет склепа и злодей. Валидатор не
+находит в нём ни ошибок, ни предупреждений, поэтому любая проблема в тесте — результат правки,
+которую тест сам внёс. Чтобы изменить вложенное поле, берут «сырые» данные из `adventure_data()`,
+правят их и собирают `Adventure.model_validate(data)`.
 """
 
 from typing import Any
@@ -14,6 +15,7 @@ from dnd_engine.adventure.schema import Adventure
 def adventure_data() -> dict[str, Any]:
     """Свежие «сырые» данные чистого приключения (каждый вызов — новые словари и списки)."""
     return {
+        "format_version": 2,
         "id": "factory-crypt",
         "title": "Склеп у деревни",
         "pitch": "Пропал смотритель кладбища, и в деревне боятся выходить после заката.",
@@ -100,6 +102,14 @@ def adventure_data() -> dict[str, Any]:
                         "reveals": [{"kind": "clue", "id": "clue-ledger"}],
                     }
                 ],
+                "secrets": [
+                    {
+                        "id": "empty-vault",
+                        "text": "Тайник под алтарём давно пуст.",
+                        "check": {"ability": "int", "skill": "investigation", "dc": 15},
+                        "reveals": [{"kind": "flag", "id": "vault-empty"}],
+                    }
+                ],
             },
         },
         "npcs": {
@@ -110,7 +120,6 @@ def adventure_data() -> dict[str, Any]:
                 "appearance": "Крепкая женщина с усталым взглядом.",
                 "manner": "говорит коротко",
                 "motive": "найти брата",
-                "relations": [{"npc_id": "fabian", "kind": "debtor", "note": "должник брата"}],
                 "location_id": "village",
             },
             "fabian": {
@@ -120,7 +129,6 @@ def adventure_data() -> dict[str, Any]:
                 "appearance": "Тощий человек в чёрном плаще.",
                 "manner": "тараторит и оправдывается",
                 "motive": "расплатиться с долгами",
-                "relations": [{"npc_id": "marta", "kind": "creditor"}],
                 "location_id": "crypt",
                 "statblock": "cultist_fanatic",
             },
@@ -169,6 +177,68 @@ def adventure_data() -> dict[str, Any]:
                 ],
             }
         },
+        "world": {
+            "history": "Холм за деревней хранит склеп старого графа.",
+            "regions": [{"id": "marsh", "name": "Болотный край", "description": "Туман и тропы."}],
+            "rumors": [{"text": "В склепе спрятана казна графа.", "true": False}],
+        },
+        "deities": {
+            "warden": {
+                "id": "warden",
+                "name": "Страж",
+                "title": "Хранитель покоя мёртвых",
+                "domains": ["смерть", "покой"],
+                "symbol": "ключ на цепи",
+                "dogma": "Мёртвым — покой.",
+                "appearance": "Старик с фонарём.",
+                "attitude_to_mortals": "строг, но справедлив",
+                "avatar_statblock": "ghoul",
+            }
+        },
+        "factions": {
+            "candle-circle": {
+                "id": "candle-circle",
+                "name": "Круг бледной свечи",
+                "goal": "Найти казну графа.",
+                "methods": "Ритуалы по брошюрам.",
+                "leader": "npc:fabian",
+                "base_location": "crypt",
+            }
+        },
+        "relations": [
+            {
+                "id": "fabian-debtor-marta",
+                "a": "npc:fabian",
+                "b": "npc:marta",
+                "kind": "debtor",
+                "note": "должник брата",
+                "mutual": False,
+            },
+            {
+                "id": "warden-enemy-candle-circle",
+                "a": "deity:warden",
+                "b": "faction:candle-circle",
+                "kind": "enemy",
+                "secret": True,
+            },
+            # У каждого NPC есть вторая связь: правка одной связи в тесте не оставляет его без связей.
+            {
+                "id": "marta-worships-warden",
+                "a": "npc:marta",
+                "b": "deity:warden",
+                "kind": "worships",
+                "mutual": False,
+            },
+            {
+                "id": "fabian-seeks-crypt",
+                "a": "npc:fabian",
+                "b": "location:crypt",
+                "kind": "seeks",
+                "note": "ищет казну графа",
+                "mutual": False,
+            },
+        ],
+        "villain": "npc:fabian",
     }
 
 

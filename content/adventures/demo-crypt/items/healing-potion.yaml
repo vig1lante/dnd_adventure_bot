@@ -5,3 +5,4 @@ description: >-
   приписал на этикетке: «От похмелья не помогает».
 base_item: potion_of_healing
 holder: location:cemetery
+public: Зелье лечения в тёмной фляге.

@@ -17,3 +17,4 @@ monsters:
     count: 2
     zone: hall
 pc_zone: stairs
+boss: true

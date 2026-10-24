@@ -901,10 +901,14 @@ async def test_error_goes_back_to_the_owning_step_only(break_answers, code, ref,
         ("unknown_monster", "encounter:ghoul-pack", "encounters"),
         ("encounter_too_hard", "encounter:ghoul-pack", "encounters"),
         ("encounter_too_easy", "encounter:ghoul-pack", "encounters"),
+        ("boss_too_easy", "encounter:ghoul-pack", "encounters"),  # валидатор v2 (DND-2 §8)
         ("dangling_ref", "encounter:ghoul-pack", "encounters"),
         ("npc_without_motive", "npc:otto", "npcs"),
         ("npc_without_relations", "npc:otto", "npcs"),
         ("dangling_ref", "npc:otto", "npcs"),
+        # Связи генератор кладёт в NPC (шаг npcs), при чтении они переходят в граф (формат v2).
+        ("dangling_ref", "relation:greta-kin-otto", "npcs"),
+        ("dangling_ref", "relation:lost-brother-kin-warden", "npcs"),
         ("dangling_ref", "item:undercroft-key", "items"),
         # unreachable_key: ключ переносит шаг items; он не трогает граф и остальные шаги.
         ("unreachable_key", "location:chapel/exit:to-undercroft", "items"),

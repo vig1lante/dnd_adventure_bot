@@ -47,10 +47,12 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dnd_engine.adventure.loader import adventure_from_data
 from dnd_engine.adventure.schema import Adventure, Location, Npc
 from dnd_engine.character import Character
 from dnd_engine.content import SrdContent
 from dnd_engine.state import GameState, PcHook, RulesRef
+from dnd_engine.tools.lore import relations_of
 from dnd_server.characters.flavor import SHORT_TEXT_MAX_CHARS
 from dnd_server.db.models import (
     Game,
@@ -203,7 +205,8 @@ def weaving_request(
     стиля (спека §4). `unlinked` — id героев (наши, не модели), у которых в прошлом ответе не
     оказалось связей: просьба повторяется с замечанием об этом, остальной текст запроса тот же."""
     npcs = [
-        json_line(_npc_data(npc)) for npc in sorted(adventure.npcs.values(), key=lambda n: n.id)
+        json_line(_npc_data(npc, adventure))
+        for npc in sorted(adventure.npcs.values(), key=lambda n: n.id)
     ]
     places = [
         json_line(_place_data(place))
@@ -241,7 +244,7 @@ def weaving_request(
     )
 
 
-def _npc_data(npc: Npc) -> dict[str, Any]:
+def _npc_data(npc: Npc, adventure: Adventure) -> dict[str, Any]:
     """NPC для запроса: кто он, чего хочет и как связан с другими NPC. Тайны и «что знает» — нет."""
     data: dict[str, Any] = {
         "id": npc.id,
@@ -249,9 +252,38 @@ def _npc_data(npc: Npc) -> dict[str, Any]:
         "role": npc.role,
         "motive": one_line(npc.motive),
     }
-    if npc.relations:
-        data["relations"] = [{"npc_id": rel.npc_id, "kind": rel.kind} for rel in npc.relations]
+    if relations := _npc_relations(adventure, npc.id):
+        data["relations"] = relations
     return data
+
+
+def _npc_relations(adventure: Adventure, npc_id: str) -> list[dict[str, str]]:
+    """Открытые связи NPC с другими NPC в форме запроса DND-1 — только `{npc_id, kind}`, где
+    `npc_id` — кем тот приходится этому NPC.
+
+    Связи лежат в общем графе приключения (формат v2, читает движок `relations_of`). Связь графа
+    «a — kind для b» говорит b, кем ему приходится a, поэтому идёт в данные b; взаимная — ещё и в
+    данные a. Зацепку читает игрок, поэтому видимость — уровня DND-1: тайная связь (`secret`) не
+    идёт, как и тайны NPC; связи с богами, фракциями и местами — тоже (мир — данные мастера, спека
+    DND-2 §8). Пояснение `note` не идёт ни у какого вида, даже у `other`: в v1 у связи не было
+    признака тайны, а при переводе v1 вид вне словаря становится `other` и уходит в пояснение
+    вместе с текстом автора, который DND-1 держал только для мастера."""
+    me = f"npc:{npc_id}"
+    found: list[dict[str, str]] = []
+    for relation in relations_of(adventure, me):
+        if relation["secret"]:
+            continue
+        if relation["b"] == me:
+            other = relation["a"]
+        elif relation["mutual"]:
+            other = relation["b"]
+        else:
+            continue
+        kind, _, other_id = other.partition(":")
+        if kind != "npc":
+            continue
+        found.append({"npc_id": other_id, "kind": relation["kind"]})
+    return found
 
 
 def _place_data(place: Location) -> dict[str, str]:
@@ -543,7 +575,7 @@ async def _load(session: AsyncSession, game: Game) -> _Plan:
         raise ValueError("в игре нет ни одного персонажа")
     return _Plan(
         game_id=game.id,
-        adventure=Adventure.model_validate(game.adventure_data),
+        adventure=adventure_from_data(game.adventure_data),
         heroes=heroes,
         provider_name=game.provider,
         model=game.model,

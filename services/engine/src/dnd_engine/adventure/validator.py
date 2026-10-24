@@ -1,11 +1,13 @@
-"""Валидатор приключения (спека §6.2): блокирующие ошибки, предупреждения, балл и оценка времени.
+"""Валидатор приключения (спека §6.2, формат v2 — спека DND-2 §8): блокирующие ошибки,
+предупреждения, балл и оценка времени.
 
-Схема (`schema`) проверяет форму данных, а этот модуль — смысл: ссылки между сущностями,
-уникальность id вложенных сущностей (места, улики, выходы, зоны) и предметов (свои не совпадают с
-предметами SRD), держателей предметов, которые кладут находки, достижимость локаций и ключей
-замков-предметов, улики открытий, кастомные статблоки (всё, что бой читает из них: числа, записи
-костей в пределах, обязательные поля действий, типы урона и состояния SRD) и сложность боёв. Это
-чистая функция:
+Схема (`schema`) проверяет форму данных, а этот модуль — смысл: ссылки между сущностями (в том
+числе концы связей графа, лидеры и базы фракций, аватары богов, злодей и находки тайн мест),
+уникальность id вложенных сущностей (места, улики, выходы, зоны, связи, края, тайны мест) и
+предметов (свои не совпадают с предметами SRD), разные концы связи, держателей предметов, которые
+кладут находки, достижимость локаций и ключей замков-предметов, улики открытий, кастомные статблоки
+(всё, что бой читает из них: числа, записи костей в пределах, обязательные поля действий, типы урона
+и состояния SRD) и сложность боёв (бой с боссом — не легче «высокой»). Это чистая функция:
 она читает приключение и данные SRD, ничего не меняет, не касается файлов и сети и не бросает
 исключений на корректно собранном `Adventure`. Тексты приключения для неё — данные: в сообщения
 они попадают только как короткие id и ссылки, а `ref` и `message` каждой проблемы — одна печатная
@@ -24,8 +26,17 @@ from dnd_engine.adventure.budget import (
     encounter_rating,
     encounter_xp,
     find_monster,
+    party_budget,
 )
-from dnd_engine.adventure.schema import COLLECTIONS, Adventure, Clue, Feature, Item
+from dnd_engine.adventure.schema import (
+    COLLECTIONS,
+    REF_KINDS,
+    Adventure,
+    Clue,
+    Feature,
+    Item,
+    RevealRef,
+)
 from dnd_engine.content import (
     MonsterAction,
     MonsterDef,
@@ -332,6 +343,15 @@ class _Ref(NamedTuple):
     kinds: tuple[str, ...]  # какие виды целей допустимы в этом поле
 
 
+def _reveal_sources(adventure: Adventure) -> Iterator[tuple[str, tuple[RevealRef, ...]]]:
+    """(ref, находки) всего, что раскрывает находки: интересные места и тайны мест."""
+    for location in adventure.locations.values():
+        for feature in location.features:
+            yield f"location:{location.id}/feature:{feature.id}", feature.reveals
+        for secret in location.secrets:
+            yield f"location:{location.id}/secret:{secret.id}", secret.reveals
+
+
 def _references(adventure: Adventure) -> Iterator[_Ref]:
     """Все ссылки приключения, кроме `MonsterGroup.monster_id` (её проверяет `unknown_monster`)
     и зон боя (их проверяет `_check_zones`)."""
@@ -339,6 +359,8 @@ def _references(adventure: Adventure) -> Iterator[_Ref]:
     yield _Ref(
         "adventure", "finale_location", f"location:{adventure.finale_location}", ("location",)
     )
+    if adventure.villain is not None:
+        yield _Ref("adventure", "villain", adventure.villain, ("npc", "deity"))
     for location in adventure.locations.values():
         owner = f"location:{location.id}"
         if location.encounter_id is not None:
@@ -349,19 +371,31 @@ def _references(adventure: Adventure) -> Iterator[_Ref]:
             if exit_.locked_by is not None:
                 yield _Ref(exit_owner, "locked_by", exit_.locked_by, ("item", "flag"))
         for feature in location.features:
-            feature_owner = f"{owner}/feature:{feature.id}"
             if feature.locked_by is not None:
+                feature_owner = f"{owner}/feature:{feature.id}"
                 yield _Ref(feature_owner, "locked_by", feature.locked_by, ("item", "flag"))
-            for reveal in feature.reveals:
-                target = f"{reveal.kind}:{reveal.id}"
-                yield _Ref(feature_owner, "reveals", target, (reveal.kind,))
+    for source, reveals in _reveal_sources(adventure):
+        for reveal in reveals:
+            yield _Ref(source, "reveals", f"{reveal.kind}:{reveal.id}", (reveal.kind,))
     for npc in adventure.npcs.values():
         owner = f"npc:{npc.id}"
         yield _Ref(owner, "location_id", f"location:{npc.location_id}", ("location",))
         if npc.statblock is not None:
             yield _Ref(owner, "statblock", f"monster:{npc.statblock}", ("monster",))
-        for relation in npc.relations:
-            yield _Ref(owner, "relations.npc_id", f"npc:{relation.npc_id}", ("npc",))
+    for deity in adventure.deities.values():
+        if deity.avatar_statblock is not None:
+            target = f"monster:{deity.avatar_statblock}"
+            yield _Ref(f"deity:{deity.id}", "avatar_statblock", target, ("monster",))
+    for faction in adventure.factions.values():
+        owner = f"faction:{faction.id}"
+        if faction.leader is not None:
+            yield _Ref(owner, "leader", faction.leader, ("npc",))
+        if faction.base_location is not None:
+            target = f"location:{faction.base_location}"
+            yield _Ref(owner, "base_location", target, ("location",))
+    for relation in adventure.relations:
+        for field in ("a", "b"):
+            yield _Ref(f"relation:{relation.id}", field, getattr(relation, field), REF_KINDS)
     for item in adventure.items.values():
         owner = f"item:{item.id}"
         if item.base_item is not None:
@@ -386,6 +420,8 @@ def _known_ids(adventure: Adventure, content: SrdContent) -> dict[str, Container
         "npc": adventure.npcs,
         "item": adventure.items,
         "encounter": adventure.encounters,
+        "deity": adventure.deities,
+        "faction": adventure.factions,
         "monster": adventure.monsters.keys() | content.monsters.keys(),
         "srd_item": content.items,
         "feature": {feature.id for location in locations for feature in location.features},
@@ -516,13 +552,12 @@ def _check_engine_flags(adventure: Adventure) -> list[Issue]:
     issues = [
         _error(
             "schema",
-            f"location:{location.id}/feature:{feature.id}",
+            source,
             f"reveals: флаг {quoted(reveal.id)} ведёт движок "
             f"(префиксы {', '.join(ENGINE_FLAG_PREFIXES)}), находка не может его выставить",
         )
-        for location in adventure.locations.values()
-        for feature in location.features
-        for reveal in feature.reveals
+        for source, reveals in _reveal_sources(adventure)
+        for reveal in reveals
         if reveal.kind == "flag" and reveal.id.startswith(ENGINE_FLAG_PREFIXES)
     ]
     locks = (  # выходы и места: у обоих есть `id` и `locked_by`
@@ -633,6 +668,21 @@ def _check_unique_ids(adventure: Adventure) -> list[Issue]:
         ),
         "предмет лежит внутри одного места, иначе неясно, какое из них его закрывает",
     )
+    issues += _repeated_id_errors(
+        "тайна места",
+        ((f"location:{loc.id}/secret:{s.id}", s.id) for loc in locations for s in loc.secrets),
+        "id тайны места один на всё приключение",
+    )
+    issues += _repeated_id_errors(
+        "связь",
+        ((f"relation:{r.id}", r.id) for r in adventure.relations),
+        "по id связь находят в графе",
+    )
+    issues += _repeated_id_errors(
+        "край",
+        ((f"region:{r.id}", r.id) for r in adventure.world.regions),
+        "по id край находят в мире",
+    )
     for location in locations:
         issues += _repeated_id_errors(
             "выход",
@@ -645,6 +695,19 @@ def _check_unique_ids(adventure: Adventure) -> list[Issue]:
             "start_combat не начнёт бой в такой локации",
         )
     return issues
+
+
+def _check_relation_ends(adventure: Adventure) -> list[Issue]:
+    """У связи графа разные концы: связь сущности с самой собой ничего не говорит мастеру."""
+    return [
+        _error(
+            "schema",
+            f"relation:{relation.id}",
+            f"a и b: связь ведёт от {quoted(relation.a)} к нему же, у связи разные концы",
+        )
+        for relation in adventure.relations
+        if relation.a == relation.b
+    ]
 
 
 def _check_hidden_exit_ids(adventure: Adventure) -> list[Issue]:
@@ -958,6 +1021,11 @@ def _check_encounters(adventure: Adventure, content: SrdContent) -> list[Issue]:
             issues.append(
                 _warning("encounter_too_hard", ref, f"бой смертельно тяжёл: {_shown(xp)} XP")
             )
+        elif encounter.boss and rating != "high":
+            # Одно предупреждение вместо двух: «слишком лёгок» для босса уже сказано этим.
+            high = party_budget(adventure.party_level, adventure.party_size)[2]
+            message = f"бой с боссом легче высокой сложности: {_shown(xp)} XP, нужно от {high} XP"
+            issues.append(_warning("boss_too_easy", ref, message))
         elif rating == "trivial":
             issues.append(
                 _warning("encounter_too_easy", ref, f"бой слишком лёгок: {_shown(xp)} XP")
@@ -981,17 +1049,16 @@ def _check_locations(adventure: Adventure) -> list[Issue]:
 
 def _check_npcs(adventure: Adventure) -> list[Issue]:
     """Без мотива предупреждаем любого NPC, без связей — тех, кто важен: со статблоком или
-    названный в уликах. Связь считается с любой стороны: достаточно, чтобы на NPC сослался
-    другой."""
+    названный в уликах. Связи берутся из общего графа, NPC может стоять на любом её конце."""
     named_in_clues = {clue.where for rev in adventure.revelations.values() for clue in rev.clues}
-    related = {rel.npc_id for npc in adventure.npcs.values() for rel in npc.relations}
+    related = {end for relation in adventure.relations for end in (relation.a, relation.b)}
     issues: list[Issue] = []
     for npc in adventure.npcs.values():
         ref = f"npc:{npc.id}"
         if not npc.motive.strip():
             issues.append(_warning("npc_without_motive", ref, "у NPC нет мотива"))
-        important = npc.statblock is not None or f"npc:{npc.id}" in named_in_clues
-        if important and not npc.relations and npc.id not in related:
+        important = npc.statblock is not None or ref in named_in_clues
+        if important and ref not in related:
             issues.append(_warning("npc_without_relations", ref, "у важного NPC нет связей"))
     return issues
 
@@ -1030,6 +1097,7 @@ def validate(adventure: Adventure, content: SrdContent) -> Report:
         *_check_custom_monsters(adventure, content),
         *_check_unique_ids(adventure),
         *_check_hidden_exit_ids(adventure),
+        *_check_relation_ends(adventure),
         *_check_references(adventure, content),
         *_check_zones(adventure),
         *_check_location_encounters(adventure),

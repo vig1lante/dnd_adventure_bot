@@ -6,7 +6,8 @@
 - `adventure_brief` — сводка приключения без заметок мастера по локациям: от них сводка менялась
   бы при любой правке, а кеш промпта держится на её стабильности;
 - `turn_context` — динамический контекст одного хода: режим мата игры, летопись, мир, локация,
-  отряд, бой, подсказки внимания, прошлые ходы и ходы этого раунда.
+  мир приключения вокруг неё (история, боги, фракции и связи, формат v2), отряд, бой, подсказки
+  внимания, прошлые ходы и ходы этого раунда.
 
 Границы доверия в `turn_context`. Текст пишут игроки (ходы, реплики у костра, имя, внешность,
 предыстория и замысел героев) и сама модель (зацепки вплетения, прошлые рассказы): для мастера это
@@ -23,18 +24,18 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from dnd_engine.adventure.schema import Adventure
+from dnd_engine.adventure.schema import Adventure, Deity, Faction
 from dnd_engine.character import IMPROVISED_WEAPON_ID, Character
 from dnd_engine.combat.model import Combat, Combatant
 from dnd_engine.conditions import is_dead
 from dnd_engine.content import SrdContent
 from dnd_engine.modules.base import NO_RULES, RuleSet
 from dnd_engine.state import GameState, PcHook, SceneType
-from dnd_engine.tools.lore import GetLocationArgs, get_location, item_holder
+from dnd_engine.tools.lore import GetLocationArgs, get_location, item_holder, relations_of
 from dnd_engine.tools.registry import ToolContext
 from dnd_server.db.models import TurnKind
 from dnd_server.dm.spotlight import spotlight_hints
-from dnd_server.dm.text import json_line, one_line
+from dnd_server.dm.text import json_line, one_line, printable_line
 from dnd_server.prompts import load, profanity_line
 
 # Режим хода мастера: открытие игры, раунд, боевой ход, конец привала. Тот же перечень, что у
@@ -91,10 +92,20 @@ _READING_GUIDE = (
     f"«{MARK_PASS}» — герой выжидает."
 )
 _LOCATION_GUIDE = (
-    "Результат get_location для текущей локации. dm_notes — заметки только для тебя. items — то, "
+    "Результат get_location для текущей локации. dm_notes — заметки только для тебя, secrets — "
+    "тайны места, тоже только для тебя. items — то, "
     "что лежит здесь открыто или у NPC здесь: такой предмет можно выдать через give_item; "
     "предмет внутри ещё не найденного места появится в items после reveal этого места."
 )
+# «История в 2–3 строки» (план DND-2 B2.2): целиком её отдаёт get_world.
+HISTORY_MAX_CHARS = 400
+_LORE_GUIDE = (
+    "Мир вокруг текущей локации и её NPC — только для тебя: игроки узнают из него лишь то, что "
+    "ты расскажешь. Полностью — get_world, богов — get_deity, фракции — get_faction, связи "
+    "любого NPC, бога, фракции или места — get_relations."
+)
+_RELATIONS_HEADING = "Связи (читаются «a — kind для b»):"
+_MARK_MUTUAL, _MARK_HIDDEN = "взаимная", "тайная: игроки не знают"
 _SCENE_NAMES = {
     SceneType.EXPLORATION: "исследование",
     SceneType.SOCIAL: "разговор",
@@ -223,12 +234,14 @@ def turn_context(
     боевом вызове, `profanity` — флажок мата игры (строка раздела «Стиль»). Контекст начинается с
     собственного заголовка: провайдер `claude_code_cli` передаёт его одним аргументом
     `-p <контекст>`, и начало с «-» приняли бы за флаг."""
+    place = _location_view(state, adventure, srd)
     sections = [
         f"# Контекст хода мастера (режим: {mode.value}, {_MODE_NAMES[mode]})\n{_READING_GUIDE}",
         f"## Стиль\n{profanity_line(profanity)}",
         _chronicle_section(state),
         _world_section(state, adventure, pacing),
-        _location_section(state, adventure, srd),
+        _location_section(place),
+        _lore_section(adventure, place),
         _party_section(state, adventure, srd),
         _combat_section(state, acting),
         _spotlight_section(state),
@@ -297,15 +310,92 @@ class _NoDice:
         raise RuntimeError("снимок контекста не бросает кубы")
 
 
-def _location_section(state: GameState, adventure: Adventure, srd: SrdContent) -> str:
+def _location_view(state: GameState, adventure: Adventure, srd: SrdContent) -> dict[str, Any]:
     # Снимок — результат самого инструмента `get_location`, а не его копия: состав локации, статусы
     # выходов и видимость предметов считает движок. Обработчик читает только состояние и
     # приключение, остальные поля контекста нужны лишь для его типа.
     tools = ToolContext(
         state=state, adventure=adventure, content=srd, rules=NO_RULES, rng=_NoDice()
     )
-    view = get_location(tools, GetLocationArgs())
-    return "\n".join(["## Текущая локация", _LOCATION_GUIDE, _json_object(view)])
+    return get_location(tools, GetLocationArgs())
+
+
+def _location_section(place: Mapping[str, Any]) -> str:
+    return "\n".join(["## Текущая локация", _LOCATION_GUIDE, _json_object(place)])
+
+
+def _lore_section(adventure: Adventure, place: Mapping[str, Any]) -> str | None:
+    """Мир приключения (формат v2) вокруг текущей локации: краткая история мира, боги и фракции,
+    связанные с локацией и её NPC, и связи этих NPC и самой локации. Нечего показать — раздела нет.
+
+    «Связанные» — стоящие на другом конце этих связей; фракция — ещё и по базе в локации и по
+    лидеру из её NPC. NPC локации берутся из снимка `get_location` (`place`), связи графа отбирает
+    движок (`relations_of`): раздел только выбирает и пишет строки. Раздел — в контексте хода, а не
+    в сводке приключения: сводка должна быть стабильной для кеша промпта."""
+    here = [f"location:{place['id']}", *(f"npc:{npc['id']}" for npc in place["npcs"])]
+    # Связь между двумя участниками «здесь» найдётся дважды: оставляем первую.
+    relations = list(
+        {rel["id"]: rel for ref in here for rel in relations_of(adventure, ref)}.values()
+    )
+    ends = {end for relation in relations for end in (relation["a"], relation["b"])}
+    deities = [
+        deity
+        for deity in sorted(adventure.deities.values(), key=lambda deity: deity.id)
+        if f"deity:{deity.id}" in ends
+    ]
+    factions = [
+        faction
+        for faction in sorted(adventure.factions.values(), key=lambda faction: faction.id)
+        if f"faction:{faction.id}" in ends
+        or faction.base_location == place["id"]
+        or faction.leader in here
+    ]
+    history = adventure.world.history.strip()
+    if not (history or deities or factions or relations):
+        return None
+    lines = ["## Мир приключения", _LORE_GUIDE]
+    if history:
+        lines.append(f"История мира: {printable_line(history, HISTORY_MAX_CHARS)}")
+    if deities:
+        lines += ["Боги:", *(_deity_line(deity) for deity in deities)]
+    if factions:
+        lines += ["Фракции:", *(_faction_line(faction) for faction in factions)]
+    if relations:
+        lines += [_RELATIONS_HEADING, *(_relation_line(relation) for relation in relations)]
+    return "\n".join(lines)
+
+
+def _deity_line(deity: Deity) -> str:
+    return (
+        f"- deity:{deity.id} — {one_line(deity.name)}, {one_line(deity.title)}; "
+        f"сферы: {', '.join(one_line(domain) for domain in deity.domains)}"
+    )
+
+
+def _faction_line(faction: Faction) -> str:
+    parts = [f"- faction:{faction.id} — {one_line(faction.name)}"]
+    if faction.leader:
+        parts.append(f"лидер {faction.leader}")
+    if faction.base_location:
+        parts.append(f"база {faction.base_location}")
+    parts.append(f"отношение к отряду {faction.attitude_to_party}")
+    parts.append(f"цель: {one_line(faction.goal)}")
+    return "; ".join(parts)
+
+
+def _relation_line(relation: Mapping[str, Any]) -> str:
+    """Строка связи «a — kind для b»; пометки ставит сервер до пояснения автора."""
+    line = f"- {relation['a']} — {relation['kind']} для {relation['b']}"
+    marks = [
+        mark
+        for mark, on in ((_MARK_MUTUAL, relation["mutual"]), (_MARK_HIDDEN, relation["secret"]))
+        if on
+    ]
+    if marks:
+        line += f" ({'; '.join(marks)})"
+    if note := one_line(relation["note"]):
+        line += f": {note}"
+    return line
 
 
 def _party_section(state: GameState, adventure: Adventure, srd: SrdContent) -> str:

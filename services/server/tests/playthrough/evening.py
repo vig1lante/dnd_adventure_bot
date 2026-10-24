@@ -30,6 +30,7 @@ from typing import Any
 
 import httpx
 import uvicorn
+from adventure_secrets import hidden_texts
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from websockets.asyncio.client import ClientConnection, connect
@@ -115,25 +116,10 @@ OWN_SECRETS = {
 # Эти слова сервер не должен показать никому: ключи, адрес базы и тому подобное.
 SERVER_SECRETS = (SESSION_SECRET, BOT_TOKEN, BOT_TOKEN.partition(":")[2])
 
-# Поля приключения, которые игроки видеть не должны, и ключи служебных данных.
-HIDDEN_ADVENTURE_FIELDS = ("secret", "dm_notes", "knows")
+# Ключи служебных данных, которые игроки видеть не должны (тайные тексты приключения собирает
+# `hidden_texts`).
 HIDDEN_KEYS = ("adventure_data", "dm_turn_logs", "issues", "pc_hooks")
 HIDDEN_EXIT_ID = "to-crypt"  # скрытый выход демо-приключения: игрокам он открывается находкой
-
-
-def hidden_texts(node: Any) -> list[str]:
-    """Все строки полей `secret`, `dm_notes` и `knows` во вложенных данных приключения."""
-    found: list[str] = []
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key in HIDDEN_ADVENTURE_FIELDS:
-                found += [value] if isinstance(value, str) else [str(v) for v in value]
-            else:
-                found += hidden_texts(value)
-    elif isinstance(node, list):
-        for item in node:
-            found += hidden_texts(item)
-    return [text for text in found if text]
 
 
 def with_sentences(text: str) -> list[str]:

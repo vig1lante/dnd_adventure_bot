@@ -78,6 +78,8 @@ _STEP_BY_CODE = {
 _STEP_BY_REF_KIND = {
     "location": "locations",
     "npc": "npcs",
+    # Связь графа (формат v2): связи генератор кладёт в NPC, при чтении они переходят в граф.
+    "relation": "npcs",
     "item": "items",
     "encounter": "encounters",
     "monster": "encounters",
@@ -236,9 +238,9 @@ def owner_step(issue: Issue, seed_ids: Iterable[str] = ()) -> str | None:
     По плану B5.6 `unreachable_location` и `no_path_to_finale` идут шагу locations,
     `too_few_clues` и `clues_same_place` — clues, `unknown_monster` и сложность боя — encounters,
     `npc_*` — npcs. `unreachable_key` (ключ замка, которого не достать) переносит шаг items: он
-    держит ключи и не трогает граф. Остальные коды (`dangling_ref`, `schema`) идут владельцу
-    объекта из `ref`: выход и место — locations, NPC — npcs, предмет — items, бой и монстр —
-    encounters, улика — clues, `adventure` (старт и финал) — locations.
+    держит ключи и не трогает граф. Остальные коды (`dangling_ref`, `schema`, `boss_too_easy`)
+    идут владельцу объекта из `ref`: выход и место — locations, NPC и связь графа — npcs, предмет —
+    items, бой и монстр — encounters, улика — clues, `adventure` (старт и финал) — locations.
 
     Сид правит автор, а не модель: из его проблем чинится только то, что можно исправить, не меняя
     сид (`_seed_issue_owner`). Ссылку сида в пустоту чинит шаг, который создаёт цель, выход к

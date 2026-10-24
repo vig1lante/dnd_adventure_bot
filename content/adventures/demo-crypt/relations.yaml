@@ -1,0 +1,31 @@
+- id: fabian-debtor-marta
+  a: npc:fabian
+  b: npc:marta
+  kind: debtor
+  note: Должен ей сорок золотых за комнату и ужины.
+  mutual: false
+- id: marta-worships-veyla
+  a: npc:marta
+  b: deity:veyla
+  kind: worships
+  mutual: false
+- id: fabian-other-pale-candle
+  a: npc:fabian
+  b: faction:pale-candle
+  kind: other
+  note: Заочный ученик общества; исправно платит взносы и верит каждой брошюре.
+  secret: true
+  mutual: false
+- id: regulars-seeks-fabian
+  a: faction:regulars
+  b: npc:fabian
+  kind: seeks
+  note: Фабиан задолжал и завсегдатаям за выпивку, которую ему наливали в долг.
+  mutual: false
+- id: ossmar-enemy-pale-candle
+  a: deity:ossmar
+  b: faction:pale-candle
+  kind: enemy
+  note: Общество выдаёт перевранные молитвы Оссмару за некромантию.
+  secret: true
+  mutual: false

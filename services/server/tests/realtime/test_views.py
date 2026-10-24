@@ -15,11 +15,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from lore_trap import LORE_KEYS, trap_lore
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dnd_engine.abilities import ABILITY_NAMES_RU, SKILL_ABILITY, SKILL_NAMES_RU, Ability, Skill
-from dnd_engine.adventure.loader import load_adventure
+from dnd_engine.adventure.loader import adventure_from_data, load_adventure
 from dnd_engine.adventure.schema import Adventure
 from dnd_engine.character import (
     ActiveBuff,
@@ -884,6 +885,26 @@ async def test_snapshot_has_no_secrets_of_the_game_for_any_player(db, srd, table
             assert f"ПРЕДЫСТОРИЯ-{other}" not in text
             assert f"-{other}" not in text  # ни личного, ни тайного хода, ни броска другого
     assert f"ПРЕДЫСТОРИЯ-{key}" in text
+
+
+@pytest.mark.parametrize("key", PLAYER_KEYS)
+async def test_nothing_of_the_world_gods_factions_relations_or_place_secrets_reaches_a_player(
+    db, srd, table, key
+):
+    async with db() as session:
+        game = await session.get(Game, table.game_id)
+        trapped = trap_lore(game.adventure_data, SECRET_MARK)
+        game.adventure_data = trapped
+        await session.commit()
+    adventure = adventure_from_data(trapped)
+
+    snapshot = await snapshot_of(db, srd, table, key)
+    events = [payload for payload, _ in state_events(table.state, srd, adventure)]
+
+    for payload in (snapshot, *events):
+        assert SECRET_MARK not in dump(payload)
+        assert not LORE_KEYS & set(keys_of(payload))
+    assert snapshot["game"]["adventure_title"] == trapped["title"]  # снимок читал эту копию
 
 
 async def test_snapshot_has_only_the_keys_of_the_contract(db, srd, table):

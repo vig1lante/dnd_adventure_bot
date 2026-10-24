@@ -167,6 +167,26 @@ def test_manual_command_writes_a_valid_adventure_and_exits_with_0(demo_env, tmp_
     ]
 
 
+def test_the_written_folder_is_format_v2_with_the_relations_of_the_npcs_in_the_graph(
+    demo_env, tmp_path
+):
+    # Модель отдаёт связи внутри NPC (форма шага npcs), а папка пишется в формате v2: связи — в
+    # `relations.yaml`, у NPC их нет, и загрузчик читает папку обратно с тем же графом (Р8).
+    out = tmp_path / "chapel-whispers"
+
+    assert generate_into(out) == 0
+
+    manifest = yaml.safe_load((out / "adventure.yaml").read_text(encoding="utf-8"))
+    graph = yaml.safe_load((out / "relations.yaml").read_text(encoding="utf-8"))
+    npcs = [yaml.safe_load(path.read_text(encoding="utf-8")) for path in (out / "npcs").iterdir()]
+    assert manifest["format_version"] == 2
+    assert all("relations" not in npc for npc in npcs)
+    # «Отто — родня для Греты» из связи v1 у Греты и обратная — из связи у Отто.
+    expected = {("npc:otto", "npc:greta", "kin"), ("npc:greta", "npc:otto", "kin")}
+    assert {(rel["a"], rel["b"], rel["kind"]) for rel in graph} == expected
+    assert {(rel.a, rel.b, rel.kind) for rel in load_adventure(out).relations} == expected
+
+
 def test_empty_existing_out_folder_is_accepted(demo_env, tmp_path):
     out = tmp_path / "empty"
     out.mkdir()

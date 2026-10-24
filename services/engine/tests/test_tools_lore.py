@@ -11,9 +11,10 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from adventure_factory import make_adventure
 from pydantic import BaseModel, Field
 
-from dnd_engine.adventure.schema import Adventure, Exit
+from dnd_engine.adventure.schema import Adventure, Exit, Relation, WorldInfo
 from dnd_engine.character import Character
 from dnd_engine.content import SrdContent, load_srd
 from dnd_engine.dice import Advantage, roll
@@ -21,7 +22,7 @@ from dnd_engine.events import FlagEvent, RollEvent
 from dnd_engine.modules import build_ruleset
 from dnd_engine.rng import ScriptedRng
 from dnd_engine.state import GameState, RulesRef, WorldState
-from dnd_engine.tools.lore import LORE_TOOLS, exit_status, is_locked
+from dnd_engine.tools.lore import LORE_TOOLS, exit_status, is_locked, relations_of
 from dnd_engine.tools.registry import (
     MAX_ERROR_CHARS,
     MAX_NAME_CHARS,
@@ -862,6 +863,26 @@ def test_get_location_shows_an_unfinished_encounter(lore, make_ctx, make_state):
     assert active["status"] == "active"
 
 
+def test_get_location_says_whether_the_fight_is_a_boss_fight(lore, make_ctx, make_state):
+    cemetery = lore.call(make_ctx(make_state(location_id="cemetery")), "get_location", {})
+    crypt = lore.call(make_ctx(), "get_location", {"location_id": "crypt"})
+
+    assert cemetery.result["encounter"]["boss"] is False
+    assert crypt.result["encounter"]["boss"] is True
+
+
+def test_get_location_gives_the_master_the_secrets_of_the_place(lore, make_ctx):
+    crypt = lore.call(make_ctx(), "get_location", {"location_id": "crypt"}).result
+    village = lore.call(make_ctx(), "get_location", {}).result
+
+    [secret] = crypt["secrets"]
+    assert secret["id"] == "empty-treasury"
+    assert "казну" in secret["text"].casefold()
+    assert secret["check"] == {"ability": "int", "skill": "investigation", "dc": 15}
+    assert secret["reveals"] == [{"kind": "flag", "id": "treasury-empty"}]
+    assert village["secrets"] == []
+
+
 def test_get_location_hides_a_finished_encounter(lore, make_ctx, make_state):
     state = make_state(location_id="cemetery")
     state.world.flags["encounter:risen-bones"] = "done"
@@ -896,13 +917,22 @@ def test_get_npc_returns_everything_with_the_current_attitude(lore, make_ctx, ma
     assert result["statblock"] == "cultist_fanatic"
     assert "Ульрих" in result["secret"]
     assert result["knows"]
-    assert result["relations"] == [
-        {
-            "npc_id": "marta",
-            "kind": "creditor",
-            "note": "Марта — его кредитор, ей он должен сорок золотых.",
-        }
+    # Связи — из общего графа: все, где Фабиан на любом конце, вместе с тайными.
+    assert [r["id"] for r in result["relations"]] == [
+        "fabian-debtor-marta",
+        "fabian-other-pale-candle",
+        "regulars-seeks-fabian",
     ]
+    assert result["relations"][0] == {
+        "id": "fabian-debtor-marta",
+        "a": "npc:fabian",
+        "b": "npc:marta",
+        "kind": "debtor",
+        "note": "Должен ей сорок золотых за комнату и ужины.",
+        "secret": False,
+        "mutual": False,
+    }
+    assert result["relations"][1]["secret"] is True
     assert {"appearance", "manner", "motive", "role"} <= result.keys()
 
 
@@ -928,6 +958,224 @@ def test_get_npc_with_an_unknown_id_lists_the_known_ones(lore, make_ctx):
     assert outcome.result is None
     assert "bob" in outcome.error
     assert "marta" in outcome.error and "fabian" in outcome.error
+
+
+# --- get_world, get_deity, get_faction, get_relations ---
+
+
+def test_get_world_returns_history_regions_rumors_and_the_villain(lore, make_ctx):
+    result = lore.call(make_ctx(), "get_world", {}).result
+
+    assert "граф" in result["history"].casefold()
+    assert [region["id"] for region in result["regions"]] == ["marshland", "barrow-hill"]
+    assert [rumor["true"] for rumor in result["rumors"]] == [False, False, True]
+    assert result["villain"] == "npc:fabian"
+
+
+def test_get_world_of_an_adventure_without_a_world_is_empty(lore, make_ctx, demo_adventure):
+    bare = demo_adventure.model_copy(update={"world": WorldInfo(), "villain": None})
+
+    result = lore.call(make_ctx(adventure=bare), "get_world", {}).result
+
+    assert result == {"history": "", "regions": [], "rumors": [], "villain": None}
+
+
+def test_get_deity_returns_everything_with_the_secret_and_the_relations(lore, make_ctx):
+    result = lore.call(make_ctx(), "get_deity", {"deity_id": "ossmar"}).result
+
+    assert (result["id"], result["name"], result["title"]) == ("ossmar", "Оссмар", "Сторож могил")
+    assert result["domains"] == ["смерть", "покой"]
+    assert "Ульрих" in result["secret"]
+    assert result["avatar_statblock"] is None
+    assert [r["id"] for r in result["relations"]] == ["ossmar-enemy-pale-candle"]
+    assert {"symbol", "dogma", "appearance", "attitude_to_mortals"} <= result.keys()
+
+
+def test_get_faction_returns_everything_with_the_secret_and_the_relations(lore, make_ctx):
+    regulars = lore.call(make_ctx(), "get_faction", {"faction_id": "regulars"}).result
+    candle = lore.call(make_ctx(), "get_faction", {"faction_id": "pale-candle"}).result
+
+    assert (regulars["leader"], regulars["base_location"]) == ("npc:marta", "village")
+    assert regulars["attitude_to_party"] == 1
+    assert [r["id"] for r in regulars["relations"]] == ["regulars-seeks-fabian"]
+    assert (candle["leader"], candle["base_location"]) == (None, None)
+    assert "мошенник" in candle["secret"]
+    assert [r["id"] for r in candle["relations"]] == [
+        "fabian-other-pale-candle",
+        "ossmar-enemy-pale-candle",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("ref", "expected"),
+    [
+        ("npc:marta", ["fabian-debtor-marta", "marta-worships-veyla"]),
+        ("deity:veyla", ["marta-worships-veyla"]),
+        ("faction:regulars", ["regulars-seeks-fabian"]),
+        ("location:crypt", []),
+    ],
+)
+def test_get_relations_lists_every_relation_with_the_entity_at_either_end(
+    lore, make_ctx, ref, expected
+):
+    result = lore.call(make_ctx(), "get_relations", {"ref": ref}).result
+
+    assert result["ref"] == ref
+    assert [r["id"] for r in result["relations"]] == expected
+
+
+def test_get_relations_marks_the_secret_ones_for_the_master(lore, make_ctx):
+    result = lore.call(make_ctx(), "get_relations", {"ref": "faction:pale-candle"}).result
+
+    assert [(r["id"], r["secret"]) for r in result["relations"]] == [
+        ("fabian-other-pale-candle", True),
+        ("ossmar-enemy-pale-candle", True),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "args", "known"),
+    [
+        ("get_deity", {"deity_id": "thor"}, ("veyla", "ossmar")),
+        ("get_faction", {"faction_id": "guild"}, ("regulars", "pale-candle")),
+        ("get_relations", {"ref": "npc:bob"}, ("marta", "fabian")),
+        ("get_relations", {"ref": "deity:thor"}, ("veyla", "ossmar")),
+        ("get_relations", {"ref": "location:moon"}, ("village", "crypt")),
+    ],
+)
+def test_an_unknown_id_lists_the_known_ones(lore, make_ctx, name, args, known):
+    outcome = lore.call(make_ctx(), name, args)
+
+    assert outcome.result is None
+    assert all(ident in outcome.error for ident in known), outcome.error
+
+
+@pytest.mark.parametrize(
+    "ref",
+    ["marta", "item:chest-key", "npc:", ":marta", "clue:clue-diary", "", "NPC:marta", " npc:marta"],
+)
+def test_get_relations_names_the_allowed_references_for_a_wrong_one(lore, make_ctx, ref):
+    outcome = lore.call(make_ctx(), "get_relations", {"ref": ref})
+
+    assert outcome.result is None
+    assert "npc:" in outcome.error and "deity:" in outcome.error
+
+
+@pytest.mark.parametrize(
+    ("name", "args", "known"),
+    [
+        ("get_deity", {"deity_id": ""}, ("veyla", "ossmar")),
+        ("get_deity", {"deity_id": "deity:veyla"}, ("veyla", "ossmar")),
+        ("get_deity", {"deity_id": "VEYLA"}, ("veyla", "ossmar")),
+        ("get_deity", {"deity_id": "v" * 64}, ("veyla", "ossmar")),
+        ("get_faction", {"faction_id": "../regulars"}, ("regulars", "pale-candle")),
+        ("get_faction", {"faction_id": "regulars "}, ("regulars", "pale-candle")),
+        ("get_relations", {"ref": "npc:MARTA"}, ("marta", "fabian")),
+        ("get_relations", {"ref": "npc: marta"}, ("marta", "fabian")),
+        ("get_relations", {"ref": "npc:marta:veyla"}, ("marta", "fabian")),
+        ("get_relations", {"ref": "location:" + "v" * 71}, ("village", "crypt")),
+    ],
+)
+def test_a_foreign_shaped_id_is_unknown_not_guessed(lore, make_ctx, name, args, known):
+    # Аргумент пишет модель, а в него мог попасть текст игрока: id сравнивается точно, без
+    # приведения регистра, пробелов и путей, и ошибка подсказывает настоящие id.
+    outcome = lore.call(make_ctx(), name, args)
+
+    assert outcome.result is None
+    assert all(ident in outcome.error for ident in known), outcome.error
+
+
+def test_without_the_graph_nobody_has_relations(lore, make_ctx, demo_adventure):
+    ctx = make_ctx(adventure=demo_adventure.model_copy(update={"relations": ()}))
+
+    assert lore.call(ctx, "get_npc", {"npc_id": "fabian"}).result["relations"] == []
+    assert lore.call(ctx, "get_deity", {"deity_id": "ossmar"}).result["relations"] == []
+    assert lore.call(ctx, "get_faction", {"faction_id": "pale-candle"}).result["relations"] == []
+    assert lore.call(ctx, "get_relations", {"ref": "npc:marta"}).result == {
+        "ref": "npc:marta",
+        "relations": [],
+    }
+
+
+def test_get_relations_of_a_place_lists_what_is_linked_to_it(lore, make_ctx):
+    # В демо мест на концах связей нет; в приключении фабрики Фабиан ищет склеп.
+    ctx = make_ctx(adventure=make_adventure())
+
+    result = lore.call(ctx, "get_relations", {"ref": "location:crypt"}).result
+
+    assert [(r["id"], r["a"], r["b"]) for r in result["relations"]] == [
+        ("fabian-seeks-crypt", "npc:fabian", "location:crypt")
+    ]
+
+
+# --- relations_of: связи сущности из графа ---
+
+
+def with_graph(*ends: tuple[str, str]) -> Adventure:
+    """Приключение фабрики с графом из связей `rel-<n>` между заданными концами."""
+    relations = tuple(
+        Relation(id=f"rel-{number}", a=a, b=b, kind="ally")
+        for number, (a, b) in enumerate(ends, start=1)
+    )
+    return make_adventure(relations=relations)
+
+
+def test_relations_of_takes_both_ends_in_the_order_of_the_graph():
+    adventure = with_graph(
+        ("npc:marta", "npc:fabian"),
+        ("deity:warden", "faction:candle-circle"),
+        ("npc:fabian", "npc:marta"),
+        ("faction:candle-circle", "npc:marta"),
+    )
+
+    found = relations_of(adventure, "npc:marta")
+
+    assert [relation["id"] for relation in found] == ["rel-1", "rel-3", "rel-4"]
+    assert found == relations_of(adventure, "npc:marta")  # тот же ответ при каждом вызове
+
+
+def test_relations_of_matches_the_whole_reference_with_its_kind():
+    adventure = with_graph(("npc:marta", "npc:fabian"), ("deity:warden", "faction:candle-circle"))
+
+    assert relations_of(adventure, "npc:mart") == []
+    assert relations_of(adventure, "marta") == []
+    assert (
+        relations_of(adventure, "faction:marta") == []
+    )  # тот же id у другого вида — не та сущность
+    assert relations_of(adventure, "faction:warden") == []
+
+
+def test_relations_of_gives_a_relation_once_even_with_both_ends_on_the_entity():
+    # Связь с самим собой отвергает валидатор, но не схема: в ответе она всё равно одна.
+    adventure = with_graph(("npc:marta", "npc:marta"))
+
+    assert [relation["id"] for relation in relations_of(adventure, "npc:marta")] == ["rel-1"]
+
+
+def test_relations_of_gives_whole_relations_as_json():
+    found = relations_of(make_adventure(), "deity:warden")
+
+    assert found == [
+        {
+            "id": "warden-enemy-candle-circle",
+            "a": "deity:warden",
+            "b": "faction:candle-circle",
+            "kind": "enemy",
+            "note": "",
+            "secret": True,
+            "mutual": True,
+        },
+        {
+            "id": "marta-worships-warden",
+            "a": "npc:marta",
+            "b": "deity:warden",
+            "kind": "worships",
+            "note": "",
+            "secret": False,
+            "mutual": False,
+        },
+    ]
+    assert json.loads(json.dumps(found)) == found
 
 
 # --- get_item ---
@@ -1012,6 +1260,39 @@ def test_search_lore_covers_locations_npcs_items_and_revelations(lore, make_ctx)
     assert "revelation:kidnapper" in revelation_refs
 
 
+@pytest.mark.parametrize(
+    ("query", "ref"),
+    [
+        ("торф", "world"),
+        ("гати", "region:marshland"),
+        ("очага", "deity:veyla"),
+        ("взносы", "faction:pale-candle"),
+        ("тайник", "location:crypt"),  # тайна места ищется вместе с локацией
+    ],
+)
+def test_search_lore_also_covers_the_world_deities_factions_and_secrets(lore, make_ctx, query, ref):
+    assert ref in {r["ref"] for r in search(lore, make_ctx(), query, limit=20)}
+
+
+@pytest.mark.parametrize(
+    ("query", "ref"),
+    [("обету", "deity:ossmar"), ("мошенников", "faction:pale-candle")],
+)
+def test_search_lore_reaches_the_secrets_of_deities_and_factions(lore, make_ctx, query, ref):
+    # Поиск — инструмент мастера: тайны богов и фракций ему видны, как секрет NPC.
+    [found] = search(lore, make_ctx(), query, limit=20)
+
+    assert found["ref"] == ref
+    assert query in found["snippet"]
+
+
+def test_search_lore_finds_a_rumor_in_the_world(lore, make_ctx):
+    results = search(lore, make_ctx(), "взаперти", limit=20)
+
+    assert results[0]["ref"] == "world"
+    assert results[0]["title"] == "Мир"
+
+
 def test_search_lore_ignores_case(lore, make_ctx):
     assert search(lore, make_ctx(), "ДоЛг") == search(lore, make_ctx(), "долг")
 
@@ -1071,6 +1352,11 @@ def test_search_lore_rejects_bad_arguments(lore, make_ctx, args):
         ("get_item", {"item_id": "я" * 65}),
         ("get_npc", {}),
         ("get_item", {"item_id": 7}),
+        ("get_deity", {"deity_id": "я" * 65}),
+        ("get_faction", {"faction_id": "я" * 65}),
+        ("get_relations", {"ref": "npc:" + "я" * 80}),
+        ("get_relations", {}),
+        ("get_world", {"crit": True}),
     ],
 )
 def test_lore_tools_validate_their_arguments(lore, make_ctx, name, args):
@@ -1089,6 +1375,10 @@ LORE_CALLS = [
     ("get_npc", {"npc_id": "marta"}),
     ("get_item", {"item_id": "chest-key"}),
     ("search_lore", {"query": "долг"}),
+    ("get_world", {}),
+    ("get_deity", {"deity_id": "ossmar"}),
+    ("get_faction", {"faction_id": "pale-candle"}),
+    ("get_relations", {"ref": "npc:fabian"}),
 ]
 
 
@@ -1117,7 +1407,16 @@ def test_lore_results_are_short_json_compatible_dicts(lore, make_ctx, name, args
 def test_lore_tools_are_registered_with_russian_descriptions_and_schemas():
     names = {spec.name for spec in LORE_TOOLS}
 
-    assert names == {"get_location", "get_npc", "get_item", "search_lore"}
+    assert names == {
+        "get_location",
+        "get_npc",
+        "get_item",
+        "search_lore",
+        "get_world",
+        "get_deity",
+        "get_faction",
+        "get_relations",
+    }
     for spec in LORE_TOOLS:
         assert any("а" <= ch.casefold() <= "я" for ch in spec.description), spec.name
         schema = spec.json_schema()

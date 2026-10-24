@@ -15,6 +15,7 @@ from dnd_engine.adventure.budget import (
     XP_BUDGET_PER_CHARACTER,
     encounter_rating,
     encounter_xp,
+    party_budget,
 )
 from dnd_engine.adventure.schema import Adventure
 from dnd_engine.adventure.validator import (
@@ -152,6 +153,13 @@ def test_encounter_rating_refuses_a_level_outside_the_budget_table(level):
         encounter_rating(100, level=level, party_size=6)
 
 
+def test_party_budget_multiplies_the_budget_per_character_by_the_party_size():
+    assert party_budget(3, 6) == (900, 1350, 2400)
+    assert party_budget(1, 1) == (50, 75, 100)
+    with pytest.raises(ValueError, match="уров"):
+        party_budget(6, 6)
+
+
 # --- общие помощники валидатора ---
 
 
@@ -274,7 +282,17 @@ def test_validate_is_repeatable_and_leaves_the_adventure_alone(srd):
 
 def test_validate_survives_an_empty_world(srd):
     adventure = make_adventure(
-        locations={}, npcs={}, items={}, encounters={}, revelations={}, acts=(), endings=()
+        locations={},
+        npcs={},
+        items={},
+        encounters={},
+        revelations={},
+        acts=(),
+        endings=(),
+        relations=(),
+        deities={},
+        factions={},
+        villain=None,
     )
 
     report = validate(adventure, srd)
@@ -792,7 +810,42 @@ def two_zones_with_one_id_in_a_location(data: dict[str, Any]) -> None:
     ]
 
 
+def a_second_relation_with_the_same_id(data: dict[str, Any]) -> None:
+    data["relations"].append(
+        {"id": "fabian-debtor-marta", "a": "npc:marta", "b": "deity:warden", "kind": "worships"}
+    )
+
+
+def a_second_region_with_the_same_id(data: dict[str, Any]) -> None:
+    data["world"]["regions"].append({"id": "marsh", "name": "Ещё болото", "description": "Тоже."})
+
+
+def a_secret_id_of_another_location(data: dict[str, Any]) -> None:
+    # Деревня идёт раньше склепа: повтором считается тайна склепа.
+    data["locations"]["village"]["secrets"] = [{"id": "empty-vault", "text": "Другая тайна."}]
+
+
+def the_same_secret_twice_in_one_location(data: dict[str, Any]) -> None:
+    data["locations"]["crypt"]["secrets"].append({"id": "empty-vault", "text": "Вторая тайна."})
+
+
 REPEATED_IDS = [
+    pytest.param(
+        a_second_relation_with_the_same_id,
+        "relation:fabian-debtor-marta",
+        id="relation",
+    ),
+    pytest.param(a_second_region_with_the_same_id, "region:marsh", id="region"),
+    pytest.param(
+        a_secret_id_of_another_location,
+        "location:crypt/secret:empty-vault",
+        id="secret-in-two-locations",
+    ),
+    pytest.param(
+        the_same_secret_twice_in_one_location,
+        "location:crypt/secret:empty-vault",
+        id="secret-in-one-location",
+    ),
     pytest.param(
         a_second_ledger_in_the_village,
         "location:crypt/feature:ledger",
@@ -865,6 +918,89 @@ def test_the_same_id_of_plain_exits_and_zones_in_different_locations_is_fine(srd
         data["locations"]["crypt"]["zones"] = zones
 
     assert validate(edited(same_zone_names), srd).issues == []
+
+
+def test_the_same_id_of_a_relation_a_region_and_a_secret_is_fine(srd):
+    # Уникальность — внутри вида: id связи, края и тайны места живут в разных пространствах.
+    def one_id_for_three_kinds(data: dict[str, Any]) -> None:
+        data["relations"][0]["id"] = "shared"
+        data["world"]["regions"][0]["id"] = "shared"
+        data["locations"]["crypt"]["secrets"][0]["id"] = "shared"
+
+    assert validate(edited(one_id_for_three_kinds), srd).issues == []
+
+
+# --- граф связей: концы ---
+
+
+@pytest.mark.parametrize(
+    ("index", "end"), [(0, "npc:fabian"), (1, "deity:warden")], ids=["npc", "deity"]
+)
+def test_a_relation_of_an_entity_with_itself_is_a_schema_error(srd, index, end):
+    def loop(data: dict[str, Any]) -> None:
+        data["relations"][index]["a"] = end
+        data["relations"][index]["b"] = end
+
+    issue = only_issue(validate(edited(loop), srd))
+
+    assert (issue.code, issue.severity) == ("schema", "error")
+    assert issue.ref == f"relation:{adventure_data()['relations'][index]['id']}"
+    assert end in issue.message
+
+
+def test_relations_may_link_npcs_factions_deities_and_locations(srd):
+    def every_kind_of_end(data: dict[str, Any]) -> None:
+        data["relations"].append(
+            {
+                "id": "seeks-the-crypt",
+                "a": "faction:candle-circle",
+                "b": "location:crypt",
+                "kind": "seeks",
+            }
+        )
+
+    assert validate(edited(every_kind_of_end), srd).issues == []
+
+
+def test_the_villain_may_be_a_deity(srd):
+    assert validate(with_value(("villain",), "deity:warden"), srd).issues == []
+
+
+def test_a_deity_and_a_faction_may_share_an_id_and_relations_tell_them_apart(srd):
+    # id уникальны внутри вида: `deity:warden` и `faction:warden` — разные концы одной связи.
+    def twin_ids(data: dict[str, Any]) -> None:
+        data["factions"]["warden"] = data["factions"].pop("candle-circle") | {"id": "warden"}
+        data["relations"][1]["b"] = "faction:warden"  # a — `deity:warden`
+
+    assert validate(edited(twin_ids), srd).issues == []
+
+
+@pytest.mark.parametrize("leader", ["faction:candle-circle", "location:crypt"])
+def test_a_faction_leader_must_be_an_npc(srd, leader):
+    issue = only_issue(validate(with_value(("factions", "candle-circle", "leader"), leader), srd))
+
+    assert (issue.code, issue.severity, issue.ref) == (
+        "dangling_ref",
+        "error",
+        "faction:candle-circle",
+    )
+    assert "допустимы: npc)" in issue.message
+
+
+def test_a_custom_statblock_is_a_valid_avatar_of_a_deity(srd):
+    data = adventure_data()
+    data["monsters"] = {"crypt-rat": custom_monster_data()}
+    data["deities"]["warden"]["avatar_statblock"] = "crypt-rat"
+
+    assert validate(Adventure.model_validate(data), srd).issues == []
+
+
+def test_an_adventure_without_villain_deities_and_factions_is_clean(srd):
+    adventure = make_adventure(
+        villain=None, deities={}, factions={}, relations=(make_adventure().relations[0],)
+    )
+
+    assert validate(adventure, srd).issues == []
 
 
 def a_hidden_exit_named_like_a_plain_exit_of_another_location(data: dict[str, Any]) -> None:
@@ -1103,7 +1239,67 @@ DANGLING_REFS = [
         id="zone-link",
     ),
     pytest.param(("npcs", "marta", "location_id"), "nowhere", "npc:marta", id="npc.location_id"),
-    pytest.param(("npcs", "marta", "relations", 0, "npc_id"), "nobody", "npc:marta", id="relation"),
+    pytest.param(
+        ("relations", 0, "b"), "npc:nobody", "relation:fabian-debtor-marta", id="relation-npc"
+    ),
+    pytest.param(
+        ("relations", 0, "a"),
+        "faction:nobody",
+        "relation:fabian-debtor-marta",
+        id="relation-faction",
+    ),
+    pytest.param(
+        ("relations", 1, "a"),
+        "deity:nobody",
+        "relation:warden-enemy-candle-circle",
+        id="relation-deity",
+    ),
+    pytest.param(
+        ("relations", 0, "b"),
+        "location:nowhere",
+        "relation:fabian-debtor-marta",
+        id="relation-location",
+    ),
+    pytest.param(
+        ("factions", "candle-circle", "leader"),
+        "npc:nobody",
+        "faction:candle-circle",
+        id="faction-leader",
+    ),
+    pytest.param(
+        ("factions", "candle-circle", "leader"),
+        "deity:warden",
+        "faction:candle-circle",
+        id="faction-leader-not-an-npc",
+    ),
+    pytest.param(
+        ("factions", "candle-circle", "base_location"),
+        "nowhere",
+        "faction:candle-circle",
+        id="faction-base",
+    ),
+    pytest.param(
+        ("deities", "warden", "avatar_statblock"),
+        "no-such-monster",
+        "deity:warden",
+        id="deity-avatar",
+    ),
+    pytest.param(("villain",), "npc:nobody", "adventure", id="villain"),
+    pytest.param(("villain",), "deity:nobody", "adventure", id="villain-deity"),
+    pytest.param(("villain",), "location:crypt", "adventure", id="villain-a-location"),
+    pytest.param(("villain",), "faction:candle-circle", "adventure", id="villain-a-faction"),
+    pytest.param(
+        ("locations", "crypt", "secrets", 0, "reveals"),
+        [{"kind": "clue", "id": "clue-nope"}],
+        "location:crypt/secret:empty-vault",
+        id="secret-reveals-clue",
+    ),
+    pytest.param(
+        ("locations", "crypt", "secrets", 0, "reveals"),
+        [{"kind": "exit", "id": "nothing"}],
+        "location:crypt/secret:empty-vault",
+        id="secret-reveals-exit",
+    ),
     pytest.param(("npcs", "fabian", "statblock"), "no-such-monster", "npc:fabian", id="statblock"),
     pytest.param(("items", "key", "holder"), "location:nowhere", "item:key", id="holder-location"),
     pytest.param(("items", "potion", "holder"), "npc:nobody", "item:potion", id="holder-npc"),
@@ -1237,7 +1433,9 @@ def test_garbage_in_a_free_text_reference_is_a_dangling_ref_not_a_crash(srd, pat
 
 
 @pytest.mark.parametrize(
-    "seed", ["village", "marta", "key", "bones", "kidnapper", "crypt-rat"], ids=lambda s: s
+    "seed",
+    ["village", "marta", "key", "bones", "kidnapper", "crypt-rat", "warden", "candle-circle"],
+    ids=lambda s: s,
 )
 def test_a_seed_may_name_any_entity_of_the_adventure(srd, seed):
     adventure = adventure_with_rat()
@@ -1283,6 +1481,19 @@ def test_a_finding_must_not_set_a_flag_the_engine_owns(srd, name):
 @pytest.mark.parametrize("name", ["ledger-read", "encounters", "met:encounter:bones"])
 def test_a_finding_may_set_a_story_flag(srd, name):
     assert validate(reveals_flag(name), srd).issues == []
+
+
+@pytest.mark.parametrize(
+    ("name", "codes_found"),
+    [("encounter:bones", ["schema"]), ("vault-opened", [])],
+    ids=["engine-flag", "story-flag"],
+)
+def test_a_secret_of_a_location_follows_the_rule_of_engine_flags(srd, name, codes_found):
+    reveals = [{"kind": "flag", "id": name}]
+    report = validate(with_value(("locations", "crypt", "secrets", 0, "reveals"), reveals), srd)
+
+    assert codes(report) == codes_found
+    assert all(issue.ref == "location:crypt/secret:empty-vault" for issue in report.issues)
 
 
 # Замок-флаг открывается любым непустым значением, а флаг `encounter:<id>` движок выставляет уже при
@@ -2023,6 +2234,108 @@ def test_a_fight_inside_the_budget_is_clean(srd, count):
     assert validate(with_value(("encounters", "bones", "monsters"), monsters), srd).issues == []
 
 
+# --- бой с боссом ---
+
+
+def boss_fight(ghouls: int) -> Adventure:
+    """Чистое приключение, где бой `bones` — бой с боссом из `ghouls` гулей по 200 XP."""
+    data = adventure_data()
+    data["encounters"]["bones"]["boss"] = True
+    data["encounters"]["bones"]["monsters"] = [{"monster_id": "ghoul", "count": ghouls}]
+    return Adventure.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    "ghouls", [5, 8, 11]
+)  # 1000 «низкий», 1600 «умеренный», 2200 — ещё не «высокий»
+def test_a_boss_fight_easier_than_high_is_a_warning_not_an_error(srd, ghouls):
+    report = validate(boss_fight(ghouls), srd)
+
+    issue = only_issue(report)
+    assert (issue.code, issue.severity, issue.ref) == (
+        "boss_too_easy",
+        "warning",
+        "encounter:bones",
+    )
+    assert not report.blocking
+    # «Высокая» сложность для 6 героев 3-го уровня начинается с 6 × 400 XP.
+    assert f"{ghouls * 200} XP" in issue.message and "2400" in issue.message
+
+
+def test_a_trivial_boss_fight_is_warned_once_as_a_boss_fight(srd):
+    issue = only_issue(validate(boss_fight(4), srd))
+
+    assert issue.code == "boss_too_easy"
+
+
+@pytest.mark.parametrize("ghouls", [12, 18])  # 2400 и 3600 XP — «высокий»
+def test_a_boss_fight_of_high_difficulty_is_clean(srd, ghouls):
+    assert validate(boss_fight(ghouls), srd).issues == []
+
+
+def test_a_deadly_boss_fight_is_warned_only_as_too_hard(srd):
+    issue = only_issue(validate(boss_fight(19), srd))
+
+    assert issue.code == "encounter_too_hard"
+
+
+def boss_of_xp(xp: int, level: int, party_size: int) -> Adventure:
+    """Чистое приключение для партии `level`/`party_size`, где бой `bones` — бой с боссом из одного
+    своего монстра на `xp` опыта: так опыт боя задаётся с точностью до единицы."""
+    data = adventure_data()
+    data["party_level"], data["party_size"] = level, party_size
+    data["monsters"] = {"crypt-rat": custom_monster_data(xp=xp)}
+    data["encounters"]["bones"]["boss"] = True
+    data["encounters"]["bones"]["monsters"] = [{"monster_id": "crypt-rat"}]
+    return Adventure.model_validate(data)
+
+
+BOSS_PARTIES = [(3, 6), (1, 4), (5, 2)]  # (уровень, число героев)
+
+
+@pytest.mark.parametrize(("level", "party_size"), BOSS_PARTIES)
+def test_a_boss_fight_one_xp_short_of_high_is_warned_and_exactly_high_is_clean(
+    srd, level, party_size
+):
+    high = party_budget(level, party_size)[2]
+
+    issue = only_issue(validate(boss_of_xp(high - 1, level, party_size), srd))
+
+    assert (issue.code, issue.severity) == ("boss_too_easy", "warning")
+    assert issue.message == (
+        f"бой с боссом легче высокой сложности: {high - 1} XP, нужно от {high} XP"
+    )
+    assert validate(boss_of_xp(high, level, party_size), srd).issues == []
+
+
+@pytest.mark.parametrize(("level", "party_size"), BOSS_PARTIES)
+def test_a_boss_fight_of_one_and_a_half_high_is_clean_and_one_xp_more_is_too_hard(
+    srd, level, party_size
+):
+    top_of_high = party_budget(level, party_size)[2] * 3 // 2
+
+    assert validate(boss_of_xp(top_of_high, level, party_size), srd).issues == []
+    issue = only_issue(validate(boss_of_xp(top_of_high + 1, level, party_size), srd))
+    assert issue.code == "encounter_too_hard"
+
+
+def test_a_boss_fight_with_an_unknown_monster_gets_no_boss_warning(srd):
+    # Опыт неизвестного монстра не посчитать: о сложности боя с боссом судить не по чему.
+    data = adventure_data()
+    data["encounters"]["bones"]["boss"] = True
+    data["encounters"]["bones"]["monsters"] = [{"monster_id": "ghost-knight"}]
+
+    assert codes(validate(Adventure.model_validate(data), srd)) == ["unknown_monster"]
+
+
+def test_a_boss_fight_of_a_party_level_without_a_budget_gets_no_boss_warning(srd):
+    data = adventure_data()
+    data["party_level"] = 6
+    data["encounters"]["bones"]["boss"] = True
+
+    assert codes(validate(Adventure.model_validate(data), srd)) == ["schema"]
+
+
 # --- предупреждения о тексте и NPC ---
 
 
@@ -2094,10 +2407,33 @@ def test_a_plain_npc_without_relations_is_not_warned(srd):
     assert validate(with_extra_npc(), srd).issues == []
 
 
-def test_an_npc_other_npcs_have_a_relation_to_is_not_warned(srd):
+@pytest.mark.parametrize("end", ["a", "b"])
+def test_an_npc_at_either_end_of_a_relation_of_the_graph_is_not_warned(srd, end):
     data = adventure_data()
     data["npcs"]["extra"] = extra_npc_data(statblock="skeleton")
-    data["npcs"]["marta"]["relations"].append({"npc_id": "extra", "kind": "neighbour"})
+    ends = {"a": "npc:marta", "b": "deity:warden"} | {end: "npc:extra"}
+    data["relations"].append({"id": "extra-rel", "kind": "worships", **ends})
+
+    assert validate(Adventure.model_validate(data), srd).issues == []
+
+
+def test_without_the_graph_every_important_npc_is_warned(srd):
+    # Фабиан важен статблоком, Марта — уликой; лидерство во фракции связью не считается.
+    report = validate(make_adventure(relations=()), srd)
+
+    assert sorted((issue.code, issue.ref) for issue in report.issues) == [
+        ("npc_without_relations", "npc:fabian"),
+        ("npc_without_relations", "npc:marta"),
+    ]
+
+
+def test_the_graph_made_from_v1_relations_counts_for_the_warning(srd):
+    # Данные без `format_version` — это v1: связи NPC переходят в граф, и ложного предупреждения
+    # «нет связей» нет.
+    data = adventure_data()
+    del data["format_version"]
+    data["relations"] = []
+    data["npcs"]["marta"]["relations"] = [{"npc_id": "fabian", "kind": "debtor"}]
 
     assert validate(Adventure.model_validate(data), srd).issues == []
 
@@ -2234,10 +2570,11 @@ HOSTILE_VALUES = [
     pytest.param(
         at(("npcs", "marta", "statblock"), HOSTILE), "никуда не ведёт", id="npc-statblock"
     ),
+    # База фракции — id по шаблону: чужое значение там отвергает схема (test_adventure_v2).
     pytest.param(
-        at(("npcs", "marta", "relations", 0, "npc_id"), HOSTILE),
+        at(("deities", "warden", "avatar_statblock"), HOSTILE),
         "никуда не ведёт",
-        id="npc-relation",
+        id="deity-avatar",
     ),
     pytest.param(at(("items", "key", "base_item"), HOSTILE), "никуда не ведёт", id="srd-item"),
     pytest.param(
@@ -2329,7 +2666,12 @@ def test_the_shipped_adventure_keeps_its_report_word_for_word(demo_adventure, sr
 
     assert (report.blocking, report.score) == (False, 91)
     assert [(issue.code, issue.severity, issue.ref, issue.message) for issue in report.issues] == [
-        ("encounter_too_easy", "warning", "encounter:fabian-fight", "бой слишком лёгок: 550 XP"),
+        (
+            "boss_too_easy",
+            "warning",
+            "encounter:fabian-fight",
+            "бой с боссом легче высокой сложности: 550 XP, нужно от 2400 XP",
+        ),
         ("encounter_too_easy", "warning", "encounter:risen-bones", "бой слишком лёгок: 250 XP"),
         (
             "duration_mismatch",

@@ -69,6 +69,7 @@ from fastapi import FastAPI
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from dnd_engine.adventure.loader import adventure_from_data
 from dnd_engine.adventure.schema import Adventure
 from dnd_engine.content import SrdContent, load_srd
 from dnd_engine.events import Event
@@ -601,7 +602,7 @@ async def _plan(
         )
     )
     character_of = {hero.player_id: hero.id for hero in state.party.values() if hero.player_id}
-    adventure = Adventure.model_validate(game.adventure_data)
+    adventure = adventure_from_data(game.adventure_data)  # копия любого поколения формата
     return _Plan(
         game_id=game.id,
         turn_id=turn.id,

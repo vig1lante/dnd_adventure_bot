@@ -1,0 +1,7 @@
+id: healing-potion
+name: Зелье лечения
+description: >-
+  Красная жидкость в тёмной стеклянной фляге. Ульрих хранил её на чёрный день и
+  приписал на этикетке: «От похмелья не помогает».
+base_item: potion_of_healing
+holder: location:cemetery

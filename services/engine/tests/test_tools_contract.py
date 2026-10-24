@@ -43,12 +43,17 @@ EVENTS = TypeAdapter(list[Event])
 
 VALID_CHECK = {"character_id": HERO, "ability": "dex", "dc": 15, "reason": "т"}
 
-# Таблица инструментов из спеки §8.3: движок может добавлять свои, но эти обязаны остаться.
+# Таблица инструментов из спеки §8.3 и инструменты чтения формата v2 (спека DND-2 §8): движок может
+# добавлять свои, но эти обязаны остаться.
 SPEC_TOOLS = {
     "get_location",
     "get_npc",
     "get_item",
     "search_lore",
+    "get_world",
+    "get_deity",
+    "get_faction",
+    "get_relations",
     "request_check",
     "request_save",
     "contest",
@@ -538,6 +543,10 @@ def test_every_tool_that_rolls_dice_is_in_the_secret_rolls_table(tool_registry):
         "get_npc",
         "get_item",
         "search_lore",
+        "get_world",
+        "get_deity",
+        "get_faction",
+        "get_relations",
         "move_party",
         "reveal",
         "give_item",

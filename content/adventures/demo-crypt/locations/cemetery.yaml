@@ -76,3 +76,5 @@ links:
   - a: graves
     b: lodge
     distance: near
+public: Деревенское кладбище на холме; здесь пропал смотритель Ульрих.
+known_at_start: true

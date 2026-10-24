@@ -577,6 +577,23 @@ def test_every_npc_and_item_can_be_read_with_the_state_the_data_promises(adventu
         assert outcome.result["holder"] == item.holder
 
 
+def test_every_deity_faction_and_relation_end_can_be_read_by_the_master(adventure, table_at):
+    table = table_at(adventure.start_location)
+
+    [world] = table.turn(call("get_world"))
+    assert world.result["villain"] == adventure.villain
+    for deity in adventure.deities.values():
+        [outcome] = table.turn(call("get_deity", deity_id=deity.id))
+        assert outcome.result["name"] == deity.name
+    for faction in adventure.factions.values():
+        [outcome] = table.turn(call("get_faction", faction_id=faction.id))
+        assert outcome.result["name"] == faction.name
+    for relation in adventure.relations:
+        for end in (relation.a, relation.b):
+            [outcome] = table.turn(call("get_relations", ref=end))
+            assert relation.id in [r["id"] for r in outcome.result["relations"]], (end, relation.id)
+
+
 def test_the_lore_search_finds_every_location_npc_and_item_by_its_name(adventure, table_at):
     table = table_at(adventure.start_location)
     named = {f"location:{x.id}": x.name for x in adventure.locations.values()}

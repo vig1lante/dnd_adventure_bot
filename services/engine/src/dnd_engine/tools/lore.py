@@ -1,8 +1,10 @@
-"""Чтение лора: `get_location`, `get_npc`, `get_item`, `search_lore` (план B4.5, спека §8.3).
+"""Чтение лора: `get_location`, `get_npc`, `get_item`, `search_lore` (план B4.5, спека §8.3) и
+мира формата v2 — `get_world`, `get_deity`, `get_faction`, `get_relations` (спека DND-2 §8).
 
 Инструменты только читают приключение и состояние мира: состояние не меняют и событий не создают.
 Результат — короткий словарь, пригодный для JSON. Это инструменты мастера, поэтому в ответе есть
-заметки мастера и секреты NPC: игрокам их показывает только рассказ модели.
+заметки мастера, секреты NPC, богов, фракций и мест, злодей и тайные связи (с признаком
+`secret`): игрокам их показывает только рассказ модели.
 
 Расчёт замков, скрытых выходов и закрытых мест (`is_locked`, `exit_status`,
 `closed_place_with_item`) вынесен отдельно: тот же расчёт нужен инструментам перехода, раскрытия
@@ -15,13 +17,14 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from dnd_engine.adventure.schema import Adventure, Exit, Feature, Location, Npc
+from dnd_engine.adventure.schema import REF_KINDS, Adventure, Exit, Feature, Location, Npc
 from dnd_engine.state import GameState
 from dnd_engine.tools.registry import ToolArgs, ToolContext, ToolError, ToolSpec, find_or_error
 
 ExitStatus = Literal["open", "locked", "hidden"]
 
 MAX_ID_CHARS = 64  # предел id сущности приключения (`schema.ID_PATTERN`)
+MAX_REF_CHARS = 80  # самая длинная ссылка: `location:` и id в 64 символа
 MAX_QUERY_CHARS = 200
 DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT = 5, 20
 # Короткие слова («в», «на», «и») совпадают почти везде и портят порядок результатов.
@@ -162,6 +165,15 @@ def _items_here(
     ]
 
 
+def relations_of(adventure: Adventure, ref: str) -> list[dict[str, Any]]:
+    """Связи графа, где `ref` (`npc:<id>`, `deity:<id>`…) стоит на любом конце, в порядке графа."""
+    return [
+        relation.model_dump(mode="json")
+        for relation in adventure.relations
+        if ref in (relation.a, relation.b)
+    ]
+
+
 def _encounter_view(
     state: GameState, adventure: Adventure, location: Location
 ) -> dict[str, Any] | None:
@@ -179,6 +191,7 @@ def _encounter_view(
         "tactics": encounter.tactics,
         "monsters": [group.model_dump(mode="json") for group in encounter.monsters],
         "pc_zone": encounter.pc_zone,
+        "boss": encounter.boss,
     }
 
 
@@ -209,6 +222,9 @@ def get_location(ctx: ToolContext, args: GetLocationArgs) -> dict[str, Any]:
         "dm_notes": location.dm_notes,
         "exits": [_exit_view(state, adventure, exit_) for exit_ in location.exits],
         "features": [_feature_view(state, adventure, feature) for feature in location.features],
+        "secrets": [
+            secret.model_dump(mode="json", exclude_none=True) for secret in location.secrets
+        ],
         "npcs": [_npc_here(state, npc) for npc in npcs_here],
         "items": _items_here(state, adventure, location, npcs_here),
         "encounter": _encounter_view(state, adventure, location),
@@ -230,7 +246,7 @@ def get_npc(ctx: ToolContext, args: GetNpcArgs) -> dict[str, Any]:
         "motive": npc.motive,
         "secret": npc.secret,
         "knows": list(npc.knows),
-        "relations": [relation.model_dump(mode="json") for relation in npc.relations],
+        "relations": relations_of(ctx.adventure, f"npc:{npc.id}"),
         "statblock": npc.statblock,
         "alive": ctx.state.world.npc_alive.get(npc.id, True),
         "attitude": ctx.state.world.npc_attitude.get(npc.id, npc.attitude),
@@ -256,6 +272,64 @@ def get_item(ctx: ToolContext, args: GetItemArgs) -> dict[str, Any]:
     return view
 
 
+# --- get_world, get_deity, get_faction, get_relations ---
+
+
+class GetWorldArgs(ToolArgs):
+    pass
+
+
+def get_world(ctx: ToolContext, args: GetWorldArgs) -> dict[str, Any]:
+    world = ctx.adventure.world.model_dump(mode="json")
+    return {**world, "villain": ctx.adventure.villain}
+
+
+class GetDeityArgs(ToolArgs):
+    deity_id: str = Field(max_length=MAX_ID_CHARS, description="id бога")
+
+
+def get_deity(ctx: ToolContext, args: GetDeityArgs) -> dict[str, Any]:
+    deity = find_or_error(ctx.adventure.deities, "бога", args.deity_id)
+    relations = relations_of(ctx.adventure, f"deity:{deity.id}")
+    return {**deity.model_dump(mode="json"), "relations": relations}
+
+
+class GetFactionArgs(ToolArgs):
+    faction_id: str = Field(max_length=MAX_ID_CHARS, description="id фракции")
+
+
+def get_faction(ctx: ToolContext, args: GetFactionArgs) -> dict[str, Any]:
+    faction = find_or_error(ctx.adventure.factions, "фракции", args.faction_id)
+    relations = relations_of(ctx.adventure, f"faction:{faction.id}")
+    return {**faction.model_dump(mode="json"), "relations": relations}
+
+
+class GetRelationsArgs(ToolArgs):
+    ref: str = Field(
+        max_length=MAX_REF_CHARS,
+        description="чьи связи: npc:<id>, faction:<id>, deity:<id> или location:<id>",
+    )
+
+
+def get_relations(ctx: ToolContext, args: GetRelationsArgs) -> dict[str, Any]:
+    kind, _, ident = args.ref.partition(":")
+    if kind not in REF_KINDS or not ident:
+        raise ToolError(
+            f"Ссылка {args.ref!r} не подходит: нужна npc:<id>, faction:<id>, deity:<id> "
+            "или location:<id>."
+        )
+    adventure = ctx.adventure
+    collections = {
+        "npc": (adventure.npcs, "NPC"),
+        "faction": (adventure.factions, "фракции"),
+        "deity": (adventure.deities, "бога"),
+        "location": (adventure.locations, "локации"),
+    }
+    collection, what = collections[kind]
+    find_or_error(collection, what, ident)
+    return {"ref": args.ref, "relations": relations_of(adventure, args.ref)}
+
+
 # --- search_lore ---
 
 
@@ -273,10 +347,23 @@ class SearchLoreArgs(ToolArgs):
 
 def _documents(adventure: Adventure) -> Iterator[tuple[str, str, str]]:
     """(ref, заголовок, весь текст) каждой сущности, по которой ищет `search_lore`."""
+    world = adventure.world
+    if world_text := "\n".join([world.history, *(rumor.text for rumor in world.rumors)]).strip():
+        yield "world", "Мир", world_text
+    for region in world.regions:
+        yield f"region:{region.id}", region.name, f"{region.name}\n{region.description}"
+    for deity in adventure.deities.values():
+        parts = [deity.name, deity.title, *deity.domains, deity.symbol, deity.dogma]
+        parts += [deity.appearance, deity.attitude_to_mortals, deity.secret]
+        yield f"deity:{deity.id}", deity.name, "\n".join(parts)
+    for faction in adventure.factions.values():
+        parts = [faction.name, faction.goal, faction.methods, faction.secret]
+        yield f"faction:{faction.id}", faction.name, "\n".join(parts)
     for location in adventure.locations.values():
         parts = [location.name, location.region, location.read_aloud, location.dm_notes]
         parts += [f"{feature.name}. {feature.description}" for feature in location.features]
         parts += [exit_.description for exit_ in location.exits]
+        parts += [secret.text for secret in location.secrets]
         yield f"location:{location.id}", location.name, "\n".join(parts)
     for npc in adventure.npcs.values():
         parts = [npc.name, npc.role, npc.appearance, npc.manner, npc.motive, npc.secret, *npc.knows]
@@ -326,7 +413,11 @@ LORE_TOOLS = (
         name="get_location",
         description=(
             "Прочитать локацию: текст для чтения вслух, заметки мастера, выходы, интересные места, "
-            "NPC, предметы и бой. Без аргумента — текущая локация. Статус выхода: open — свободен, "
+            "тайны места (secrets), NPC, предметы и бой (boss — бой с боссом). Без аргумента — "
+            "текущая локация. Тайна раскрывается проверкой или событием; её находки (reveals) "
+            "движок сам не применяет — после удачной проверки примени их сам: flag → set_flag "
+            '(name — id находки, value — если задано), clue → reveal("clue:<id>"), exit → '
+            'reveal("exit:<id>"), item → give_item. Статус выхода: open — свободен, '
             "locked — заперт (locked_by говорит, что открывает), hidden — скрыт, пока его не "
             "нашли (hidden_dc — Сл поиска). Интересное место со статусом locked тоже заперто. "
             "Предметы — те, что лежат здесь открыто или у NPC здесь (holder); предмет внутри ещё "
@@ -338,8 +429,9 @@ LORE_TOOLS = (
     ToolSpec(
         name="get_npc",
         description=(
-            "Прочитать всё об NPC: облик, манеру, мотив, секрет, что знает, связи, статблок "
-            "и текущее состояние (жив ли, отношение −3..3, где находится)."
+            "Прочитать всё об NPC: облик, манеру, мотив, секрет, что знает, связи из общего графа "
+            "(secret — игроки о связи не знают), статблок и текущее состояние (жив ли, "
+            "отношение −3..3, где находится)."
         ),
         args_model=GetNpcArgs,
         handler=get_npc,
@@ -356,10 +448,49 @@ LORE_TOOLS = (
     ToolSpec(
         name="search_lore",
         description=(
-            "Найти в лоре приключения (локации, NPC, предметы, открытия) места, где встречаются "
-            "слова запроса. Возвращает ref, заголовок и выдержку; больше совпадений — выше."
+            "Найти в лоре приключения (мир и слухи, края, боги, фракции, локации с их тайнами, NPC, "
+            "предметы, открытия) места, где встречаются слова запроса. Возвращает ref, заголовок "
+            "и выдержку; больше совпадений — выше."
         ),
         args_model=SearchLoreArgs,
         handler=search_lore,
+    ),
+    ToolSpec(
+        name="get_world",
+        description=(
+            "Прочитать мир приключения: краткую историю, края, слухи (true — слух правдив, это "
+            "знает только мастер) и злодея сюжета (villain)."
+        ),
+        args_model=GetWorldArgs,
+        handler=get_world,
+    ),
+    ToolSpec(
+        name="get_deity",
+        description=(
+            "Прочитать бога: титул, сферы, символ, догмы, облик, отношение к смертным, секрет, "
+            "статблок аватара и связи из общего графа."
+        ),
+        args_model=GetDeityArgs,
+        handler=get_deity,
+    ),
+    ToolSpec(
+        name="get_faction",
+        description=(
+            "Прочитать фракцию: цель, методы, лидера, базу, секрет, отношение к отряду −3..3 и "
+            "связи из общего графа."
+        ),
+        args_model=GetFactionArgs,
+        handler=get_faction,
+    ),
+    ToolSpec(
+        name="get_relations",
+        description=(
+            "Прочитать связи NPC, фракции, бога или места из общего графа. Связь читается "
+            "«a — kind для b» (kind: kin, spouse, lover, friend, ally, rival, enemy, debtor, "
+            "patron, servant, worships, betrayed, seeks или other с пояснением note); mutual — "
+            "верна и в обратную сторону; secret — игроки о связи не знают."
+        ),
+        args_model=GetRelationsArgs,
+        handler=get_relations,
     ),
 )

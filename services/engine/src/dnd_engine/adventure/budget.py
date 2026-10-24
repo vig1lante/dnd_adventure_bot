@@ -45,18 +45,24 @@ def encounter_xp(encounter: Encounter, adventure: Adventure, content: SrdContent
     return total
 
 
+def party_budget(level: int, party_size: int) -> tuple[int, int, int]:
+    """Бюджет партии (низкая, умеренная, высокая): бюджет на персонажа × число персонажей.
+
+    Уровень вне таблицы (1–5) — `ValueError`."""
+    if level not in XP_BUDGET_PER_CHARACTER:
+        first, last = min(XP_BUDGET_PER_CHARACTER), max(XP_BUDGET_PER_CHARACTER)
+        raise ValueError(f"бюджет боёв задан для уровней {first}–{last}, получен {level}")
+    low, moderate, high = XP_BUDGET_PER_CHARACTER[level]
+    return low * party_size, moderate * party_size, high * party_size
+
+
 def encounter_rating(xp: int, level: int, party_size: int) -> EncounterRating:
     """Сложность боя для партии: наибольшая из сложностей, чей бюджет бой уже набрал.
 
     Ниже бюджета «низкой» — `trivial`; больше бюджета «высокой» в полтора раза — `deadly`
     (ровно в полтора — ещё `high`). Уровень вне таблицы (1–5) — `ValueError`.
     """
-    if level not in XP_BUDGET_PER_CHARACTER:
-        first, last = min(XP_BUDGET_PER_CHARACTER), max(XP_BUDGET_PER_CHARACTER)
-        raise ValueError(f"бюджет боёв задан для уровней {first}–{last}, получен {level}")
-    low, moderate, high = (
-        per_character * party_size for per_character in XP_BUDGET_PER_CHARACTER[level]
-    )
+    low, moderate, high = party_budget(level, party_size)
     if xp * 2 > high * 3:  # «больше high × 1,5» без дробей
         return "deadly"
     if xp >= high:

@@ -38,6 +38,10 @@ VALID_CALLS = [
     ValidCall("get_npc", {"npc_id": "marta"}),
     ValidCall("get_item", {"item_id": "chest-key"}),
     ValidCall("search_lore", {"query": "долг"}),
+    ValidCall("get_world", {}),
+    ValidCall("get_deity", {"deity_id": "ossmar"}),
+    ValidCall("get_faction", {"faction_id": "pale-candle"}),
+    ValidCall("get_relations", {"ref": "npc:marta"}),
     ValidCall("move_party", {"location_id": "village"}),
     ValidCall("reveal", {"ref": "feature:diary"}),
     # Ключ уже у Брона: зелье из закрытого сундука так не отдать, а ключ передаётся напарнику.
