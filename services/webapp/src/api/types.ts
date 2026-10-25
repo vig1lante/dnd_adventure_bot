@@ -599,3 +599,177 @@ export type WsEvent =
   | { type: "lobby"; game: GameSummary }
   | { type: "error"; detail: string }
   | { type: "pong" };
+
+// --- конструктор приключений (спека DND-2 §10.3 и дополнение dispatcher к контракту B4) ---
+
+/** Шаги генератора по порядку (контракт B3); они же ключи `steps`, `wishes` и замков `step:<шаг>`. */
+export type AuthoringStep =
+  | "concept"
+  | "world"
+  | "pantheon"
+  | "factions"
+  | "plot"
+  | "locations"
+  | "location_contents"
+  | "npcs"
+  | "relations"
+  | "encounters"
+  | "items"
+  | "clues";
+
+/** Разделы, которые в блоке 4 принимает `PUT /api/drafts/{id}/sections/{section}`. */
+export type DraftSection =
+  "settings" | "world" | "deities" | "factions" | "plot";
+
+/** Статус шага считает сервер: «пусто / черновик / готово». */
+export type StepStatus = "empty" | "draft" | "ready";
+
+export interface StepState {
+  status: StepStatus;
+  /** Последняя запись раздела этого шага (руками или генерацией); `null` — не было. */
+  updated_at: string | null;
+}
+
+export type JobStatus = "queued" | "running" | "done" | "failed";
+
+/** Фоновое задание генерации шага. */
+export interface Job {
+  id: string;
+  step: AuthoringStep;
+  /** Ссылка на одну сущность (`<вид>:<id>`); `null` — шаг целиком. */
+  target: string | null;
+  status: JobStatus;
+  /** Безопасный текст сбоя по-русски; только у `failed`. */
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+/** Поля дневника отряда у сущностей (спека §8): что знают игроки и известно ли с начала. */
+export interface JournalFields {
+  public: string;
+  known_at_start: boolean;
+}
+
+export interface Region extends JournalFields {
+  id: string;
+  name: string;
+  description: string;
+}
+
+export interface Rumor extends JournalFields {
+  text: string;
+  /** Правдив ли слух: знает только мастер. */
+  true: boolean;
+}
+
+export interface WorldInfo {
+  history: string;
+  regions: Region[];
+  rumors: Rumor[];
+}
+
+export interface Deity extends JournalFields {
+  id: string;
+  name: string;
+  title: string;
+  domains: string[];
+  symbol: string;
+  dogma: string;
+  appearance: string;
+  attitude_to_mortals: string;
+  secret: string;
+  /** id статблока аватара (монстр SRD или свой); `null` — аватара нет. */
+  avatar_statblock: string | null;
+}
+
+export interface Faction extends JournalFields {
+  id: string;
+  name: string;
+  goal: string;
+  methods: string;
+  /** Ссылка на NPC-лидера: `npc:<id>`. */
+  leader: string | null;
+  /** id локации-базы. */
+  base_location: string | null;
+  secret: string;
+  /** Отношение к отряду, ступени от −3 до 3. */
+  attitude_to_party: number;
+}
+
+export interface Act {
+  id: string;
+  title: string;
+  summary: string;
+  key_scenes: string[];
+}
+
+export interface Plot {
+  acts: Act[];
+  endings: string[];
+  /** Злодей сюжета: `npc:<id>` или `deity:<id>`. */
+  villain: string | null;
+}
+
+/** Заказ автора: завязка, тон, длина игры, отряд, модули правил и флажок мата. */
+export interface DraftSettings {
+  pitch: string;
+  tone: string;
+  target_hours: number;
+  party_size: number;
+  party_level: number;
+  modules: string[];
+  profanity: boolean;
+}
+
+/** Данные раздела `settings`: настройки и два поля верхнего уровня черновика. */
+export interface SettingsSection extends DraftSettings {
+  title: string;
+  journal_intro: string;
+}
+
+/** Черновик приключения (контракт B4, §1). Разделы блоков 5–6 клиент пока не читает. */
+export interface Draft {
+  /** id записи черновика, не slug приключения. */
+  id: string;
+  version: number;
+  title: string;
+  /** slug приключения; `null` до шага concept; в блоке 4 только чтение. */
+  adventure_id: string | null;
+  journal_intro: string;
+  settings: DraftSettings;
+  world: WorldInfo | null;
+  deities: Deity[];
+  factions: Faction[];
+  plot: Plot | null;
+  locations: unknown[];
+  npcs: unknown[];
+  relations: unknown[];
+  encounters: unknown[];
+  monsters: unknown[];
+  items: unknown[];
+  revelations: unknown[];
+  start_location: string | null;
+  finale_location: string | null;
+  /** Закрепления: `<вид>:<id>` или `step:<шаг>`. */
+  locks: string[];
+  wishes: Partial<Record<AuthoringStep, string>>;
+  steps: Record<AuthoringStep, StepState>;
+  /** Активное или последнее задание черновика. */
+  job: Job | null;
+}
+
+/** Строка списка черновиков (`GET /api/drafts`), новые сверху. */
+export interface DraftSummary {
+  id: string;
+  title: string;
+  adventure_id: string | null;
+  version: number;
+  updated_at: string;
+}
+
+export interface GenerateBody {
+  step: AuthoringStep;
+  wish?: string;
+  target?: string;
+}

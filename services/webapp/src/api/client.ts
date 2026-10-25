@@ -1,3 +1,4 @@
+import { authoringApi } from "./authoring";
 import type {
   ActionBody,
   AdventureSummary,
@@ -28,13 +29,24 @@ export class ApiError extends Error {
   readonly detail: string;
   /** Подробности отказа правил (только у 422): список строк по-русски. */
   readonly problems?: string[];
+  /**
+   * Машинный код отказа, если сервер его прислал (конструктор: `version_conflict`,
+   * `job_running` и др.). По нему экран различает отказы с одинаковым статусом.
+   */
+  readonly code?: string;
 
-  constructor(status: number, detail: string, problems?: string[]) {
+  constructor(
+    status: number,
+    detail: string,
+    problems?: string[],
+    code?: string,
+  ) {
     super(detail);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
     this.problems = problems;
+    this.code = code;
   }
 }
 
@@ -102,6 +114,7 @@ async function errorFrom(response: Response): Promise<ApiError> {
     response.status,
     detail,
     problems.length > 0 ? problems : undefined,
+    typeof body?.code === "string" ? body.code : undefined,
   );
 }
 
@@ -112,7 +125,7 @@ export function errorText(error: unknown): string {
     : "Что-то пошло не так. Попробуйте ещё раз.";
 }
 
-interface RequestOptions {
+export interface RequestOptions {
   body?: unknown;
   /**
    * Заголовок Authorization. Не задан — `Bearer <токен сессии>`, если токен есть;
@@ -120,6 +133,13 @@ interface RequestOptions {
    */
   authorization?: string | null;
 }
+
+/** Общий запрос клиента: методы конструктора (authoring.ts) строятся поверх него. */
+export type Request = <T>(
+  method: string,
+  path: string,
+  options?: RequestOptions,
+) => Promise<T>;
 
 /**
  * Клиент REST API сервера. `getToken` отдаёт токен текущей сессии (он живёт только
@@ -238,6 +258,9 @@ export function createApi(
     // --- кнопки хоста: ответ — фаза игры, как в снимке ---
     hostAction: (gameId: string, action: HostAction) =>
       post<PhaseView>(`${gamePath(gameId)}/host/${action}`),
+
+    // --- конструктор приключений (только создателям игр) ---
+    ...authoringApi(request),
   };
 }
 

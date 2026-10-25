@@ -29,7 +29,7 @@ from dnd_engine.adventure.validator import Issue
 from dnd_engine.content import MonsterDef
 from dnd_server.authoring.draft import AuthoringDraft
 from dnd_server.authoring.schemas import EncountersOut
-from dnd_server.authoring.steps import STEPS, repair_step, run_step
+from dnd_server.authoring.steps import STEPS, repair_step, run_step, target_id
 from dnd_server.llm.base import ProviderError
 from dnd_server.prompts import PROFANITY_ALLOWED, PROFANITY_FORBIDDEN, load
 
@@ -544,6 +544,33 @@ async def test_an_unknown_kind_or_a_malformed_target_is_a_value_error_before_any
     with pytest.raises(ValueError):
         await run_step(provider, draft, "npcs", target=target)
     assert provider.requests == []
+
+
+@pytest.mark.parametrize(
+    ("step", "target"),
+    [
+        ("pantheon", "npc:bram"),
+        ("concept", "revelation:ash-truth"),
+        ("npcs", "npc:nobody"),
+        ("npcs", "bram"),
+        ("npcs", "step:npcs"),
+        ("dragons", None),
+    ],
+)
+async def test_the_public_target_check_refuses_what_run_step_refuses(step, target):
+    # Конструктор (блок 4) проверяет цель этой функцией до задания: правило живёт в одном месте.
+    draft = await full_v2_draft()
+
+    with pytest.raises(ValueError):
+        target_id(draft, step, target)
+
+
+async def test_the_public_target_check_gives_the_id_of_the_target_or_none():
+    draft = await full_v2_draft()
+
+    assert target_id(draft, "npcs", "npc:bram") == "bram"
+    assert target_id(draft, "pantheon", "deity:selmara") == "selmara"
+    assert target_id(draft, "world", None) is None
 
 
 # --- закреплённое в каждом разделе ---

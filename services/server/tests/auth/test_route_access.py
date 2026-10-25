@@ -37,6 +37,8 @@ PUBLIC = frozenset(
 )
 # Какие префиксы вообще бывают у маршрутов приложения; новый префикс требует решения о доступе.
 KNOWN_PREFIXES = ("/health", "/api/", "/ws/", "/internal/")
+# Маршруты только для создателей игр: конструктор приключений (DND-2 B4.1).
+CREATOR_ONLY_PREFIXES = ("/api/drafts",)
 
 
 @asynccontextmanager
@@ -151,6 +153,35 @@ async def test_every_protected_route_is_401_with_a_foreign_expired_or_broken_tok
         assert response.status_code == 401, (kind, route)
         assert isinstance(response.json()["detail"], str), (kind, route)
         assert token not in response.text, (kind, route)
+
+
+@pytest.mark.parametrize("app_env", ["dev", "prod"])
+async def test_every_route_of_the_constructor_is_403_for_a_player_who_may_not_create_games(
+    settings, db, route_table, app_env
+):
+    # Конструктор — только для создателей игр (спека Р7, §10.3). Игрок с Telegram-id вне списка
+    # не создатель ни в dev, ни в prod; отказ в праве идёт раньше проверки тела и черновика.
+    async with db() as session:
+        user = User(tg_id=4242, name="Игрок")
+        session.add(user)
+        await session.commit()
+    headers = {"Authorization": f"Bearer {SessionSigner(SESSION_SECRET).issue(user.id)}"}
+
+    async with client_for(settings, app_env) as (app, http):
+        routes = [
+            route
+            for route in protected_routes(route_table, app)
+            if route[1].startswith(CREATOR_ONLY_PREFIXES)
+        ]
+        responses = {
+            route: await http.request(route[0], concrete(route[1]), headers=headers)
+            for route in routes
+        }
+
+    assert len(routes) >= 10  # список, создание, чтение, удаление, разделы, задания, проверка
+    for route, response in responses.items():
+        assert response.status_code == 403, route
+        assert isinstance(response.json()["detail"], str), route
 
 
 @pytest.mark.parametrize("app_env", ["dev", "prod"])

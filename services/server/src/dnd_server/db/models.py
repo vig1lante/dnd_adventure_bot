@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import BigInteger, Enum, ForeignKey, String, Text, true
+from sqlalchemy import BigInteger, Enum, ForeignKey, Index, String, Text, text, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from dnd_engine.state import GameState
@@ -75,12 +75,30 @@ class MessageKind(StrEnum):
     ACTION = "action"
 
 
+class JobStatus(StrEnum):
+    """Состояние задания генерации шага конструктора (спека §10.2)."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+
+
+# Незавершённые задания: у черновика такое одно (индекс ниже), его перезапуск сервера срывает.
+ACTIVE_JOB_STATUSES = (JobStatus.QUEUED, JobStatus.RUNNING)
+
+
 class UnsupportedSnapshotVersion(ValueError):
     """Снимок состояния записан более новой схемой, чем понимает этот сервер."""
 
 
 def new_id() -> str:
     return str(uuid.uuid4())
+
+
+def new_hex_id() -> str:
+    """id черновика и задания конструктора: uuid4 в 32 шестнадцатеричных знаках (дополнение B4 §1)."""
+    return uuid.uuid4().hex
 
 
 def utcnow() -> datetime:
@@ -284,3 +302,71 @@ class DmTurnLog(Base):
     duration_ms: Mapped[int | None]
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class AdventureDraft(Base):
+    """Черновик конструктора приключений (миграция 0005, спека §10.2, Р5).
+
+    Весь черновик — JSON `AuthoringDraft` (контракт B3) в `data`: разделы, закрепления, пожелания и
+    название; так у черновика одна версия и одно место правды. `title` повторяет название для списка
+    черновиков. `version` ведёт ORM (`version_id_col`): каждая запись поднимает её на 1, а запись
+    поверх чужой версии отвергается (`StaleDataError`), так что две вкладки не перетрут друг друга.
+    """
+
+    __tablename__ = "adventure_drafts"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_hex_id)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    title: Mapped[str]
+    data: Mapped[dict[str, Any]]
+    # Время последней записи раздела каждого шага: `{шаг: ISO-время}` (`Draft.steps[шаг].updated_at`).
+    step_times: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    version: Mapped[int] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    __mapper_args__ = {"version_id_col": version}
+
+
+class AuthoringJob(Base):
+    """Задание генерации шага черновика (миграция 0005, спека §10.2, Р6).
+
+    Незавершённое задание (`queued`/`running`) у черновика одно: это держит частичный уникальный
+    индекс базы, а не только проверка в коде, поэтому два одновременных запуска не пройдут оба.
+    `wish` — пожелание этого запуска (текст автора); в журнал сервера и ответы оно не попадает.
+    """
+
+    __tablename__ = "authoring_jobs"
+    __table_args__ = (
+        Index(
+            "ix_authoring_jobs_active_draft",
+            "draft_id",
+            unique=True,
+            sqlite_where=text("status IN ('queued', 'running')"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_hex_id)
+    draft_id: Mapped[str] = mapped_column(ForeignKey("adventure_drafts.id"))
+    step: Mapped[str]
+    target: Mapped[str | None]
+    wish: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[JobStatus] = mapped_column(enum_column(JobStatus), default=JobStatus.QUEUED)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    finished_at: Mapped[datetime | None]
+
+
+class AuthoredAdventure(Base):
+    """Опубликованное приключение конструктора (миграция 0005, спека §10.2; заполняет блок B6).
+
+    `id` — id приключения. Ссылка на черновик без внешнего ключа: черновик можно удалить и после
+    публикации."""
+
+    __tablename__ = "authored_adventures"
+
+    id: Mapped[str] = mapped_column(primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    data: Mapped[dict[str, Any]]
+    source_draft_id: Mapped[str | None]
+    published_at: Mapped[datetime] = mapped_column(default=utcnow)

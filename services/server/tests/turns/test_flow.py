@@ -380,6 +380,23 @@ async def test_the_task_set_logs_an_unexpected_failure_but_not_a_refusal_of_the_
     assert "разбор упал" in caplog.text
 
 
+async def test_the_task_set_names_the_failing_task_with_its_own_text_or_the_turn_by_default(
+    caplog,
+):
+    tasks = TaskSet()
+
+    async def crash() -> None:
+        raise RuntimeError("упало")
+
+    with caplog.at_level(logging.ERROR):
+        tasks.spawn(crash())
+        tasks.spawn(crash(), failure_text="Фоновая задача конструктора завершилась ошибкой.")
+        await tasks.join()
+
+    assert caplog.text.count("Фоновая задача хода завершилась ошибкой.") == 1
+    assert caplog.text.count("Фоновая задача конструктора завершилась ошибкой.") == 1
+
+
 async def test_the_task_set_logs_a_failure_without_the_input_of_the_error(caplog, leak):
     tasks = TaskSet()
 

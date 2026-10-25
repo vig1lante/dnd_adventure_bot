@@ -8,8 +8,10 @@ import { Alert, Badge, Button, Card, EmptyState, Loading } from "../ui";
 import type { BadgeProps } from "../ui";
 import { CreateGameForm } from "./CreateGameForm";
 import { TextField } from "./fields";
+import { AdventuresHome } from "./authoring/AdventuresHome";
 import { useAction, useLoaded } from "./hooks";
 import "./screens.css";
+import "./authoring/authoring.css";
 
 const PHASES: Record<GamePhase, { label: string; tone: BadgeProps["tone"] }> = {
   lobby: { label: "Лобби", tone: "neutral" },
@@ -95,21 +97,47 @@ function GameRow({ game }: { game: GameSummary }) {
   );
 }
 
-/** «Мои игры»: список игр игрока, вход по коду приглашения и (создателям) новая игра. */
-export function MyGames() {
+type Tab = "games" | "adventures";
+
+const TABS: readonly { value: Tab; label: string }[] = [
+  { value: "games", label: "Мои игры" },
+  { value: "adventures", label: "Приключения" },
+];
+
+function Tabs({
+  value,
+  onChange,
+}: {
+  value: Tab;
+  onChange: (tab: Tab) => void;
+}) {
+  return (
+    <div role="tablist" aria-label="Разделы" className="authoring-tabs">
+      {TABS.map((tab) => (
+        <Button
+          key={tab.value}
+          role="tab"
+          aria-selected={tab.value === value}
+          variant={tab.value === value ? "primary" : "secondary"}
+          onClick={() => onChange(tab.value)}
+        >
+          {tab.label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+/** Список игр игрока, вход по коду приглашения и (создателям) новая игра. */
+function GamesTab({ canCreate }: { canCreate: boolean }) {
   const api = useApi();
   const userName = useGame((state) => state.session?.user.name);
-  const canCreate = useGame(
-    (state) => state.session?.user.can_create_games === true,
-  );
-  const notice = useGame((state) => state.notice);
   const [creating, setCreating] = useState(false);
   const loadGames = useCallback(() => api.listGames(), [api]);
   const [games, reload] = useLoaded(loadGames);
 
   return (
     <>
-      {notice !== null && <Alert>{notice}</Alert>}
       <Card title="Мои игры" icon="scroll">
         <p className="screen-muted">Вы вошли как {userName}.</p>
         {games.status === "loading" && <Loading label="Загружаем игры…" />}
@@ -151,6 +179,30 @@ export function MyGames() {
             Создать игру
           </Button>
         ))}
+    </>
+  );
+}
+
+/**
+ * «Мои игры». Создателям игр — ещё вкладка «Приключения» (конструктор). Право проверяет
+ * сервер (403); здесь флажок сессии только прячет вкладку от остальных.
+ */
+export function MyGames() {
+  const canCreate = useGame(
+    (state) => state.session?.user.can_create_games === true,
+  );
+  const notice = useGame((state) => state.notice);
+  const [tab, setTab] = useState<Tab>("games");
+
+  return (
+    <>
+      {notice !== null && <Alert>{notice}</Alert>}
+      {canCreate && <Tabs value={tab} onChange={setTab} />}
+      {canCreate && tab === "adventures" ? (
+        <AdventuresHome />
+      ) : (
+        <GamesTab canCreate={canCreate} />
+      )}
     </>
   );
 }

@@ -54,6 +54,7 @@ from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.db.models import (
     GAME_STATE_SCHEMA_VERSION,
+    AdventureDraft,
     DmTurnLog,
     Game,
     GamePlayer,
@@ -85,6 +86,7 @@ SAVED_GAME_TESTS = {
     "0002": "test_a_game_saved_before_the_clock_column_keeps_counting_after_upgrade_head",
     "0003": "test_a_game_saved_before_hero_choices_keeps_its_heroes_after_upgrade_head",
     "0004": "test_a_game_saved_before_the_profanity_flag_allows_profanity_after_upgrade_head",
+    "0005": "test_a_game_saved_before_the_authoring_tables_is_read_after_upgrade_head",
 }
 
 
@@ -611,6 +613,47 @@ async def test_a_game_saved_before_the_profanity_flag_allows_profanity_after_upg
             )
         assert response.status_code == 200, response.text
         assert response.json()["profanity"] is True
+    finally:
+        await app.state.engine.dispose()
+        await engine.dispose()
+
+
+async def test_a_game_saved_before_the_authoring_tables_is_read_after_upgrade_head(
+    settings, migrate
+):
+    # Ревизия 0005 (DND-2 B4.1, спека §10.2) завела таблицы конструктора и не тронула таблицы игр:
+    # игра на ревизии 0004 читается теми же моделями, а черновиков у владельца ещё нет.
+    golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
+    adventure = json.loads(golden_adventures()[1].read_text(encoding="utf-8"))
+    await migrate("upgrade", "0004")
+    ids = insert_saved_game(
+        sqlite_file(settings.database_url), golden, adventure, pending_roll=False
+    )
+    await migrate("upgrade", "head")
+
+    engine = make_engine(settings.database_url)
+    db = make_sessionmaker(engine)
+    app = create_app(settings)
+    try:
+        async with db() as session:
+            game = await session.get(Game, ids["game_id"])
+            snapshot = await session.get(GameStateSnapshot, (ids["game_id"], game.state_version))
+            alice = await session.get(User, ids["Алиса"])
+            view = await snapshot_for(session, alice, ids["game_id"], srd=load_srd())
+            drafts = list(await session.scalars(select(AdventureDraft)))
+        assert snapshot.to_state().model_dump(mode="json") == golden["state"]
+        assert adventure_from_data(game.adventure_data) == adventure_from_data(adventure)
+        assert (game.phase.value, game.profanity) == ("playing", True)
+        assert [m["name"] for m in view["party"]] == ["Алиса", "Борис", "Вера"]
+        assert drafts == []
+        token = SessionSigner.from_settings(settings).issue(ids["Алиса"])
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as http:
+            response = await http.get(
+                f"/api/games/{ids['game_id']}", headers={"Authorization": f"Bearer {token}"}
+            )
+        assert response.status_code == 200, response.text
+        assert [p["name"] for p in response.json()["players"]] == ["Алиса", "Борис", "Вера"]
     finally:
         await app.state.engine.dispose()
         await engine.dispose()

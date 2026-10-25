@@ -48,7 +48,7 @@ from dnd_server.authoring.draft import SECTION_KINDS, STEPS, AuthoringDraft, Dra
 from dnd_server.llm.base import JsonRequest, LLMProvider, ProviderError
 from dnd_server.prompts import role_with_style
 
-__all__ = ["MAX_PARALLEL_CONTENTS", "STEPS", "is_empty", "repair_step", "run_step"]
+__all__ = ["MAX_PARALLEL_CONTENTS", "STEPS", "is_empty", "repair_step", "run_step", "target_id"]
 
 MAX_PARALLEL_CONTENTS = 4  # запросов наполнения локаций одновременно
 
@@ -122,17 +122,17 @@ async def run_step(
     цель, которые закрепил автор, модель не спрашивают: черновик возвращается как есть. Цель не из
     раздела шага (или которой нет в черновике) — `ValueError`; ответ без цели и ошибки модели —
     `ProviderError`."""
-    target_id = _target_id(draft, step, target)
+    chosen = target_id(draft, step, target)
     if draft.is_locked(f"step:{step}") or (target is not None and draft.is_locked(target)):
         return draft
     if _nothing_to_fill(draft, step):
         return draft
     wish = wish or draft.wishes.get(step)
     if step == "location_contents":
-        ids = [target_id] if target_id else [loc.id for loc in _unlocked(draft, "locations")]
+        ids = [chosen] if chosen else [loc.id for loc in _unlocked(draft, "locations")]
         return await _fill_contents(provider, draft, ids, wish=wish, target=target, issues={})
     answer = await _ask(provider, draft, step, wish=wish, target=target, issues=())
-    return _MERGES[step](draft, answer, target_id)
+    return _MERGES[step](draft, answer, chosen)
 
 
 async def repair_step(
@@ -292,8 +292,9 @@ def _budget_hint(settings: DraftSettings) -> str:
 # --- цель и закреплённое ---
 
 
-def _target_id(draft: AuthoringDraft, step: str, target: str | None) -> str | None:
-    """id цели `target` в разделе шага; цель не того вида или которой нет — `ValueError`."""
+def target_id(draft: AuthoringDraft, step: str, target: str | None) -> str | None:
+    """id цели `target` в разделе шага; неизвестный шаг, цель не того вида или которой нет —
+    `ValueError`. Этой же проверкой конструктор (блок 4) отвергает запрос до задания генерации."""
     if step not in STEPS:
         raise ValueError(f"неизвестный шаг генератора: {step!r}")
     if target is None:

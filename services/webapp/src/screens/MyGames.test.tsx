@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { ApiContext } from "../api/context";
 import { createApi } from "../api/client";
 import type { GameSummary } from "../api/types";
@@ -6,6 +6,7 @@ import { sessionToken, useGame } from "../store/game";
 import { fakeServer, gameSummary, lobbyPlayer, signInAs } from "../test-setup";
 import type { FakeReply, RecordedCall } from "../test-setup";
 import { MyGames } from "./MyGames";
+import { draftOf, jobOf, summaryOf } from "./authoring/fixtures";
 
 type Routes = Record<string, FakeReply | ((call: RecordedCall) => FakeReply)>;
 
@@ -442,5 +443,98 @@ describe("создание игры: только для создателей", 
     expect(
       screen.getByRole("button", { name: "Создать игру" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("вкладка «Приключения»: только для создателей", () => {
+  const tab = (name: string) => screen.getByRole("tab", { name });
+
+  test("создатель видит вкладки «Мои игры» (выбрана) и «Приключения»", async () => {
+    renderMyGames({ canCreate: true });
+    await screen.findByText("Пока нет игр");
+
+    expect(tab("Мои игры")).toHaveAttribute("aria-selected", "true");
+    expect(tab("Приключения")).toHaveAttribute("aria-selected", "false");
+  });
+
+  test("не создатель вкладок не видит, черновики не запрашиваются", async () => {
+    const server = renderMyGames({ canCreate: false });
+    await screen.findByText("Пока нет игр");
+
+    expect(screen.queryByRole("tab", { name: "Приключения" })).toBeNull();
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(callsTo(server, "GET", "/api/drafts")).toHaveLength(0);
+  });
+
+  test("«Приключения» показывает черновики, «Мои игры» возвращает список игр", async () => {
+    const server = renderMyGames({
+      canCreate: true,
+      games: [CRYPT],
+      routes: {
+        "GET /api/drafts": {
+          json: [summaryOf({ id: "d1", title: "Туманная гавань" })],
+        },
+      },
+    });
+    await screen.findByText("Склеп забытого короля");
+
+    fireEvent.click(tab("Приключения"));
+
+    expect(await screen.findByText("Туманная гавань")).toBeInTheDocument();
+    expect(tab("Приключения")).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByText("Склеп забытого короля")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Войти по коду" })).toBeNull();
+    expect(callsTo(server, "GET", "/api/drafts")).toHaveLength(1);
+
+    fireEvent.click(tab("Мои игры"));
+
+    expect(
+      await screen.findByText("Склеп забытого короля"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Туманная гавань")).toBeNull();
+  });
+});
+
+// --- финальное покрытие блока 4 ---
+
+describe("вкладка «Приключения»: уход со вкладки", () => {
+  const tick = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+  test("переход на «Мои игры» во время генерации останавливает опрос задания", async () => {
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+    });
+    const running = jobOf({ id: "j1", step: "plot", status: "queued" });
+    const server = renderMyGames({
+      canCreate: true,
+      games: [CRYPT],
+      routes: {
+        "GET /api/drafts": {
+          json: [summaryOf({ id: "d1", title: "Туманная гавань" })],
+        },
+        "GET /api/drafts/d1": { json: draftOf({ job: running }) },
+        "GET /api/drafts/d1/jobs/j1": { json: running },
+      },
+    });
+    const polls = () => callsTo(server, "GET", "/api/drafts/d1/jobs/j1");
+    await tick(0);
+    fireEvent.click(screen.getByRole("tab", { name: "Приключения" }));
+    await tick(0);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Открыть: Туманная гавань" }),
+    );
+    await tick(0);
+    await tick(2000);
+    expect(polls()).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("tab", { name: "Мои игры" }));
+    await tick(0);
+    await tick(10_000);
+
+    expect(polls()).toHaveLength(1);
+    expect(screen.getByText("Склеп забытого короля")).toBeInTheDocument();
   });
 });

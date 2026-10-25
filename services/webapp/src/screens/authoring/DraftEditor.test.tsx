@@ -1,0 +1,1210 @@
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { createApi } from "../../api/client";
+import { ApiContext } from "../../api/context";
+import { sessionToken } from "../../store/game";
+import { fakeServer, signInAs } from "../../test-setup";
+import { DraftEditor } from "./DraftEditor";
+import {
+  callsTo,
+  deityOf,
+  draftOf,
+  jobOf,
+  renderEditor,
+  stepsOf,
+} from "./fixtures";
+
+// Подменяются только таймеры экрана: React, промисы и ответы заглушки работают как обычно.
+const FAKE_TIMERS: (
+  "setTimeout" | "clearTimeout" | "setInterval" | "clearInterval"
+)[] = ["setTimeout", "clearTimeout", "setInterval", "clearInterval"];
+
+const tick = (ms: number) =>
+  act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+
+const opened = () =>
+  screen.findByRole("navigation", { name: "Шаги приключения" });
+const stepButton = (name: string) =>
+  within(
+    screen.getByRole("navigation", { name: "Шаги приключения" }),
+  ).getByRole("button", { name: new RegExp(name) });
+const panel = (name: string) => screen.getByRole("region", { name });
+const button = (name: string | RegExp) => screen.getByRole("button", { name });
+
+const CONCEPT_PATH = "/api/drafts/d1/sections/settings";
+
+describe("полоска шагов", () => {
+  test("пять шагов со статусами сервера: пусто, черновик, готово", async () => {
+    renderEditor(
+      draftOf({
+        steps: stepsOf({
+          concept: { status: "ready", updated_at: "2026-10-25T10:00:00Z" },
+          world: { status: "draft", updated_at: "2026-10-25T10:01:00Z" },
+        }),
+      }),
+    );
+    await opened();
+
+    expect(stepButton("Замысел")).toHaveTextContent("готово");
+    expect(stepButton("Мир")).toHaveTextContent("черновик");
+    expect(stepButton("Боги")).toHaveTextContent("пусто");
+    expect(stepButton("Фракции")).toHaveTextContent("пусто");
+    expect(stepButton("Сюжет")).toHaveTextContent("пусто");
+  });
+
+  test("закреплённый целиком шаг помечен замком", async () => {
+    renderEditor(draftOf({ locks: ["step:world"] }));
+    await opened();
+
+    expect(stepButton("Мир")).toHaveTextContent("закреплён");
+    expect(stepButton("Замысел")).not.toHaveTextContent("закреплён");
+  });
+
+  test("сначала открыт Замысел; выбор шага показывает его форму", async () => {
+    renderEditor(draftOf());
+    await opened();
+
+    expect(panel("Замысел")).toBeInTheDocument();
+    expect(stepButton("Замысел")).toHaveAttribute("aria-current", "step");
+    expect(screen.queryByRole("region", { name: "Мир" })).toBeNull();
+
+    fireEvent.click(stepButton("Мир"));
+
+    expect(panel("Мир")).toBeInTheDocument();
+    expect(stepButton("Мир")).toHaveAttribute("aria-current", "step");
+    expect(screen.queryByRole("region", { name: "Замысел" })).toBeNull();
+  });
+
+  test("несохранённая правка шага переживает переход на другой шаг", async () => {
+    renderEditor(draftOf());
+    await opened();
+
+    fireEvent.change(
+      within(panel("Замысел")).getByRole("textbox", { name: "Название" }),
+      { target: { value: "Гавань" } },
+    );
+    fireEvent.click(stepButton("Мир"));
+    fireEvent.click(stepButton("Замысел"));
+
+    expect(
+      within(panel("Замысел")).getByRole("textbox", { name: "Название" }),
+    ).toHaveValue("Гавань");
+  });
+
+  test("«К списку приключений» закрывает редактор", async () => {
+    const { onClose } = renderEditor(draftOf());
+    await opened();
+
+    fireEvent.click(button("К списку приключений"));
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  test("сбой загрузки черновика: текст сервера и «Повторить»", async () => {
+    let attempts = 0;
+    renderEditor(draftOf(), {
+      "GET /api/drafts/d1": () =>
+        ++attempts === 1
+          ? { status: 404, json: { detail: "Черновик не найден." } }
+          : { json: draftOf() },
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Черновик не найден.",
+    );
+    fireEvent.click(button("Повторить"));
+
+    expect(await opened()).toBeInTheDocument();
+  });
+});
+
+describe("ответы сервера на запись", () => {
+  const saveConcept = () =>
+    fireEvent.click(
+      within(panel("Замысел")).getByRole("button", {
+        name: "Сохранить раздел",
+      }),
+    );
+
+  test("сохранение уходит с версией черновика, ответ становится новым черновиком", async () => {
+    const { server } = renderEditor(draftOf({ version: 7 }), {
+      [`PUT ${CONCEPT_PATH}`]: {
+        json: draftOf({
+          version: 8,
+          steps: stepsOf({
+            concept: { status: "draft", updated_at: "2026-10-25T10:00:00Z" },
+          }),
+        }),
+      },
+    });
+    await opened();
+
+    saveConcept();
+
+    await vi.waitFor(() =>
+      expect(stepButton("Замысел")).toHaveTextContent("черновик"),
+    );
+    expect(callsTo(server, "PUT", CONCEPT_PATH)[0].body).toMatchObject({
+      version: 7,
+    });
+  });
+
+  test("409 version_conflict: диалог «Черновик изменился, обновить?»; «Обновить» перечитывает черновик", async () => {
+    let reads = 0;
+    const { server } = renderEditor(draftOf(), {
+      "GET /api/drafts/d1": () => ({
+        json: draftOf({
+          version: ++reads,
+          title: reads > 1 ? "Чужая правка" : "",
+        }),
+      }),
+      [`PUT ${CONCEPT_PATH}`]: {
+        status: 409,
+        json: { detail: "Черновик изменился.", code: "version_conflict" },
+      },
+    });
+    await opened();
+
+    saveConcept();
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Черновик изменился, обновить?",
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Обновить" }));
+
+    await vi.waitFor(() =>
+      expect(
+        within(panel("Замысел")).getByRole("textbox", { name: "Название" }),
+      ).toHaveValue("Чужая правка"),
+    );
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(callsTo(server, "GET", "/api/drafts/d1")).toHaveLength(2);
+  });
+
+  test("в диалоге конфликта «Отмена» закрывает его и оставляет правки", async () => {
+    const { server } = renderEditor(draftOf(), {
+      [`PUT ${CONCEPT_PATH}`]: {
+        status: 409,
+        json: { detail: "Черновик изменился.", code: "version_conflict" },
+      },
+    });
+    await opened();
+    fireEvent.change(
+      within(panel("Замысел")).getByRole("textbox", { name: "Название" }),
+      { target: { value: "Моя правка" } },
+    );
+
+    saveConcept();
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Отмена" }));
+
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(
+      within(panel("Замысел")).getByRole("textbox", { name: "Название" }),
+    ).toHaveValue("Моя правка");
+    expect(callsTo(server, "GET", "/api/drafts/d1")).toHaveLength(1);
+  });
+
+  test("409 job_running — не конфликт версии: текст сервера без диалога", async () => {
+    renderEditor(draftOf(), {
+      [`PUT ${CONCEPT_PATH}`]: {
+        status: 409,
+        json: {
+          detail: "Идёт генерация: дождитесь её окончания.",
+          code: "job_running",
+        },
+      },
+    });
+    await opened();
+
+    saveConcept();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Идёт генерация: дождитесь её окончания.",
+    );
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  test("422: текст сервера и подробности списком", async () => {
+    renderEditor(draftOf(), {
+      [`PUT ${CONCEPT_PATH}`]: {
+        status: 422,
+        json: {
+          detail: "Раздел не прошёл проверку.",
+          problems: ["party_size: не больше 6", "title: не длиннее 100 знаков"],
+          code: "invalid_data",
+        },
+      },
+    });
+    await opened();
+
+    saveConcept();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Раздел не прошёл проверку.");
+    expect(within(alert).getAllByRole("listitem")).toHaveLength(2);
+    expect(alert).toHaveTextContent("party_size: не больше 6");
+  });
+});
+
+describe("закрепление раздела-одиночки", () => {
+  test("«Закрепить раздел» у Замысла шлёт замки с step:concept и версией", async () => {
+    const { server } = renderEditor(
+      draftOf({ version: 3, locks: ["deity:tiamat"] }),
+      {
+        "PUT /api/drafts/d1/locks": {
+          json: draftOf({
+            version: 4,
+            locks: ["deity:tiamat", "step:concept"],
+          }),
+        },
+      },
+    );
+    await opened();
+    const lock = within(panel("Замысел")).getByRole("button", {
+      name: "Закрепить раздел",
+    });
+    expect(lock).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(lock);
+
+    await vi.waitFor(() =>
+      expect(lock).toHaveAttribute("aria-pressed", "true"),
+    );
+    expect(callsTo(server, "PUT", "/api/drafts/d1/locks")[0].body).toEqual({
+      version: 3,
+      locks: ["deity:tiamat", "step:concept"],
+    });
+    expect(stepButton("Замысел")).toHaveTextContent("закреплён");
+  });
+
+  test("повторное нажатие снимает закрепление", async () => {
+    const { server } = renderEditor(
+      draftOf({ version: 3, locks: ["step:plot", "deity:tiamat"] }),
+      {
+        "PUT /api/drafts/d1/locks": {
+          json: draftOf({ version: 4, locks: ["deity:tiamat"] }),
+        },
+      },
+    );
+    await opened();
+    fireEvent.click(stepButton("Сюжет"));
+
+    fireEvent.click(
+      within(panel("Сюжет")).getByRole("button", { name: "Закрепить раздел" }),
+    );
+
+    await vi.waitFor(() =>
+      expect(callsTo(server, "PUT", "/api/drafts/d1/locks")).toHaveLength(1),
+    );
+    expect(callsTo(server, "PUT", "/api/drafts/d1/locks")[0].body).toEqual({
+      version: 3,
+      locks: ["deity:tiamat"],
+    });
+  });
+});
+
+// Закрепление фиксирует то, что знает сервер. Пока в форме есть несохранённые правки, закрепить
+// можно было бы не то, что видит автор, а следующая генерация стёрла бы правки (находка reviewer B4).
+describe("несохранённые правки шага: закрепление и генерация", () => {
+  const SAVE_FIRST =
+    "Сначала сохраните раздел: закрепить можно только сохранённое.";
+  const concept = () => panel("Замысел");
+  const titleBox = () =>
+    within(concept()).getByRole("textbox", { name: "Название" });
+  const sectionLock = () =>
+    within(concept()).getByRole("button", { name: "Закрепить раздел" });
+  const generate = () =>
+    within(concept()).getByRole("button", { name: "Сгенерировать шаг" });
+
+  test("общая подсказка у генерации: сначала сохранить раздел, затем закрепить", async () => {
+    renderEditor(draftOf());
+    await opened();
+
+    expect(concept()).toHaveTextContent(
+      "Сначала сохраните раздел, затем закрепите то, что хотите сохранить.",
+    );
+  });
+
+  test("правка без сохранения закрывает «Закрепить раздел» с подсказкой; после «Сохранить раздел» — открыт", async () => {
+    const { server } = renderEditor(draftOf({ version: 3 }), {
+      [`PUT ${CONCEPT_PATH}`]: {
+        json: draftOf({ version: 4, title: "Гавань" }),
+      },
+    });
+    await opened();
+    expect(sectionLock()).toBeEnabled();
+    expect(within(concept()).queryByText(SAVE_FIRST)).toBeNull();
+
+    fireEvent.change(titleBox(), { target: { value: "Гавань" } });
+
+    expect(sectionLock()).toBeDisabled();
+    expect(within(concept()).getByText(SAVE_FIRST)).toBeInTheDocument();
+
+    fireEvent.click(
+      within(concept()).getByRole("button", { name: "Сохранить раздел" }),
+    );
+
+    await vi.waitFor(() => expect(sectionLock()).toBeEnabled());
+    expect(within(concept()).queryByText(SAVE_FIRST)).toBeNull();
+    expect(titleBox()).toHaveValue("Гавань");
+    expect(callsTo(server, "PUT", CONCEPT_PATH)[0].body).toMatchObject({
+      version: 3,
+      data: { title: "Гавань" },
+    });
+  });
+
+  test("правка, возвращённая к сохранённому, «Закрепить» не держит", async () => {
+    renderEditor(draftOf({ title: "Маяк" }));
+    await opened();
+
+    fireEvent.change(titleBox(), { target: { value: "Маяк!" } });
+    expect(sectionLock()).toBeDisabled();
+    fireEvent.change(titleBox(), { target: { value: "Маяк" } });
+
+    expect(sectionLock()).toBeEnabled();
+  });
+
+  test("при несохранённых правках у «Сгенерировать шаг» — предупреждение, кнопка доступна", async () => {
+    renderEditor(draftOf());
+    await opened();
+    expect(concept()).not.toHaveTextContent(/несохранённые правки/);
+
+    fireEvent.change(titleBox(), { target: { value: "Гавань" } });
+
+    expect(concept()).toHaveTextContent(
+      "В шаге есть несохранённые правки: генерация их заменит.",
+    );
+    expect(generate()).toBeEnabled();
+  });
+});
+
+// Набранное пожелание — текст автора: пересоздание формы раздела (после «Сохранить раздел») не
+// должно его сбрасывать (находка reviewer B4, attempt 002). Сохранённое на сервере пожелание поле
+// берёт после генерации и после «Обновить».
+describe("пожелание шага не теряется при сохранении раздела", () => {
+  const concept = () => panel("Замысел");
+  const wishIn = (step: string) =>
+    within(panel(step)).getByRole("textbox", { name: "Что хочу увидеть" });
+  const saveIn = (step: string) =>
+    fireEvent.click(
+      within(panel(step)).getByRole("button", { name: "Сохранить раздел" }),
+    );
+
+  test("пожелание, набранное до «Сохранить раздел», на месте; генерация шлёт его, затем ставит задание", async () => {
+    const { server } = renderEditor(draftOf({ version: 3 }), {
+      [`PUT ${CONCEPT_PATH}`]: {
+        json: draftOf({ version: 4, title: "Маяк" }),
+      },
+      "PUT /api/drafts/d1/wishes/concept": {
+        json: draftOf({
+          version: 5,
+          title: "Маяк",
+          wishes: { concept: "Морская готика" },
+        }),
+      },
+      "POST /api/drafts/d1/generate": {
+        status: 202,
+        json: jobOf({ step: "concept" }),
+      },
+    });
+    await opened();
+    fireEvent.change(
+      within(concept()).getByRole("textbox", { name: "Название" }),
+      { target: { value: "Маяк" } },
+    );
+    fireEvent.change(wishIn("Замысел"), {
+      target: { value: "Морская готика" },
+    });
+
+    saveIn("Замысел");
+    await vi.waitFor(() =>
+      expect(
+        within(concept()).getByRole("button", { name: "Закрепить раздел" }),
+      ).toBeEnabled(),
+    );
+
+    expect(wishIn("Замысел")).toHaveValue("Морская готика");
+    fireEvent.click(
+      within(concept()).getByRole("button", { name: "Сгенерировать шаг" }),
+    );
+    expect(await screen.findByText("Генерирую…")).toBeInTheDocument();
+    expect(server.calls.map((call) => `${call.method} ${call.path}`)).toEqual([
+      "GET /api/drafts/d1",
+      `PUT ${CONCEPT_PATH}`,
+      "PUT /api/drafts/d1/wishes/concept",
+      "POST /api/drafts/d1/generate",
+    ]);
+    expect(server.calls[2].body).toEqual({
+      version: 4,
+      text: "Морская готика",
+    });
+    expect(server.calls[3].body).toEqual({ step: "concept" });
+  });
+
+  test("несохранённое пожелание другого шага переживает переход между шагами и сохранение текущего раздела", async () => {
+    renderEditor(draftOf(), {
+      [`PUT ${CONCEPT_PATH}`]: {
+        json: draftOf({ version: 2, title: "Маяк" }),
+      },
+    });
+    await opened();
+    fireEvent.click(stepButton("Боги"));
+    fireEvent.change(wishIn("Боги"), { target: { value: "Боги моря" } });
+    fireEvent.click(stepButton("Замысел"));
+    fireEvent.change(
+      within(concept()).getByRole("textbox", { name: "Название" }),
+      { target: { value: "Маяк" } },
+    );
+
+    saveIn("Замысел");
+    await vi.waitFor(() =>
+      expect(
+        within(concept()).getByRole("button", { name: "Закрепить раздел" }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(stepButton("Боги"));
+
+    expect(wishIn("Боги")).toHaveValue("Боги моря");
+  });
+
+  test("после «Обновить» поле пожелания берёт сохранённое на сервере", async () => {
+    let reads = 0;
+    renderEditor(draftOf(), {
+      "GET /api/drafts/d1": () => ({
+        json: draftOf({
+          version: ++reads,
+          wishes: reads > 1 ? { concept: "Из другой вкладки" } : {},
+        }),
+      }),
+      [`PUT ${CONCEPT_PATH}`]: VERSION_CONFLICT,
+    });
+    await opened();
+    fireEvent.change(wishIn("Замысел"), { target: { value: "Моё" } });
+
+    saveIn("Замысел");
+    const dialog = await screen.findByRole("alertdialog");
+    expect(wishIn("Замысел")).toHaveValue("Моё");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Обновить" }));
+
+    await vi.waitFor(() =>
+      expect(wishIn("Замысел")).toHaveValue("Из другой вкладки"),
+    );
+  });
+
+  test("после генерации поле пожелания берёт сохранённое на сервере", async () => {
+    vi.useFakeTimers({ toFake: FAKE_TIMERS });
+    let reads = 0;
+    renderEditor(draftOf(), {
+      "GET /api/drafts/d1": () => ({
+        json:
+          ++reads === 1
+            ? draftOf()
+            : draftOf({ version: 3, wishes: { concept: "Морская готика" } }),
+      }),
+      "PUT /api/drafts/d1/wishes/concept": {
+        json: draftOf({ version: 2, wishes: { concept: "Морская готика" } }),
+      },
+      "POST /api/drafts/d1/generate": {
+        status: 202,
+        json: jobOf({ id: "j1", step: "concept" }),
+      },
+      "GET /api/drafts/d1/jobs/j1": {
+        json: jobOf({ id: "j1", status: "done" }),
+      },
+    });
+    await tick(0);
+    // Пробелы по краям сервер обрезает: поле покажет его текст.
+    fireEvent.change(wishIn("Замысел"), {
+      target: { value: "  Морская готика  " },
+    });
+
+    fireEvent.click(
+      within(concept()).getByRole("button", { name: "Сгенерировать шаг" }),
+    );
+    await tick(0);
+    await tick(2000);
+
+    expect(screen.queryByText("Генерирую…")).toBeNull();
+    expect(wishIn("Замысел")).toHaveValue("Морская готика");
+  });
+});
+
+describe("генерация шага", () => {
+  const wishField = (step: string) =>
+    within(panel(step)).getByRole("textbox", { name: "Что хочу увидеть" });
+  const generateButton = (step: string) =>
+    within(panel(step)).getByRole("button", { name: "Сгенерировать шаг" });
+
+  test("рядом с кнопкой — подсказка: незакреплённые ручные правки шаг заменит", async () => {
+    renderEditor(draftOf());
+    await opened();
+
+    expect(panel("Замысел")).toHaveTextContent(/незакреплённые ручные правки/);
+  });
+
+  test("новое пожелание сначала сохраняется с версией, затем ставится задание шага", async () => {
+    const { server } = renderEditor(draftOf({ version: 5 }), {
+      "PUT /api/drafts/d1/wishes/concept": {
+        json: draftOf({ version: 6, wishes: { concept: "Мрачный порт" } }),
+      },
+      "POST /api/drafts/d1/generate": {
+        status: 202,
+        json: jobOf({ step: "concept" }),
+      },
+    });
+    await opened();
+
+    fireEvent.change(wishField("Замысел"), {
+      target: { value: "Мрачный порт" },
+    });
+    fireEvent.click(generateButton("Замысел"));
+
+    expect(await screen.findByText("Генерирую…")).toBeInTheDocument();
+    expect(server.calls.map((call) => `${call.method} ${call.path}`)).toEqual([
+      "GET /api/drafts/d1",
+      "PUT /api/drafts/d1/wishes/concept",
+      "POST /api/drafts/d1/generate",
+    ]);
+    expect(server.calls[1].body).toEqual({ version: 5, text: "Мрачный порт" });
+    expect(server.calls[2].body).toEqual({ step: "concept" });
+  });
+
+  test("пожелание не менялось — сразу задание, без записи пожелания", async () => {
+    const { server } = renderEditor(
+      draftOf({ wishes: { pantheon: "Боги моря" } }),
+      {
+        "POST /api/drafts/d1/generate": {
+          status: 202,
+          json: jobOf({ step: "pantheon" }),
+        },
+      },
+    );
+    await opened();
+    fireEvent.click(stepButton("Боги"));
+
+    expect(wishField("Боги")).toHaveValue("Боги моря");
+    fireEvent.click(generateButton("Боги"));
+
+    await screen.findByText("Генерирую…");
+    expect(
+      callsTo(server, "PUT", "/api/drafts/d1/wishes/pantheon"),
+    ).toHaveLength(0);
+    expect(callsTo(server, "POST", "/api/drafts/d1/generate")[0].body).toEqual({
+      step: "pantheon",
+    });
+  });
+
+  test("шаг, закреплённый целиком, не генерируется", async () => {
+    renderEditor(draftOf({ locks: ["step:world"] }));
+    await opened();
+    fireEvent.click(stepButton("Мир"));
+
+    expect(generateButton("Мир")).toBeDisabled();
+    expect(panel("Мир")).toHaveTextContent(/закреплён целиком/);
+  });
+
+  test("отказ постановки задания (422 step_locked) показан текстом сервера", async () => {
+    renderEditor(draftOf(), {
+      "POST /api/drafts/d1/generate": {
+        status: 422,
+        json: { detail: "Шаг закреплён.", code: "step_locked" },
+      },
+    });
+    await opened();
+
+    fireEvent.click(generateButton("Замысел"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Шаг закреплён.",
+    );
+    expect(screen.queryByText("Генерирую…")).toBeNull();
+  });
+
+  test("пока задание идёт, правка заблокирована: поля, сохранение, замки и генерация", async () => {
+    renderEditor(draftOf({ job: jobOf({ status: "running" }) }));
+    await opened();
+
+    expect(screen.getByText("Генерирую…")).toBeInTheDocument();
+    const concept = panel("Замысел");
+    expect(
+      within(concept).getByRole("textbox", { name: "Название" }),
+    ).toBeDisabled();
+    expect(
+      within(concept).getByRole("button", { name: "Сохранить раздел" }),
+    ).toBeDisabled();
+    expect(
+      within(concept).getByRole("button", { name: "Закрепить раздел" }),
+    ).toBeDisabled();
+    expect(generateButton("Замысел")).toBeDisabled();
+    // Смотреть другие шаги во время генерации можно.
+    expect(stepButton("Мир")).toBeEnabled();
+  });
+});
+
+// Часы подменены с самого начала: интервал опроса заводится, как только задание стало активным,
+// в том числе сразу при открытии черновика. `vi.waitFor` здесь не годится — с подменёнными часами
+// он сам двигает время; ответы заглушки дожидаются `settle()` (сдвиг на 0 мс).
+describe("опрос задания раз в 2 секунды", () => {
+  const settle = () => tick(0);
+  const generateButton = () =>
+    within(panel("Замысел")).getByRole("button", { name: "Сгенерировать шаг" });
+  const title = () =>
+    within(panel("Замысел")).getByRole("textbox", { name: "Название" });
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: FAKE_TIMERS });
+  });
+
+  test("на done — остановка и форма из нового черновика", async () => {
+    let polls = 0;
+    let reads = 0;
+    const { server } = renderEditor(draftOf(), {
+      // Второе чтение черновика — после done: в нём результат генерации.
+      "GET /api/drafts/d1": () => ({
+        json:
+          ++reads === 1
+            ? draftOf()
+            : draftOf({ version: 2, title: "Туманная гавань" }),
+      }),
+      "POST /api/drafts/d1/generate": {
+        status: 202,
+        json: jobOf({ id: "j1", step: "concept" }),
+      },
+      "GET /api/drafts/d1/jobs/j1": () => ({
+        json: jobOf({ id: "j1", status: ++polls < 2 ? "running" : "done" }),
+      }),
+    });
+    const polled = () => callsTo(server, "GET", "/api/drafts/d1/jobs/j1");
+    await settle();
+
+    fireEvent.click(generateButton());
+    await settle();
+    expect(screen.getByText("Генерирую…")).toBeInTheDocument();
+
+    await tick(1999);
+    expect(polled()).toHaveLength(0);
+    await tick(1);
+    expect(polled()).toHaveLength(1);
+    expect(screen.getByText("Генерирую…")).toBeInTheDocument();
+    expect(title()).toBeDisabled();
+
+    await tick(2000);
+    expect(polled()).toHaveLength(2);
+    expect(title()).toHaveValue("Туманная гавань");
+    expect(title()).toBeEnabled();
+    expect(screen.queryByText("Генерирую…")).toBeNull();
+
+    await tick(10_000);
+    expect(polled()).toHaveLength(2);
+  });
+
+  test("на failed — остановка, текст ошибки и «Повторить», который ставит задание снова", async () => {
+    const { server } = renderEditor(draftOf(), {
+      "POST /api/drafts/d1/generate": {
+        status: 202,
+        json: jobOf({ id: "j1", step: "concept" }),
+      },
+      "GET /api/drafts/d1/jobs/j1": {
+        json: jobOf({
+          id: "j1",
+          step: "concept",
+          status: "failed",
+          error: "Нейронка не ответила.",
+        }),
+      },
+    });
+    const polled = () => callsTo(server, "GET", "/api/drafts/d1/jobs/j1");
+    await settle();
+
+    fireEvent.click(generateButton());
+    await settle();
+    await tick(2000);
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Не удалось сгенерировать шаг «Замысел»");
+    expect(alert).toHaveTextContent("Нейронка не ответила.");
+    expect(screen.queryByText("Генерирую…")).toBeNull();
+    expect(title()).toBeEnabled();
+    await tick(10_000);
+    expect(polled()).toHaveLength(1);
+
+    fireEvent.click(button("Повторить"));
+    await settle();
+
+    expect(callsTo(server, "POST", "/api/drafts/d1/generate")).toHaveLength(2);
+    expect(callsTo(server, "POST", "/api/drafts/d1/generate")[1].body).toEqual({
+      step: "concept",
+    });
+    expect(screen.getByText("Генерирую…")).toBeInTheDocument();
+  });
+
+  test("следующий опрос — через 2 с после ответа на предыдущий: запросы не накладываются", async () => {
+    signInAs({ id: "u1", name: "Вика", can_create_games: true });
+    const server = fakeServer({
+      "GET /api/drafts/d1": {
+        json: draftOf({ job: jobOf({ id: "j1", status: "running" }) }),
+      },
+      "GET /api/drafts/d1/jobs/j1": {
+        json: jobOf({ id: "j1", status: "running" }),
+      },
+    });
+    // Ответ на первый опрос задерживается, пока тест его не отпустит (медленная связь).
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let polls = 0;
+    const slow: typeof fetch = async (input, init) => {
+      if (String(input).includes("/jobs/") && ++polls === 1) await held;
+      return server.fetch(input, init);
+    };
+    render(
+      <ApiContext value={createApi(slow, sessionToken)}>
+        <DraftEditor draftId="d1" onClose={() => {}} />
+      </ApiContext>,
+    );
+    await settle();
+
+    await tick(2000);
+    expect(polls).toBe(1);
+    await tick(6000);
+    expect(polls).toBe(1);
+
+    release();
+    await settle();
+    await tick(1999);
+    expect(polls).toBe(1);
+    await tick(1);
+    expect(polls).toBe(2);
+  });
+
+  test("черновик открыт во время задания — опрос продолжается", async () => {
+    const { server } = renderEditor(
+      draftOf({
+        job: jobOf({ id: "j7", step: "pantheon", status: "running" }),
+      }),
+      {
+        "GET /api/drafts/d1/jobs/j7": {
+          json: jobOf({ id: "j7", step: "pantheon", status: "running" }),
+        },
+      },
+    );
+    const polled = () => callsTo(server, "GET", "/api/drafts/d1/jobs/j7");
+    await settle();
+
+    expect(screen.getByText(/Шаг «Боги»/)).toBeInTheDocument();
+    await tick(2000);
+    expect(polled()).toHaveLength(1);
+    await tick(2000);
+    expect(polled()).toHaveLength(2);
+  });
+
+  test("сбой опроса: текст и «Обновить», который перечитывает черновик", async () => {
+    let reads = 0;
+    const { server } = renderEditor(draftOf(), {
+      "GET /api/drafts/d1": () => ({
+        json: draftOf({
+          job: ++reads === 1 ? jobOf({ id: "j1", status: "running" }) : null,
+        }),
+      }),
+      "GET /api/drafts/d1/jobs/j1": {
+        status: 500,
+        json: { detail: "Сервер устал." },
+      },
+    });
+    await settle();
+
+    await tick(2000);
+    expect(screen.getByRole("alert")).toHaveTextContent("Сервер устал.");
+    await tick(10_000);
+    expect(callsTo(server, "GET", "/api/drafts/d1/jobs/j1")).toHaveLength(1);
+
+    fireEvent.click(button("Обновить"));
+    await settle();
+
+    expect(title()).toBeEnabled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(callsTo(server, "GET", "/api/drafts/d1")).toHaveLength(2);
+  });
+});
+
+// --- финальное покрытие блока 4: стыки редактора с сервером ---
+
+const JOB_RUNNING = {
+  status: 409,
+  json: {
+    detail:
+      "Идёт генерация шага: дождитесь её окончания, потом правьте черновик.",
+    code: "job_running",
+  },
+};
+const VERSION_CONFLICT = {
+  status: 409,
+  json: {
+    detail: "Черновик изменился: обновите его и повторите правку.",
+    code: "version_conflict",
+  },
+};
+
+const jobPolls = (server: { calls: { path: string }[] }) =>
+  server.calls.filter((call) => call.path.includes("/jobs/"));
+
+describe("пожелание перед генерацией", () => {
+  const wishField = () =>
+    within(panel("Замысел")).getByRole("textbox", { name: "Что хочу увидеть" });
+  const generateButton = () =>
+    within(panel("Замысел")).getByRole("button", { name: "Сгенерировать шаг" });
+
+  test("стёртое пожелание удаляется на сервере пустым текстом, затем ставится задание", async () => {
+    const { server } = renderEditor(
+      draftOf({ version: 2, wishes: { concept: "Мрачный порт" } }),
+      {
+        "PUT /api/drafts/d1/wishes/concept": {
+          json: draftOf({ version: 3, wishes: {} }),
+        },
+        "POST /api/drafts/d1/generate": {
+          status: 202,
+          json: jobOf({ step: "concept" }),
+        },
+      },
+    );
+    await opened();
+    expect(wishField()).toHaveValue("Мрачный порт");
+
+    fireEvent.change(wishField(), { target: { value: "" } });
+    fireEvent.click(generateButton());
+
+    await screen.findByText("Генерирую…");
+    expect(
+      callsTo(server, "PUT", "/api/drafts/d1/wishes/concept")[0].body,
+    ).toEqual({ version: 2, text: "" });
+    expect(callsTo(server, "POST", "/api/drafts/d1/generate")[0].body).toEqual({
+      step: "concept",
+    });
+  });
+
+  test("пробелы по краям не делают пожелание новым: записи нет, сразу задание", async () => {
+    const { server } = renderEditor(
+      draftOf({ wishes: { concept: "Мрачный порт" } }),
+      {
+        "POST /api/drafts/d1/generate": {
+          status: 202,
+          json: jobOf({ step: "concept" }),
+        },
+      },
+    );
+    await opened();
+
+    fireEvent.change(wishField(), { target: { value: "  Мрачный порт \n" } });
+    fireEvent.click(generateButton());
+
+    await screen.findByText("Генерирую…");
+    expect(
+      callsTo(server, "PUT", "/api/drafts/d1/wishes/concept"),
+    ).toHaveLength(0);
+  });
+
+  test("конфликт версии при записи пожелания: диалог, задание не ставится", async () => {
+    const { server } = renderEditor(draftOf({ version: 5 }), {
+      "PUT /api/drafts/d1/wishes/concept": VERSION_CONFLICT,
+    });
+    await opened();
+
+    fireEvent.change(wishField(), { target: { value: "Морская готика" } });
+    fireEvent.click(generateButton());
+
+    expect(
+      await screen.findByRole("alertdialog", {
+        name: "Черновик изменился, обновить?",
+      }),
+    ).toBeInTheDocument();
+    expect(callsTo(server, "POST", "/api/drafts/d1/generate")).toHaveLength(0);
+    expect(screen.queryByText("Генерирую…")).toBeNull();
+  });
+
+  test("422 invalid_wish: текст сервера, задание не ставится", async () => {
+    const { server } = renderEditor(draftOf(), {
+      "PUT /api/drafts/d1/wishes/concept": {
+        status: 422,
+        json: {
+          detail: "Пожелание — от 1 до 2000 знаков.",
+          code: "invalid_wish",
+        },
+      },
+    });
+    await opened();
+
+    fireEvent.change(wishField(), { target: { value: "очень длинное" } });
+    fireEvent.click(generateButton());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Пожелание — от 1 до 2000 знаков.",
+    );
+    expect(callsTo(server, "POST", "/api/drafts/d1/generate")).toHaveLength(0);
+  });
+});
+
+describe("ошибки записи: правки остаются", () => {
+  const title = () =>
+    within(panel("Замысел")).getByRole("textbox", { name: "Название" });
+  const saveConcept = () =>
+    fireEvent.click(
+      within(panel("Замысел")).getByRole("button", {
+        name: "Сохранить раздел",
+      }),
+    );
+
+  test("обрыв связи при сохранении: понятный текст, правка в форме, можно сохранить снова", async () => {
+    renderEditor(draftOf(), {
+      [`PUT ${CONCEPT_PATH}`]: () => {
+        throw new TypeError("Failed to fetch");
+      },
+    });
+    await opened();
+    fireEvent.change(title(), { target: { value: "Гавань" } });
+
+    saveConcept();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Нет связи с сервером. Проверьте интернет и попробуйте ещё раз.",
+    );
+    expect(title()).toHaveValue("Гавань");
+    expect(
+      within(panel("Замысел")).getByRole("button", {
+        name: "Сохранить раздел",
+      }),
+    ).toBeEnabled();
+  });
+
+  test("422 invalid_data: подробности у раздела, введённое в форме не пропало", async () => {
+    renderEditor(draftOf(), {
+      [`PUT ${CONCEPT_PATH}`]: {
+        status: 422,
+        json: {
+          detail: "Данные раздела не прошли проверку.",
+          code: "invalid_data",
+          problems: [
+            "settings.title: String should have at most 100 characters",
+          ],
+        },
+      },
+    });
+    await opened();
+    fireEvent.change(title(), { target: { value: "Очень длинное название" } });
+
+    saveConcept();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Данные раздела не прошли проверку.");
+    expect(alert).toHaveTextContent("settings.title:");
+    expect(title()).toHaveValue("Очень длинное название");
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+});
+
+describe("конфликт версии на другом шаге", () => {
+  test("закрепление бога по чужой версии: «Обновить» перечитывает черновик и оставляет автора на шаге «Боги»", async () => {
+    let reads = 0;
+    const tiamat = deityOf({ id: "tiamat", name: "Тиамат" });
+    const bahamut = deityOf({ id: "bahamut", name: "Бахамут" });
+    const { server } = renderEditor(draftOf(), {
+      "GET /api/drafts/d1": () => ({
+        json:
+          ++reads === 1
+            ? draftOf({ version: 1, deities: [tiamat] })
+            : draftOf({ version: 3, deities: [tiamat, bahamut] }),
+      }),
+      "PUT /api/drafts/d1/locks": VERSION_CONFLICT,
+    });
+    await opened();
+    fireEvent.click(stepButton("Боги"));
+
+    fireEvent.click(
+      within(panel("Боги")).getByRole("button", { name: "Закрепить: Тиамат" }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Обновить" }));
+
+    expect(
+      await within(
+        await screen.findByRole("region", { name: "Боги" }),
+      ).findByRole("group", { name: "Бахамут" }),
+    ).toBeInTheDocument();
+    expect(stepButton("Боги")).toHaveAttribute("aria-current", "step");
+    expect(callsTo(server, "PUT", "/api/drafts/d1/locks")[0].body).toEqual({
+      version: 1,
+      locks: ["deity:tiamat"],
+    });
+  });
+});
+
+// Часы подменены до открытия редактора, как в блоке опроса выше.
+describe("задание генерации: стыки с сервером", () => {
+  const settle = () => tick(0);
+  const generateIn = (step: string) =>
+    within(panel(step)).getByRole("button", { name: "Сгенерировать шаг" });
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: FAKE_TIMERS });
+  });
+
+  test("генерация «Богов»: на done форма — боги нового черновика, их можно закрепить, шаг «готово»", async () => {
+    let reads = 0;
+    const { server } = renderEditor(draftOf(), {
+      "GET /api/drafts/d1": () => ({
+        json:
+          ++reads === 1
+            ? draftOf()
+            : draftOf({
+                version: 2,
+                deities: [deityOf({ id: "tiamat", name: "Тиамат" })],
+                steps: stepsOf({
+                  pantheon: {
+                    status: "ready",
+                    updated_at: "2026-10-25T10:00:02+00:00",
+                  },
+                }),
+                job: jobOf({ id: "j1", step: "pantheon", status: "done" }),
+              }),
+      }),
+      "POST /api/drafts/d1/generate": {
+        status: 202,
+        json: jobOf({ id: "j1", step: "pantheon" }),
+      },
+      "GET /api/drafts/d1/jobs/j1": {
+        json: jobOf({ id: "j1", step: "pantheon", status: "done" }),
+      },
+    });
+    await settle();
+    fireEvent.click(stepButton("Боги"));
+    expect(panel("Боги")).toHaveTextContent("Пока пусто.");
+
+    fireEvent.click(generateIn("Боги"));
+    await settle();
+    expect(screen.getByText(/Шаг «Боги»/)).toBeInTheDocument();
+    await tick(2000);
+
+    const gods = panel("Боги");
+    expect(
+      within(gods).getByRole("group", { name: "Тиамат" }),
+    ).toBeInTheDocument();
+    expect(
+      within(gods).getByRole("button", { name: "Закрепить: Тиамат" }),
+    ).toBeEnabled();
+    expect(stepButton("Боги")).toHaveTextContent("готово");
+    expect(screen.queryByText("Генерирую…")).toBeNull();
+    expect(callsTo(server, "POST", "/api/drafts/d1/generate")[0].body).toEqual({
+      step: "pantheon",
+    });
+  });
+
+  test("409 job_running при постановке: текст сервера, без диалога и без опроса", async () => {
+    const { server } = renderEditor(draftOf(), {
+      "POST /api/drafts/d1/generate": JOB_RUNNING,
+    });
+    await settle();
+
+    fireEvent.click(generateIn("Замысел"));
+    await settle();
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Идёт генерация шага: дождитесь её окончания",
+    );
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.queryByText("Генерирую…")).toBeNull();
+    await tick(10_000);
+    expect(jobPolls(server)).toHaveLength(0);
+    expect(generateIn("Замысел")).toBeEnabled();
+  });
+
+  test("после нажатия «Сгенерировать шаг» кнопка недоступна: одно задание, один опрос раз в 2 секунды", async () => {
+    const { server } = renderEditor(draftOf(), {
+      "POST /api/drafts/d1/generate": {
+        status: 202,
+        json: jobOf({ id: "j1", step: "concept" }),
+      },
+      "GET /api/drafts/d1/jobs/j1": {
+        json: jobOf({ id: "j1", step: "concept", status: "running" }),
+      },
+    });
+    await settle();
+
+    fireEvent.click(generateIn("Замысел"));
+    // Запрос постановки ещё в пути: правка и генерация уже закрыты.
+    expect(generateIn("Замысел")).toBeDisabled();
+    await settle();
+    expect(generateIn("Замысел")).toBeDisabled();
+    expect(callsTo(server, "POST", "/api/drafts/d1/generate")).toHaveLength(1);
+
+    await tick(2000);
+    expect(jobPolls(server)).toHaveLength(1);
+    await tick(2000);
+    expect(jobPolls(server)).toHaveLength(2);
+    await tick(6000);
+    expect(jobPolls(server)).toHaveLength(5);
+  });
+
+  test("черновик с завершённым последним заданием: опроса и «Генерирую…» нет, правка открыта", async () => {
+    const { server } = renderEditor(
+      draftOf({
+        job: jobOf({
+          id: "j1",
+          status: "done",
+          finished_at: "2026-10-25T10:00:05+00:00",
+        }),
+      }),
+    );
+    await settle();
+
+    expect(screen.queryByText("Генерирую…")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(generateIn("Замысел")).toBeEnabled();
+    await tick(10_000);
+    expect(jobPolls(server)).toHaveLength(0);
+  });
+
+  test("черновик с упавшим заданием цели: текст сервера, «Повторить» шлёт шаг и цель, опрашивается только новое задание", async () => {
+    const failed = jobOf({
+      id: "j1",
+      step: "pantheon",
+      target: "deity:tiamat",
+      status: "failed",
+      error: "Генерация не удалась. Попробуйте ещё раз.",
+      finished_at: "2026-10-25T10:00:05+00:00",
+    });
+    const { server } = renderEditor(
+      draftOf({ deities: [deityOf()], job: failed }),
+      {
+        "POST /api/drafts/d1/generate": {
+          status: 202,
+          json: jobOf({ id: "j2", step: "pantheon", target: "deity:tiamat" }),
+        },
+        "GET /api/drafts/d1/jobs/j2": {
+          json: jobOf({ id: "j2", step: "pantheon", status: "running" }),
+        },
+      },
+    );
+    await settle();
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Не удалось сгенерировать шаг «Боги»");
+    expect(alert).toHaveTextContent(
+      "Генерация не удалась. Попробуйте ещё раз.",
+    );
+    await tick(4000);
+    expect(jobPolls(server)).toHaveLength(0);
+
+    fireEvent.click(button("Повторить"));
+    await settle();
+
+    expect(callsTo(server, "POST", "/api/drafts/d1/generate")[0].body).toEqual({
+      step: "pantheon",
+      target: "deity:tiamat",
+    });
+    expect(screen.getByText("Генерирую…")).toBeInTheDocument();
+    await tick(2000);
+    expect(callsTo(server, "GET", "/api/drafts/d1/jobs/j2")).toHaveLength(1);
+    expect(callsTo(server, "GET", "/api/drafts/d1/jobs/j1")).toHaveLength(0);
+  });
+});

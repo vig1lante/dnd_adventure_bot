@@ -1,11 +1,12 @@
-"""Миграции Alembic (план B6.1, B7.4, B8.s3, DND-2 B1.2): схемы создаются, откатываются и
+"""Миграции Alembic (план B6.1, B7.4, B8.s3, DND-2 B1.2, B4.1): схемы создаются, откатываются и
 совпадают с моделями.
 
 Ревизия 0001 — начальная схема; 0002 (B7.4) добавляет к играм колонку `clock_at` — отметку часов
 игры, из которой выводятся остаток отсчёта на паузе и время игры без пауз; 0003 (B8.s3, решения
 владельца R9 и R10) убирает таблицу `pending_rolls` (броска характеристик больше нет) и добавляет
 персонажам колонку `choices` — выбор игрока при создании героя; 0004 (DND-2 B1.2, решение Р1)
-добавляет играм флажок мата `profanity`: обязательный, у старых игр — «разрешён».
+добавляет играм флажок мата `profanity`: обязательный, у старых игр — «разрешён»; 0005 (DND-2
+B4.1, спека §10.2) заводит таблицы конструктора: черновики, задания генерации и опубликованное.
 
 Правило на будущее: каждая следующая миграция добавляет тест «игра с состоянием, сохранённая
 до миграции, читается после `upgrade`» (база на предыдущей ревизии, строки игры, `upgrade head`,
@@ -57,7 +58,12 @@ COLUMNS = {
         "id game_id turn_id attempt provider model request trace output usage duration_ms error "
         "created_at"
     ),
+    "adventure_drafts": "id owner_user_id title data step_times version created_at updated_at",
+    "authoring_jobs": "id draft_id step target wish status error created_at finished_at",
+    "authored_adventures": "id owner_user_id data source_draft_id published_at",
 }
+# Таблицы конструктора (ревизия 0005): таблицы игр она не меняет.
+AUTHORING_TABLES = {"adventure_drafts", "authoring_jobs", "authored_adventures"}
 PRIMARY_KEYS = {
     "users": "id",
     "games": "id",
@@ -68,6 +74,9 @@ PRIMARY_KEYS = {
     "player_actions": "turn_id user_id",
     "messages": "id",
     "dm_turn_logs": "id",
+    "adventure_drafts": "id",
+    "authoring_jobs": "id",
+    "authored_adventures": "id",
 }
 UNIQUE = {"users": ["tg_id", "dev_login"], "games": ["code"]}
 # Остальные колонки обязательны.
@@ -79,6 +88,8 @@ NULLABLE = {
     "turns": "state_version_before state_version_after",
     "messages": "turn_id data",
     "dm_turn_logs": "model output usage duration_ms error",
+    "authoring_jobs": "target wish error finished_at",
+    "authored_adventures": "source_draft_id",
 }
 FOREIGN_KEYS = {
     ("games", "host_user_id"): "users",
@@ -95,6 +106,9 @@ FOREIGN_KEYS = {
     ("messages", "turn_id"): "turns",
     ("dm_turn_logs", "game_id"): "games",
     ("dm_turn_logs", "turn_id"): "turns",
+    ("adventure_drafts", "owner_user_id"): "users",
+    ("authoring_jobs", "draft_id"): "adventure_drafts",
+    ("authored_adventures", "owner_user_id"): "users",
 }
 JSON_COLUMNS = {
     ("games", "adventure_data"),
@@ -105,6 +119,9 @@ JSON_COLUMNS = {
     ("dm_turn_logs", "request"),
     ("dm_turn_logs", "trace"),
     ("dm_turn_logs", "usage"),
+    ("adventure_drafts", "data"),
+    ("adventure_drafts", "step_times"),
+    ("authored_adventures", "data"),
 }
 TABLES = set(COLUMNS)
 ALEMBIC_TABLE = "alembic_version"
@@ -164,7 +181,7 @@ def test_migration_history_is_a_single_line_from_0001():
     script = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
 
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0004"]
+    assert script.get_heads() == ["0005"]
 
 
 # --- ревизия 0002: отметка часов игры ---
@@ -702,6 +719,181 @@ def test_the_fourth_revision_prints_its_steps_in_sql_mode_without_a_database(
     assert not (tmp_path / "data").exists()
 
 
+# --- ревизия 0005: черновики, задания генерации и опубликованное (DND-2 B4.1, спека §10.2) ---
+
+
+def insert_draft_with_jobs(path: Path, *statuses: str) -> None:
+    """Черновик хоста и его задания прямым SQL по таблицам ревизии 0005."""
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "INSERT INTO adventure_drafts (id, owner_user_id, title, data, step_times, version,"
+            " created_at, updated_at) VALUES ('draft-1', 'host', 'Маяк', '{}', '{}', 1, ?, ?)",
+            (NOW, NOW),
+        )
+        for number, status in enumerate(statuses, start=1):
+            connection.execute(
+                "INSERT INTO authoring_jobs (id, draft_id, step, status, created_at)"
+                " VALUES (?, 'draft-1', 'world', ?, ?)",
+                (f"job-{number}", status, NOW),
+            )
+        connection.commit()
+
+
+async def test_the_fifth_revision_only_adds_the_three_authoring_tables(settings, migrate):
+    await migrate("upgrade", "0004")
+    before = await reflect(settings, schema_signature)
+    await migrate("upgrade", "0005")
+    after = await reflect(settings, schema_signature)
+
+    assert set(after) - set(before) == AUTHORING_TABLES
+    assert {table: after[table] for table in before} == before  # таблицы игр не тронуты
+
+
+async def test_games_saved_on_the_fourth_revision_are_kept_by_the_fifth(settings, migrate):
+    await migrate("upgrade", "0004")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+
+    await migrate("upgrade", "0005")
+
+    assert saved_lobby(path) == saved
+
+
+async def test_one_draft_has_at_most_one_queued_or_running_job(settings, migrate):
+    await migrate("upgrade", "head")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    insert_draft_with_jobs(path, "done", "failed", "running")
+
+    with closing(sqlite3.connect(path)) as connection:
+        for status in ("queued", "running"):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO authoring_jobs (id, draft_id, step, status, created_at)"
+                    " VALUES ('job-x', 'draft-1', 'plot', ?, ?)",
+                    (status, NOW),
+                )
+        # Законченных заданий у черновика сколько угодно; статус вне списка отвергается.
+        connection.execute(
+            "INSERT INTO authoring_jobs (id, draft_id, step, status, created_at)"
+            " VALUES ('job-y', 'draft-1', 'plot', 'done', ?)",
+            (NOW,),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO authoring_jobs (id, draft_id, step, status, created_at)"
+                " VALUES ('job-z', 'draft-1', 'plot', 'bogus', ?)",
+                (NOW,),
+            )
+
+
+async def test_downgrade_to_the_fourth_revision_drops_the_authoring_tables_and_keeps_the_games(
+    settings, migrate
+):
+    await migrate("upgrade", "0004")
+    at_fourth = await reflect(settings, schema_signature)
+    await migrate("upgrade", "head")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    insert_draft_with_jobs(path, "done", "running")
+    saved = saved_lobby(path)
+
+    await migrate("downgrade", "0004")
+
+    assert await reflect(settings, schema_signature) == at_fourth
+    assert saved_lobby(path) == saved
+
+
+async def test_the_fifth_revision_can_be_applied_again_after_a_downgrade(settings, migrate):
+    await migrate("upgrade", "head")
+    after_first = await reflect(settings, schema_signature)
+    await migrate("downgrade", "0004")
+    await migrate("upgrade", "head")
+
+    assert await reflect(settings, schema_signature) == after_first
+
+
+async def test_the_fifth_revision_is_repeated_after_a_failure_on_its_last_step(
+    settings, migrate, monkeypatch
+):
+    # SQLite выполняет CREATE TABLE сразу и насовсем: обрыв перед индексом оставляет таблицы.
+    await migrate("upgrade", "0004")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+    with monkeypatch.context() as broken:
+        break_operation(broken, "create_index")
+        with pytest.raises(OperationalError):
+            await migrate("upgrade", "0005")
+    assert recorded_revision(path) == "0004"
+
+    await migrate("upgrade", "0005")
+
+    assert recorded_revision(path) == "0005"
+    assert saved_lobby(path) == saved
+    insert_draft_with_jobs(path, "running")
+    with closing(sqlite3.connect(path)) as connection, pytest.raises(sqlite3.IntegrityError):
+        connection.execute(
+            "INSERT INTO authoring_jobs (id, draft_id, step, status, created_at)"
+            " VALUES ('job-x', 'draft-1', 'plot', 'queued', ?)",
+            (NOW,),
+        )
+
+
+async def test_the_fifth_revision_is_repeated_when_its_changes_were_made_but_not_recorded(
+    settings, migrate
+):
+    await migrate("upgrade", "0004")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+    await migrate("upgrade", "0005")
+    done = await reflect(settings, schema_signature)
+    set_recorded_revision(path, "0004")
+
+    await migrate("upgrade", "0005")
+
+    assert recorded_revision(path) == "0005"
+    assert await reflect(settings, schema_signature) == done
+    assert saved_lobby(path) == saved
+
+
+async def test_downgrade_of_the_fifth_revision_is_repeated_when_made_but_not_recorded(
+    settings, migrate
+):
+    await migrate("upgrade", "0004")
+    at_fourth = await reflect(settings, schema_signature)
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+    set_recorded_revision(path, "0005")  # откат сделан целиком, запись о нём не появилась
+
+    await migrate("downgrade", "0004")
+
+    assert recorded_revision(path) == "0004"
+    assert await reflect(settings, schema_signature) == at_fourth
+    assert saved_lobby(path) == saved
+
+
+def test_the_fifth_revision_prints_its_steps_in_sql_mode_without_a_database(
+    monkeypatch, capsys, settings, tmp_path
+):
+    monkeypatch.setenv("DATABASE_URL", settings.database_url)
+    get_settings.cache_clear()
+    printed = {}
+    for name, revisions in (("upgrade", "0004:0005"), ("downgrade", "0005:0004")):
+        getattr(command, name)(Config(str(ALEMBIC_INI)), revisions, sql=True)
+        printed[name] = capsys.readouterr().out
+
+    for table in AUTHORING_TABLES:
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in printed["upgrade"]
+        assert f"DROP TABLE IF EXISTS {table}" in printed["downgrade"]
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS" in printed["upgrade"]
+    assert "WHERE status IN ('queued', 'running')" in printed["upgrade"]
+    assert not (tmp_path / "data").exists()
+
+
 # --- миграция совпадает с моделями и планом ---
 
 
@@ -780,4 +972,4 @@ def test_alembic_command_line_works_from_the_repo_root_and_the_service_folder(
         tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master")}
         [(revision,)] = connection.execute("SELECT version_num FROM alembic_version")
     assert tables >= TABLES
-    assert revision == "0004"
+    assert revision == "0005"

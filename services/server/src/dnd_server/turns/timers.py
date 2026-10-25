@@ -16,6 +16,7 @@ import bisect
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
 from dnd_server.config import Settings
@@ -25,6 +26,9 @@ from dnd_server.games.service import GameError
 logger = logging.getLogger(__name__)
 
 Action = Callable[[], Awaitable[None]]
+
+# Текст журнала о сбое фоновой задачи по умолчанию: задачи разбора мастера.
+TURN_TASK_FAILED = "Фоновая задача хода завершилась ошибкой."
 
 
 def utc_now() -> datetime:
@@ -145,22 +149,22 @@ class TaskSet:
     def __len__(self) -> int:
         return len(self._tasks)
 
-    def spawn[T](self, work: Coroutine[Any, Any, T]) -> asyncio.Task[T]:
+    def spawn[T](
+        self, work: Coroutine[Any, Any, T], *, failure_text: str = TURN_TASK_FAILED
+    ) -> asyncio.Task[T]:
+        """Запускает задачу; `failure_text` — чья это задача в журнале, если она упадёт."""
         task = asyncio.create_task(work)
         self._tasks.add(task)
-        task.add_done_callback(self._finished)
+        task.add_done_callback(partial(self._finished, failure_text))
         return task
 
-    def _finished(self, task: asyncio.Task[Any]) -> None:
+    def _finished(self, failure_text: str, task: asyncio.Task[Any]) -> None:
         self._tasks.discard(task)
         if task.cancelled():
             return
         error = task.exception()  # читается всегда: иначе Python пожалуется на непрочитанную ошибку
         if error is not None and not isinstance(error, GameError):
-            logger.error(
-                "Фоновая задача хода завершилась ошибкой.\n%s",
-                safe_traceback(error, self._settings),
-            )
+            logger.error("%s\n%s", failure_text, safe_traceback(error, self._settings))
 
     async def join(self) -> None:
         """Ждёт, пока кончатся все задачи, в том числе поставленные уже во время ожидания."""

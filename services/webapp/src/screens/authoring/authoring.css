@@ -1,0 +1,129 @@
+/*
+ * Конструктор приключений: вкладки «Мои игры» / «Приключения», полоска шагов, списки
+ * сущностей, индикатор задания и диалог конфликта версии. Только токены (tokens.css,
+ * theme.css) и элементы src/ui: своих цветов, шрифтов и анимаций здесь нет (это проверяет
+ * screens-style.test.ts). Поля форм — общие классы screens.css.
+ */
+
+/* Вкладки над экраном «Мои игры» (только создателям игр) */
+.authoring-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* Полоска шагов: на узком экране прокручивается вбок, а не ломает страницу */
+.authoring-steps {
+  display: flex;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0 0 var(--space-1);
+  overflow-x: auto;
+  list-style: none;
+}
+
+.authoring-step {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-height: var(--tap-size);
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.authoring-step--current {
+  border-color: var(--color-accent);
+  border-width: 2px;
+}
+
+.authoring-step__label {
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-heading);
+}
+
+/* Все шаги редактора в одной рамке без рамки: она нужна только чтобы закрыть правку */
+.authoring-editor {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+/* Сущности раздела */
+.authoring-entities {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.authoring-entity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.authoring-entity__title {
+  padding: 0;
+  font-weight: 700;
+  color: var(--color-heading);
+  overflow-wrap: anywhere;
+}
+
+.authoring-entity__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* Пожелание и генерация шага */
+.authoring-generate {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+}
+
+/* Предупреждение у генерации: несохранённые правки будут заменены */
+.authoring-warning {
+  margin: 0;
+  font-weight: 700;
+  color: var(--color-seal-text);
+}
+
+.authoring-job {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* Диалог «Черновик изменился, обновить?» */
+.authoring-dialog {
+  padding: var(--space-3);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-seal-text);
+  border-radius: var(--radius-sm);
+}
+
+.authoring-dialog__title {
+  margin: 0 0 var(--space-2);
+  font-weight: 700;
+  color: var(--color-heading);
+}

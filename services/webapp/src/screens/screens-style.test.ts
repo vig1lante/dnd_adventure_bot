@@ -5,6 +5,7 @@ import { readSource } from "../styles/read-source";
 const STYLE_FILES = [
   "../screens/screens.css",
   "../screens/character/character.css",
+  "../screens/authoring/authoring.css",
 ] as const;
 
 const withoutComments = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, "");

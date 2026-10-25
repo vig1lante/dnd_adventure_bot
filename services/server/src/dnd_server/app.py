@@ -17,6 +17,10 @@ from dnd_server.adventures import router as adventures_router
 from dnd_server.auth.api import router as auth_router
 from dnd_server.auth.dev import dev_router
 from dnd_server.auth.session import SessionSigner
+from dnd_server.authoring.api import handle_draft_error
+from dnd_server.authoring.api import router as authoring_router
+from dnd_server.authoring.jobs import fail_interrupted_jobs
+from dnd_server.authoring.service import DraftError
 from dnd_server.bot.bot import running_bot
 from dnd_server.bot.handlers import BotDeps
 from dnd_server.bot.notify import Notifier
@@ -123,6 +127,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Игры переживают перезапуск: отсчёты ставятся из базы, прерванные разборы отмечаются.
         if database_file_exists(app.state.engine.url):
             await restore_games(Flow.from_app(app))
+            # Задания конструктора, прерванные остановкой, иначе навсегда закрыли бы свои черновики.
+            await fail_interrupted_jobs(app.state.sessionmaker, app.state.settings)
         try:
             yield
         finally:
@@ -130,6 +136,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # неудачным (игра не остаётся в `resolving`); бот ещё работает, пока это происходит.
             await app.state.scheduler.close()
             await app.state.turn_tasks.shutdown()
+            await app.state.authoring_tasks.shutdown()
     await app.state.engine.dispose()
 
 
@@ -147,6 +154,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.add_exception_handler(RequestValidationError, handle_invalid_request)
     app.add_exception_handler(GameError, handle_game_error)
+    app.add_exception_handler(DraftError, handle_draft_error)
     app.add_exception_handler(Exception, handle_unexpected_error)
     # Чужое имя хоста — признак DNS-rebinding (страница злоумышленника ходит на localhost как на
     # свой сайт); запрос получает 400 до любого маршрута, в том числе рукопожатие WebSocket.
@@ -175,6 +183,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.turn_follow_up = scene_follow_up
     app.state.scheduler = Scheduler(settings=settings)
     app.state.turn_tasks = TaskSet(settings=settings)
+    # Задания генерации конструктора (B4.1) — такие же фоновые задачи с учётом и остановкой.
+    app.state.authoring_tasks = TaskSet(settings=settings)
     # Уведомления в Telegram шлёт мастер (B7) через `app.state.notifier`. До старта и без токена
     # бота это заглушка, которая ничего не отправляет; `lifespan` подставляет рабочую.
     app.state.notifier = Notifier(app.state.sessionmaker)
@@ -193,6 +203,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(characters_router)
     app.include_router(turns_router)
     app.include_router(realtime_router)
+    app.include_router(authoring_router)
     # dev-вход есть только в dev: в prod маршрута нет вовсе, запрос получает обычный 404.
     if settings.app_env == "dev":
         app.include_router(dev_router)
