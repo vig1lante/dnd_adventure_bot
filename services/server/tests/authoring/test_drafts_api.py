@@ -1,8 +1,10 @@
-"""API черновиков конструктора `/api/drafts` (план B4.1; спека §10.3; дополнение dispatcher B4).
+"""API черновиков конструктора `/api/drafts` (планы B4.1, B5.1; спека §10.3; дополнения dispatcher
+B4 и B5).
 
 Контракт для параллельной работы с webapp: формы `Draft`, `DraftSummary`, `DraftReport`, ошибки
-`{detail, code, problems?}`, версия черновика (409 `version_conflict`), разделы B4 и доступ (только
-создатели игр, чужой черновик — 404). Задания генерации — `test_jobs.py`; он берёт стенд отсюда.
+`{detail, code, problems?}`, версия черновика (409 `version_conflict`), разделы B4 и B5 и доступ
+(только создатели игр, чужой черновик — 404). Задания генерации — `test_jobs.py`, справочник ссылок —
+`test_refs.py`; они берут стенд и данные разделов отсюда.
 """
 
 import asyncio
@@ -19,19 +21,23 @@ from typing import Any
 import httpx
 import pytest
 from fastapi import FastAPI
-from generator_fakes import V2_SCENARIO, v2_answers
-from pydantic import SecretStr
+from generator_fakes import V2_SCENARIO, v2_answers, v2_draft
+from pydantic import BaseModel, SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dnd_engine.adventure.budget import XP_BUDGET_PER_CHARACTER
+from dnd_engine.adventure.loader import load_adventure
+from dnd_engine.adventure.schema import Item, Location, Npc, Relation
 from dnd_engine.modules import MODULES
 from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
-from dnd_server.authoring import schemas, service
-from dnd_server.authoring.draft import STEPS
+from dnd_server.authoring import cli, schemas, service
+from dnd_server.authoring.draft import STEPS, AuthoringDraft, from_adventure, seeded
+from dnd_server.authoring.pipeline import generate
 from dnd_server.config import Settings
 from dnd_server.db.models import AdventureDraft, User
+from dnd_server.llm.fake import FakeProvider, load_scenario
 
 SESSION_SECRET = "drafts-api-session-secret-0123456789-abcdef"
 CREATOR_TG_ID = 777
@@ -180,15 +186,91 @@ def plot_data() -> dict[str, Any]:
     return v2_answers()["generator.plot"]
 
 
+def as_served(model: type[BaseModel], entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Сущности в форме `Draft`: модель движка со всеми полями по умолчанию, как их отдаёт сервер."""
+    return [model.model_validate(entity).model_dump(mode="json") for entity in entities]
+
+
+def locations_data() -> dict[str, Any]:
+    """Раздел «Карта» демо v2 (дополнение B5 §1): локации с графом и наполнением, старт и финал."""
+    answers = v2_answers()
+    graph = answers["generator.locations"]
+    filled = [
+        node | contents
+        for node, contents in zip(
+            graph["locations"], answers["generator.location_contents"], strict=True
+        )
+    ]
+    return {
+        "locations": as_served(Location, filled),
+        "start_location": graph["start_location"],
+        "finale_location": graph["finale_location"],
+    }
+
+
+# Локации демо по порядку: гавань, тропа, комнаты смотрителя (тайник и тайна), фонарная.
+HARBOR, CLIFF_PATH, LIGHTHOUSE, LAMP_ROOM = range(4)
+
+
+def location_at(index: int) -> dict[str, Any]:
+    return locations_data()["locations"][index]
+
+
+def map_with(index: int = HARBOR, **changes: Any) -> dict[str, Any]:
+    """«Карта» демо, где у локации `index` заменены поля `changes`."""
+    data = locations_data()
+    data["locations"][index] |= changes
+    return data
+
+
+def cupboard(**changes: Any) -> dict[str, Any]:
+    """Тайник демо: шкаф смотрителя, внутри которого лежит ключ от фонарной (`reveals: item`)."""
+    [feature] = [f for f in location_at(LIGHTHOUSE)["features"] if f["id"] == "keeper-cupboard"]
+    return feature | changes
+
+
+# Проверка детали или тайны локации со Сл из таблицы.
+CHECK = {"ability": "wis", "skill": "perception", "dc": 10}
+
+
+def npcs_data() -> list[dict[str, Any]]:
+    return as_served(Npc, v2_answers()["generator.npcs"]["npcs"])
+
+
+def relations_data() -> list[dict[str, Any]]:
+    return as_served(Relation, v2_answers()["generator.relations"]["relations"])
+
+
+def items_data() -> list[dict[str, Any]]:
+    return as_served(Item, v2_answers()["generator.items"]["items"])
+
+
 def section_data(section: str) -> Any:
-    """Верные данные любого раздела B4 (из демо-сценария v2)."""
+    """Верные данные любого раздела B4 и B5 (из демо-сценария v2)."""
     return {
         "settings": settings_data,
         "world": world_data,
         "deities": deities_data,
         "factions": factions_data,
         "plot": plot_data,
+        "locations": locations_data,
+        "npcs": npcs_data,
+        "relations": relations_data,
+        "items": items_data,
     }[section]()
+
+
+def served_section(draft: dict[str, Any], section: str) -> Any:
+    """Данные раздела из `Draft` — так их сохраняет webapp: «Карта» — объект со стартом и финалом,
+    «Замысел» — настройки с названием и главным для дневника."""
+    if section == "locations":
+        return {name: draft[name] for name in ("locations", "start_location", "finale_location")}
+    if section == "settings":
+        return draft["settings"] | {
+            "title": draft["title"],
+            "journal_intro": draft["journal_intro"],
+        }
+    return draft[section]
 
 
 def database_file(settings: Settings) -> Path:
@@ -444,8 +526,8 @@ async def test_a_body_that_is_not_json_is_422_invalid_data(stand):
     assert_error(response, 422, "invalid_data")
 
 
-@pytest.mark.parametrize("section", ["locations", "npcs", "revelations", "nope", "SETTINGS"])
-async def test_a_section_outside_block_4_is_unsupported(stand, section):
+@pytest.mark.parametrize("section", ["encounters", "monsters", "revelations", "nope", "SETTINGS"])
+async def test_a_section_outside_blocks_4_and_5_is_unsupported(stand, section):
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -539,8 +621,8 @@ async def test_a_wish_longer_than_2000_characters_is_invalid_wish(stand):
     assert (await stand.draft(author, draft["id"]))["wishes"] == {}
 
 
-@pytest.mark.parametrize("step", ["locations", "clues", "nope"])
-async def test_a_wish_for_a_step_outside_block_4_is_unsupported(stand, step):
+@pytest.mark.parametrize("step", ["items", "encounters", "clues", "nope"])
+async def test_a_wish_for_a_step_outside_blocks_4_and_5_is_unsupported(stand, step):
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -609,6 +691,7 @@ DRAFT_ROUTES = {
     ("POST", "/api/drafts/{draft_id}/generate"): {"step": "concept"},
     ("GET", "/api/drafts/{draft_id}/jobs/{job_id}"): None,
     ("POST", "/api/drafts/{draft_id}/validate"): None,
+    ("GET", "/api/drafts/{draft_id}/refs"): None,
 }
 # Маршруты, которым id черновика не нужен: у них нет чужого черновика.
 WITHOUT_DRAFT = {("GET", "/api/drafts"), ("POST", "/api/drafts")}
@@ -681,7 +764,17 @@ async def test_a_draft_that_does_not_exist_is_404(stand):
 
 # --- финальное покрытие блока 4: каждая запись — целый `Draft` и версия ровно +1 ---
 
-SECTIONS = ("settings", "world", "deities", "factions", "plot")
+SECTIONS = (
+    "settings",
+    "world",
+    "deities",
+    "factions",
+    "plot",
+    "locations",
+    "npcs",
+    "relations",
+    "items",
+)
 
 
 async def test_every_write_answers_with_the_whole_draft_one_version_up(stand):
@@ -714,6 +807,10 @@ async def test_every_write_answers_with_the_whole_draft_one_version_up(stand):
 STALE_WRITES = {
     "sections/settings": {"data": settings_data(title="Старая вкладка")},
     "sections/deities": {"data": deities_data()},
+    "sections/locations": {"data": locations_data()},
+    "sections/npcs": {"data": npcs_data()},
+    "sections/relations": {"data": relations_data()},
+    "sections/items": {"data": items_data()},
     "locks": {"locks": ["step:world"]},
     "wishes/world": {"text": "Пираты"},
 }
@@ -912,6 +1009,20 @@ def many_endings(count: int) -> dict[str, Any]:
     return plot_data() | {"endings": ["Конец."] * count}
 
 
+def many_locations(count: int) -> dict[str, Any]:
+    harbor = locations_data()["locations"][0]
+    return {
+        "locations": [harbor | {"id": f"l{n}"} for n in range(count)],
+        "start_location": None,
+        "finale_location": None,
+    }
+
+
+def many_of(build, count: int) -> list[dict[str, Any]]:
+    """`count` копий первой сущности раздела с разными id."""
+    return [build()[0] | {"id": f"e{n}"} for n in range(count)]
+
+
 @pytest.mark.parametrize(
     ("section", "build", "limit"),
     [
@@ -929,8 +1040,23 @@ def many_endings(count: int) -> dict[str, Any]:
         ("world", many_rumors, 8),
         ("plot", many_acts, 5),
         ("plot", many_endings, 5),
+        ("locations", many_locations, schemas.MAX_LOCATIONS),
+        ("npcs", lambda n: many_of(npcs_data, n), schemas.MAX_NPCS),
+        ("relations", lambda n: many_of(relations_data, n), schemas.MAX_RELATIONS),
+        ("items", lambda n: many_of(items_data, n), schemas.MAX_ITEMS),
     ],
-    ids=["deities", "factions", "regions", "rumors", "acts", "endings"],
+    ids=[
+        "deities",
+        "factions",
+        "regions",
+        "rumors",
+        "acts",
+        "endings",
+        "locations",
+        "npcs",
+        "relations",
+        "items",
+    ],
 )
 async def test_the_number_of_entities_stops_at_the_limit_of_a_model_answer(
     stand, section, build, limit
@@ -950,6 +1076,12 @@ async def test_the_number_of_entities_stops_at_the_limit_of_a_model_answer(
 def test_the_limits_of_gods_and_factions_are_the_ones_of_the_contract():
     # Дополнение §7 называет числа: богов и фракций не больше шести.
     assert (schemas.MAX_DEITIES, schemas.MAX_FACTIONS) == (6, 6)
+
+
+def test_the_limits_of_block_5_are_the_ones_of_the_model_answers():
+    # Дополнение B5 §4: пределы схем ответа модели — локаций и NPC ≤ 12, связей ≤ 24, предметов ≤ 20.
+    assert (schemas.MAX_LOCATIONS, schemas.MAX_NPCS) == (12, 12)
+    assert (schemas.MAX_RELATIONS, schemas.MAX_ITEMS) == (24, 20)
 
 
 # --- лишние поля и ошибки формы тела ---
@@ -989,6 +1121,34 @@ async def test_an_extra_field_in_any_body_is_422_invalid_data_and_writes_nothing
         ("factions", [factions_data()[0] | {"members": 40}]),
         ("plot", plot_data() | {"twist": "Нет."}),
         ("plot", many_acts(1) | {"acts": [many_acts(1)["acts"][0] | {"x": 1}]}),
+        ("locations", locations_data() | {"rooms": 4}),
+        ("locations", map_with(climate="сыро")),
+        ("locations", map_with(exits=[location_at(HARBOR)["exits"][0] | {"x": 1}])),
+        ("locations", map_with(features=[location_at(HARBOR)["features"][0] | {"x": 1}])),
+        (
+            "locations",
+            map_with(LIGHTHOUSE, secrets=[location_at(LIGHTHOUSE)["secrets"][0] | {"x": 1}]),
+        ),
+        ("locations", map_with(zones=[{"id": "here", "name": "здесь", "x": 1}])),
+        ("locations", map_with(links=[{"a": "here", "b": "here", "distance": "near", "x": 1}])),
+        (
+            "locations",
+            map_with(
+                LIGHTHOUSE, features=[cupboard(reveals=[{"kind": "item", "id": "k", "x": 1}])]
+            ),
+        ),
+        # Проверка детали и тайны — тоже уровень вложенности со своим запретом лишнего.
+        ("locations", map_with(LIGHTHOUSE, features=[cupboard(check=CHECK | {"x": 1})])),
+        (
+            "locations",
+            map_with(
+                LIGHTHOUSE,
+                secrets=[location_at(LIGHTHOUSE)["secrets"][0] | {"check": CHECK | {"x": 1}}],
+            ),
+        ),
+        ("npcs", [npcs_data()[0] | {"x": 1}]),
+        ("relations", [relations_data()[0] | {"x": 1}]),
+        ("items", [items_data()[0] | {"x": 1}]),
     ],
 )
 async def test_an_extra_field_inside_a_section_is_422_invalid_data(stand, section, data):
@@ -1272,3 +1432,842 @@ async def test_problems_of_a_malformed_body_are_in_russian(stand):
 
     body = assert_error(response, 422, "invalid_data")
     assert sorted(body["problems"]) == ["force: лишнее поле", "version: нужно целое число"]
+
+
+# --- разделы блока 5: карта, NPC, связи, предметы (дополнение B5 §1, §3–§5, §7) ---
+
+B5_SECTIONS = ("locations", "npcs", "relations", "items")
+B5_STEPS = ("locations", "location_contents", "npcs", "relations")
+
+
+async def validate(stand: Stand, who: Author, draft: dict[str, Any]) -> dict[str, Any]:
+    response = await stand.call(who, "POST", f"/api/drafts/{draft['id']}/validate")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def findings(report: dict[str, Any]) -> set[tuple[str, str, str | None]]:
+    """Находки проверки как (код, ссылка, шаг)."""
+    return {(f["code"], f["ref"], f["step"]) for f in report["errors"] + report["warnings"]}
+
+
+async def lock(stand: Stand, who: Author, draft: dict[str, Any], *refs: str) -> dict[str, Any]:
+    response = await stand.call(
+        who,
+        "PUT",
+        f"/api/drafts/{draft['id']}/locks",
+        json={"version": draft["version"], "locks": list(refs)},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def saved(stand: Stand, who: Author, draft: dict[str, Any], section: str, data: Any) -> dict:
+    response = await stand.put_section(who, draft, section, data)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def put_draft(stand: Stand, who: Author, content: AuthoringDraft) -> dict[str, Any]:
+    """Черновик автора с готовым содержимым `content` прямо в базе (как его пишет задание
+    генерации) — то, что автор затем читает и правит через API."""
+    draft = await stand.new_draft(who)
+    async with stand.db() as session:
+        row = await session.get(AdventureDraft, draft["id"])
+        service.put_into(row, content)
+        await session.commit()
+    return await stand.draft(who, draft["id"])
+
+
+async def complete_draft(stand: Stand, who: Author) -> dict[str, Any]:
+    """Черновик автора со всеми разделами демо v2 (боги, фракции, NPC, карта, предметы, бои): так
+    в черновике есть и то, что конструктор B5 сам не пишет (бои, свои статблоки, открытия)."""
+    complete = (await generate(FakeProvider(load_scenario(V2_SCENARIO)), v2_draft())).draft
+    return await put_draft(stand, who, complete)
+
+
+@pytest.mark.parametrize("section", B5_SECTIONS)
+async def test_each_section_of_block_5_is_saved_and_read_back_as_given(stand, section):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    data = section_data(section)
+
+    response = await stand.put_section(author, draft, section, data)
+
+    assert response.status_code == 200, response.text
+    written = response.json()
+    assert_draft_shape(written)
+    assert written["version"] == 2
+    # Сервер принимает назад всё, что отдаёт: поля по умолчанию (зоны, связи зон, бой) не теряются.
+    assert served_section(written, section) == data
+    assert await stand.draft(author, draft["id"]) == written
+    again = await stand.put_section(author, written, section, served_section(written, section))
+    assert again.status_code == 200, again.text
+    assert served_section(again.json(), section) == data
+
+
+async def test_the_map_writes_the_start_and_the_finale_of_the_draft(stand):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    written = await saved(stand, author, draft, "locations", locations_data())
+    cleared = await saved(
+        stand,
+        author,
+        written,
+        "locations",
+        locations_data() | {"start_location": None, "finale_location": None},
+    )
+
+    assert (written["start_location"], written["finale_location"]) == ("harbor", "lamp-room")
+    assert (cleared["start_location"], cleared["finale_location"]) == (None, None)
+    assert [loc["id"] for loc in cleared["locations"]] == [
+        "harbor",
+        "cliff-path",
+        "lighthouse",
+        "lamp-room",
+    ]
+
+
+@pytest.mark.parametrize("field", ["start_location", "finale_location"])
+async def test_a_start_or_finale_outside_the_map_is_422_without_the_value(stand, field):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    response = await stand.put_section(
+        author, draft, "locations", locations_data() | {field: SECRET_INPUT}
+    )
+
+    body = assert_error(response, 422, "invalid_data")
+    assert body["problems"] == [f"locations.{field}: такой локации на карте нет"]
+    assert SECRET_INPUT not in response.text
+    assert (await stand.draft(author, draft["id"]))["version"] == 1
+
+
+@pytest.mark.parametrize(
+    ("section", "data", "where"),
+    [
+        ("locations", map_with(name=None, exits=SECRET_INPUT), "locations.locations.0."),
+        ("locations", {"locations": SECRET_INPUT}, "locations."),
+        ("npcs", [npcs_data()[0] | {"knows": SECRET_INPUT, "attitude": 9}], "npcs.0."),
+        ("relations", [relations_data()[0] | {"kind": SECRET_INPUT}], "relations.0."),
+        ("items", [items_data()[0] | {"holder": None, "name": [SECRET_INPUT]}], "items.0."),
+    ],
+)
+async def test_a_section_of_block_5_breaking_the_schema_is_422_without_input_values(
+    stand, section, data, where
+):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    response = await stand.put_section(author, draft, section, data)
+
+    body = assert_error(response, 422, "invalid_data")
+    assert all(line.startswith(where) for line in body["problems"]), body
+    assert SECRET_INPUT not in response.text
+    assert (await stand.draft(author, draft["id"]))["version"] == 1
+
+
+async def test_relations_inside_an_npc_are_refused_with_a_hint_to_the_relations_step(stand):
+    # Дополнение B5 §1: связи NPC формата v1 в конструкторе — только пустой список.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    npc = npcs_data()[1] | {"relations": [{"npc_id": "veran", "kind": "debtor"}]}
+
+    response = await stand.put_section(author, draft, "npcs", [npc])
+
+    body = assert_error(response, 422, "invalid_data")
+    assert body["problems"] == ["npcs.0.relations: связи NPC — на шаге «Связи»"]
+    assert (await stand.draft(author, draft["id"]))["relations"] == []
+
+
+async def test_a_location_without_exits_is_accepted(stand):
+    # Дополнение B5 §4: минимум выходов на границе API не требуется.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    lonely = location_at(HARBOR) | {"exits": []}
+
+    written = await saved(
+        stand,
+        author,
+        draft,
+        "locations",
+        {"locations": [lonely], "start_location": "harbor", "finale_location": "harbor"},
+    )
+
+    assert written["locations"] == [lonely]
+
+
+def map_with_a_repeated_location() -> dict[str, Any]:
+    data = locations_data()
+    data["locations"][CLIFF_PATH]["id"] = "harbor"
+    return data
+
+
+def with_the_first_repeated(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [*entities, entities[0]]
+
+
+@pytest.mark.parametrize(
+    ("section", "data", "ident"),
+    [
+        ("locations", map_with_a_repeated_location(), "harbor"),
+        ("npcs", with_the_first_repeated(npcs_data()), "ilsa"),
+        ("relations", with_the_first_repeated(relations_data()), "ilsa-worships-selmara"),
+        ("items", with_the_first_repeated(items_data()), "lamp-key"),
+    ],
+)
+async def test_repeated_ids_in_a_section_of_block_5_are_refused(stand, section, data, ident):
+    # Дополнение B5 §4: повтор id в верхнем списке раздела — отказ записи, как в B4.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    response = await stand.put_section(author, draft, section, data)
+
+    body = assert_error(response, 422, "invalid_data")
+    assert any(section in line and ident in line for line in body["problems"]), body
+    assert await stand.draft(author, draft["id"]) == draft
+
+
+@pytest.mark.parametrize(
+    ("data", "ref", "step"),
+    [
+        (
+            map_with(features=[location_at(CLIFF_PATH)["features"][0]]),
+            "location:cliff-path/feature:ash-marks",
+            "location_contents",
+        ),
+        (
+            map_with(exits=[location_at(HARBOR)["exits"][0]] * 2),
+            "location:harbor/exit:to-cliff-path",
+            "locations",
+        ),
+        (
+            map_with(LIGHTHOUSE, secrets=[location_at(LIGHTHOUSE)["secrets"][0]] * 2),
+            "location:lighthouse/secret:drowned-keeper",
+            "location_contents",
+        ),
+    ],
+    ids=["feature", "exit", "secret"],
+)
+async def test_a_repeated_id_inside_a_location_is_accepted_and_shown_by_the_check(
+    stand, data, ref, step
+):
+    # Дополнение B5 §4: повтор id вложенных сущностей виден в проверке, а не на записи.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    written = await saved(stand, author, draft, "locations", data)
+
+    report = await validate(stand, author, written)
+    assert ("schema", ref, step) in findings(report)
+
+
+async def test_an_item_in_a_cache_saved_before_the_map_is_linked_to_its_feature(stand):
+    # Предмет «в тайнике»: держатель — локация места, деталь раскрывает предмет (дополнение B5 §1);
+    # webapp пишет сначала `items`, потом `locations`.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    draft = await saved(stand, author, draft, "items", items_data())
+
+    draft = await saved(stand, author, draft, "locations", locations_data())
+
+    assert draft["items"][0]["holder"] == "location:lighthouse"
+    assert cupboard() in draft["locations"][LIGHTHOUSE]["features"]
+    assert cupboard()["reveals"] == [{"kind": "item", "id": "lamp-key", "value": None}]
+    report = await validate(stand, author, draft)
+    cache = "location:lighthouse/feature:keeper-cupboard"
+    assert all(ref != cache for _, ref, _ in findings(report)), report
+    assert all("lamp-key" not in f["message"] for f in report["errors"]), report
+
+
+async def test_an_item_in_a_cache_of_another_location_is_a_dangling_ref_of_the_filling(stand):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    items = items_data()
+    items[0]["holder"] = "location:harbor"  # ключ от фонарной лежит в гавани, а не в шкафу
+    draft = await saved(stand, author, draft, "items", items)
+
+    draft = await saved(stand, author, draft, "locations", locations_data())
+
+    report = await validate(stand, author, draft)
+    cache = "location:lighthouse/feature:keeper-cupboard"
+    assert ("dangling_ref", cache, "location_contents") in findings(report)
+
+
+async def test_an_encounter_of_a_location_that_does_not_exist_is_kept_and_shown_by_the_check(
+    stand,
+):
+    # Дополнение B5 §1: `encounter_id` без такого боя принимается и виден в проверке как висящая
+    # ссылка — в черновике, где бои уже есть (их шаг не пуст).
+    author = await stand.author()
+    draft = await complete_draft(stand, author)
+    data = served_section(draft, "locations")
+    data["locations"][HARBOR]["encounter_id"] = "ghost-fight"
+
+    written = await saved(stand, author, draft, "locations", data)
+
+    assert written["locations"][HARBOR]["encounter_id"] == "ghost-fight"
+    assert written["encounters"] == draft["encounters"]
+    report = await validate(stand, author, written)
+    assert ("dangling_ref", "location:harbor", "encounters") in findings(report)
+
+
+async def test_an_encounter_of_a_location_in_a_draft_without_encounters_is_not_reported(stand):
+    # Уточнение dispatcher B5 §8 (принято как есть): находку висящего `encounter_id` проверка
+    # относит к шагу `encounters`, а в черновике без единого боя этот шаг пуст — находка
+    # отбрасывается, хотя сама ссылка записана.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    written = await saved(stand, author, draft, "locations", map_with(encounter_id="ghost-fight"))
+
+    assert written["locations"][HARBOR]["encounter_id"] == "ghost-fight"
+    assert written["steps"]["encounters"]["status"] == "empty"
+    report = await validate(stand, author, written)
+    assert all(ref != "location:harbor" for _, ref, _ in findings(report)), report
+
+
+async def test_deleting_a_locked_location_unlocks_it_and_leaves_the_exit_to_the_check(stand):
+    # Дополнение B5 §5: удаление — запись раздела без сущности; её замок снимается в той же записи,
+    # закрепления шага и чужих сущностей остаются, ссылки на удалённое — находки проверки.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    draft = await saved(stand, author, draft, "locations", locations_data())
+    draft = await lock(
+        stand, author, draft, "location:lamp-room", "location:harbor", "step:locations", "npc:ilsa"
+    )
+    without = locations_data()
+    del without["locations"][LAMP_ROOM]
+    without["finale_location"] = "lighthouse"
+
+    deleted = await saved(stand, author, draft, "locations", without)
+
+    assert deleted["version"] == draft["version"] + 1
+    assert deleted["locks"] == ["location:harbor", "npc:ilsa", "step:locations"]
+    report = await validate(stand, author, deleted)
+    assert ("dangling_ref", "location:lighthouse/exit:to-lamp-room", "locations") in findings(
+        report
+    )
+    # Новая локация с id удалённой не закреплена.
+    restored = await saved(stand, author, deleted, "locations", locations_data())
+    assert restored["locks"] == ["location:harbor", "npc:ilsa", "step:locations"]
+
+
+@pytest.mark.parametrize(
+    ("section", "kind", "step", "foreign"),
+    [
+        ("npcs", "npc", "npcs", "location:harbor"),
+        ("relations", "relation", "relations", "npc:ilsa"),
+        ("items", "item", "items", "location:harbor"),
+        ("deities", "deity", "pantheon", "faction:smugglers"),
+        ("factions", "faction", "factions", "deity:selmara"),
+    ],
+)
+async def test_deleting_an_entity_unlocks_only_that_entity(stand, section, kind, step, foreign):
+    # Замок шага, замок сущности другого раздела и замок id, которого в разделе не было, — не замки
+    # удалённой сущности: запись раздела их не трогает (дополнение B5 §5).
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    first, second, *rest = section_data(section)
+    draft = await saved(stand, author, draft, section, [first, second, *rest])
+    kept = sorted([f"{kind}:{second['id']}", f"step:{step}", foreign, f"{kind}:never-written"])
+    draft = await lock(stand, author, draft, f"{kind}:{first['id']}", *kept)
+
+    deleted = await saved(stand, author, draft, section, [second, *rest])
+
+    assert deleted["locks"] == kept
+    restored = await saved(stand, author, deleted, section, [first, second, *rest])
+    assert restored["locks"] == kept
+
+
+async def test_the_steps_of_block_5_take_their_status_from_the_content(stand):
+    # Дополнение B5 §3: карта без наполнения — наполнение пусто; NPC и связи — по наличию.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    graph = locations_data()
+    for location in graph["locations"]:
+        location |= {"read_aloud": "", "dm_notes": "", "features": [], "secrets": []}
+
+    bare = await saved(stand, author, draft, "locations", graph)
+    filled = await saved(stand, author, bare, "locations", locations_data())
+    with_npcs = await saved(stand, author, filled, "npcs", npcs_data())
+    linked = await saved(stand, author, with_npcs, "relations", relations_data())
+
+    assert {step: draft["steps"][step]["status"] for step in B5_STEPS} == dict.fromkeys(
+        B5_STEPS, "empty"
+    )
+    assert bare["steps"]["locations"]["status"] == "ready"
+    assert bare["steps"]["location_contents"]["status"] == "empty"
+    assert filled["steps"]["location_contents"]["status"] == "ready"
+    assert with_npcs["steps"]["npcs"]["status"] != "empty"
+    assert linked["steps"]["relations"]["status"] != "empty"
+    # Ручная запись карты — запись раздела обоих шагов, которые его пишут.
+    for step in ("locations", "location_contents"):
+        assert isinstance(bare["steps"][step]["updated_at"], str)
+    assert bare["steps"]["npcs"]["updated_at"] is None
+
+
+@pytest.mark.parametrize("step", B5_STEPS)
+async def test_a_wish_for_a_step_of_block_5_is_saved(stand, step):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    response = await stand.call(
+        author,
+        "PUT",
+        f"/api/drafts/{draft['id']}/wishes/{step}",
+        json={"version": 1, "text": "Больше тумана"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["wishes"] == {step: "Больше тумана"}
+
+
+@pytest.mark.parametrize(
+    ("steps", "section"),
+    [
+        (["locations"], "locations"),
+        (["locations", "location_contents"], "locations"),
+        (["npcs"], "npcs"),
+        (["relations"], "relations"),
+    ],
+    ids=["locations", "location_contents", "npcs", "relations"],
+)
+async def test_a_generated_section_of_block_5_is_saved_back_unchanged(stand, steps, section):
+    # Инвариант дополнения B5 §4: всё, что даёт генерация, сохраняется обратно без правки.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    for step in steps:
+        started = await stand.call(
+            author, "POST", f"/api/drafts/{draft['id']}/generate", json={"step": step}
+        )
+        assert started.status_code == 202, started.text
+        await stand.app.state.authoring_tasks.join()
+    generated = await stand.draft(author, draft["id"])
+    assert generated["steps"][steps[-1]]["status"] != "empty"
+
+    response = await stand.put_section(
+        author, generated, section, served_section(generated, section)
+    )
+
+    assert response.status_code == 200, response.text
+    assert served_section(response.json(), section) == served_section(generated, section)
+
+
+async def test_a_draft_written_before_block_5_is_read_and_edited(stand):
+    # carry_over B4: в JSON черновика нет номера схемы — черновик в формате B4 (без разделов B5)
+    # читается и правится после изменений B5.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    b4_data = {
+        "id": None,
+        "title": "Старый черновик",
+        "journal_intro": "",
+        "settings": settings_data(),
+        "world": None,
+        "plot": {"acts": [], "endings": [], "villain": None},
+        "deities": deities_data(),
+        "factions": [],
+        "locks": ["deity:selmara"],
+        "wishes": {"world": "Пираты"},
+    }
+    del b4_data["settings"]["title"], b4_data["settings"]["journal_intro"]
+    async with stand.db() as session:
+        row = await session.get(AdventureDraft, draft["id"])
+        row.data = b4_data
+        await session.commit()
+
+    read = await stand.draft(author, draft["id"])
+    written = await saved(stand, author, read, "locations", locations_data())
+
+    assert_draft_shape(read)
+    assert read["title"] == "Старый черновик" and read["locks"] == ["deity:selmara"]
+    for section in ("locations", "npcs", "relations", "items", "encounters"):
+        assert read[section] == []
+    assert (read["start_location"], read["finale_location"]) == (None, None)
+    assert written["deities"] == read["deities"] and written["wishes"] == {"world": "Пираты"}
+
+
+# --- финальное покрытие блока 5: формы сущностей, заполненные черновики, границы, удаление ---
+
+
+# Поля сущностей B5 в `Draft` (дополнение B5 §1) записаны здесь, а не взяты из моделей движка: это
+# страж контракта webapp (`services/webapp/src/api/types.ts`).
+JOURNAL_FIELDS = {"public", "known_at_start"}
+LOCATION_FIELDS = JOURNAL_FIELDS | {
+    "id",
+    "name",
+    "region",
+    "read_aloud",
+    "dm_notes",
+    "exits",
+    "features",
+    "secrets",
+    "encounter_id",
+    "zones",
+    "links",
+}
+EXIT_FIELDS = {"id", "to", "direction", "description", "locked_by", "hidden_dc"}
+FEATURE_FIELDS = {"id", "name", "description", "check", "reveals", "hidden", "locked_by"}
+SECRET_FIELDS = {"id", "text", "check", "reveals"}
+CHECK_FIELDS = {"ability", "skill", "dc"}
+REVEAL_FIELDS = {"kind", "id", "value"}
+ZONE_FIELDS = {"id", "name"}
+LINK_FIELDS = {"a", "b", "distance"}
+NPC_FIELDS = JOURNAL_FIELDS | {
+    "id",
+    "name",
+    "role",
+    "appearance",
+    "manner",
+    "motive",
+    "secret",
+    "knows",
+    "attitude",
+    "relations",
+    "location_id",
+    "statblock",
+}
+RELATION_FIELDS = {"id", "a", "b", "kind", "note", "secret", "mutual"}
+ITEM_FIELDS = JOURNAL_FIELDS | {"id", "name", "description", "base_item", "holder"}
+
+
+async def test_entities_of_block_5_in_the_draft_have_exactly_the_fields_of_the_contract(stand):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    zoned = map_with(
+        zones=[{"id": "here", "name": "здесь"}, {"id": "pier", "name": "причал"}],
+        links=[{"a": "here", "b": "pier", "distance": "far"}],
+    )
+    for section, data in [
+        ("items", items_data()),
+        ("locations", zoned),
+        ("npcs", npcs_data()),
+        ("relations", relations_data()),
+    ]:
+        draft = await saved(stand, author, draft, section, data)
+
+    locations = draft["locations"]
+    parts = [part for loc in locations for part in (*loc["features"], *loc["secrets"])]
+    shapes = [
+        (LOCATION_FIELDS, locations),
+        (EXIT_FIELDS, [e for loc in locations for e in loc["exits"]]),
+        (FEATURE_FIELDS, [f for loc in locations for f in loc["features"]]),
+        (SECRET_FIELDS, [s for loc in locations for s in loc["secrets"]]),
+        (CHECK_FIELDS, [part["check"] for part in parts if part["check"] is not None]),
+        (REVEAL_FIELDS, [r for part in parts for r in part["reveals"]]),
+        (ZONE_FIELDS, [z for loc in locations for z in loc["zones"]]),
+        (LINK_FIELDS, [link for loc in locations for link in loc["links"]]),
+        (NPC_FIELDS, draft["npcs"]),
+        (RELATION_FIELDS, draft["relations"]),
+        (ITEM_FIELDS, draft["items"]),
+    ]
+    # Каждая форма есть в ответе хотя бы раз: страж не проходит на пустых списках.
+    for fields, entities in shapes:
+        assert entities and all(set(entity) == fields for entity in entities), sorted(fields)
+    # Связи NPC формата v1 в конструкторе — всегда пустой список (дополнение B5 §1).
+    assert all(npc["relations"] == [] for npc in draft["npcs"])
+
+
+@pytest.mark.parametrize(
+    ("section", "data"),
+    [
+        ("locations", locations_data()["locations"]),  # «Карта» — объект, а не список
+        ("npcs", {"npcs": npcs_data()}),  # разделы-списки — списки
+        ("relations", relations_data()[0]),
+        ("items", None),
+    ],
+)
+async def test_a_section_of_block_5_in_another_shape_is_422_invalid_data(stand, section, data):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    response = await stand.put_section(author, draft, section, data)
+
+    body = assert_error(response, 422, "invalid_data")
+    assert all(line.startswith(section) for line in body["problems"]), body
+    assert (await stand.draft(author, draft["id"]))["version"] == 1
+
+
+# Готовые примеры автора из репозитория: читаются по пути, а не копией.
+CONTENT_DIR = Path(__file__).resolve().parents[4] / "content"
+EXAMPLE_SEEDS = CONTENT_DIR / "examples" / "seeds_v2.yaml"
+DEMO_CRYPT = CONTENT_DIR / "adventures" / "demo-crypt"
+
+
+async def generated_draft() -> AuthoringDraft:
+    """Черновик, целиком наполненный генерацией демо v2: все шаги на FakeProvider."""
+    return (await generate(FakeProvider(load_scenario(V2_SCENARIO)), v2_draft())).draft
+
+
+async def seeded_draft() -> AuthoringDraft:
+    """Черновик CLI с заготовками примера `seeds_v2.yaml` (закреплены), дописанный генерацией."""
+    order = seeded(v2_draft(), cli._load_seeds(EXAMPLE_SEEDS))
+    return (await generate(FakeProvider(load_scenario(V2_SCENARIO)), order)).draft
+
+
+async def demo_crypt_draft() -> AuthoringDraft:
+    """Черновик из папки готового приключения `demo-crypt`: связи NPC формата v1 уже в графе."""
+    return from_adventure(load_adventure(DEMO_CRYPT))
+
+
+FILLED_DRAFTS = {
+    "generated": generated_draft,
+    "seeded": seeded_draft,
+    "demo-crypt": demo_crypt_draft,
+}
+
+
+def without_times(draft: dict[str, Any]) -> dict[str, Any]:
+    """`Draft` без версии и времени записи шагов: запись тех же данных не меняет остального."""
+    statuses = {step: state["status"] for step, state in draft["steps"].items()}
+    return draft | {"version": None, "steps": statuses}
+
+
+@pytest.mark.parametrize("source", FILLED_DRAFTS)
+async def test_every_section_of_a_filled_draft_is_saved_back_unchanged(stand, source):
+    # Инвариант дополнений B4 §7 и B5 §1, §4: сервер принимает назад всё, что сам отдаёт, — и в
+    # черновике из генерации всех шагов, из сидов CLI и из папки готового приключения. Запись тех
+    # же данных не снимает замков (сущности не удалены) и не меняет статусов.
+    author = await stand.author()
+    draft = await put_draft(stand, author, await FILLED_DRAFTS[source]())
+    assert all(draft[section] for section in SECTIONS if section != "settings"), source
+
+    for section in SECTIONS:
+        response = await stand.put_section(author, draft, section, served_section(draft, section))
+        assert response.status_code == 200, (section, response.text)
+        written = response.json()
+        assert written["version"] == draft["version"] + 1, section
+        assert without_times(written) == without_times(draft), section
+        draft = written
+
+
+async def test_a_fully_generated_draft_is_ready_on_every_step_and_in_the_check(stand):
+    author = await stand.author()
+    draft = await complete_draft(stand, author)
+
+    report = await validate(stand, author, draft)
+
+    statuses = {step: state["status"] for step, state in draft["steps"].items()}
+    assert statuses == dict.fromkeys(STEPS, "ready")
+    assert (report["errors"], report["readiness_percent"]) == ([], 100)
+
+
+DRAGONS = "🐉"
+
+
+@pytest.mark.parametrize(
+    ("section", "write", "limit"),
+    [
+        ("locations", lambda text: map_with(name=text), 100),
+        ("locations", lambda text: map_with(read_aloud=text), 2000),
+        (
+            "locations",
+            lambda text: map_with(exits=[location_at(HARBOR)["exits"][0] | {"description": text}]),
+            300,
+        ),
+        ("npcs", lambda text: [npcs_data()[0] | {"knows": [text]}], 300),
+        ("relations", lambda text: [relations_data()[0] | {"note": text}], 300),
+        ("items", lambda text: [items_data()[0] | {"description": text}], 2000),
+    ],
+    ids=["location-name", "read-aloud", "exit", "knows", "relation-note", "item-description"],
+)
+async def test_texts_of_block_5_are_counted_in_characters_up_to_the_limit(
+    stand, section, write, limit
+):
+    # Знак вне базовой плоскости — один знак, а не четыре байта (как у Замысла в B4).
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    at_limit = await stand.put_section(author, draft, section, write(DRAGONS * limit))
+    assert at_limit.status_code == 200, at_limit.text
+    over = await stand.put_section(author, at_limit.json(), section, write(DRAGONS * (limit + 1)))
+
+    assert served_section(at_limit.json(), section) == write(DRAGONS * limit)
+    body = assert_error(over, 422, "invalid_data")
+    assert any(line.endswith(f": не длиннее {limit} знаков") for line in body["problems"]), body
+    assert DRAGONS * 50 not in over.text
+    assert await stand.draft(author, draft["id"]) == at_limit.json()
+
+
+def with_feature_dc(dc: int) -> dict[str, Any]:
+    """«Карта» демо, где Сл проверки журнала смотрителя — `dc`."""
+    data = locations_data()
+    data["locations"][LIGHTHOUSE]["features"][0]["check"]["dc"] = dc
+    return data
+
+
+def with_secret_dc(dc: int) -> dict[str, Any]:
+    """«Карта» демо, где Сл проверки тайны комнат смотрителя — `dc`."""
+    data = locations_data()
+    data["locations"][LIGHTHOUSE]["secrets"][0]["check"]["dc"] = dc
+    return data
+
+
+def with_hidden_exit(dc: int) -> dict[str, Any]:
+    """«Карта» демо, где выход из комнат смотрителя скрыт со Сл поиска `dc`."""
+    data = locations_data()
+    data["locations"][LIGHTHOUSE]["exits"][0]["hidden_dc"] = dc
+    return data
+
+
+@pytest.mark.parametrize("dc", [5, 10, 15, 20, 25, 30])
+async def test_every_difficulty_of_the_table_is_accepted_in_the_checks_of_a_location(stand, dc):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    for build in (with_feature_dc, with_secret_dc, with_hidden_exit):
+        draft = await saved(stand, author, draft, "locations", build(dc))
+        assert served_section(draft, "locations") == build(dc), build.__name__
+
+
+@pytest.mark.parametrize("dc", [0, 12, 31, 1234567])
+@pytest.mark.parametrize(
+    ("build", "path"),
+    [
+        (with_feature_dc, "features.0.check.dc"),
+        (with_secret_dc, "secrets.0.check.dc"),
+        (with_hidden_exit, "exits.0.hidden_dc"),
+    ],
+    ids=["feature", "secret", "hidden-exit"],
+)
+async def test_a_difficulty_off_the_table_is_refused_in_every_check_of_a_location(
+    stand, build, path, dc
+):
+    # Инвариант проекта: Сл — только из таблицы 5/10/15/20/25/30, и ручной ввод его не обходит.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    response = await stand.put_section(author, draft, "locations", build(dc))
+
+    body = assert_error(response, 422, "invalid_data")
+    # Дополнение B5 §9 (security I1): правило таблицы, а не введённое число.
+    assert body["problems"] == [
+        f"locations.locations.{LIGHTHOUSE}.{path}: Сл — одна из 5, 10, 15, 20, 25, 30"
+    ]
+    assert "получено" not in response.text and "1234567" not in response.text
+    assert (await stand.draft(author, draft["id"]))["version"] == 1
+
+
+def without(draft: dict[str, Any], section: str, ident: str) -> Any:
+    """Данные раздела `section` из `Draft` без сущности `ident`: так автор удаляет сущность."""
+    data = served_section(draft, section)
+    if section == "locations":
+        return data | {"locations": [loc for loc in data["locations"] if loc["id"] != ident]}
+    return [entity for entity in data if entity["id"] != ident]
+
+
+@pytest.mark.parametrize(
+    ("section", "ident", "referrer", "finding"),
+    [
+        (
+            "locations",
+            "cliff-path",
+            ("locations", "harbor"),
+            ("dangling_ref", "location:harbor/exit:to-cliff-path", "locations"),
+        ),
+        ("locations", "cliff-path", ("npcs", "bram"), ("dangling_ref", "npc:bram", "npcs")),
+        (
+            "npcs",
+            "ilsa",
+            ("relations", "bram-rival-ilsa"),
+            ("dangling_ref", "relation:bram-rival-ilsa", "relations"),
+        ),
+        (
+            "deities",
+            "selmara",
+            ("relations", "ilsa-worships-selmara"),
+            ("dangling_ref", "relation:ilsa-worships-selmara", "relations"),
+        ),
+        ("npcs", "veran", ("items", "ash-tome"), ("dangling_ref", "item:ash-tome", "items")),
+        (
+            "locations",
+            "lighthouse",
+            ("items", "lamp-key"),
+            ("dangling_ref", "item:lamp-key", "items"),
+        ),
+    ],
+    ids=[
+        "exit-to-deleted-location",
+        "npc-in-deleted-location",
+        "relation-with-deleted-npc",
+        "relation-with-deleted-god",
+        "item-of-deleted-npc",
+        "item-in-deleted-location",
+    ],
+)
+async def test_deleting_an_entity_keeps_what_refers_to_it_and_the_check_names_the_dangling_ref(
+    stand, section, ident, referrer, finding
+):
+    # Дополнение B5 §5: ссылающиеся сущности не удаляются, висящая ссылка — находка проверки со
+    # своим шагом.
+    author = await stand.author()
+    draft = await complete_draft(stand, author)
+    assert finding not in findings(await validate(stand, author, draft))
+    referrer_section, referrer_id = referrer
+
+    deleted = await saved(stand, author, draft, section, without(draft, section, ident))
+
+    assert ident not in {entity["id"] for entity in deleted[section]}
+    before = {entity["id"]: entity for entity in draft[referrer_section]}
+    after = {entity["id"]: entity for entity in deleted[referrer_section]}
+    assert after[referrer_id] == before[referrer_id]  # ссылающееся осталось как было
+    assert finding in findings(await validate(stand, author, deleted))
+
+
+@pytest.mark.parametrize(
+    ("field", "index", "ident"),
+    [("start_location", HARBOR, "harbor"), ("finale_location", LAMP_ROOM, "lamp-room")],
+)
+async def test_the_start_or_finale_location_is_deleted_only_with_its_field_moved(
+    stand, field, index, ident
+):
+    # Фактическое поведение: старт и финал сами не сбрасываются. Карта без локации, на которую они
+    # указывают, — 422 без записи; с полем, переведённым в null, она записывается, замок удалённой
+    # локации снимается, а проверка говорит, что старта (финала) нет.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    draft = await saved(stand, author, draft, "locations", locations_data())
+    draft = await lock(stand, author, draft, f"location:{ident}")
+    data = locations_data()
+    del data["locations"][index]
+
+    refused = await stand.put_section(author, draft, "locations", data)
+    body = assert_error(refused, 422, "invalid_data")
+    assert body["problems"] == [f"locations.{field}: такой локации на карте нет"]
+    assert await stand.draft(author, draft["id"]) == draft
+
+    moved = await saved(stand, author, draft, "locations", data | {field: None})
+
+    assert moved[field] is None and moved["locks"] == []
+    assert moved["steps"]["locations"]["status"] == "draft"
+    report = await validate(stand, author, moved)
+    assert any(
+        (f["code"], f["ref"], f["step"]) == ("dangling_ref", "adventure", "locations")
+        and f["message"].startswith(f"{field}:")
+        for f in report["errors"]
+    ), report
+
+
+async def test_a_lock_and_a_deletion_of_its_entity_at_once_let_exactly_one_through(stand):
+    # Замки и раздел пишутся по одной версии черновика: закрепление из одной вкладки и удаление той
+    # же сущности из другой не оставят замка у сущности, которой нет, — проходит ровно одна запись.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    draft = await saved(stand, author, draft, "npcs", npcs_data())
+    path = f"/api/drafts/{draft['id']}/locks"
+
+    locked, deleted = await asyncio.gather(
+        stand.call(author, "PUT", path, json={"version": draft["version"], "locks": ["npc:ilsa"]}),
+        stand.put_section(author, draft, "npcs", without(draft, "npcs", "ilsa")),
+    )
+
+    statuses = sorted([locked.status_code, deleted.status_code])
+    assert statuses == [200, 409], (locked.text, deleted.text)
+    winner, loser = (locked, deleted) if locked.status_code == 200 else (deleted, locked)
+    assert_error(loser, 409, "version_conflict")
+    final = await stand.draft(author, draft["id"])
+    assert final == winner.json() and final["version"] == draft["version"] + 1
+    ilsa_kept = "ilsa" in {npc["id"] for npc in final["npcs"]}
+    assert ilsa_kept == ("npc:ilsa" in final["locks"])

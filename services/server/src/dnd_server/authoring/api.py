@@ -1,5 +1,5 @@
-"""Маршруты конструктора `/api/drafts` (план B4.1; спека §10.3; дополнение dispatcher B4): тонкая
-обёртка над `service` и `jobs`.
+"""Маршруты конструктора `/api/drafts` (планы B4.1, B5.1; спека §10.3; дополнения dispatcher B4 и
+B5): тонкая обёртка над `service` и `jobs`.
 
 Все маршруты — только создателям игр (`require_game_creator`, иначе 403); черновик — только его
 автору (чужой — 404). Ошибки конструктора (`DraftError`) — `{"detail", "code", "problems"?}` с
@@ -175,3 +175,8 @@ async def get_job(
 @router.post("/{draft_id}/validate")
 async def validate_draft(draft_id: str, user: CreatorDep, session: SessionDep) -> dict[str, Any]:
     return await service.validate_draft(session, user, draft_id)
+
+
+@router.get("/{draft_id}/refs")
+async def draft_refs(draft_id: str, user: CreatorDep, session: SessionDep) -> list[dict[str, str]]:
+    return await service.draft_refs(session, user, draft_id)

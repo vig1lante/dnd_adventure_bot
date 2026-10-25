@@ -386,17 +386,20 @@ def _merge_section(section: str, model: type[BaseModel]) -> Merge:
 def _merge_locations(
     draft: AuthoringDraft, answer: schemas.LocationGraphOut, target_id: str | None
 ) -> AuthoringDraft:
-    """Граф: имена, края и выходы локаций; наполнение локации с тем же id сохраняется."""
+    """Граф: имена, края и выходы локаций; наполнение локации с тем же id сохраняется.
+
+    Старт и финал — всегда локации итоговой карты (с закреплёнными): из ответа, если такая локация
+    на ней есть, иначе прежние, если они на ней остались, иначе их нет (дополнение B5 §9). Схема
+    ответа их не сверяет со списком, а висящий старт автор не смог бы сохранить обратно."""
     previous = {location.id: location for location in draft.locations}
     nodes = [_graph_location(node, previous.get(node.id)) for node in answer.locations]
-    update: dict[str, Any] = {
-        "locations": _merged(draft.locations, nodes, "location", draft, target_id)
-    }
+    locations = _merged(draft.locations, nodes, "location", draft, target_id)
+    update: dict[str, Any] = {"locations": locations}
     if target_id is None:
-        update |= {
-            "start_location": answer.start_location,
-            "finale_location": answer.finale_location,
-        }
+        on_map = {location.id for location in locations}
+        for field in ("start_location", "finale_location"):
+            candidates = (getattr(answer, field), getattr(draft, field))
+            update[field] = next((ident for ident in candidates if ident in on_map), None)
     return draft.model_copy(update=update)
 
 

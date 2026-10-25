@@ -1,10 +1,11 @@
-"""Задания генерации шага конструктора (план B4.1; спека Р6, §10.2, §10.3; дополнение dispatcher
-B4 §5, §9).
+"""Задания генерации шага конструктора (планы B4.1, B5.1; спека Р6, §10.2, §10.3; дополнения
+dispatcher B4 §5, §9 и B5 §2).
 
-`create_job` проверяет вход до задания — шаг B4, пожелание (`draft.Wish`), цель (та же проверка,
-что у `run_step`: `steps.target_id`) и закрепления — и записывает задание `queued`. Незавершённое
-задание у черновика одно: проверка в коде и частичный уникальный индекс базы, так что два
-одновременных запуска не пройдут оба.
+`create_job` проверяет вход до задания — шаг конструктора (`sections.EDITOR_STEPS`), пожелание
+(`draft.Wish`), цель (та же проверка, что у `run_step`: `steps.target_id`, одна сущность раздела
+шага) и закрепления — и записывает задание `queued`. Незавершённое задание у черновика одно:
+проверка в коде и частичный уникальный индекс базы, так что два одновременных запуска не пройдут
+оба.
 
 `run_job` выполняет задание фоновой задачей сервера: `run_step` с провайдером игры и генератора
 (`dm.provider.game_provider`; дешёвую модель просит сам запрос шага, `cheap`). Пока задание идёт,
@@ -26,6 +27,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.exc import StaleDataError
 
+from dnd_server.authoring.sections import steps_written_by
 from dnd_server.authoring.service import (
     JOB_RUNNING,
     DraftConflict,
@@ -185,12 +187,12 @@ async def _store(
     sessionmaker: async_sessionmaker[AsyncSession], job_id: str, result: Any, version: int
 ) -> str | None:
     """Пишет результат шага и `done` одной транзакцией, если черновик всё ещё той же версии;
-    иначе — текст отказа, черновик не тронут."""
+    иначе — текст отказа, черновик не тронут. Время записи получают все шаги раздела шага."""
     async with sessionmaker() as session:
         job, row = await _job_and_draft(session, job_id)
         if row.version != version:
             return DRAFT_CHANGED
-        put_into(row, result, steps=[job.step])
+        put_into(row, result, steps=steps_written_by(job.step))
         job.status = JobStatus.DONE
         job.finished_at = utcnow()
         try:

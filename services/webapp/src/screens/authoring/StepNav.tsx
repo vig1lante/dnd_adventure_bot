@@ -4,13 +4,21 @@ import type { BadgeProps } from "../../ui";
 import { classNames } from "../../ui/classNames";
 import "./authoring.css";
 
-/** Шаги редактора блока 4 по порядку генератора. */
+/**
+ * Экраны редактора по порядку генератора; каждый — шаг генерации, его статус и замок
+ * `step:<шаг>`. «Карта» и «Наполнение» правят один раздел `locations`, но шаги у них разные
+ * (дополнение B5, §2).
+ */
 export const EDITOR_STEPS = [
   { step: "concept", label: "Замысел" },
   { step: "world", label: "Мир" },
   { step: "pantheon", label: "Боги" },
   { step: "factions", label: "Фракции" },
   { step: "plot", label: "Сюжет" },
+  { step: "locations", label: "Карта" },
+  { step: "location_contents", label: "Наполнение" },
+  { step: "npcs", label: "Персонажи" },
+  { step: "relations", label: "Связи" },
 ] as const;
 
 export type EditorStep = (typeof EDITOR_STEPS)[number]["step"];

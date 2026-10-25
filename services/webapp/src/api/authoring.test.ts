@@ -1,7 +1,12 @@
 import { ApiError, createApi } from "./client";
 import { fakeServer } from "../test-setup";
 import type { FakeReply, RecordedCall } from "../test-setup";
-import { draftOf, jobOf, summaryOf } from "../screens/authoring/fixtures";
+import {
+  draftOf,
+  jobOf,
+  locationOf,
+  summaryOf,
+} from "../screens/authoring/fixtures";
 
 // Методы конструктора — часть общего клиента: тот же токен сессии, те же ошибки по-русски.
 function apiWith(
@@ -91,6 +96,53 @@ describe("клиент конструктора: пути, методы и те�
     const { api } = apiWith({ "GET /api/drafts/d1/jobs/j1": { json: job } });
 
     await expect(api.getJob("d1", "j1")).resolves.toEqual(job);
+  });
+
+  test("справочник ссылок — GET .../refs, список {ref, kind, name} как есть", async () => {
+    const refs = [
+      { ref: "deity:umberlee", kind: "deity", name: "Амберли" },
+      { ref: "npc:marta", kind: "npc", name: "Марта" },
+    ];
+    const { api, server } = apiWith({
+      "GET /api/drafts/a%2Fb/refs": { json: refs },
+    });
+
+    await expect(api.listRefs("a/b")).resolves.toEqual(refs);
+    expect(server.calls[0]).toMatchObject({
+      method: "GET",
+      path: "/api/drafts/a%2Fb/refs",
+    });
+    expect(server.calls[0].headers.get("Authorization")).toBe("Bearer tok");
+  });
+
+  test("раздел карты — объект: локации, старт и финал (дополнение B5 §1)", async () => {
+    const data = {
+      locations: [locationOf()],
+      start_location: "crypt",
+      finale_location: null,
+    };
+    const { api, server } = apiWith({
+      "PUT /api/drafts/d1/sections/locations": {
+        json: draftOf({ version: 8 }),
+      },
+    });
+
+    await api.saveSection("d1", 7, "locations", data);
+
+    expect(server.calls[0].body).toEqual({ version: 7, data });
+  });
+
+  test("перегенерация одной сущности — шаг и цель в теле", async () => {
+    const { api, server } = apiWith({
+      "POST /api/drafts/d1/generate": { status: 202, json: jobOf() },
+    });
+
+    await api.generate("d1", { step: "npcs", target: "npc:marta" });
+
+    expect(server.calls[0].body).toEqual({
+      step: "npcs",
+      target: "npc:marta",
+    });
   });
 });
 

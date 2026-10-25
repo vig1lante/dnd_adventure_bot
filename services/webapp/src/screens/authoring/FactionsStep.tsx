@@ -6,8 +6,8 @@ import { JournalFieldsEditor, SectionForm, orNull, sameData } from "./fields";
 import type { StepFormProps } from "./fields";
 import { LockToggle } from "./LockToggle";
 
-// Ступени отношения к отряду, как у NPC: от −3 до 3.
-const ATTITUDES = [
+// Ступени отношения к отряду, общие у фракций и NPC: от −3 до 3.
+export const ATTITUDES = [
   { value: "-3", label: "−3 — враги" },
   { value: "-2", label: "−2" },
   { value: "-1", label: "−1" },

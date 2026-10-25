@@ -1,18 +1,55 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
-import type { Draft, JournalFields } from "../../api/types";
+import type {
+  Draft,
+  DraftRef,
+  DraftSection,
+  JournalFields,
+} from "../../api/types";
 import { Button } from "../../ui";
 import { Switch, TextAreaField } from "../fields";
+
+/** Справочник ссылок черновика; `error` — текст сбоя загрузки, список тогда прежний или пуст. */
+export interface DraftRefs {
+  list: readonly DraftRef[];
+  error: string | null;
+}
+
+/** Одна запись раздела: `PUT .../sections/{section}` с `data`. */
+export interface SectionWrite {
+  section: DraftSection;
+  data: unknown;
+}
 
 /** Что форма шага получает от редактора. */
 export interface StepFormProps {
   draft: Draft;
-  /** Сохранить раздел целиком; `data` — форма раздела по контракту. */
+  /** Справочник ссылок; грузится только для экранов, где есть выбор ссылок. */
+  refs: DraftRefs;
+  /** Сохранить раздел шага целиком; `data` — форма раздела по контракту. */
   onSave: (data: unknown) => void;
+  /** Записать несколько разделов по очереди, каждый с версией после предыдущей записи. */
+  onSaveSections: (writes: SectionWrite[]) => void;
   onLock: (ref: string, locked: boolean) => void;
   /** Панель генерации шага; ей важно, есть ли в форме несохранённые правки. */
   generate: (dirty: boolean) => ReactNode;
+  /**
+   * «Перегенерировать» одну сущность шага (`target` — `<вид>:<id>`) с пожеланием шага. При
+   * несохранённых правках формы (`dirty`) кнопка закрыта: генерация начала бы форму заново.
+   */
+  regenerate: (target: string, name: string, dirty: boolean) => ReactNode;
+  /**
+   * Сообщить редактору, есть ли в форме несохранённые правки. Нужно экранам, которые делят
+   * раздел с другим экраном: запись одного начинает другой заново.
+   */
+  onDirtyChange: (dirty: boolean) => void;
+  /** Предупреждение о несохранённых правках другого экрана того же раздела; `null` — их нет. */
+  unsavedElsewhere: string | null;
 }
+
+/** Подсказка формы с «Перегенерировать» при несохранённых правках. */
+export const SAVE_FIRST_REGENERATE =
+  "Сначала сохраните раздел: закрепить и перегенерировать можно только сохранённое.";
 
 // Ключи объектов по порядку: сервер и форма могут перечислять одни и те же поля по-разному.
 const sortedKeys = (_key: string, value: unknown) =>
@@ -32,6 +69,10 @@ interface SectionFormProps {
   canSave?: boolean;
   /** В форме есть несохранённые правки: закреплять пока нечего. */
   dirty: boolean;
+  /** Подсказка при несохранённых правках: что закрыто, пока раздел не сохранён. */
+  dirtyHint?: string;
+  /** Предупреждение у «Сохранить раздел»: запись заденет чужие несохранённые правки. */
+  warning?: string | null;
   /** «Закрепить раздел» рядом с сохранением (у разделов-одиночек). */
   lock?: ReactNode;
   /** Панель генерации шага: идёт сразу после формы. */
@@ -44,6 +85,8 @@ export function SectionForm({
   onSubmit,
   canSave = true,
   dirty,
+  dirtyHint = "Сначала сохраните раздел: закрепить можно только сохранённое.",
+  warning = null,
   lock,
   generate,
   children,
@@ -64,11 +107,8 @@ export function SectionForm({
           </Button>
           {lock}
         </div>
-        {dirty && (
-          <p className="form-field__hint">
-            Сначала сохраните раздел: закрепить можно только сохранённое.
-          </p>
-        )}
+        {warning !== null && <p className="authoring-warning">{warning}</p>}
+        {dirty && <p className="form-field__hint">{dirtyHint}</p>}
       </form>
       {generate}
     </>
@@ -78,6 +118,23 @@ export function SectionForm({
 /** Необязательная ссылка или id: пустое поле — `null`, как ждёт сервер. */
 export const orNull = (text: string): string | null =>
   text.trim() === "" ? null : text;
+
+export interface Option {
+  value: string;
+  label: string;
+}
+
+/**
+ * Варианты выбора и текущее значение, даже если его среди них нет (сущность удалили или ещё не
+ * сохранили): список показывает правду, а не молча подставляет другой вариант.
+ */
+export const withCurrent = (
+  options: readonly Option[],
+  value: string,
+): Option[] =>
+  value === "" || options.some((option) => option.value === value)
+    ? [...options]
+    : [...options, { value, label: `${value} — нет в списке` }];
 
 const lines = (text: string) =>
   text

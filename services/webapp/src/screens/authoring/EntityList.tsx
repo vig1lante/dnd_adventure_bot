@@ -14,9 +14,16 @@ interface EntityListProps<T extends object> {
   itemLabel: (item: T, index: number) => string;
   /** Кнопки сущности рядом с «Удалить» (например, «Закрепить»). */
   actions?: (item: T, label: string) => ReactNode;
+  /**
+   * Показывать ли сущность (фильтр или часть общего списка): скрытая остаётся в списке и уходит
+   * на сервер как есть. Новая сущность из `create` должна быть видна.
+   */
+  visible?: (item: T) => boolean;
   /** Поля сущности; `update` меняет только переданные поля. */
   children: (item: T, update: (patch: Partial<T>) => void) => ReactNode;
 }
+
+const everything = () => true;
 
 /** Список сущностей раздела: группа полей на каждую, «Добавить» и «Удалить». */
 export function EntityList<T extends object>({
@@ -27,6 +34,7 @@ export function EntityList<T extends object>({
   addLabel,
   itemLabel,
   actions,
+  visible = everything,
   children,
 }: EntityListProps<T>) {
   // Ключи строк живут здесь: у новой сущности id ещё нет, а без своего ключа после удаления
@@ -50,13 +58,13 @@ export function EntityList<T extends object>({
   return (
     <fieldset className="form-group">
       <legend className="form-legend">{legend}</legend>
-      {items.length === 0 && <p className="screen-muted">Пока пусто.</p>}
+      {!items.some(visible) && <p className="screen-muted">Пока пусто.</p>}
       {items.length > 0 && (
         <ul className="authoring-entities">
           {items.map((item, index) => {
             const label = itemLabel(item, index);
             return (
-              <li key={keys[index]}>
+              <li key={keys[index]} hidden={!visible(item)}>
                 <fieldset className="authoring-entity">
                   <legend className="authoring-entity__title">{label}</legend>
                   <div className="authoring-entity__actions">

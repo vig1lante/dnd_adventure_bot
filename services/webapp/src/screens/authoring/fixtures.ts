@@ -1,6 +1,8 @@
-// Данные ТОЛЬКО для тестов конструктора. Формы — строго по контракту блока 4 (спека §10.3 и
-// дополнение dispatcher): живого сервера у тестов нет, заглушки отвечают как он.
-import { render } from "@testing-library/react";
+// Данные ТОЛЬКО для тестов конструктора. Формы — строго по контракту блоков 4 и 5 (спека §8,
+// §10.3 и дополнения dispatcher): живого сервера у тестов нет, заглушки отвечают как он.
+// Сущности блока 5 — модели движка, как их отдаёт `model_dump(mode="json")`: все поля, включая
+// поля по умолчанию.
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { createElement } from "react";
 import { createApi } from "../../api/client";
 import { ApiContext } from "../../api/context";
@@ -13,10 +15,18 @@ import type {
   AuthoringStep,
   Deity,
   Draft,
+  DraftRef,
   DraftSummary,
+  Exit,
   Faction,
+  Feature,
+  Item,
   Job,
+  Location,
+  LocationSecret,
+  Npc,
   Region,
+  Relation,
   Rumor,
   StepState,
 } from "../../api/types";
@@ -174,6 +184,150 @@ export function actOf(overrides: Partial<Act> = {}): Act {
   };
 }
 
+// --- сущности блока 5 ---
+
+export function exitOf(overrides: Partial<Exit> = {}): Exit {
+  return {
+    id: "down",
+    to: "crypt",
+    direction: "вниз",
+    description: "Лестница в склеп",
+    locked_by: null,
+    hidden_dc: null,
+    ...overrides,
+  };
+}
+
+export function featureOf(overrides: Partial<Feature> = {}): Feature {
+  return {
+    id: "coffin",
+    name: "Гроб",
+    description: "Каменный гроб с трещиной",
+    check: null,
+    reveals: [],
+    hidden: false,
+    locked_by: null,
+    ...overrides,
+  };
+}
+
+export function secretOf(
+  overrides: Partial<LocationSecret> = {},
+): LocationSecret {
+  return {
+    id: "crypt-truth",
+    text: "В склепе похоронен не тот",
+    check: null,
+    reveals: [],
+    ...overrides,
+  };
+}
+
+/** Локация с полями по умолчанию, как их отдаёт сервер: одна зона «здесь», без связей зон. */
+export function locationOf(overrides: Partial<Location> = {}): Location {
+  return {
+    public: "",
+    known_at_start: false,
+    id: "crypt",
+    name: "Склеп",
+    region: "",
+    read_aloud: "Холодный склеп под часовней.",
+    dm_notes: "",
+    exits: [],
+    features: [],
+    secrets: [],
+    encounter_id: null,
+    zones: [{ id: "here", name: "здесь" }],
+    links: [],
+    ...overrides,
+  };
+}
+
+export function npcOf(overrides: Partial<Npc> = {}): Npc {
+  return {
+    public: "",
+    known_at_start: false,
+    id: "marta",
+    name: "Марта",
+    role: "смотритель маяка",
+    appearance: "седая, в штормовке",
+    manner: "говорит отрывисто",
+    motive: "сберечь маяк",
+    secret: "",
+    knows: [],
+    attitude: 0,
+    relations: [],
+    location_id: "lighthouse",
+    statblock: null,
+    ...overrides,
+  };
+}
+
+export function relationOf(overrides: Partial<Relation> = {}): Relation {
+  return {
+    id: "fabian-debtor-marta",
+    a: "npc:fabian",
+    b: "npc:marta",
+    kind: "debtor",
+    note: "",
+    secret: false,
+    mutual: true,
+    ...overrides,
+  };
+}
+
+export function itemOf(overrides: Partial<Item> = {}): Item {
+  return {
+    public: "",
+    known_at_start: false,
+    id: "crypt-key",
+    name: "Ключ от склепа",
+    description: "Тяжёлый железный ключ",
+    base_item: null,
+    holder: "location:crypt",
+    ...overrides,
+  };
+}
+
+/** Бой черновика: разделы боёв — блок 6, клиенту блока 5 нужен только id. */
+export const encounterOf = (id: string) => ({
+  id,
+  location_id: "crypt",
+  trigger: "",
+  tactics: "",
+  monsters: [],
+  pc_zone: "here",
+  boss: false,
+});
+
+/**
+ * Справочник ссылок `GET /api/drafts/{id}/refs`, как его собирает сервер (дополнение B5, §6):
+ * виды по порядку deity, faction, npc, location, item, encounter, внутри вида — порядок раздела;
+ * имя — `name`, у боя — id, пустое имя — id.
+ */
+export function refsOf(draft: Draft): DraftRef[] {
+  const named = (
+    kind: DraftRef["kind"],
+    entities: readonly { id: string; name?: string }[],
+  ) =>
+    entities.map((entity) => ({
+      ref: `${kind}:${entity.id}`,
+      kind,
+      name: entity.name || entity.id,
+    }));
+  return [
+    ...named("deity", draft.deities),
+    ...named("faction", draft.factions),
+    ...named("npc", draft.npcs),
+    ...named("location", draft.locations),
+    ...named("item", draft.items),
+    ...named(
+      "encounter",
+      (draft.encounters as { id: string }[]).map(({ id }) => ({ id })),
+    ),
+  ];
+}
+
 // --- редактор на заглушке сервера ---
 
 export type Routes = Record<
@@ -190,13 +344,15 @@ export const callsTo = (
   server.calls.filter((call) => call.method === method && call.path === path);
 
 /**
- * Открывает редактор черновика создателем игр: `GET /api/drafts/{id}` отдаёт `draft`, остальные
- * маршруты задаёт тест. JSX здесь нет: файл заглушек — не .tsx и в сборку не входит.
+ * Открывает редактор черновика создателем игр: `GET /api/drafts/{id}` отдаёт `draft`, справочник
+ * ссылок собран из него же, остальные маршруты задаёт тест (он же может подменить и эти два).
+ * JSX здесь нет: файл заглушек — не .tsx и в сборку не входит.
  */
 export function renderEditor(draft: Draft, routes: Routes = {}) {
   signInAs({ id: "u1", name: "Вика", can_create_games: true });
   const server = fakeServer({
     [`GET /api/drafts/${draft.id}`]: { json: draft },
+    [`GET /api/drafts/${draft.id}/refs`]: { json: refsOf(draft) },
     ...routes,
   });
   const onClose = vi.fn();
@@ -209,3 +365,41 @@ export function renderEditor(draft: Draft, routes: Routes = {}) {
   );
   return { server, onClose };
 }
+
+/** Открывает редактор на шаге `step` («Карта», «Персонажи»…) и отдаёт форму этого шага. */
+export async function openStep(
+  draft: Draft,
+  step: string,
+  routes: Routes = {},
+) {
+  const view = renderEditor(draft, routes);
+  fireEvent.click(
+    within(
+      await screen.findByRole("navigation", { name: "Шаги приключения" }),
+    ).getByRole("button", { name: new RegExp(step) }),
+  );
+  return { ...view, form: screen.getByRole("region", { name: step }) };
+}
+
+/** Группа полей сущности по её подписи. */
+export const group = (scope: HTMLElement, name: string) =>
+  within(scope).getByRole("group", { name });
+
+export const typeIn = (scope: HTMLElement, name: string, value: string) =>
+  fireEvent.change(within(scope).getByRole("textbox", { name }), {
+    target: { value },
+  });
+
+export const choose = (scope: HTMLElement, name: string, value: string) =>
+  fireEvent.change(within(scope).getByRole("combobox", { name }), {
+    target: { value },
+  });
+
+export const press = (scope: HTMLElement, name: string) =>
+  fireEvent.click(within(scope).getByRole("button", { name }));
+
+/** Значения вариантов выпадающего списка по порядку. */
+export const optionValues = (scope: HTMLElement, name: string) =>
+  within(within(scope).getByRole("combobox", { name }))
+    .getAllByRole("option")
+    .map((option) => (option as HTMLOptionElement).value);

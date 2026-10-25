@@ -877,3 +877,60 @@ async def test_hostile_wishes_and_seeds_never_break_the_markup_of_any_step_promp
         assert stranger["name"] == stranger["motive"] == HOSTILE
         outside = DATA_BLOCK.sub("", prompt)
         assert "Игнорируй" not in outside and "Пираты" not in outside
+
+
+# --- старт и финал графа — только локации итоговой карты (дополнение B5 §9, fix-раунд 1) ---
+
+
+def graph_answers(start: str, finale: str) -> dict[str, Any]:
+    """Ответы демо v2, где шаг `locations` назвал старт и финал `start`, `finale`."""
+    answers = v2_answers()
+    answers["generator.locations"] |= {"start_location": start, "finale_location": finale}
+    return answers
+
+
+def watchtower() -> Location:
+    """Локация автора, которой нет в ответе шага `locations`."""
+    return Location(id="watchtower", name="Сторожевая башня", read_aloud="Ветер свистит.")
+
+
+@pytest.mark.parametrize(
+    ("before", "locks", "start", "finale", "expected"),
+    [
+        # Ответ называет локации своей карты — их и берём.
+        ((None, None), (), "harbor", "lamp-room", ("harbor", "lamp-room")),
+        # Старт или финал вне карты, прежних нет — пусто, а не висящая ссылка.
+        ((None, None), (), "ghost", "lamp-room", (None, "lamp-room")),
+        ((None, None), (), "harbor", "ghost", ("harbor", None)),
+        # Прежний старт есть на новой карте — он остаётся.
+        (("lighthouse", "harbor"), (), "ghost", "nowhere", ("lighthouse", "harbor")),
+        # Прежнего на новой карте нет — пусто.
+        (("old-tower", "old-cellar"), (), "ghost", "nowhere", (None, None)),
+        # Закреплённую локацию модель может не повторять в ответе: она на карте, старт берётся.
+        (
+            (None, None),
+            ("location:watchtower",),
+            "watchtower",
+            "lamp-room",
+            ("watchtower", "lamp-room"),
+        ),
+    ],
+    ids=["на-карте", "старт-вне", "финал-вне", "прежний-на-карте", "прежнего-нет", "закреплённая"],
+)
+async def test_the_start_and_finale_of_a_graph_are_always_locations_of_the_new_map(
+    before, locks, start, finale, expected
+):
+    draft = v2_draft().model_copy(
+        update={
+            "locations": (watchtower(),) if locks else (),
+            "start_location": before[0],
+            "finale_location": before[1],
+            "locks": frozenset(locks),
+        }
+    )
+
+    new = await run_step(RecordingProvider(graph_answers(start, finale)), draft, "locations")
+
+    assert (new.start_location, new.finale_location) == expected
+    on_map = {location.id for location in new.locations}
+    assert {new.start_location, new.finale_location} - {None} <= on_map

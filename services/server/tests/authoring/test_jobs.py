@@ -1,4 +1,5 @@
-"""Задания генерации шага конструктора (план B4.1; спека Р6, §10.2, §10.3; дополнение dispatcher B4 §5).
+"""Задания генерации шага конструктора (планы B4.1, B5.1; спека Р6, §10.2, §10.3; дополнения
+dispatcher B4 §5 и B5 §2).
 
 `POST /api/drafts/{id}/generate` проверяет вход до задания (шаг, пожелание, цель, закрепления),
 держит одно активное задание на черновик и выполняет его фоновой задачей через `run_step` тем же
@@ -31,8 +32,12 @@ from test_drafts_api import (  # noqa: F401  (фикстуры стенда API 
     database_file,
     deities_data,
     factions_data,
+    locations_data,
+    lock,
     plot_data,
+    saved,
     section_data,
+    served_section,
     settings,
     settings_data,
     stand,
@@ -212,7 +217,9 @@ async def test_a_target_regenerates_only_that_entity(stand):
 @pytest.mark.parametrize(
     ("body", "code"),
     [
-        ({"step": "locations"}, "unsupported_step"),
+        ({"step": "items"}, "unsupported_step"),
+        ({"step": "encounters"}, "unsupported_step"),
+        ({"step": "clues"}, "unsupported_step"),
         ({"step": "nope"}, "unsupported_step"),
         ({"step": "world", "wish": "Я" * 2001}, "invalid_wish"),
         ({"step": "world", "wish": "   "}, "invalid_wish"),
@@ -500,7 +507,7 @@ async def add_job(stand: Stand, draft: dict[str, Any], status: JobStatus) -> Non
 
 
 async def every_edit(stand: Stand, who: Author, draft: dict[str, Any]) -> list:
-    """Все записи черновика: пять разделов, закрепления, пожелание, удаление и запуск задания."""
+    """Все записи черновика: разделы B4 и B5, закрепления, пожелание, удаление и запуск задания."""
     path = f"/api/drafts/{draft['id']}"
     sections = [
         await stand.put_section(who, draft, section, section_data(section)) for section in SECTIONS
@@ -1005,3 +1012,321 @@ async def test_an_error_escaping_a_job_is_logged_as_one_of_the_constructor(
         await stand.app.state.authoring_tasks.join()
 
     assert "конструктора" in caplog.text and "хода" not in caplog.text
+
+
+# --- шаги блока 5: карта, наполнение, NPC, связи и одна сущность (дополнение B5 §2) ---
+
+
+B5_STEPS = (["locations"], ["locations", "location_contents"], ["npcs"], ["relations"])
+
+
+async def run(stand: Stand, who: Author, draft: dict[str, Any], **body: Any) -> dict[str, Any]:
+    """Запускает задание, ждёт его и возвращает черновик после него; задание — `done`."""
+    started = await generate(stand, who, draft, **body)
+    assert started.status_code == 202, started.text
+    await stand.app.state.authoring_tasks.join()
+    assert (await job_of(stand, who, draft, started.json()["id"]))["status"] == "done"
+    return await stand.draft(who, draft["id"])
+
+
+def own_map() -> dict[str, Any]:
+    """«Карта» демо, где автор сам написал имя и текст вслух каждой локации."""
+    data = locations_data()
+    for location in data["locations"]:
+        location |= {"name": f"Своё: {location['id']}", "read_aloud": f"Своё: {location['id']}."}
+    return data
+
+
+def by_id(entities: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {entity["id"]: entity for entity in entities}
+
+
+@pytest.mark.parametrize(
+    "steps", B5_STEPS, ids=["locations", "location_contents", "npcs", "relations"]
+)
+async def test_each_step_of_block_5_is_generated(stand, steps):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    for step in steps:
+        draft = await run(stand, author, draft, step=step)
+
+    assert draft["steps"][steps[-1]]["status"] != "empty"
+    assert draft["version"] == 1 + len(steps)
+    # Результат задания — запись раздела шага: у шага есть время этой записи.
+    assert all(isinstance(draft["steps"][step]["updated_at"], str) for step in steps)
+
+
+async def test_the_filling_without_a_target_fills_every_location_but_the_locked_one(stand):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    draft = await saved(stand, author, draft, "locations", own_map())
+    written = by_id(draft["locations"])
+    draft = await lock(stand, author, draft, "location:lamp-room")
+
+    after = await run(stand, author, draft, step="location_contents")
+
+    contents = v2_answers()["generator.location_contents"]
+    filled = by_id(after["locations"])
+    # Сценарий отвечает по локации в порядке карты; закреплённую модель не спрашивают.
+    for ident, answer in zip(("harbor", "cliff-path", "lighthouse"), contents, strict=False):
+        assert filled[ident]["read_aloud"] == answer["read_aloud"]
+        assert filled[ident]["name"] == written[ident]["name"]  # граф наполнение не трогает
+    assert filled["lamp-room"] == written["lamp-room"]
+    assert after["locks"] == ["location:lamp-room"]
+
+
+async def test_regenerating_one_location_leaves_the_others_and_the_locked_one_alone(stand):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    draft = await saved(stand, author, draft, "locations", own_map())
+    written = by_id(draft["locations"])
+    draft = await lock(stand, author, draft, "location:lamp-room")
+
+    after = await run(stand, author, draft, step="location_contents", target="location:lighthouse")
+
+    filled = by_id(after["locations"])
+    answer = v2_answers()["generator.location_contents"][0]  # один запрос — первый ответ
+    assert filled["lighthouse"]["read_aloud"] == answer["read_aloud"]
+    assert filled["lighthouse"]["name"] == written["lighthouse"]["name"]
+    assert [f["id"] for f in filled["lighthouse"]["features"]] == ["harbor-board"]
+    for ident in ("harbor", "cliff-path", "lamp-room"):
+        assert filled[ident] == written[ident], ident
+    assert [loc["id"] for loc in after["locations"]] == list(written)  # порядок карты тот же
+    assert after["job"]["target"] == "location:lighthouse"
+
+
+async def test_regenerating_one_location_of_the_map_keeps_its_filling_and_the_start(stand):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    data = own_map() | {"start_location": "lighthouse", "finale_location": "harbor"}
+    draft = await saved(stand, author, draft, "locations", data)
+    written = by_id(draft["locations"])
+
+    after = await run(stand, author, draft, step="locations", target="location:cliff-path")
+
+    changed = by_id(after["locations"])
+    assert changed["cliff-path"]["name"] == "Тропа над обрывом"  # имя из ответа шага
+    assert changed["cliff-path"]["read_aloud"] == written["cliff-path"]["read_aloud"]
+    for ident in ("harbor", "lighthouse", "lamp-room"):
+        assert changed[ident] == written[ident], ident
+    assert (after["start_location"], after["finale_location"]) == ("lighthouse", "harbor")
+
+
+@pytest.mark.parametrize(
+    ("section", "step", "target", "field"),
+    [
+        ("npcs", "npcs", "npc:bram", "name"),
+        ("relations", "relations", "relation:bram-rival-ilsa", "note"),
+    ],
+)
+async def test_regenerating_one_npc_or_relation_leaves_the_others_alone(
+    stand, section, step, target, field
+):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    own = [entity | {field: f"Своё: {entity['id']}"} for entity in section_data(section)]
+    draft = await saved(stand, author, draft, section, own)
+    ident = target.partition(":")[2]
+
+    after = await run(stand, author, draft, step=step, target=target)
+
+    answer = by_id(v2_answers()[f"generator.{step}"][section])[ident]
+    changed = by_id(after[section])
+    assert changed[ident][field] == answer[field]
+    assert {key: value for key, value in changed.items() if key != ident} == {
+        entity["id"]: entity for entity in own if entity["id"] != ident
+    }
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"step": "location_contents", "target": "npc:ilsa"},
+        {"step": "location_contents", "target": "location:nowhere"},
+        {"step": "locations", "target": "location:nowhere"},
+        {"step": "locations", "target": "npc:ilsa"},
+        {"step": "npcs", "target": "location:harbor"},
+        {"step": "npcs", "target": "npc:nobody"},
+        {"step": "relations", "target": "npc:ilsa"},
+        {"step": "relations", "target": "relation:nothing"},
+    ],
+)
+async def test_a_target_of_another_kind_or_missing_is_refused_before_any_job(stand, body):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    for section in ("locations", "npcs", "relations"):
+        draft = await saved(stand, author, draft, section, section_data(section))
+
+    response = await generate(stand, author, draft, **body)
+
+    assert_error(response, 422, "invalid_target")
+    assert await count_jobs(stand.db) == 0
+    assert body["target"] not in response.text
+
+
+@pytest.mark.parametrize(
+    ("locks", "body"),
+    [
+        (["location:harbor"], {"step": "location_contents", "target": "location:harbor"}),
+        (["location:harbor"], {"step": "locations", "target": "location:harbor"}),
+        (["step:location_contents"], {"step": "location_contents"}),
+        (["step:locations"], {"step": "locations", "target": "location:harbor"}),
+        (["npc:bram"], {"step": "npcs", "target": "npc:bram"}),
+        (["relation:bram-rival-ilsa"], {"step": "relations", "target": "relation:bram-rival-ilsa"}),
+    ],
+)
+async def test_a_locked_step_or_target_of_block_5_is_refused_before_any_job(stand, locks, body):
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    for section in ("locations", "npcs", "relations"):
+        draft = await saved(stand, author, draft, section, section_data(section))
+    draft = await lock(stand, author, draft, *locks)
+
+    response = await generate(stand, author, draft, **body)
+
+    assert_error(response, 422, "step_locked")
+    assert await count_jobs(stand.db) == 0
+
+
+async def test_the_filling_takes_the_saved_wish_of_its_step(stand, monkeypatch):
+    provider = RecordingProvider(v2_answers())
+    use_provider(monkeypatch, provider)
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    draft = await saved(stand, author, draft, "locations", locations_data())
+    wish = await stand.call(
+        author,
+        "PUT",
+        f"/api/drafts/{draft['id']}/wishes/location_contents",
+        json={"version": draft["version"], "text": "Больше тумана"},
+    )
+    assert wish.status_code == 200, wish.text
+
+    await run(stand, author, wish.json(), step="location_contents", target="location:harbor")
+
+    [prompt] = provider.prompts("generator.location_contents")
+    assert "Больше тумана" in prompt and "перегенерировать только location:harbor" in prompt
+
+
+# --- финальное покрытие блока 5: перегенерация карты целиком, чтение во время задания ---
+
+
+async def test_regenerating_the_whole_map_keeps_the_filling_and_the_locked_location(stand):
+    # Шаг `locations` без цели пишет граф (имена, края, выходы, старт и финал из ответа), а
+    # наполнение локаций с теми же id и закреплённая локация остаются такими, как их записал автор.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    data = own_map() | {"start_location": "lighthouse", "finale_location": "cliff-path"}
+    draft = await saved(stand, author, draft, "locations", data)
+    written = by_id(draft["locations"])
+    draft = await lock(stand, author, draft, "location:lamp-room")
+
+    after = await run(stand, author, draft, step="locations")
+
+    graph = v2_answers()["generator.locations"]
+    answered = by_id(graph["locations"])
+    changed = by_id(after["locations"])
+    assert set(changed) == set(written)
+    assert changed["lamp-room"] == written["lamp-room"]
+    for ident in ("harbor", "cliff-path", "lighthouse"):
+        assert changed[ident]["name"] == answered[ident]["name"], ident
+        for field in ("read_aloud", "dm_notes", "features", "secrets", "zones"):
+            assert changed[ident][field] == written[ident][field], (ident, field)
+    assert (after["start_location"], after["finale_location"]) == (
+        graph["start_location"],
+        graph["finale_location"],
+    )
+    assert after["locks"] == ["location:lamp-room"]
+
+
+async def test_while_a_job_runs_the_draft_its_refs_and_the_check_stay_readable(stand, monkeypatch):
+    # Во время задания закрыты записи (любой PUT и DELETE — 409 `job_running`, их обходит
+    # `every_edit`); чтение черновика, справочник ссылок и проверка открыты и ничего не пишут.
+    provider = BlockingProvider()
+    use_provider(monkeypatch, provider)
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    draft = await saved(stand, author, draft, "npcs", section_data("npcs"))
+    path = f"/api/drafts/{draft['id']}"
+    started = await generate(stand, author, draft, step="npcs", target="npc:bram")
+    assert started.status_code == 202, started.text
+    await provider.asked.wait()
+
+    refs = await stand.call(author, "GET", f"{path}/refs")
+    read = await stand.call(author, "GET", path)
+    checked = await stand.call(author, "POST", f"{path}/validate")
+    edit = await stand.put_section(author, draft, "npcs", section_data("npcs")[1:])
+
+    assert refs.status_code == 200, refs.text
+    assert [entry["ref"] for entry in refs.json()] == ["npc:ilsa", "npc:bram", "npc:veran"]
+    assert read.status_code == 200 and read.json()["job"]["status"] == "running"
+    assert checked.status_code == 200, checked.text
+    assert_error(edit, 409, "job_running")
+    provider.release.set()
+    await stand.app.state.authoring_tasks.join()
+    assert (await stand.draft(author, draft["id"]))["version"] == draft["version"] + 1
+
+
+# --- fix-раунд 1 блока 5: старт и финал из ответа модели, время шагов раздела (дополнение B5 §9) ---
+
+
+@pytest.mark.parametrize(
+    ("start", "finale"), [("ghost", "lamp-room"), ("harbor", "nowhere"), ("ghost", "nowhere")]
+)
+async def test_a_map_whose_start_or_finale_the_model_put_off_the_map_is_saved_back(
+    stand, monkeypatch, start, finale
+):
+    # Инвариант «сгенерированное сохраняется обратно» — и на ошибке модели: старт или финал вне
+    # её же списка локаций в черновик не попадает.
+    answers = v2_answers()
+    answers["generator.locations"] |= {"start_location": start, "finale_location": finale}
+    use_provider(monkeypatch, RecordingProvider(answers))
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    generated = await run(stand, author, draft, step="locations")
+    response = await stand.put_section(
+        author, generated, "locations", served_section(generated, "locations")
+    )
+
+    on_map = {location["id"] for location in generated["locations"]}
+    for field in ("start_location", "finale_location"):
+        assert generated[field] is None or generated[field] in on_map, field
+    assert response.status_code == 200, response.text
+    assert served_section(response.json(), "locations") == served_section(generated, "locations")
+
+
+async def test_a_map_regenerated_with_a_start_off_the_map_keeps_the_start_of_the_author(
+    stand, monkeypatch
+):
+    answers = v2_answers()
+    answers["generator.locations"] |= {"start_location": "ghost", "finale_location": "nowhere"}
+    use_provider(monkeypatch, RecordingProvider(answers))
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    own = locations_data() | {"start_location": "lighthouse", "finale_location": "harbor"}
+    draft = await saved(stand, author, draft, "locations", own)
+
+    generated = await run(stand, author, draft, step="locations")
+
+    assert (generated["start_location"], generated["finale_location"]) == ("lighthouse", "harbor")
+
+
+@pytest.mark.parametrize("step", ["locations", "location_contents"])
+async def test_a_job_marks_the_time_of_every_step_of_its_section(stand, step):
+    # Дополнение B5 §9 (B4 §3): время шага — последняя запись его раздела, ручная или генерацией.
+    # Карту пишут оба шага, поэтому результат любого из них отмечает время обоих.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    draft = await saved(stand, author, draft, "npcs", section_data("npcs"))
+    draft = await saved(stand, author, draft, "locations", locations_data())
+    before = draft["steps"]
+
+    after = (await run(stand, author, draft, step=step))["steps"]
+
+    for written in ("locations", "location_contents"):
+        assert after[written]["updated_at"] > before[written]["updated_at"], written
+    assert after["locations"]["updated_at"] == after["location_contents"]["updated_at"]
+    assert after["npcs"]["updated_at"] == before["npcs"]["updated_at"]
+    assert all(after[s]["updated_at"] is None for s in ("relations", "items", "concept"))

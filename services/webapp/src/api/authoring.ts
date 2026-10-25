@@ -2,6 +2,7 @@ import type { Request } from "./client";
 import type {
   AuthoringStep,
   Draft,
+  DraftRef,
   DraftSection,
   DraftSummary,
   GenerateBody,
@@ -50,5 +51,8 @@ export function authoringApi(request: Request) {
         "GET",
         `${draftPath(draftId)}/jobs/${encodeURIComponent(jobId)}`,
       ),
+    /** Справочник ссылок черновика для выбора в формах (дополнение B5, §6). */
+    listRefs: (draftId: string) =>
+      request<DraftRef[]>("GET", `${draftPath(draftId)}/refs`),
   };
 }

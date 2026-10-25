@@ -9,6 +9,12 @@ import {
   deityOf,
   draftOf,
   jobOf,
+  locationOf,
+  npcOf,
+  openStep,
+  optionValues,
+  refsOf,
+  relationOf,
   renderEditor,
   stepsOf,
 } from "./fixtures";
@@ -35,22 +41,58 @@ const button = (name: string | RegExp) => screen.getByRole("button", { name });
 const CONCEPT_PATH = "/api/drafts/d1/sections/settings";
 
 describe("полоска шагов", () => {
-  test("пять шагов со статусами сервера: пусто, черновик, готово", async () => {
+  test("девять шагов по порядку со статусами сервера: пусто, черновик, готово", async () => {
     renderEditor(
       draftOf({
         steps: stepsOf({
           concept: { status: "ready", updated_at: "2026-10-25T10:00:00Z" },
           world: { status: "draft", updated_at: "2026-10-25T10:01:00Z" },
+          locations: { status: "ready", updated_at: "2026-10-25T10:02:00Z" },
+          location_contents: {
+            status: "draft",
+            updated_at: "2026-10-25T10:03:00Z",
+          },
+          relations: { status: "ready", updated_at: "2026-10-25T10:04:00Z" },
         }),
       }),
     );
     await opened();
 
+    expect(
+      within(screen.getByRole("navigation", { name: "Шаги приключения" }))
+        .getAllByRole("button")
+        .map(
+          (step) => step.querySelector(".authoring-step__label")?.textContent,
+        ),
+    ).toEqual([
+      "Замысел",
+      "Мир",
+      "Боги",
+      "Фракции",
+      "Сюжет",
+      "Карта",
+      "Наполнение",
+      "Персонажи",
+      "Связи",
+    ]);
     expect(stepButton("Замысел")).toHaveTextContent("готово");
     expect(stepButton("Мир")).toHaveTextContent("черновик");
     expect(stepButton("Боги")).toHaveTextContent("пусто");
     expect(stepButton("Фракции")).toHaveTextContent("пусто");
     expect(stepButton("Сюжет")).toHaveTextContent("пусто");
+    // Карта и Наполнение — один раздел locations, но статусы у них свои: шаги генерации разные.
+    expect(stepButton("Карта")).toHaveTextContent("готово");
+    expect(stepButton("Наполнение")).toHaveTextContent("черновик");
+    expect(stepButton("Персонажи")).toHaveTextContent("пусто");
+    expect(stepButton("Связи")).toHaveTextContent("готово");
+  });
+
+  test("замок целого шага блока 5 — у его экрана: step:location_contents у «Наполнения»", async () => {
+    renderEditor(draftOf({ locks: ["step:location_contents"] }));
+    await opened();
+
+    expect(stepButton("Наполнение")).toHaveTextContent("закреплён");
+    expect(stepButton("Карта")).not.toHaveTextContent("закреплён");
   });
 
   test("закреплённый целиком шаг помечен замком", async () => {
@@ -1207,4 +1249,260 @@ describe("задание генерации: стыки с сервером", ()
     expect(callsTo(server, "GET", "/api/drafts/d1/jobs/j2")).toHaveLength(1);
     expect(callsTo(server, "GET", "/api/drafts/d1/jobs/j1")).toHaveLength(0);
   });
+});
+
+describe("справочник ссылок (GET /api/drafts/{id}/refs)", () => {
+  const REFS = "/api/drafts/d1/refs";
+
+  test("экраны без выбора ссылок справочник не просят", async () => {
+    const { server } = renderEditor(draftOf());
+    await opened();
+
+    for (const name of ["Мир", "Боги", "Фракции", "Сюжет", "Карта"]) {
+      fireEvent.click(stepButton(name));
+    }
+    await act(async () => {});
+
+    expect(callsTo(server, "GET", REFS)).toHaveLength(0);
+  });
+
+  test("на экране со ссылками справочник грузится, после записи — заново: в нём сохранённое", async () => {
+    const saved = draftOf({
+      version: 2,
+      locations: [locationOf({ id: "crypt", name: "Склеп" })],
+    });
+    let asked = 0;
+    const { server } = renderEditor(draftOf(), {
+      [`GET ${REFS}`]: () =>
+        ++asked === 1 ? { json: [] } : { json: refsOf(saved) },
+      "PUT /api/drafts/d1/sections/npcs": { json: saved },
+    });
+    await opened();
+    fireEvent.click(stepButton("Персонажи"));
+    const form = panel("Персонажи");
+    await vi.waitFor(() =>
+      expect(callsTo(server, "GET", REFS)).toHaveLength(1),
+    );
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Добавить персонажа" }),
+    );
+    expect(optionValues(form, "Где находится")).toEqual([""]);
+
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Сохранить раздел" }),
+    );
+
+    await vi.waitFor(() =>
+      expect(callsTo(server, "GET", REFS)).toHaveLength(2),
+    );
+    await vi.waitFor(() =>
+      expect(optionValues(panel("Персонажи"), "Где находится")).toEqual([
+        "",
+        "location:crypt",
+      ]),
+    );
+  });
+
+  test("сбой справочника — текст у поля выбора, остальная правка открыта", async () => {
+    renderEditor(draftOf({ npcs: [npcOf()] }), {
+      [`GET ${REFS}`]: { status: 500, json: { detail: "Сервер устал." } },
+    });
+    await opened();
+    fireEvent.click(stepButton("Персонажи"));
+
+    const marta = within(panel("Персонажи")).getByRole("group", {
+      name: "Марта",
+    });
+    expect(await within(marta).findByRole("alert")).toHaveTextContent(
+      "Список ссылок не загрузился",
+    );
+    expect(within(marta).getByRole("textbox", { name: "Имя" })).toBeEnabled();
+  });
+});
+
+// --- финальное покрытие блока 5 ---
+
+/** Черновик блока 5: локация, два персонажа и связь между ними. */
+const PEOPLE = draftOf({
+  version: 4,
+  locations: [locationOf({ id: "crypt", name: "Склеп" })],
+  npcs: [
+    npcOf({ id: "marta", name: "Марта" }),
+    npcOf({ id: "fabian", name: "Фабиан" }),
+  ],
+  relations: [relationOf()],
+});
+
+/** Кнопка «Перегенерировать» сущности; подпись связи берёт имена из справочника — ждём его. */
+const regenerateButton = (form: HTMLElement, name: string) =>
+  within(form).findByRole("button", { name: `Перегенерировать: ${name}` });
+
+/** Правка поля на экране: форма шага получает несохранённые правки. */
+const editIn = (scope: HTMLElement, field: string, value: string) =>
+  fireEvent.change(within(scope).getByRole("textbox", { name: field }), {
+    target: { value },
+  });
+
+// Экран → шаг генерации → цель одной сущности (дополнение B5, §2 и §7); `edit` — любая правка экрана.
+describe.each([
+  {
+    label: "Наполнение",
+    step: "location_contents",
+    target: "location:crypt",
+    name: "Склеп",
+    edit: (form: HTMLElement) => editIn(form, "Текст вслух", "Другой текст"),
+  },
+  {
+    label: "Персонажи",
+    step: "npcs",
+    target: "npc:marta",
+    name: "Марта",
+    edit: (form: HTMLElement) =>
+      editIn(
+        within(form).getByRole("group", { name: "Фабиан" }),
+        "Мотив",
+        "уехать",
+      ),
+  },
+  {
+    label: "Связи",
+    step: "relations",
+    target: "relation:fabian-debtor-marta",
+    name: "Фабиан — должник — Марта",
+    edit: (form: HTMLElement) => editIn(form, "Пояснение", "долг чести"),
+  },
+] as const)(
+  "«Перегенерировать» на экране «$label»",
+  ({ label, step, target, name, edit }) => {
+    // Fix-раунд 1 B5 (§9, minor 2): после генерации форма начинается заново с черновиком
+    // сервера, поэтому при несохранённых правках кнопка закрыта, как «Закрепить» (B4 §10).
+    test("при несохранённых правках экрана закрыта с подсказкой «Сначала сохраните раздел»", async () => {
+      const { form } = await openStep(PEOPLE, label);
+      const regenerate = await regenerateButton(form, name);
+      expect(regenerate).toBeEnabled();
+
+      edit(form);
+
+      expect(regenerate).toBeDisabled();
+      expect(regenerate).toHaveAccessibleDescription(
+        "Сначала сохраните раздел",
+      );
+      expect(form).toHaveTextContent(
+        "Сначала сохраните раздел: закрепить и перегенерировать можно только сохранённое.",
+      );
+    });
+
+    test("новое пожелание шага сохраняется первым, затем задание {step, target}", async () => {
+      const { server, form } = await openStep(PEOPLE, label, {
+        [`PUT /api/drafts/d1/wishes/${step}`]: {
+          json: { ...PEOPLE, version: 5, wishes: { [step]: "Мрачнее" } },
+        },
+        "POST /api/drafts/d1/generate": {
+          status: 202,
+          json: jobOf({ step, target }),
+        },
+      });
+      fireEvent.change(
+        within(form).getByRole("textbox", { name: "Что хочу увидеть" }),
+        { target: { value: "Мрачнее" } },
+      );
+      fireEvent.click(await regenerateButton(form, name));
+
+      expect(await screen.findByText("Генерирую…")).toBeInTheDocument();
+      expect(
+        server.calls
+          .filter((call) => call.method !== "GET")
+          .map((call) => [call.method, call.path, call.body]),
+      ).toEqual([
+        [
+          "PUT",
+          `/api/drafts/d1/wishes/${step}`,
+          { version: 4, text: "Мрачнее" },
+        ],
+        ["POST", "/api/drafts/d1/generate", { step, target }],
+      ]);
+    });
+
+    test("закреплённую сущность не перегенерировать", async () => {
+      const { form } = await openStep({ ...PEOPLE, locks: [target] }, label);
+
+      expect(await regenerateButton(form, name)).toBeDisabled();
+    });
+
+    test("шаг закреплён целиком — кнопка закрыта и у незакреплённой сущности", async () => {
+      const { form } = await openStep(
+        { ...PEOPLE, locks: [`step:${step}`] },
+        label,
+      );
+
+      expect(await regenerateButton(form, name)).toBeDisabled();
+    });
+  },
+);
+
+test.each([
+  ["Карта", "locations"],
+  ["Наполнение", "location_contents"],
+  ["Персонажи", "npcs"],
+  ["Связи", "relations"],
+] as const)(
+  "«Сгенерировать шаг» на экране «%s» ставит задание шага %s без цели",
+  async (label, step) => {
+    const { server, form } = await openStep(PEOPLE, label, {
+      "POST /api/drafts/d1/generate": { status: 202, json: jobOf({ step }) },
+    });
+
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Сгенерировать шаг" }),
+    );
+
+    expect(await screen.findByText("Генерирую…")).toBeInTheDocument();
+    expect(
+      callsTo(server, "POST", "/api/drafts/d1/generate").map(
+        (call) => call.body,
+      ),
+    ).toEqual([{ step }]);
+  },
+);
+
+test("сбой перезагрузки справочника: прежний список на месте, у поля — текст сбоя", async () => {
+  const REFS = "/api/drafts/d1/refs";
+  const draft = draftOf({
+    locations: [locationOf({ id: "crypt", name: "Склеп" })],
+    npcs: [npcOf({ location_id: "crypt" })],
+  });
+  let asked = 0;
+  const { server } = renderEditor(draft, {
+    [`GET ${REFS}`]: () =>
+      ++asked === 1
+        ? { json: refsOf(draft) }
+        : { status: 500, json: { detail: "Сервер устал." } },
+    "PUT /api/drafts/d1/sections/npcs": { json: { ...draft, version: 2 } },
+  });
+  await opened();
+  fireEvent.click(stepButton("Персонажи"));
+  await vi.waitFor(() =>
+    expect(optionValues(panel("Персонажи"), "Где находится")).toEqual([
+      "",
+      "location:crypt",
+    ]),
+  );
+
+  fireEvent.click(
+    within(panel("Персонажи")).getByRole("button", {
+      name: "Сохранить раздел",
+    }),
+  );
+
+  await vi.waitFor(() => expect(callsTo(server, "GET", REFS)).toHaveLength(2));
+  const marta = within(panel("Персонажи")).getByRole("group", {
+    name: "Марта",
+  });
+  expect(await within(marta).findByRole("alert")).toHaveTextContent(
+    "Список ссылок не загрузился",
+  );
+  expect(optionValues(marta, "Где находится")).toEqual(["", "location:crypt"]);
+  expect(
+    within(marta).getByRole("combobox", { name: "Где находится" }),
+  ).toHaveValue("location:crypt");
 });

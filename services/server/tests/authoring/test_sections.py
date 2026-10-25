@@ -1,4 +1,5 @@
-"""Разделы черновика в конструкторе (план B4.1; спека §10.3; дополнение dispatcher B4 §2, §3, §7, §8).
+"""Разделы черновика в конструкторе (планы B4.1, B5.1; спека §10.3; дополнения dispatcher B4 §2, §3,
+§7, §8 и B5 §1, §3–§5).
 
 Чистые функции без базы: раздел ↔ шаг, проверка данных раздела с пределами API и запись его в
 черновик (`apply_section`), строки проблем без значений входа, статусы шагов и отчёт проверки по
@@ -10,12 +11,24 @@ import re
 import pytest
 from generator_fakes import V2_SCENARIO, RecordingProvider, v2_answers, v2_draft
 from pydantic import TypeAdapter, ValidationError
+from test_drafts_api import (
+    HARBOR,
+    LIGHTHOUSE,
+    cupboard,
+    items_data,
+    location_at,
+    locations_data,
+    map_with,
+    npcs_data,
+    relations_data,
+)
 
-from dnd_engine.adventure.schema import Deity, Faction, WorldInfo
+from dnd_engine.adventure.schema import Deity, Faction, Item, Location, Npc, Relation, WorldInfo
 from dnd_engine.content import load_srd
 from dnd_server.authoring.draft import STEPS, AuthoringDraft, Plot, to_adventure
 from dnd_server.authoring.pipeline import check, generate, owner_step
 from dnd_server.authoring.sections import (
+    EDITOR_STEPS,
     REQUIRED_STEPS,
     SECTION_STEPS,
     InvalidSection,
@@ -82,14 +95,31 @@ def problems_of(section: str, data, draft: AuthoringDraft | None = None) -> list
 # --- раздел и шаг ---
 
 
-def test_the_editor_has_the_five_sections_of_block_4_each_with_its_step():
+def test_the_editor_has_the_sections_of_blocks_4_and_5_each_with_its_step():
     assert SECTION_STEPS == {
         "settings": "concept",
         "world": "world",
         "deities": "pantheon",
         "factions": "factions",
         "plot": "plot",
+        "locations": "locations",
+        "npcs": "npcs",
+        "relations": "relations",
+        "items": "items",
     }
+    # Шаги генерации — явный список (дополнение B5 §2): наполнение локаций пишет раздел карты, а
+    # предметы в B5 правятся только вручную.
+    assert EDITOR_STEPS == (
+        "concept",
+        "world",
+        "pantheon",
+        "factions",
+        "plot",
+        "locations",
+        "location_contents",
+        "npcs",
+        "relations",
+    )
     assert REQUIRED_STEPS == (
         "concept",
         "plot",
@@ -358,6 +388,103 @@ LONGEST_ANSWERS = {
         "endings": ["Я" * 2000] * 5,
         "villain": "deity:" + "a" * 64,
     },
+    "locations": {
+        "start_location": "l0",
+        "finale_location": "l11",
+        "locations": [
+            {
+                "id": f"l{n}",
+                "name": "Я" * 100,
+                "region": "Я" * 300,
+                "public": "Я" * 300,
+                "known_at_start": True,
+                "exits": [
+                    {
+                        "id": f"x{k}",
+                        "to": "a" * 64,
+                        "direction": "Я" * 40,
+                        "description": "Я" * 300,
+                        "locked_by": "item:" + "a" * 64,
+                        "hidden_dc": 30,
+                    }
+                    for k in range(6)
+                ],
+            }
+            for n in range(12)
+        ],
+    },
+    "location_contents": {
+        "read_aloud": "Я" * 2000,
+        "dm_notes": "Я" * 2000,
+        "features": [
+            {
+                "id": f"f{n}",
+                "name": "Я" * 100,
+                "description": "Я" * 2000,
+                "check": {"ability": "wis", "skill": "perception", "dc": 30},
+                "locked_by": "item:" + "a" * 64,
+                "reveals": [{"kind": "item", "id": "a" * 64}] * 2,
+            }
+            for n in range(5)
+        ],
+        "secrets": [
+            {
+                "id": f"s{n}",
+                "text": "Я" * 2000,
+                "check": {"ability": "int", "skill": "investigation", "dc": 30},
+                "reveals": [{"kind": "flag", "id": "a" * 64}] * 3,
+            }
+            for n in range(3)
+        ],
+    },
+    "npcs": {
+        "npcs": [
+            {
+                "id": f"n{n}",
+                "name": "Я" * 100,
+                "role": "Я" * 300,
+                "appearance": "Я" * 300,
+                "manner": "Я" * 300,
+                "motive": "Я" * 300,
+                "secret": "Я" * 300,
+                "knows": ["Я" * 300] * 6,
+                "attitude": -3,
+                "location_id": "a" * 64,
+                "statblock": "a" * 64,
+                "public": "Я" * 300,
+                "known_at_start": True,
+            }
+            for n in range(12)
+        ]
+    },
+    "relations": {
+        "relations": [
+            {
+                "id": f"r{n}",
+                "a": "npc:" + "a" * 64,
+                "b": "deity:" + "b" * 64,
+                "kind": "other",
+                "note": "Я" * 300,
+                "secret": True,
+                "mutual": False,
+            }
+            for n in range(24)
+        ]
+    },
+    "items": {
+        "items": [
+            {
+                "id": f"i{n}",
+                "name": "Я" * 100,
+                "description": "Я" * 2000,
+                "base_item": "a" * 64,
+                "holder": "location:" + "a" * 64,
+                "public": "Я" * 300,
+                "known_at_start": True,
+            }
+            for n in range(20)
+        ]
+    },
 }
 
 
@@ -366,6 +493,8 @@ def section_data(draft: AuthoringDraft, section: str):
     dumped = draft.model_dump(mode="json")
     if section == "settings":
         return dumped["settings"] | {"title": draft.title, "journal_intro": draft.journal_intro}
+    if section == "locations":
+        return {name: dumped[name] for name in ("locations", "start_location", "finale_location")}
     return dumped[section]
 
 
@@ -378,6 +507,19 @@ async def test_the_longest_answer_a_step_may_give_is_saved_back_by_hand(section)
     saved = apply_section(AuthoringDraft(), section, section_data(generated, section))
 
     assert section_data(saved, section) == section_data(generated, section)
+
+
+async def test_the_longest_filling_a_step_may_give_is_saved_back_by_hand():
+    provider = RecordingProvider(
+        {f"generator.{step}": LONGEST_ANSWERS[step] for step in ("locations", "location_contents")}
+    )
+    graph = await run_step(provider, AuthoringDraft(), "locations")
+    filled = await run_step(provider, graph, "location_contents")
+
+    saved = apply_section(AuthoringDraft(), "locations", section_data(filled, "locations"))
+
+    assert section_data(saved, "locations") == section_data(filled, "locations")
+    assert all(location.read_aloud for location in saved.locations)
 
 
 # Типичные отказы ручного ввода (находка minor reviewer B4): автор видит их в редакторе.
@@ -403,16 +545,19 @@ TYPICAL_REFUSALS = {
 }
 
 
-@pytest.mark.parametrize("case", TYPICAL_REFUSALS)
-def test_problems_of_typical_refusals_are_in_russian_without_pydantic_phrases(case):
-    section, data, path = TYPICAL_REFUSALS[case]
-
-    found = problems_of(section, data)
-
+def assert_in_russian(found: list[str], path: str) -> None:
+    """Отказ называет поле `path`, а сообщения всех строк — по-русски, без фраз pydantic."""
     assert any(line.startswith(path) for line in found), found
     for line in found:
         message = line.split(": ", 1)[1]
         assert message and not re.search(r"[A-Za-z]", message), line
+
+
+@pytest.mark.parametrize("case", TYPICAL_REFUSALS)
+def test_problems_of_typical_refusals_are_in_russian_without_pydantic_phrases(case):
+    section, data, path = TYPICAL_REFUSALS[case]
+
+    assert_in_russian(problems_of(section, data), path)
 
 
 def test_problems_of_common_refusals_read_as_the_contract_says():
@@ -701,3 +846,574 @@ def test_readiness_counts_the_steps_and_not_their_errors_below_99():
     report = draft_report(draft)
 
     assert report["errors"] and report["readiness_percent"] == 100 // len(REQUIRED_STEPS)
+
+
+# --- разделы блока 5: форма, пределы, замки удалённых (дополнение B5 §1, §4, §5) ---
+
+
+def graph_only() -> dict:
+    """«Карта» демо без наполнения: имена, края и выходы, как их пишет шаг locations."""
+    data = locations_data()
+    for location in data["locations"]:
+        location |= {"read_aloud": "", "dm_notes": "", "features": [], "secrets": []}
+    return data
+
+
+def npc(**changes) -> dict:
+    return npcs_data()[0] | changes
+
+
+def relation(**changes) -> dict:
+    return relations_data()[0] | changes
+
+
+def item(**changes) -> dict:
+    return items_data()[0] | changes
+
+
+def secret(**changes) -> dict:
+    return location_at(LIGHTHOUSE)["secrets"][0] | changes
+
+
+def exit_(**changes) -> dict:
+    return location_at(HARBOR)["exits"][0] | changes
+
+
+def feature(**changes) -> dict:
+    return location_at(HARBOR)["features"][0] | changes
+
+
+def test_the_map_is_written_in_the_shape_of_the_engine_models_with_its_start_and_finale():
+    data = locations_data()
+
+    draft = apply_section(AuthoringDraft(), "locations", data)
+
+    assert draft.locations == TypeAdapter(tuple[Location, ...]).validate_python(data["locations"])
+    assert (draft.start_location, draft.finale_location) == ("harbor", "lamp-room")
+
+
+@pytest.mark.parametrize(
+    ("section", "data", "model"),
+    [
+        ("npcs", npcs_data(), Npc),
+        ("relations", relations_data(), Relation),
+        ("items", items_data(), Item),
+    ],
+)
+def test_a_list_section_of_block_5_is_written_in_the_shape_of_the_engine_models(
+    section, data, model
+):
+    draft = apply_section(AuthoringDraft(), section, data)
+
+    assert getattr(draft, section) == TypeAdapter(tuple[model, ...]).validate_python(data)
+
+
+@pytest.mark.parametrize("field", ["start_location", "finale_location"])
+def test_a_start_or_finale_outside_the_map_is_refused_without_the_value(field):
+    found = problems_of("locations", locations_data() | {field: SECRET_INPUT})
+
+    assert found == [f"locations.{field}: такой локации на карте нет"]
+
+
+def test_a_map_without_a_start_and_a_finale_is_accepted():
+    draft = apply_section(
+        AuthoringDraft(),
+        "locations",
+        graph_only() | {"start_location": None, "finale_location": None},
+    )
+
+    assert (draft.start_location, draft.finale_location) == (None, None)
+
+
+def test_a_map_needs_its_three_fields():
+    found = problems_of("locations", {"locations": []})
+
+    assert sorted(found) == [
+        "locations.finale_location: обязательное поле",
+        "locations.start_location: обязательное поле",
+    ]
+
+
+def test_relations_inside_an_npc_are_refused_with_a_hint_to_the_relations_step():
+    found = problems_of("npcs", [npc(relations=[{"npc_id": "bram", "kind": "rival"}])])
+
+    assert found == ["npcs.0.relations: связи NPC — на шаге «Связи»"]
+
+
+@pytest.mark.parametrize(
+    ("section", "data", "path"),
+    [
+        ("locations", map_with(name="Я" * 101), "locations.locations.0.name"),
+        ("locations", map_with(region="Я" * 301), "locations.locations.0.region"),
+        ("locations", map_with(read_aloud="Я" * 2001), "locations.locations.0.read_aloud"),
+        ("locations", map_with(dm_notes="Я" * 2001), "locations.locations.0.dm_notes"),
+        ("locations", map_with(public="Я" * 301), "locations.locations.0.public"),
+        ("locations", map_with(encounter_id="я" * 301), "locations.locations.0.encounter_id"),
+        ("locations", map_with(exits=[exit_()] * 7), "locations.locations.0.exits"),
+        ("locations", map_with(exits=[exit_(to="я" * 301)]), "locations.locations.0.exits.0.to"),
+        (
+            "locations",
+            map_with(exits=[exit_(direction="Я" * 41)]),
+            "locations.locations.0.exits.0.direction",
+        ),
+        (
+            "locations",
+            map_with(exits=[exit_(description="Я" * 301)]),
+            "locations.locations.0.exits.0.description",
+        ),
+        (
+            "locations",
+            map_with(exits=[exit_(locked_by="я" * 301)]),
+            "locations.locations.0.exits.0.locked_by",
+        ),
+        ("locations", map_with(features=[feature()] * 6), "locations.locations.0.features"),
+        (
+            "locations",
+            map_with(features=[feature(name="Я" * 101)]),
+            "locations.locations.0.features.0.name",
+        ),
+        (
+            "locations",
+            map_with(features=[feature(description="Я" * 2001)]),
+            "locations.locations.0.features.0.description",
+        ),
+        (
+            "locations",
+            map_with(features=[cupboard(reveals=[{"kind": "item", "id": "k"}] * 3)]),
+            "locations.locations.0.features.0.reveals",
+        ),
+        (
+            "locations",
+            map_with(features=[cupboard(reveals=[{"kind": "item", "id": "я" * 301}])]),
+            "locations.locations.0.features.0.reveals.0.id",
+        ),
+        (
+            "locations",
+            map_with(LIGHTHOUSE, secrets=[secret()] * 4),
+            "locations.locations.2.secrets",
+        ),
+        (
+            "locations",
+            map_with(LIGHTHOUSE, secrets=[secret(text="Я" * 2001)]),
+            "locations.locations.2.secrets.0.text",
+        ),
+        (
+            "locations",
+            map_with(LIGHTHOUSE, secrets=[secret(reveals=[{"kind": "flag", "id": "f"}] * 4)]),
+            "locations.locations.2.secrets.0.reveals",
+        ),
+        (
+            "locations",
+            map_with(zones=[{"id": f"z{n}", "name": "зона"} for n in range(13)]),
+            "locations.locations.0.zones",
+        ),
+        (
+            "locations",
+            map_with(zones=[{"id": "here", "name": "Я" * 101}]),
+            "locations.locations.0.zones.0.name",
+        ),
+        (
+            "locations",
+            map_with(links=[{"a": "here", "b": "here", "distance": "near"}] * 13),
+            "locations.locations.0.links",
+        ),
+        ("npcs", [npc(name="Я" * 101)], "npcs.0.name"),
+        ("npcs", [npc(role="Я" * 301)], "npcs.0.role"),
+        ("npcs", [npc(appearance="Я" * 301)], "npcs.0.appearance"),
+        ("npcs", [npc(manner="Я" * 301)], "npcs.0.manner"),
+        ("npcs", [npc(motive="Я" * 301)], "npcs.0.motive"),
+        ("npcs", [npc(secret="Я" * 301)], "npcs.0.secret"),
+        ("npcs", [npc(knows=["Я" * 301])], "npcs.0.knows.0"),
+        ("npcs", [npc(knows=["Знает."] * 7)], "npcs.0.knows"),
+        ("npcs", [npc(public="Я" * 301)], "npcs.0.public"),
+        ("npcs", [npc(location_id="я" * 301)], "npcs.0.location_id"),
+        ("npcs", [npc(statblock="я" * 301)], "npcs.0.statblock"),
+        ("relations", [relation(note="Я" * 301)], "relations.0.note"),
+        ("items", [item(name="Я" * 101)], "items.0.name"),
+        ("items", [item(description="Я" * 2001)], "items.0.description"),
+        ("items", [item(public="Я" * 301)], "items.0.public"),
+        ("items", [item(holder="я" * 301)], "items.0.holder"),
+        ("items", [item(base_item="я" * 301)], "items.0.base_item"),
+    ],
+)
+def test_texts_and_lists_of_block_5_longer_than_a_model_answer_may_be_are_refused(
+    section, data, path
+):
+    # Дополнение B5 §4: пределы полей схем ответа модели; без аналога — Line 300, списки ≤ 12.
+    found = problems_of(section, data)
+
+    assert any(line.startswith(f"{path}: ") for line in found), found
+    assert all("ЯЯЯ" not in line and "яяя" not in line for line in found)
+
+
+def test_texts_and_lists_of_block_5_at_the_limits_are_accepted():
+    harbor = location_at(HARBOR) | {
+        "name": "Я" * 100,
+        "read_aloud": "Я" * 2000,
+        "exits": [exit_(id=f"x{n}", direction="Я" * 40) for n in range(6)],
+        "features": [feature(id=f"f{n}") for n in range(4)] + [cupboard()],
+        "secrets": [secret(id=f"s{n}") for n in range(3)],
+        "encounter_id": "я" * 300,
+        "zones": [{"id": f"z{n}", "name": "Я" * 100} for n in range(12)],
+        "links": [{"a": "z0", "b": f"z{n}", "distance": "far"} for n in range(12)],
+    }
+    data = {"locations": [harbor], "start_location": "harbor", "finale_location": None}
+
+    draft = apply_section(AuthoringDraft(), "locations", data)
+    draft = apply_section(draft, "npcs", [npc(knows=["Я" * 300] * 6, secret="Я" * 300)])
+    draft = apply_section(draft, "relations", [relation(note="Я" * 300)])
+    draft = apply_section(draft, "items", [item(description="Я" * 2000, holder="я" * 300)])
+
+    [location] = draft.locations
+    assert (len(location.exits), len(location.features), len(location.zones)) == (6, 5, 12)
+    assert len(draft.npcs[0].knows) == 6
+
+
+def test_a_location_without_exits_and_with_the_default_zone_is_accepted():
+    bare = {
+        key: value for key, value in location_at(HARBOR).items() if key not in ("zones", "links")
+    }
+
+    draft = apply_section(
+        AuthoringDraft(),
+        "locations",
+        {"locations": [bare | {"exits": []}], "start_location": None, "finale_location": None},
+    )
+
+    [location] = draft.locations
+    assert location.exits == () and [zone.id for zone in location.zones] == ["here"]
+
+
+def test_repeated_ids_inside_locations_are_accepted_and_left_to_the_check():
+    data = map_with(features=[feature(), feature()], exits=[exit_(), exit_()])
+
+    draft = apply_section(AuthoringDraft(), "locations", data)
+
+    codes = {(issue.code, issue.ref) for issue in check(to_adventure(draft), load_srd()).issues}
+    assert ("schema", "location:harbor/feature:harbor-board") in codes
+    assert ("schema", "location:harbor/exit:to-cliff-path") in codes
+
+
+@pytest.mark.parametrize(
+    ("section", "data"),
+    [
+        ("locations", locations_data() | {"extra": 1}),
+        ("locations", map_with(zones=[{"id": "here", "name": "здесь", "x": 1}])),
+        ("npcs", [npc(extra=1)]),
+        ("relations", [relation(extra=1)]),
+        ("items", [item(extra=1)]),
+        ("locations", locations_data()["locations"]),  # «Карта» приходит объектом
+        ("npcs", {"npcs": npcs_data()}),  # раздел-список приходит списком
+    ],
+)
+def test_extra_fields_and_a_wrong_shape_of_block_5_are_refused(section, data):
+    assert problems_of(section, data)
+
+
+def test_writing_a_section_without_an_entity_drops_its_lock_and_only_its_lock():
+    # Дополнение B5 §5: замок удалённой сущности снимается в той же записи, иначе новая сущность
+    # с тем же id молча оказалась бы закреплённой; шаг и другие замки не трогаются.
+    draft = apply_section(AuthoringDraft(), "locations", locations_data())
+    draft = draft.model_copy(
+        update={"locks": frozenset({"location:harbor", "location:lighthouse", "step:locations"})}
+    )
+    without = locations_data()
+    del without["locations"][HARBOR]
+    without["start_location"] = "cliff-path"
+
+    changed = apply_section(draft, "locations", without)
+
+    assert changed.locks == {"location:lighthouse", "step:locations"}
+    assert apply_section(changed, "locations", locations_data()).locks == changed.locks
+
+
+def test_writing_one_section_keeps_the_locks_of_the_others():
+    draft = apply_section(AuthoringDraft(), "npcs", npcs_data())
+    draft = draft.model_copy(update={"locks": frozenset({"npc:ilsa", "deity:selmara"})})
+
+    changed = apply_section(draft, "locations", locations_data())
+
+    assert changed.locks == {"npc:ilsa", "deity:selmara"}
+
+
+# --- статусы шагов блока 5 по содержимому (дополнение B5 §3) ---
+
+
+def statuses_of(draft: AuthoringDraft) -> dict[str, str]:
+    return {step: state["status"] for step, state in step_statuses(draft, {}).items()}
+
+
+def test_the_map_has_content_once_it_has_a_location_locked_ones_too():
+    draft = apply_section(AuthoringDraft(), "locations", graph_only())
+    locked = draft.model_copy(
+        update={"locks": frozenset(f"location:{loc.id}" for loc in draft.locations)}
+    )
+
+    assert statuses_of(AuthoringDraft())["locations"] == "empty"
+    assert statuses_of(draft)["locations"] == "ready"
+    # Генератору шаг пуст (закреплённое он не пишет заново), автору — нет: карта нарисована.
+    assert is_empty(locked, "locations")
+    assert statuses_of(locked)["locations"] == "ready"
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        {"read_aloud": "Пахнет рыбой."},
+        {"dm_notes": "Ильза ждёт у доски."},
+        {"features": [feature()]},
+        {"secrets": [secret()]},
+    ],
+)
+def test_the_filling_has_content_once_a_location_has_text_details_or_secrets(contents):
+    data = graph_only()
+    data["locations"][HARBOR] |= contents
+
+    draft = apply_section(AuthoringDraft(), "locations", data)
+
+    assert statuses_of(draft)["location_contents"] == "draft"  # у остальных нет текста вслух
+
+
+def test_the_filling_has_content_once_an_item_lies_in_a_location():
+    draft = apply_section(AuthoringDraft(), "locations", graph_only())
+
+    with_item = apply_section(draft, "items", [item(holder="location:harbor")])
+    elsewhere = apply_section(draft, "items", [item(holder="npc:ilsa")])
+
+    assert statuses_of(with_item)["location_contents"] == "draft"
+    assert statuses_of(elsewhere)["location_contents"] == "empty"
+
+
+def test_a_map_of_blank_texts_has_no_filling():
+    data = graph_only()
+    for location in data["locations"]:
+        location |= {"read_aloud": "  \n", "dm_notes": "\t"}
+
+    draft = apply_section(AuthoringDraft(), "locations", data)
+
+    assert statuses_of(draft)["location_contents"] == "empty"
+    assert statuses_of(AuthoringDraft())["location_contents"] == "empty"
+
+
+def test_the_filling_is_ready_when_every_location_has_text_to_read_aloud_and_no_errors():
+    draft = apply_section(AuthoringDraft(), "locations", locations_data())
+    blank = locations_data()
+    blank["locations"][LIGHTHOUSE]["read_aloud"] = " "
+
+    assert statuses_of(draft)["location_contents"] == "ready"
+    assert statuses_of(apply_section(draft, "locations", blank))["location_contents"] == "draft"
+
+
+def test_the_filling_with_an_error_of_its_own_is_a_draft():
+    # Тайна раскрывает предмет, который лежит не в её локации: это чинит наполнение.
+    draft = apply_section(AuthoringDraft(), "items", [item(id="keeper-ring", holder="npc:ilsa")])
+    draft = apply_section(draft, "locations", locations_data())
+
+    assert statuses_of(draft)["location_contents"] == "draft"
+
+
+@pytest.mark.parametrize(
+    ("section", "data", "kind"),
+    [("npcs", npcs_data(), "npc"), ("relations", relations_data(), "relation")],
+)
+def test_npcs_and_relations_have_content_once_written_locked_ones_too(section, data, kind):
+    draft = apply_section(AuthoringDraft(), section, data)
+    locked = draft.model_copy(
+        update={"locks": frozenset(f"{kind}:{entity.id}" for entity in getattr(draft, section))}
+    )
+
+    assert statuses_of(AuthoringDraft())[section] == "empty"
+    assert statuses_of(draft)[section] != "empty"
+    assert is_empty(locked, section) and statuses_of(locked)[section] != "empty"
+
+
+def test_readiness_counts_the_map_and_its_filling_by_their_content():
+    concept = v2_draft().model_copy(update={"id": "crow-lighthouse"})
+    graph = apply_section(concept, "locations", graph_only())
+    filled = apply_section(concept, "locations", locations_data())
+    with_npcs = apply_section(filled, "npcs", npcs_data())
+
+    # Обязательных шагов семь: замысел и карта — 2 из 7, с наполнением — 3, с NPC — 4.
+    assert draft_report(graph)["readiness_percent"] == 2 * 100 // len(REQUIRED_STEPS) == 28
+    assert draft_report(filled)["readiness_percent"] == 3 * 100 // len(REQUIRED_STEPS) == 42
+    assert draft_report(with_npcs)["readiness_percent"] == 4 * 100 // len(REQUIRED_STEPS) == 57
+
+
+def test_the_report_keeps_findings_of_the_map_and_drops_those_of_an_empty_filling():
+    # Выход ведёт в локацию, которой нет: находку чинит карта (она не пуста), а пустое наполнение
+    # своих находок в отчёт не даёт.
+    data = graph_only()
+    data["locations"][HARBOR]["exits"][0]["to"] = "nowhere"
+    draft = apply_section(AuthoringDraft(), "locations", data)
+
+    report = draft_report(draft)
+
+    found = {(f["code"], f["ref"], f["step"]) for f in report["errors"] + report["warnings"]}
+    assert ("dangling_ref", "location:harbor/exit:to-cliff-path", "locations") in found
+    assert all(step != "location_contents" for _, _, step in found), found
+
+
+# --- финальное покрытие блока 5: типичные отказы, словарь связей, шкала отношения ---
+
+
+def without_field(entity: dict, field: str) -> dict:
+    return {key: value for key, value in entity.items() if key != field}
+
+
+# Типичные отказы ручного ввода разделов блока 5: автор видит их в редакторе карты, наполнения,
+# персонажей и связей.
+B5_TYPICAL_REFUSALS = {
+    "id локации не латиницей": ("locations", map_with(id="гавань"), "locations.locations.0.id"),
+    "нет текста вслух": (
+        "locations",
+        {"locations": [without_field(location_at(HARBOR), "read_aloud")]}
+        | {"start_location": None, "finale_location": None},
+        "locations.locations.0.read_aloud",
+    ),
+    "раскрывает неизвестно что": (
+        "locations",
+        map_with(features=[cupboard(reveals=[{"kind": "monster", "id": "ghoul"}])]),
+        "locations.locations.0.features.0.reveals.0.kind",
+    ),
+    "проверка не той характеристикой": (
+        "locations",
+        map_with(features=[feature(check={"ability": "luck", "skill": None, "dc": 10})]),
+        "locations.locations.0.features.0.check.ability",
+    ),
+    "зоны ни близко, ни далеко": (
+        "locations",
+        map_with(links=[{"a": "here", "b": "here", "distance": "middle"}]),
+        "locations.locations.0.links.0.distance",
+    ),
+    "отношение NPC вне шкалы": ("npcs", [npc(attitude=4)], "npcs.0.attitude"),
+    "NPC не латиницей": ("npcs", [npc(id="ильза")], "npcs.0.id"),
+    "вид связи не из словаря": ("relations", [relation(kind="nemesis")], "relations.0.kind"),
+    "конец связи не ссылкой": ("relations", [relation(a="бармен")], "relations.0.a"),
+    "предмет без держателя": ("items", [without_field(item(), "holder")], "items.0.holder"),
+}
+
+
+@pytest.mark.parametrize("case", B5_TYPICAL_REFUSALS)
+def test_problems_of_typical_refusals_of_block_5_are_in_russian(case):
+    section, data, path = B5_TYPICAL_REFUSALS[case]
+
+    assert_in_russian(problems_of(section, data), path)
+
+
+# Словарь видов связи спеки §8 записан здесь, а не взят из движка: это страж контракта webapp
+# (`RelationKind` в `services/webapp/src/api/types.ts`).
+RELATION_KINDS = (
+    "kin",
+    "spouse",
+    "lover",
+    "friend",
+    "ally",
+    "rival",
+    "enemy",
+    "debtor",
+    "patron",
+    "servant",
+    "worships",
+    "betrayed",
+    "seeks",
+    "other",
+)
+
+
+def test_every_kind_of_relation_of_the_contract_is_accepted():
+    relations = [relation(id=f"r-{kind}", kind=kind, note="Пояснение.") for kind in RELATION_KINDS]
+
+    draft = apply_section(AuthoringDraft(), "relations", relations)
+
+    assert tuple(entity.kind for entity in draft.relations) == RELATION_KINDS
+
+
+def test_a_relation_of_kind_other_needs_a_note():
+    # Дополнение B5 §9: путь поля и русский текст вместо сообщения движка «kind other».
+    for note in ("  ", None):
+        data = relation(kind="other", note=note)
+        if note is None:
+            del data["note"]
+        assert problems_of("relations", [data]) == [
+            "relations.0.note: у вида «другое» нужно пояснение"
+        ]
+
+
+@pytest.mark.parametrize("attitude", [-3, 3])
+def test_the_ends_of_the_attitude_scale_of_an_npc_are_accepted(attitude):
+    [saved] = apply_section(AuthoringDraft(), "npcs", [npc(attitude=attitude)]).npcs
+
+    assert saved.attitude == attitude
+
+
+@pytest.mark.parametrize(("attitude", "message"), [(-4, "не меньше -3"), (4, "не больше 3")])
+def test_an_attitude_of_an_npc_past_the_scale_is_refused(attitude, message):
+    assert problems_of("npcs", [npc(attitude=attitude)]) == [f"npcs.0.attitude: {message}"]
+
+
+# --- fix-раунд 1 блока 5: тексты `problems` без значений входа и с путём (дополнение B5 §9) ---
+
+
+DC_RULE = "Сл — одна из 5, 10, 15, 20, 25, 30"
+
+
+@pytest.mark.parametrize("dc", [1234567, 12, 0, -5])
+@pytest.mark.parametrize(
+    ("place", "path"),
+    [
+        ("feature", "locations.locations.0.features.0.check.dc"),
+        ("secret", "locations.locations.2.secrets.0.check.dc"),
+        ("hidden_dc", "locations.locations.0.exits.0.hidden_dc"),
+    ],
+)
+def test_a_difficulty_off_the_table_is_named_by_the_rule_and_not_by_the_number(place, path, dc):
+    # Security I1 B5: сообщение движка повторяло введённое число («…получено 1234567»).
+    check = {"ability": "wis", "skill": "perception", "dc": dc}
+    data = {
+        "feature": lambda: map_with(features=[feature(check=check)]),
+        "secret": lambda: map_with(LIGHTHOUSE, secrets=[secret(check=check)]),
+        "hidden_dc": lambda: map_with(exits=[exit_(hidden_dc=dc)]),
+    }[place]()
+
+    found = problems_of("locations", data)
+
+    assert found == [f"{path}: {DC_RULE}"]
+    assert "1234567" not in found[0] and "получено" not in found[0]
+
+
+@pytest.mark.parametrize("dc", [5, 10, 15, 20, 25, 30])
+def test_every_difficulty_of_the_table_is_still_accepted(dc):
+    check = {"ability": "int", "skill": "investigation", "dc": dc}
+    data = map_with(features=[feature(check=check)], exits=[exit_(hidden_dc=dc)])
+    data["locations"][LIGHTHOUSE]["secrets"] = [secret(check=check)]
+
+    draft = apply_section(AuthoringDraft(), "locations", data)
+
+    harbor, lighthouse = draft.locations[HARBOR], draft.locations[LIGHTHOUSE]
+    assert (harbor.features[0].check.dc, harbor.exits[0].hidden_dc) == (dc, dc)
+    assert lighthouse.secrets[0].check.dc == dc
+
+
+def repeated(build) -> list[dict]:
+    first, *rest = build()
+    return [first, *rest, first]
+
+
+@pytest.mark.parametrize(
+    ("section", "data", "line"),
+    [
+        ("deities", [deity(), deity()], "deities: id повторяются: selmara"),
+        ("factions", [faction(), faction()], "factions: id повторяются: smugglers"),
+        ("npcs", repeated(npcs_data), "npcs: id повторяются: ilsa"),
+        ("relations", repeated(relations_data), "relations: id повторяются: ilsa-worships-selmara"),
+        ("items", repeated(items_data), "items: id повторяются: lamp-key"),
+        (
+            "locations",
+            locations_data() | {"locations": repeated(lambda: locations_data()["locations"])},
+            "locations.locations: id повторяются: harbor",
+        ),
+    ],
+)
+def test_repeated_ids_of_a_section_are_named_with_the_path_of_the_section(section, data, line):
+    # Reviewer nit B5: строка повтора id шла от черновика целиком, без пути раздела.
+    assert problems_of(section, data) == [line]

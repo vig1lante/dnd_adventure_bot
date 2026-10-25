@@ -617,9 +617,17 @@ export type AuthoringStep =
   | "items"
   | "clues";
 
-/** Разделы, которые в блоке 4 принимает `PUT /api/drafts/{id}/sections/{section}`. */
+/** Разделы, которые принимает `PUT /api/drafts/{id}/sections/{section}` (дополнения B4 §2, B5 §1). */
 export type DraftSection =
-  "settings" | "world" | "deities" | "factions" | "plot";
+  | "settings"
+  | "world"
+  | "deities"
+  | "factions"
+  | "plot"
+  | "locations"
+  | "npcs"
+  | "relations"
+  | "items";
 
 /** Статус шага считает сервер: «пусто / черновик / готово». */
 export type StepStatus = "empty" | "draft" | "ready";
@@ -711,6 +719,156 @@ export interface Plot {
   villain: string | null;
 }
 
+/** Проверка, которой достают находку места или раскрывают тайну: Сл — только из таблицы. */
+export interface CheckSpec {
+  ability: Ability;
+  skill: Skill | null;
+  dc: number;
+}
+
+export type RevealKind = "clue" | "item" | "flag" | "exit";
+
+/** Что раскрывает находка: улика, предмет (тайник), флаг или выход. */
+export interface RevealRef {
+  kind: RevealKind;
+  id: string;
+  value: string | number | boolean | null;
+}
+
+/** Деталь локации; с `reveals: item` — тайник, в котором лежит предмет этой локации. */
+export interface Feature {
+  id: string;
+  name: string;
+  description: string;
+  check: CheckSpec | null;
+  reveals: RevealRef[];
+  hidden: boolean;
+  /** Замок: `item:<id>` или `flag:<имя>`. */
+  locked_by: string | null;
+}
+
+export interface Exit {
+  id: string;
+  /** id локации, куда ведёт выход. */
+  to: string;
+  direction: string;
+  description: string;
+  /** Замок: `item:<id>` или `flag:<имя>`. */
+  locked_by: string | null;
+  /** Сл поиска скрытого выхода (из таблицы); `null` — выход не скрыт. */
+  hidden_dc: number | null;
+}
+
+/** Тайна места для мастера. */
+export interface LocationSecret {
+  id: string;
+  text: string;
+  check: CheckSpec | null;
+  reveals: RevealRef[];
+}
+
+export interface Zone {
+  id: string;
+  name: string;
+}
+
+export interface ZoneLink {
+  a: string;
+  b: string;
+  distance: "near" | "far";
+}
+
+export interface Location extends JournalFields {
+  id: string;
+  name: string;
+  region: string;
+  read_aloud: string;
+  dm_notes: string;
+  exits: Exit[];
+  features: Feature[];
+  secrets: LocationSecret[];
+  /** id боя черновика; `null` — боя нет. */
+  encounter_id: string | null;
+  zones: Zone[];
+  links: ZoneLink[];
+}
+
+/** Данные раздела `locations`: локации и два поля верхнего уровня черновика (B5 §1). */
+export interface LocationsSection {
+  locations: Location[];
+  start_location: string | null;
+  finale_location: string | null;
+}
+
+export interface Npc extends JournalFields {
+  id: string;
+  name: string;
+  role: string;
+  appearance: string;
+  manner: string;
+  motive: string;
+  secret: string;
+  knows: string[];
+  /** Отношение к отряду, ступени от −3 до 3. */
+  attitude: number;
+  /** Связи формата v1: в конструкторе всегда пусто, связи — в разделе `relations`. */
+  relations: unknown[];
+  location_id: string;
+  /** id статблока (монстр SRD или свой); `null` — не дерётся. */
+  statblock: string | null;
+}
+
+/** Вид связи из словаря спеки §8; `other` — с пояснением в `note`. */
+export type RelationKind =
+  | "kin"
+  | "spouse"
+  | "lover"
+  | "friend"
+  | "ally"
+  | "rival"
+  | "enemy"
+  | "debtor"
+  | "patron"
+  | "servant"
+  | "worships"
+  | "betrayed"
+  | "seeks"
+  | "other";
+
+/** Связь графа «a — <вид> для b»: концы — `npc:`, `faction:`, `deity:` или `location:<id>`. */
+export interface Relation {
+  id: string;
+  a: string;
+  b: string;
+  kind: RelationKind;
+  note: string;
+  /** Игроки о связи не знают. */
+  secret: boolean;
+  /** Связь верна и в обратную сторону. */
+  mutual: boolean;
+}
+
+export interface Item extends JournalFields {
+  id: string;
+  name: string;
+  description: string;
+  /** id предмета SRD. */
+  base_item: string | null;
+  /** Где лежит: `location:<id>`, `npc:<id>`… */
+  holder: string;
+}
+
+export type RefKind =
+  "deity" | "faction" | "npc" | "location" | "item" | "encounter";
+
+/** Строка справочника ссылок `GET /api/drafts/{id}/refs` (дополнение B5, §6), без тайн. */
+export interface DraftRef {
+  /** `<вид>:<id>`, как у закреплений. */
+  ref: string;
+  kind: RefKind;
+  name: string;
+}
+
 /** Заказ автора: завязка, тон, длина игры, отряд, модули правил и флажок мата. */
 export interface DraftSettings {
   pitch: string;
@@ -728,7 +886,7 @@ export interface SettingsSection extends DraftSettings {
   journal_intro: string;
 }
 
-/** Черновик приключения (контракт B4, §1). Разделы блоков 5–6 клиент пока не читает. */
+/** Черновик приключения (контракт B4, §1). Бои, монстры и открытия (блок 6) клиент пока не читает. */
 export interface Draft {
   /** id записи черновика, не slug приключения. */
   id: string;
@@ -742,12 +900,12 @@ export interface Draft {
   deities: Deity[];
   factions: Faction[];
   plot: Plot | null;
-  locations: unknown[];
-  npcs: unknown[];
-  relations: unknown[];
+  locations: Location[];
+  npcs: Npc[];
+  relations: Relation[];
   encounters: unknown[];
   monsters: unknown[];
-  items: unknown[];
+  items: Item[];
   revelations: unknown[];
   start_location: string | null;
   finale_location: string | null;

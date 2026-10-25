@@ -1,8 +1,9 @@
-"""Черновики конструктора (план B4.1; спека §10.2, §10.3, Р5, Р7; дополнение dispatcher B4).
+"""Черновики конструктора (планы B4.1, B5.1; спека §10.2, §10.3, Р5, Р7; дополнения dispatcher B4
+и B5).
 
 Слой не знает про HTTP: принимает сессию базы и автора, отдаёт JSON контракта (`Draft`,
-`DraftSummary`, `DraftReport`) и отказывает исключениями `DraftError` с кодом отказа (`code`).
-Как они превращаются в ответы, решает `api.py`.
+`DraftSummary`, `DraftReport`, справочник ссылок) и отказывает исключениями `DraftError` с кодом
+отказа (`code`). Как они превращаются в ответы, решает `api.py`.
 
 Черновик видит и меняет только автор: чужой черновик не отличается от несуществующего (404).
 Каждая запись поднимает версию; запись по чужой версии отвергается (409 `version_conflict`), и
@@ -26,6 +27,7 @@ from dnd_server.authoring.sections import (
     InvalidSection,
     apply_section,
     draft_report,
+    section_steps,
     step_statuses,
 )
 from dnd_server.db.models import (
@@ -147,6 +149,28 @@ def draft_out(row: AdventureDraft, job: AuthoringJob | None) -> dict[str, Any]:
     }
 
 
+# Виды справочника ссылок по порядку (дополнение B5 §6): то, что выбирают поля-ссылки разделов.
+REF_KINDS = ("deity", "faction", "npc", "location", "item", "encounter")
+_SECTION_OF_KIND = {kind: section for section, kind in SECTION_KINDS.items()}
+
+
+def refs_out(draft: AuthoringDraft) -> list[dict[str, str]]:
+    """Справочник ссылок `[{ref, kind, name}]` (дополнение B5 §6): виды по `REF_KINDS`, внутри вида —
+    порядок раздела. Имя — `name` сущности, у боя имени нет — его id, пустое имя — тоже id. Ничего,
+    кроме имени, в справочник не идёт: тайны (`secret`, `dm_notes`, тексты тайников) остаются в
+    черновике."""
+    return [
+        {"ref": f"{kind}:{entity.id}", "kind": kind, "name": _ref_name(entity)}
+        for kind in REF_KINDS
+        for entity in getattr(draft, _SECTION_OF_KIND[kind])
+    ]
+
+
+def _ref_name(entity: Any) -> str:
+    name = getattr(entity, "name", "")  # у боя (`Encounter`) поля имени нет
+    return name if name.strip() else entity.id
+
+
 def summary_out(row: AdventureDraft) -> dict[str, Any]:
     """`DraftSummary`: строка списка черновиков без разбора всего черновика."""
     return {
@@ -177,6 +201,10 @@ async def get_draft(session: AsyncSession, user: User, draft_id: str) -> dict[st
 
 async def validate_draft(session: AsyncSession, user: User, draft_id: str) -> dict[str, Any]:
     return draft_report(stored_draft(await owned_draft(session, user, draft_id)))
+
+
+async def draft_refs(session: AsyncSession, user: User, draft_id: str) -> list[dict[str, str]]:
+    return refs_out(stored_draft(await owned_draft(session, user, draft_id)))
 
 
 # --- запись ---
@@ -234,7 +262,7 @@ async def put_section(
         raise DraftInvalid(
             "Данные раздела не прошли проверку.", "invalid_data", error.problems
         ) from None
-    put_into(row, draft, steps=[SECTION_STEPS[section]])
+    put_into(row, draft, steps=section_steps(section))
     await _commit(session)
     return await _out(session, row)
 
@@ -277,7 +305,7 @@ def checked_wish(text: str) -> str:
 
 
 def require_editor_step(step: str) -> None:
-    """Шаг — из тех, что конструктор генерирует в B4; иначе `unsupported_step`."""
+    """Шаг — из тех, что генерирует конструктор (`EDITOR_STEPS`); иначе `unsupported_step`."""
     if step not in EDITOR_STEPS:
         raise DraftInvalid("Этот шаг пока нельзя генерировать в конструкторе.", "unsupported_step")
 

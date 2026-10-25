@@ -10,6 +10,8 @@ interface GeneratePanelProps {
   locked: boolean;
   /** В форме шага есть несохранённые правки: генерация их заменит. */
   dirty: boolean;
+  /** Несохранённые правки другого экрана того же раздела, которые генерация заменит; `null` — нет. */
+  warning?: string | null;
   onGenerate: () => void;
 }
 
@@ -19,6 +21,7 @@ export function GeneratePanel({
   onWishChange,
   locked,
   dirty,
+  warning = null,
   onGenerate,
 }: GeneratePanelProps) {
   return (
@@ -47,6 +50,7 @@ export function GeneratePanel({
               В шаге есть несохранённые правки: генерация их заменит.
             </p>
           )}
+          {warning !== null && <p className="authoring-warning">{warning}</p>}
         </>
       )}
       <div>
