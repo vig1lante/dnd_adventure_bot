@@ -5,19 +5,31 @@ import { sessionToken } from "../../store/game";
 import { fakeServer, signInAs } from "../../test-setup";
 import { DraftEditor } from "./DraftEditor";
 import {
+  actOf,
   callsTo,
   deityOf,
   draftOf,
+  encounterOf,
+  exitOf,
+  factionOf,
+  featureOf,
+  itemOf,
   jobOf,
   locationOf,
+  monsterOf,
   npcOf,
   openStep,
   optionValues,
   refsOf,
+  regionOf,
+  reportOf,
   relationOf,
   renderEditor,
+  revelationOf,
+  secretOf,
   stepsOf,
 } from "./fixtures";
+import { ADVENTURE_ID_HINT, ID_HINT } from "./labels";
 
 // Подменяются только таймеры экрана: React, промисы и ответы заглушки работают как обычно.
 const FAKE_TIMERS: (
@@ -41,7 +53,7 @@ const button = (name: string | RegExp) => screen.getByRole("button", { name });
 const CONCEPT_PATH = "/api/drafts/d1/sections/settings";
 
 describe("полоска шагов", () => {
-  test("девять шагов по порядку со статусами сервера: пусто, черновик, готово", async () => {
+  test("двенадцать шагов по порядку со статусами сервера, затем «Проверка» и «Публикация»", async () => {
     renderEditor(
       draftOf({
         steps: stepsOf({
@@ -53,6 +65,8 @@ describe("полоска шагов", () => {
             updated_at: "2026-10-25T10:03:00Z",
           },
           relations: { status: "ready", updated_at: "2026-10-25T10:04:00Z" },
+          encounters: { status: "draft", updated_at: "2026-10-25T10:05:00Z" },
+          items: { status: "ready", updated_at: "2026-10-25T10:06:00Z" },
         }),
       }),
     );
@@ -74,6 +88,11 @@ describe("полоска шагов", () => {
       "Наполнение",
       "Персонажи",
       "Связи",
+      "Бои и боссы",
+      "Предметы и награды",
+      "Улики",
+      "Проверка",
+      "Публикация",
     ]);
     expect(stepButton("Замысел")).toHaveTextContent("готово");
     expect(stepButton("Мир")).toHaveTextContent("черновик");
@@ -85,6 +104,23 @@ describe("полоска шагов", () => {
     expect(stepButton("Наполнение")).toHaveTextContent("черновик");
     expect(stepButton("Персонажи")).toHaveTextContent("пусто");
     expect(stepButton("Связи")).toHaveTextContent("готово");
+    expect(stepButton("Бои и боссы")).toHaveTextContent("черновик");
+    expect(stepButton("Предметы и награды")).toHaveTextContent("готово");
+    expect(stepButton("Улики")).toHaveTextContent("пусто");
+    // У проверки и публикации своего статуса нет: это не шаги генерации.
+    for (const screenName of ["Проверка", "Публикация"]) {
+      expect(stepButton(screenName)).not.toHaveTextContent(
+        /пусто|черновик|готово/,
+      );
+    }
+  });
+
+  test("замок целого шага блока 6 — у его экрана: step:clues у «Улик»", async () => {
+    renderEditor(draftOf({ locks: ["step:clues"] }));
+    await opened();
+
+    expect(stepButton("Улики")).toHaveTextContent("закреплён");
+    expect(stepButton("Бои и боссы")).not.toHaveTextContent("закреплён");
   });
 
   test("замок целого шага блока 5 — у его экрана: step:location_contents у «Наполнения»", async () => {
@@ -1505,4 +1541,348 @@ test("сбой перезагрузки справочника: прежний �
   expect(
     within(marta).getByRole("combobox", { name: "Где находится" }),
   ).toHaveValue("location:crypt");
+});
+
+// --- финальное покрытие блока 6: одна сущность на экранах «Бои и боссы», «Предметы», «Улики» ---
+
+const FIGHTS = draftOf({
+  version: 4,
+  locations: [
+    locationOf({ id: "crypt", name: "Склеп", encounter_id: "crypt-ghouls" }),
+  ],
+  encounters: [encounterOf()],
+  items: [itemOf()],
+  revelations: [revelationOf()],
+});
+// Справочник SRD нужен только экрану боёв; пустой список — чтобы не было текста сбоя.
+const SRD_ROUTE = { "GET /api/srd/monsters": { json: [] } };
+
+// Экран → шаг генерации → цель одной сущности (дополнение B6, §1: цели по `steps.target_id`).
+describe.each([
+  {
+    label: "Бои и боссы",
+    step: "encounters",
+    target: "encounter:crypt-ghouls",
+    name: "Бой crypt-ghouls",
+    edit: (form: HTMLElement) => editIn(form, "Тактика", "Бегут"),
+  },
+  {
+    label: "Предметы и награды",
+    step: "items",
+    target: "item:crypt-key",
+    name: "Ключ от склепа",
+    edit: (form: HTMLElement) => editIn(form, "Описание", "Ржавый ключ"),
+  },
+  {
+    label: "Улики",
+    step: "clues",
+    target: "revelation:smuggler",
+    name: "Откровение smuggler",
+    edit: (form: HTMLElement) => editIn(form, "Вывод", "Фабиан лжёт"),
+  },
+] as const)(
+  "одна сущность на экране «$label»",
+  ({ label, step, target, name, edit }) => {
+    test("несохранённые правки закрывают «Закрепить» и «Перегенерировать» с подсказкой", async () => {
+      const { form } = await openStep(FIGHTS, label, SRD_ROUTE);
+      const regenerate = await regenerateButton(form, name);
+      const lock = within(form).getByRole("button", {
+        name: `Закрепить: ${name}`,
+      });
+      expect(regenerate).toBeEnabled();
+      expect(lock).toBeEnabled();
+
+      edit(form);
+
+      expect(regenerate).toBeDisabled();
+      expect(regenerate).toHaveAccessibleDescription(
+        "Сначала сохраните раздел",
+      );
+      expect(lock).toBeDisabled();
+      expect(form).toHaveTextContent(
+        "Сначала сохраните раздел: закрепить и перегенерировать можно только сохранённое.",
+      );
+    });
+
+    test("новое пожелание шага сохраняется первым, затем задание {step, target}", async () => {
+      const { server, form } = await openStep(FIGHTS, label, {
+        ...SRD_ROUTE,
+        [`PUT /api/drafts/d1/wishes/${step}`]: {
+          json: { ...FIGHTS, version: 5, wishes: { [step]: "Страшнее" } },
+        },
+        "POST /api/drafts/d1/generate": {
+          status: 202,
+          json: jobOf({ step, target }),
+        },
+      });
+      fireEvent.change(
+        within(form).getByRole("textbox", { name: "Что хочу увидеть" }),
+        { target: { value: "Страшнее" } },
+      );
+      fireEvent.click(await regenerateButton(form, name));
+
+      expect(await screen.findByText("Генерирую…")).toBeInTheDocument();
+      expect(
+        server.calls
+          .filter((call) => call.method !== "GET")
+          .map((call) => [call.method, call.path, call.body]),
+      ).toEqual([
+        [
+          "PUT",
+          `/api/drafts/d1/wishes/${step}`,
+          { version: 4, text: "Страшнее" },
+        ],
+        ["POST", "/api/drafts/d1/generate", { step, target }],
+      ]);
+    });
+
+    test("закреплённую сущность не перегенерировать; «Закрепить» нажат", async () => {
+      const { form } = await openStep(
+        { ...FIGHTS, locks: [target] },
+        label,
+        SRD_ROUTE,
+      );
+
+      expect(await regenerateButton(form, name)).toBeDisabled();
+      expect(
+        within(form).getByRole("button", { name: `Закрепить: ${name}` }),
+      ).toHaveAttribute("aria-pressed", "true");
+    });
+
+    test("шаг закреплён целиком — «Перегенерировать» закрыта и у незакреплённой сущности", async () => {
+      const { form } = await openStep(
+        { ...FIGHTS, locks: [`step:${step}`] },
+        label,
+        SRD_ROUTE,
+      );
+
+      expect(await regenerateButton(form, name)).toBeDisabled();
+    });
+  },
+);
+
+test.each([
+  ["Бои и боссы", "encounters"],
+  ["Предметы и награды", "items"],
+  ["Улики", "clues"],
+] as const)(
+  "«Сгенерировать шаг» на экране «%s» ставит задание шага %s без цели",
+  async (label, step) => {
+    const { server, form } = await openStep(FIGHTS, label, {
+      ...SRD_ROUTE,
+      "POST /api/drafts/d1/generate": { status: 202, json: jobOf({ step }) },
+    });
+
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Сгенерировать шаг" }),
+    );
+
+    expect(await screen.findByText("Генерирую…")).toBeInTheDocument();
+    expect(
+      callsTo(server, "POST", "/api/drafts/d1/generate").map(
+        (call) => call.body,
+      ),
+    ).toEqual([{ step }]);
+  },
+);
+
+// --- fix-раунд 1 блока 6 (дополнение B6, §11: R2, R5, R12) ---
+
+describe("подсказка id — правило шаблона сервера на всех полях id (R2)", () => {
+  // Сущность каждого вида с полем id: так на каждом экране видны все его поля id.
+  const CRYPT = locationOf({
+    id: "crypt",
+    name: "Склеп",
+    exits: [exitOf()],
+    features: [featureOf()],
+    secrets: [secretOf()],
+  });
+  const ALL = draftOf({
+    world: { history: "", regions: [regionOf()], rumors: [] },
+    deities: [deityOf()],
+    factions: [factionOf()],
+    plot: { acts: [actOf()], endings: [], villain: null },
+    locations: [CRYPT],
+    npcs: [npcOf()],
+    relations: [relationOf()],
+    items: [itemOf()],
+    encounters: [encounterOf()],
+    monsters: [monsterOf()],
+    revelations: [revelationOf()],
+  });
+  // id зоны и находки — строки, а не EntityId движка (у них свои подсказки); id действия
+  // статблока подписан «Идентификатор действия» и сюда не попадает.
+  const NOT_ENTITY_ID = new Set(["Зоны", "Что раскрывает"]);
+  const entityIdFields = (region: HTMLElement) =>
+    within(region)
+      .getAllByRole("textbox", { name: /^Идентификатор( улики)?$/ })
+      .filter(
+        (field) =>
+          !NOT_ENTITY_ID.has(
+            field.closest("fieldset.form-group")?.querySelector("legend")
+              ?.textContent ?? "",
+          ),
+      );
+  const description = (field: HTMLElement) =>
+    (field.getAttribute("aria-describedby") ?? "")
+      .split(" ")
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+      .join(" ");
+
+  test("текст правила — шаблон EntityId движка (строчная латиница, первый знак — буква или цифра)", () => {
+    expect(ID_HINT).toBe(
+      "Строчная латиница, цифры, «-» и «_»; начинается с буквы или цифры.",
+    );
+    expect(ADVENTURE_ID_HINT).toBe(
+      "Строчная латиница, цифры, «-» и «_»; начинается с буквы или цифры; до 64 знаков.",
+    );
+  });
+
+  test.each([
+    ["Мир", 1],
+    ["Боги", 1],
+    ["Фракции", 1],
+    ["Сюжет", 1],
+    ["Карта", 2],
+    ["Наполнение", 3],
+    ["Персонажи", 1],
+    ["Связи", 1],
+    ["Бои и боссы", 2],
+    ["Предметы и награды", 1],
+    ["Улики", 2],
+  ] as const)(
+    "«%s»: у каждого поля id (%i) подсказка — правило сервера",
+    async (step, count) => {
+      const { form } = await openStep(ALL, step, {
+        "GET /api/srd/monsters": { json: [] },
+      });
+
+      const fields = entityIdFields(form);
+      expect(fields).toHaveLength(count);
+      for (const field of fields) {
+        expect(description(field)).toContain(ID_HINT);
+      }
+    },
+  );
+
+  test("«Замысел»: у id приключения — правило и «до 64 знаков»", async () => {
+    renderEditor(ALL);
+    await opened();
+
+    expect(
+      description(
+        within(panel("Замысел")).getByRole("textbox", {
+          name: "id приключения",
+        }),
+      ),
+    ).toContain(ADVENTURE_ID_HINT);
+  });
+});
+
+describe("генерация Замысла пишет и откровения «Улик» (R5)", () => {
+  const SMUGGLER = revelationOf();
+  const fromClues =
+    "На экране «Улики» есть несохранённые правки: они пропадут.";
+  const fromConcept =
+    "На экране «Замысел» есть несохранённые правки: они пропадут.";
+
+  test("у «Сгенерировать шаг» Замысла — подсказка: заменит и незакреплённые откровения с уликами", async () => {
+    renderEditor(draftOf());
+    await opened();
+
+    const note = within(panel("Замысел")).getByText(
+      "Генерация Замысла заменит и незакреплённые откровения с уликами на шаге «Улики»: закрепите нужные.",
+    );
+    expect(note.closest(".authoring-generate")).not.toBeNull();
+  });
+
+  test("на «Уликах» — строка, что откровения пишет и генерация Замысла", async () => {
+    const { form } = await openStep(draftOf(), "Улики");
+
+    expect(form).toHaveTextContent(
+      "Откровения пишет и генерация Замысла: незакреплённые она заменит вместе с уликами — закрепите нужные.",
+    );
+  });
+
+  test("несохранённые правки «Улик»: Замысел предупреждает у генерации, но не у сохранения", async () => {
+    renderEditor(draftOf({ revelations: [SMUGGLER] }));
+    await opened();
+    fireEvent.click(stepButton("Улики"));
+    fireEvent.change(
+      within(panel("Улики")).getByRole("textbox", { name: "Вывод" }),
+      { target: { value: "Фабиан лжёт" } },
+    );
+
+    fireEvent.click(stepButton("Замысел"));
+
+    const warnings = within(panel("Замысел")).getAllByText(fromClues);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].closest(".authoring-generate")).not.toBeNull();
+  });
+
+  test("несохранённые правки Замысла «Улики» не задевают: предупреждения там нет", async () => {
+    renderEditor(draftOf({ revelations: [SMUGGLER] }));
+    await opened();
+    fireEvent.change(
+      within(panel("Замысел")).getByRole("textbox", { name: "Название" }),
+      { target: { value: "Маяк" } },
+    );
+
+    fireEvent.click(stepButton("Улики"));
+
+    expect(panel("Улики")).not.toHaveTextContent(fromConcept);
+  });
+});
+
+describe("проверка и публикация говорят о несохранённых правках других экранов (R12)", () => {
+  const typeDeityName = (value: string) => {
+    fireEvent.click(stepButton("Боги"));
+    fireEvent.change(
+      within(
+        within(panel("Боги")).getByRole("group", { name: "Тиамат" }),
+      ).getByRole("textbox", { name: "Имя" }),
+      { target: { value } },
+    );
+  };
+
+  test.each(["Проверка", "Публикация"])(
+    "«%s»: строка с экранами, где правки не сохранены; без правок её нет",
+    async (screenName) => {
+      renderEditor(draftOf({ deities: [deityOf()] }), {
+        "POST /api/drafts/d1/validate": { json: reportOf() },
+      });
+      await opened();
+
+      fireEvent.click(stepButton(screenName));
+      expect(panel(screenName)).not.toHaveTextContent(
+        "есть несохранённые правки",
+      );
+
+      typeDeityName("Бахамут");
+      fireEvent.click(stepButton("Замысел"));
+      fireEvent.change(
+        within(panel("Замысел")).getByRole("textbox", { name: "Название" }),
+        { target: { value: "Маяк" } },
+      );
+      fireEvent.click(stepButton(screenName));
+
+      expect(panel(screenName)).toHaveTextContent(
+        "На экранах «Замысел», «Боги» есть несохранённые правки: проверка и публикация их не видят.",
+      );
+    },
+  );
+
+  test("одна несохранённая правка — «На экране «Боги»…»", async () => {
+    renderEditor(draftOf({ deities: [deityOf()] }), {
+      "POST /api/drafts/d1/validate": { json: reportOf() },
+    });
+    await opened();
+
+    typeDeityName("Бахамут");
+    fireEvent.click(stepButton("Проверка"));
+
+    expect(panel("Проверка")).toHaveTextContent(
+      "На экране «Боги» есть несохранённые правки: проверка и публикация их не видят.",
+    );
+  });
 });

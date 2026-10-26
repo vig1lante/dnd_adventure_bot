@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { LocationsSection } from "../../api/types";
 import { SelectField } from "../fields";
 import { SAVE_FIRST_REGENERATE, SectionForm, sameData } from "./fields";
@@ -51,8 +51,6 @@ function ContentsForm({
   const itemsDirty = !sameData(items, draft.items);
   const locationsDirty = !sameData(locations, draft.locations);
   const dirty = itemsDirty || locationsDirty;
-  // «Карта» правит тот же раздел: редактор предупредит её о правках наполнения.
-  useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
 
   if (locations.length === 0) {
     return (
@@ -90,6 +88,7 @@ function ContentsForm({
 
   return (
     <SectionForm
+      onDirtyChange={onDirtyChange}
       onSubmit={save}
       dirty={dirty}
       dirtyHint={SAVE_FIRST_REGENERATE}

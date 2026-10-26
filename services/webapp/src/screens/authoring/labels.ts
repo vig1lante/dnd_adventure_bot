@@ -1,10 +1,24 @@
 import type {
   Ability,
+  ActionRange,
+  MonsterActionKind,
   RefKind,
   RelationKind,
   RevealKind,
   Skill,
 } from "../../api/types";
+import { damageTypeName, rangeName } from "../../components/format";
+
+// Шаблон id сущностей движка (`ID_PATTERN`: `^[a-z0-9][a-z0-9_-]{0,63}$`, дополнение B6 §2)
+// словами: одно правило на все поля id, которые сервер проверяет этим шаблоном.
+const ID_RULE =
+  "Строчная латиница, цифры, «-» и «_»; начинается с буквы или цифры";
+
+/** Подсказка поля id сущности: правило шаблона сервера. */
+export const ID_HINT = `${ID_RULE}.`;
+
+/** Подсказка поля id приключения: то же правило и его длина. */
+export const ADVENTURE_ID_HINT = `${ID_RULE}; до 64 знаков.`;
 
 // Подписи значений схемы приключения по-русски (названия — как в движке, `abilities.py`). Клиент
 // только предлагает выбор из этих значений; проверяет и считает сервер.
@@ -81,4 +95,69 @@ export const REF_KINDS: Record<RefKind, string> = {
   location: "локация",
   item: "предмет",
   encounter: "бой",
+};
+
+/** Виды действий статблока. */
+export const ACTION_KINDS: readonly {
+  value: MonsterActionKind;
+  label: string;
+}[] = [
+  { value: "attack", label: "атака" },
+  { value: "save", label: "спасбросок" },
+  { value: "multiattack", label: "мультиатака" },
+  { value: "other", label: "другое" },
+];
+
+/** Дальность действия статблока; подписи — общие, как у оружия героя. */
+export const RANGE_OPTIONS: readonly { value: ActionRange; label: string }[] = (
+  ["melee", "near", "far"] as const
+).map((value) => ({ value, label: rangeName(value) }));
+
+/** Тринадцать типов урона SRD (id — как в движке); подписи — общие, как в листе героя. */
+export const DAMAGE_TYPE_OPTIONS: readonly { value: string; label: string }[] =
+  [
+    "acid",
+    "bludgeoning",
+    "cold",
+    "fire",
+    "force",
+    "lightning",
+    "necrotic",
+    "piercing",
+    "poison",
+    "psychic",
+    "radiant",
+    "slashing",
+    "thunder",
+  ].map((value) => ({ value, label: damageTypeName(value) }));
+
+// Дробные опасности монстров в записи D&D.
+const CR_FRACTIONS: Record<number, string> = {
+  0.125: "1/8",
+  0.25: "1/4",
+  0.5: "1/2",
+};
+
+/** Опасность монстра (cr) записью D&D: 0,25 → «1/4». Только запись числа сервера. */
+export const crText = (cr: number): string =>
+  CR_FRACTIONS[cr] ?? String(cr).replace(".", ",");
+
+/** Виды частей ссылки находки проверки (`location:crypt/exit:down`) и ссылка `adventure`. */
+export const FINDING_KINDS: Record<string, string> = {
+  adventure: "приключение",
+  location: "локация",
+  exit: "выход",
+  feature: "деталь",
+  secret: "секрет",
+  npc: "персонаж",
+  item: "предмет",
+  encounter: "бой",
+  monster: "монстр",
+  action: "действие",
+  revelation: "откровение",
+  clue: "улика",
+  deity: "бог",
+  faction: "фракция",
+  relation: "связь",
+  region: "регион",
 };

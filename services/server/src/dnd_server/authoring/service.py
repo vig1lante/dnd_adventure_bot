@@ -1,9 +1,11 @@
-"""Черновики конструктора (планы B4.1, B5.1; спека §10.2, §10.3, Р5, Р7; дополнения dispatcher B4
-и B5).
+"""Черновики конструктора (планы B4.1, B5.1, B6.1; спека §10.2, §10.3, Р5, Р7; дополнения
+dispatcher B4, B5 и B6).
 
 Слой не знает про HTTP: принимает сессию базы и автора, отдаёт JSON контракта (`Draft`,
-`DraftSummary`, `DraftReport`, справочник ссылок) и отказывает исключениями `DraftError` с кодом
-отказа (`code`). Как они превращаются в ответы, решает `api.py`.
+`DraftSummary`, `DraftReport`, справочник ссылок, справочник монстров SRD) и архив черновика, а
+отказывает исключениями `DraftError` с кодом отказа (`code`). Как они превращаются в ответы, решает
+`api.py`. Новый черновик бывает пустым, копией приключения каталога или импортом архива
+(`from_adventure`); публикация — `publish.py`, разбор и сборка архива — `archive.py`.
 
 Черновик видит и меняет только автор: чужой черновик не отличается от несуществующего (404).
 Каждая запись поднимает версию; запись по чужой версии отвергается (409 `version_conflict`), и
@@ -12,27 +14,43 @@
 результат задания не перетирает ручные правки.
 """
 
+import asyncio
 from collections.abc import Iterable
 from typing import Any, ClassVar
 
 from pydantic import TypeAdapter, ValidationError
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
-from dnd_server.authoring.draft import SECTION_KINDS, AuthoringDraft, LockRef, Plot, Wish
+from dnd_engine.adventure.schema import Adventure
+from dnd_engine.content import load_srd
+from dnd_server.adventures import shorten_problems
+from dnd_server.authoring.archive import ArchiveInvalid, export_zip, read_adventure
+from dnd_server.authoring.draft import (
+    SECTION_KINDS,
+    AuthoringDraft,
+    LockRef,
+    Plot,
+    Wish,
+    from_adventure,
+    to_adventure,
+)
 from dnd_server.authoring.sections import (
     EDITOR_STEPS,
     SECTION_STEPS,
     InvalidSection,
     apply_section,
     draft_report,
+    problems,
+    section_problems,
     section_steps,
     step_statuses,
 )
 from dnd_server.db.models import (
     ACTIVE_JOB_STATUSES,
     AdventureDraft,
+    AuthoredAdventure,
     AuthoringJob,
     User,
     utcnow,
@@ -42,6 +60,8 @@ _WISH = TypeAdapter(Wish)
 _LOCK = TypeAdapter(LockRef)
 
 JOB_RUNNING = "Идёт генерация шага: дождитесь её окончания, потом правьте черновик."
+ID_LOCKED = "Приключение уже опубликовано под этим id."
+NO_ADVENTURE_ID = "Сначала задайте id приключения."
 # Закрепления уходят в промпт каждого шага: их число ограничено (дополнение §7).
 MAX_LOCKS = 256
 VERSION_CONFLICT = "Черновик изменился: обновите его и повторите правку."
@@ -203,6 +223,57 @@ async def validate_draft(session: AsyncSession, user: User, draft_id: str) -> di
     return draft_report(stored_draft(await owned_draft(session, user, draft_id)))
 
 
+async def published_id(session: AsyncSession, draft_id: str) -> str | None:
+    """id приключения, под которым черновик опубликован; не публиковался — `None`. После первой
+    публикации id черновика закреплён (дополнение B6 §2). Если строк несколько (данные до
+    fix-раунда 1 B6), закреплён самый ранний id: ответ не зависит от порядка строк в базе."""
+    return await session.scalar(
+        select(AuthoredAdventure.id)
+        .where(AuthoredAdventure.source_draft_id == draft_id)
+        .order_by(AuthoredAdventure.published_at, AuthoredAdventure.id)
+        .limit(1)
+    )
+
+
+async def same_version(session: AsyncSession, draft_id: str, version: int) -> bool:
+    """Черновик всё ещё версии `version` — сверка записью, которая версию не поднимает (запись
+    публикации черновик не меняет). Она открывает транзакцию записи, и до её конца другая запись
+    черновика не закоммитится между сверкой и записью вызывающего."""
+    result = await session.execute(
+        update(AdventureDraft)
+        .where(AdventureDraft.id == draft_id, AdventureDraft.version == version)
+        .values(version=AdventureDraft.version)
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount == 1
+
+
+def srd_monsters() -> list[dict[str, Any]]:
+    """Справочник монстров SRD для боя (дополнение B6 §8): `[{id, name, cr, xp, tags}]` в порядке
+    данных; размера и типа в данных SRD нет."""
+    return [
+        {"id": m.id, "name": m.name, "cr": m.cr, "xp": m.xp, "tags": list(m.tags)}
+        for m in load_srd().monsters.values()
+    ]
+
+
+async def export_draft(session: AsyncSession, user: User, draft_id: str) -> tuple[str, bytes]:
+    """(id приключения, zip папки v2) черновика автора. Ошибки проверки экспорт не блокируют; нет
+    id — `no_adventure_id`, черновик не собирается в приключение — `export_invalid`."""
+    draft = stored_draft(await owned_draft(session, user, draft_id))
+    if draft.id is None:
+        raise DraftInvalid(NO_ADVENTURE_ID, "no_adventure_id")
+    try:
+        adventure = to_adventure(draft)
+    except ValidationError as error:
+        found = problems(error.errors(include_input=False))
+        raise DraftInvalid(
+            "Черновик не собирается в приключение.", "export_invalid", found
+        ) from None
+    # Запись файлов во временную папку и сжатие — не в цикле событий сервера.
+    return draft.id, await asyncio.to_thread(export_zip, adventure)
+
+
 async def draft_refs(session: AsyncSession, user: User, draft_id: str) -> list[dict[str, str]]:
     return refs_out(stored_draft(await owned_draft(session, user, draft_id)))
 
@@ -223,8 +294,49 @@ def put_into(row: AdventureDraft, draft: AuthoringDraft, steps: Iterable[str] = 
 
 
 async def create_draft(session: AsyncSession, user: User, title: str) -> dict[str, Any]:
+    return await _insert(session, user, AuthoringDraft(title=title))
+
+
+IMPORT_REFUSED = "Архив не подходит для импорта."
+
+
+async def copy_adventure(session: AsyncSession, user: User, adventure: Adventure) -> dict[str, Any]:
+    """Новый черновик автора — копия приключения каталога (папки или опубликованного) без
+    пожеланий; флажок мата — умолчание Р1 (у приключения его нет). Пределы разделов копия не
+    проверяет: папки — данные владельца, опубликованное их уже прошло; публикация копии проверит."""
+    return await _insert(session, user, draft_of(adventure))
+
+
+async def import_draft(session: AsyncSession, user: User, data: bytes) -> dict[str, Any]:
+    """Новый черновик автора из присланного архива; архив не подходит (в том числе по пределам
+    разделов, как у ручной записи) — `archive_invalid`."""
+    try:
+        # Распаковка во временную папку и загрузчик — не в цикле событий сервера.
+        adventure = await asyncio.to_thread(read_adventure, data)
+    except ArchiveInvalid as error:
+        raise DraftInvalid(IMPORT_REFUSED, "archive_invalid", error.problems) from None
+    draft = draft_of(adventure)
+    if found := section_problems(draft):
+        lines = [line for section_lines in found.values() for line in section_lines]
+        raise DraftInvalid(IMPORT_REFUSED, "archive_invalid", shorten_problems(lines))
+    return await _insert(session, user, draft)
+
+
+def draft_of(adventure: Adventure) -> AuthoringDraft:
+    """Черновик из приключения (`from_adventure`). Старт и финал, которых нет, в формате приключения
+    — пустые строки, а в черновике — `null` («не выбран», как пишет «Карта»)."""
+    draft = from_adventure(adventure)
+    return draft.model_copy(
+        update={
+            "start_location": draft.start_location or None,
+            "finale_location": draft.finale_location or None,
+        }
+    )
+
+
+async def _insert(session: AsyncSession, user: User, draft: AuthoringDraft) -> dict[str, Any]:
     row = AdventureDraft(owner_user_id=user.id, step_times={})
-    put_into(row, AuthoringDraft(title=title))
+    put_into(row, draft)
     session.add(row)
     await session.commit()
     return draft_out(row, None)
@@ -262,6 +374,10 @@ async def put_section(
         raise DraftInvalid(
             "Данные раздела не прошли проверку.", "invalid_data", error.problems
         ) from None
+    if section == "settings":
+        locked = await published_id(session, row.id)
+        if locked is not None and draft.id != locked:
+            raise DraftInvalid(ID_LOCKED, "adventure_id_locked")
     put_into(row, draft, steps=section_steps(section))
     await _commit(session)
     return await _out(session, row)

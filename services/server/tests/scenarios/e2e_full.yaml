@@ -322,3 +322,95 @@ json:
         b: deity:selmara
         kind: worships
         mutual: false
+  # Шаги генератора для боёв, предметов и улик (блок 6 DND-2): третий тест
+  # `services/webapp/e2e/authoring.spec.ts` проходит на настоящем сервере все двенадцать шагов на
+  # карте шага locations (гавань и тропа), «Проверку» без ошибок и публикацию, а затем играет раунд
+  # на опубликованном приключении. Бой с боссом — на тропе (финал карты): свой статблок пепельного
+  # жреца и монстры SRD. Опыт своего статблока равен опыту монстра SRD того же cr (3 → 700,
+  # правило `custom_monster_xp`), а 2600 XP — высокая сложность для шестерых героев 3 уровня
+  # (2400–3600), поэтому предупреждений о бое нет. Предметы лежат у NPC, а не открыто в локациях.
+  # Три улики открытия замысла лежат в двух местах: в детали тропы, у Брама (тропа) и у Ильзы
+  # (гавань). Ссылки ведут только в ответы шагов выше.
+  generator.encounters:
+    encounters:
+      - id: ash-rite
+        location_id: cliff-path
+        trigger: Отряд мешает обряду над обрывом или нападает на жреца.
+        tactics: >-
+          Жрец держится у края и бьёт волнами пепла, фанатики прикрывают его, упыри лезут из-под
+          обрыва и пытаются столкнуть героев вниз.
+        boss: true
+        monsters:
+          - monster_id: ash-priest
+            count: 1
+          - monster_id: cultist_fanatic
+            count: 2
+          - monster_id: ghoul
+            count: 5
+    monsters:
+      - id: ash-priest
+        name: Пепельный жрец
+        name_en: Ash Priest
+        cr: 3
+        xp: 700
+        ac: 15
+        hp: 90
+        hp_dice: 12d8+36
+        speed: 30
+        scores: {str: 10, dex: 14, con: 16, int: 13, wis: 17, cha: 15}
+        saves: {wis: 6}
+        skills: {religion: 4}
+        immunities: [fire]
+        actions:
+          - id: multiattack
+            name: Серия ударов
+            kind: multiattack
+            multiattack: [ash-staff, ash-staff]
+          - id: ash-staff
+            name: Пепельный посох
+            kind: attack
+            attack_bonus: 6
+            damage: 1d8+2
+            damage_type: bludgeoning
+            secondary_damage: 2d6
+            secondary_damage_type: fire
+            summary: Дробящий урон 1к8 + 2 и ещё 2к6 огнём.
+          - id: ash-wave
+            name: Волна пепла
+            kind: save
+            save: dex
+            dc: 14
+            damage: 4d6
+            damage_type: fire
+            half_on_save: true
+            targets: 4
+            range: near
+            summary: Спасбросок Ловкости, Сл 14; огонь 4к6, при успехе половина.
+        traits:
+          - Пепел в крови — огонь не причиняет ему вреда.
+        tags: [humanoid]
+  generator.items:
+    items:
+      - id: harbor-ledger
+        name: Книга гавани
+        description: Толстая книга Ильзы, в ней записаны все корабли, разбившиеся у мыса.
+        holder: npc:ilsa
+        public: Книга, в которую начальница гавани записывает корабли.
+      - id: healing-draught
+        name: Зелье лечения
+        description: Склянка с красной жидкостью, которую Брам выменял у моряков.
+        base_item: potion_of_healing
+        holder: npc:bram
+  generator.clues:
+    revelations:
+      - revelation_id: ash-truth
+        clues:
+          - id: clue-ash-marks
+            description: Пепельные следы ведут от обрыва прямо к маяку.
+            where: feature:ash-marks
+          - id: clue-bram
+            description: Брам проговаривается, что по ночам к маяку ходят люди в сером.
+            where: npc:bram
+          - id: clue-ilsa
+            description: Ильза вспоминает, что огонь погас в ночь, когда в гавань пришли люди в сером.
+            where: npc:ilsa

@@ -20,6 +20,7 @@ from dnd_server.auth.session import SessionSigner
 from dnd_server.authoring.api import handle_draft_error
 from dnd_server.authoring.api import router as authoring_router
 from dnd_server.authoring.jobs import fail_interrupted_jobs
+from dnd_server.authoring.publish import load_published
 from dnd_server.authoring.service import DraftError
 from dnd_server.bot.bot import running_bot
 from dnd_server.bot.handlers import BotDeps
@@ -113,13 +114,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Папку для файла SQLite создаёт приложение при старте, а не сборка приложения: сборка
     # (в том числе в тестах) не должна ничего создавать на диске.
     create_database_directory(app.state.engine.url)
-    # Каталог приключений читается один раз при старте; битая папка в него не попадает.
-    app.state.adventures = load_catalog(app.state.settings.content_dir, load_srd())
+    # Каталог приключений — один словарь на всё время работы: его держат маршруты игр, публикация
+    # конструктора и бот. Папки читаются при старте (битая в каталог не попадает), опубликованное —
+    # из базы ниже, а публикация дописывает его на месте, без перезапуска.
+    catalog = app.state.adventures
+    catalog.update(load_catalog(app.state.settings.content_dir, load_srd()))
     # Бот живёт, пока работает приложение, и только с токеном; к этому моменту каталог уже загружен.
     bot_deps = BotDeps(
         settings=app.state.settings,
         sessionmaker=app.state.sessionmaker,
-        catalog=app.state.adventures,
+        catalog=catalog,
         turn_tokens=getattr(app.state, "turn_tokens", None),
     )
     async with running_bot(bot_deps) as notifier:
@@ -129,6 +133,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await restore_games(Flow.from_app(app))
             # Задания конструктора, прерванные остановкой, иначе навсегда закрыли бы свои черновики.
             await fail_interrupted_jobs(app.state.sessionmaker, app.state.settings)
+            # Опубликованное конструктором — в тот же каталог; папка побеждает при совпадении id.
+            await load_published(app.state.sessionmaker, catalog, app.state.settings)
         try:
             yield
         finally:

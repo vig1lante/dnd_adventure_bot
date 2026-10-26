@@ -1,7 +1,7 @@
 import type { RefKind } from "../../api/types";
 import { SelectField } from "../fields";
 import { withCurrent } from "./fields";
-import type { DraftRefs } from "./fields";
+import type { DraftRefs, Option } from "./fields";
 import { REF_KINDS } from "./labels";
 
 interface RefPickerProps {
@@ -12,6 +12,8 @@ interface RefPickerProps {
   /** Какие виды сущностей подходят полю (дополнение B5, §6). */
   kinds: readonly RefKind[];
   refs: DraftRefs;
+  /** Варианты сверх справочника сервера, со своими подписями (детали локаций для улики). */
+  extra?: readonly Option[];
   /** Ссылка `<вид>:<id>`; `""` — не выбрано. */
   value: string;
   onChange: (ref: string) => void;
@@ -24,19 +26,23 @@ export function RefPicker({
   placeholder,
   kinds,
   refs,
+  extra = [],
   value,
   onChange,
 }: RefPickerProps) {
   // У поля одного вида вид в подписи лишний; у смешанного списка он отличает тёзок.
-  const options = refs.list
-    .filter((entry) => kinds.includes(entry.kind))
-    .map((entry) => ({
-      value: entry.ref,
-      label:
-        kinds.length > 1
-          ? `${entry.name} (${REF_KINDS[entry.kind]})`
-          : entry.name,
-    }));
+  const options = [
+    ...refs.list
+      .filter((entry) => kinds.includes(entry.kind))
+      .map((entry) => ({
+        value: entry.ref,
+        label:
+          kinds.length > 1
+            ? `${entry.name} (${REF_KINDS[entry.kind]})`
+            : entry.name,
+      })),
+    ...extra,
+  ];
   return (
     <SelectField
       label={label}

@@ -3,7 +3,9 @@
 
 `generate(provider, draft, progress)` проходит по порядку все пустые шаги черновика
 (`steps.run_step`), собирает приключение (`draft.to_adventure`) и проверяет его (`check`:
-валидатор движка и применимость находок тайн мест). Блокирующие ошибки возвращаются шагу-владельцу
+валидатор движка, применимость находок тайн мест и опыт своих статблоков по cr). Та же проверка —
+у конструктора, публикации и каталога папок (дополнение dispatcher B6 §3, §4): правило одно для всех
+путей, движок не меняется. Блокирующие ошибки возвращаются шагу-владельцу
 (`owner_step`): шаг повторяется с отчётом об ошибках в промпте (`steps.repair_step`), приключение
 пересобирается и проверяется снова. Кругов исправления не больше `MAX_REPAIR_ROUNDS`;
 предупреждения круг не запускают.
@@ -31,6 +33,9 @@ MAX_REPAIR_ROUNDS = 3  # круги исправления после перво
 # Проблема генератора сверх валидатора (решение dispatcher B3): находка тайны места, которую мастер
 # не сможет выдать — улика или выход другой локации, предмет, который лежит не здесь.
 INAPPLICABLE_SECRET_REVEAL = "inapplicable_secret_reveal"
+# Опыт своего статблока не тот, что у монстров SRD того же cr (дополнение dispatcher B6 §4): иначе
+# бой с «сильным» монстром и малым опытом прошёл бы проверку сложности.
+CUSTOM_MONSTER_XP = "custom_monster_xp"
 
 _STEP_BY_CODE = {
     "unreachable_location": "locations",
@@ -44,6 +49,7 @@ _STEP_BY_CODE = {
     "encounter_too_hard": "encounters",
     "encounter_too_easy": "encounters",
     "boss_too_easy": "encounters",
+    CUSTOM_MONSTER_XP: "encounters",
     # Ключ переносит шаг предметов: он держит ключи и не трогает граф с остальными шагами.
     "unreachable_key": "items",
     "too_few_clues": "clues",
@@ -155,11 +161,12 @@ async def generate(
 
 
 def check(adventure: Adventure, content: SrdContent) -> Report:
-    """Отчёт валидатора движка и проверки находок тайн мест (`INAPPLICABLE_SECRET_REVEAL`).
+    """Отчёт валидатора движка и проверок сервера: находки тайн мест (`INAPPLICABLE_SECRET_REVEAL`)
+    и опыт своих статблоков (`CUSTOM_MONSTER_XP`).
 
-    Каждая такая находка — ошибка, и балл снижается так же, как за ошибку валидатора (на 10)."""
+    Каждая такая проблема — ошибка, и балл снижается так же, как за ошибку валидатора (на 10)."""
     report = validate(adventure, content)
-    extra = _secret_reveal_issues(adventure)
+    extra = [*_secret_reveal_issues(adventure), *_custom_monster_xp_issues(adventure, content)]
     if not extra:
         return report
     return Report(
@@ -184,6 +191,25 @@ def _secret_reveal_issues(adventure: Adventure) -> list[Issue]:
         for secret in location.secrets
         for reveal in secret.reveals
         if (misplaced := _misplaced(reveal, location, adventure)) is not None
+    ]
+
+
+def _custom_monster_xp_issues(adventure: Adventure, content: SrdContent) -> list[Issue]:
+    """Свои статблоки, чей cr не из данных SRD или опыт не равен опыту монстров SRD того же cr.
+
+    В сообщении — допустимые пары «cr → опыт» из данных, а не числа автора или модели."""
+    xp_by_cr = {monster.cr: monster.xp for monster in content.monsters.values()}
+    table = ", ".join(f"{cr:g} → {xp}" for cr, xp in sorted(xp_by_cr.items()))
+    message = printable(
+        f"опыт своего монстра должен соответствовать его cr: допустимы cr и опыт {table}",
+        MAX_MESSAGE_LENGTH,
+    )
+    return [
+        Issue(
+            code=CUSTOM_MONSTER_XP, severity="error", ref=f"monster:{monster.id}", message=message
+        )
+        for monster in adventure.monsters.values()
+        if xp_by_cr.get(monster.cr) != monster.xp
     ]
 
 

@@ -1,7 +1,7 @@
-// Данные ТОЛЬКО для тестов конструктора. Формы — строго по контракту блоков 4 и 5 (спека §8,
+// Данные ТОЛЬКО для тестов конструктора. Формы — строго по контракту блоков 4–6 (спека §8,
 // §10.3 и дополнения dispatcher): живого сервера у тестов нет, заглушки отвечают как он.
-// Сущности блока 5 — модели движка, как их отдаёт `model_dump(mode="json")`: все поля, включая
-// поля по умолчанию.
+// Сущности блоков 5 и 6 — модели движка, как их отдаёт `model_dump(mode="json")`: все поля,
+// включая поля по умолчанию.
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { createElement } from "react";
 import { createApi } from "../../api/client";
@@ -14,20 +14,29 @@ import type {
   Act,
   AuthoringStep,
   Deity,
+  Clue,
   Draft,
   DraftRef,
+  DraftReport,
   DraftSummary,
+  Encounter,
   Exit,
   Faction,
   Feature,
   Item,
   Job,
+  Finding,
   Location,
   LocationSecret,
+  MonsterAction,
+  MonsterDef,
+  MonsterGroup,
   Npc,
   Region,
   Relation,
+  Revelation,
   Rumor,
+  SrdMonster,
   StepState,
 } from "../../api/types";
 
@@ -289,16 +298,131 @@ export function itemOf(overrides: Partial<Item> = {}): Item {
   };
 }
 
-/** Бой черновика: разделы боёв — блок 6, клиенту блока 5 нужен только id. */
-export const encounterOf = (id: string) => ({
-  id,
-  location_id: "crypt",
-  trigger: "",
-  tactics: "",
-  monsters: [],
-  pc_zone: "here",
-  boss: false,
-});
+// --- сущности блока 6 ---
+
+export function monsterGroupOf(
+  overrides: Partial<MonsterGroup> = {},
+): MonsterGroup {
+  return { monster_id: "skeleton", count: 1, zone: "here", ...overrides };
+}
+
+/** Бой черновика (`Encounter` движка): поля по умолчанию — как их отдаёт сервер. */
+export function encounterOf(overrides: Partial<Encounter> = {}): Encounter {
+  return {
+    id: "crypt-ghouls",
+    location_id: "crypt",
+    trigger: "Кто-то открывает гроб",
+    tactics: "Окружают самого слабого",
+    monsters: [monsterGroupOf()],
+    pc_zone: "here",
+    boss: false,
+    ...overrides,
+  };
+}
+
+/** Действие статблока (`MonsterAction` движка) со всеми полями по умолчанию. */
+export function actionOf(
+  overrides: Partial<MonsterAction> = {},
+): MonsterAction {
+  return {
+    id: "claw",
+    name: "Коготь",
+    kind: "attack",
+    attack_bonus: 4,
+    damage: "1d6+2",
+    damage_type: "slashing",
+    range: "melee",
+    save: null,
+    dc: null,
+    half_on_save: false,
+    targets: 1,
+    condition: null,
+    multiattack: [],
+    summary: "",
+    reach: false,
+    secondary_damage: null,
+    secondary_damage_type: null,
+    ...overrides,
+  };
+}
+
+/** Свой статблок (`MonsterDef` движка); скорость в футах, как в данных. */
+export function monsterOf(overrides: Partial<MonsterDef> = {}): MonsterDef {
+  return {
+    id: "crypt-horror",
+    name: "Ужас склепа",
+    name_en: "Crypt Horror",
+    cr: 1,
+    xp: 200,
+    ac: 13,
+    hp: 22,
+    hp_dice: "4d8+4",
+    speed: 30,
+    scores: { str: 14, dex: 12, con: 13, int: 6, wis: 10, cha: 5 },
+    saves: {},
+    skills: {},
+    resistances: [],
+    vulnerabilities: [],
+    immunities: [],
+    actions: [actionOf()],
+    traits: [],
+    tags: ["undead"],
+    ...overrides,
+  };
+}
+
+export function clueOf(overrides: Partial<Clue> = {}): Clue {
+  return {
+    id: "torn-letter",
+    description: "Обрывок письма с печатью гильдии",
+    where: "feature:coffin",
+    ...overrides,
+  };
+}
+
+export function revelationOf(overrides: Partial<Revelation> = {}): Revelation {
+  return {
+    id: "smuggler",
+    statement: "Фабиан — контрабандист",
+    clues: [clueOf()],
+    ...overrides,
+  };
+}
+
+/** Строка справочника `GET /api/srd/monsters`: только поля, которые есть в данных SRD (B6 §8). */
+export function srdMonsterOf(overrides: Partial<SrdMonster> = {}): SrdMonster {
+  return {
+    id: "skeleton",
+    name: "Скелет",
+    cr: 0.25,
+    xp: 50,
+    tags: ["undead"],
+    ...overrides,
+  };
+}
+
+/** Находка проверки: по умолчанию — финал не выбран (текст сервера, B6 §3). */
+export function findingOf(overrides: Partial<Finding> = {}): Finding {
+  return {
+    code: "dangling_ref",
+    message: "Финал не выбран",
+    ref: "adventure",
+    step: "locations",
+    ...overrides,
+  };
+}
+
+/** Отчёт `POST /validate`: по умолчанию без находок. */
+export function reportOf(overrides: Partial<DraftReport> = {}): DraftReport {
+  return {
+    errors: [],
+    warnings: [],
+    score: 100,
+    estimated_minutes: 150,
+    readiness_percent: 100,
+    ...overrides,
+  };
+}
 
 /**
  * Справочник ссылок `GET /api/drafts/{id}/refs`, как его собирает сервер (дополнение B5, §6):
@@ -323,7 +447,7 @@ export function refsOf(draft: Draft): DraftRef[] {
     ...named("item", draft.items),
     ...named(
       "encounter",
-      (draft.encounters as { id: string }[]).map(({ id }) => ({ id })),
+      draft.encounters.map(({ id }) => ({ id })),
     ),
   ];
 }

@@ -1,6 +1,7 @@
 import type { LocationSecret } from "../../api/types";
 import { TextAreaField, TextField } from "../fields";
 import { CheckField, RevealsField } from "./FindingFields";
+import { ID_HINT } from "./labels";
 
 interface SecretEditorProps {
   secret: LocationSecret;
@@ -13,7 +14,7 @@ export function SecretEditor({ secret, update }: SecretEditorProps) {
     <>
       <TextField
         label="Идентификатор"
-        hint="Латиница, цифры, «-» и «_»; уникален во всём приключении."
+        hint={`${ID_HINT} Уникален во всём приключении.`}
         autoComplete="off"
         value={secret.id}
         onChange={(event) => update({ id: event.target.value })}

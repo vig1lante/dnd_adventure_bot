@@ -12,6 +12,7 @@ import { JournalFieldsEditor, orNull } from "./fields";
 import type { DraftRefs } from "./fields";
 import { RefPicker } from "./RefPicker";
 import { SecretEditor } from "./SecretEditor";
+import { ID_HINT } from "./labels";
 
 const ENCOUNTER = "encounter:";
 
@@ -164,7 +165,7 @@ export function LocationEditor({
             <>
               <TextField
                 label="Идентификатор"
-                hint="Латиница, цифры, «-» и «_»."
+                hint={ID_HINT}
                 autoComplete="off"
                 value={item.id}
                 onChange={(event) => change({ id: event.target.value })}

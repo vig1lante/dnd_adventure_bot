@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType } from "react";
 import { ApiError, errorText } from "../../api/client";
 import { useApi } from "../../api/context";
@@ -6,19 +6,30 @@ import type { AuthoringStep, Draft, DraftSection, Job } from "../../api/types";
 import { Alert, Button, Card, Loading } from "../../ui";
 import { ErrorAlert } from "../fields";
 import { useAction, useLoaded } from "../hooks";
+import { CluesStep } from "./CluesStep";
 import { ContentsStep } from "./ContentsStep";
 import { DeitiesStep } from "./DeitiesStep";
+import { EncountersStep } from "./EncountersStep";
 import { FactionsStep } from "./FactionsStep";
-import type { DraftRefs, SectionWrite, StepFormProps } from "./fields";
+import { AlertDialog } from "./fields";
+import type {
+  DraftRefs,
+  SectionWrite,
+  SrdMonsters,
+  StepFormProps,
+} from "./fields";
 import { GeneratePanel } from "./GeneratePanel";
+import { ItemsStep } from "./ItemsStep";
 import { JobStatus, isActive } from "./JobStatus";
 import { MapStep } from "./MapStep";
 import { NpcsStep } from "./NpcsStep";
 import { PlotStep } from "./PlotStep";
+import { PublishStep } from "./PublishStep";
 import { RelationsStep } from "./RelationsStep";
+import { ReviewStep } from "./ReviewStep";
 import { SettingsStep } from "./SettingsStep";
 import { EDITOR_STEPS, StepNav } from "./StepNav";
-import type { EditorStep } from "./StepNav";
+import type { EditorScreen, EditorStep } from "./StepNav";
 import { WorldStep } from "./WorldStep";
 import "./authoring.css";
 
@@ -26,8 +37,19 @@ import "./authoring.css";
 export const POLL_MS = 2000;
 
 interface StepForm {
-  /** Раздел, который пишет «Сохранить раздел» шага. */
-  section: DraftSection;
+  /**
+   * Разделы, которые пишет экран; первый — тот, что пишет «Сохранить раздел» (`onSave`). Экраны
+   * с общим разделом предупреждают друг о друге: запись одного начинает другой заново.
+   */
+  sections: readonly DraftSection[];
+  /**
+   * Разделы, которые пишет генерация шага экрана; по умолчанию — те же `sections`. Генерация
+   * Замысла пишет и откровения «Улик» (`_merge_concept`, контракт B3), генерация «Наполнения» —
+   * только локации.
+   */
+  generates?: readonly DraftSection[];
+  /** Подсказка у «Сгенерировать шаг»: что генерация заменит на другом экране. */
+  generateNote?: string;
   /**
    * Содержимое черновика, которое показывает форма: она начинается заново, только когда оно
    * поменялось. `null` — форма начинается заново сама (у неё есть состояние вида над правкой).
@@ -36,29 +58,43 @@ interface StepForm {
   Form: ComponentType<StepFormProps>;
   /** В форме есть выбор ссылок: на этом экране нужен справочник сервера. */
   refs?: true;
+  /** В форме есть выбор монстров: на этом экране нужен справочник SRD. */
+  srd?: true;
 }
 
-// Экран (шаг генерации) → раздел черновика (дополнения B4 §2 и B5 §2).
+// Экран (шаг генерации) → разделы черновика (дополнения B4 §2, B5 §2, B6 §1).
 const STEP_FORMS: Record<EditorStep, StepForm> = {
   concept: {
-    section: "settings",
-    content: (draft) => [draft.title, draft.journal_intro, draft.settings],
+    sections: ["settings"],
+    generates: ["settings", "revelations"],
+    generateNote:
+      "Генерация Замысла заменит и незакреплённые откровения с уликами на шаге «Улики»: закрепите нужные.",
+    content: (draft) => [
+      draft.title,
+      draft.journal_intro,
+      draft.adventure_id,
+      draft.settings,
+    ],
     Form: SettingsStep,
   },
-  world: { section: "world", content: (draft) => draft.world, Form: WorldStep },
+  world: {
+    sections: ["world"],
+    content: (draft) => draft.world,
+    Form: WorldStep,
+  },
   pantheon: {
-    section: "deities",
+    sections: ["deities"],
     content: (draft) => draft.deities,
     Form: DeitiesStep,
   },
   factions: {
-    section: "factions",
+    sections: ["factions"],
     content: (draft) => draft.factions,
     Form: FactionsStep,
   },
-  plot: { section: "plot", content: (draft) => draft.plot, Form: PlotStep },
+  plot: { sections: ["plot"], content: (draft) => draft.plot, Form: PlotStep },
   locations: {
-    section: "locations",
+    sections: ["locations"],
     content: (draft) => [
       draft.locations,
       draft.start_location,
@@ -69,24 +105,55 @@ const STEP_FORMS: Record<EditorStep, StepForm> = {
   // «Наполнение» пишет и `locations`, и `items` (предметы локаций) — своими записями. Эта форма
   // и «Связи» начинаются заново сами: выбор локации и фильтр переживают запись.
   location_contents: {
-    section: "locations",
+    sections: ["locations", "items"],
+    generates: ["locations"],
     content: () => null,
     Form: ContentsStep,
     refs: true,
   },
   npcs: {
-    section: "npcs",
+    sections: ["npcs"],
     content: (draft) => draft.npcs,
     Form: NpcsStep,
     refs: true,
   },
   relations: {
-    section: "relations",
+    sections: ["relations"],
     content: () => null,
     Form: RelationsStep,
     refs: true,
   },
+  // «Бои и боссы» пишут свои статблоки и бои — двумя записями, статблоки первыми.
+  encounters: {
+    sections: ["encounters", "monsters"],
+    content: (draft) => [draft.encounters, draft.monsters],
+    Form: EncountersStep,
+    refs: true,
+    srd: true,
+  },
+  items: {
+    sections: ["items"],
+    content: (draft) => draft.items,
+    Form: ItemsStep,
+    refs: true,
+  },
+  clues: {
+    sections: ["revelations"],
+    content: (draft) => draft.revelations,
+    Form: CluesStep,
+    refs: true,
+  },
 };
+
+/** Форма экрана; у проверки и публикации её нет. */
+const formOf = (screen: EditorScreen): StepForm | undefined =>
+  (STEP_FORMS as Partial<Record<EditorScreen, StepForm>>)[screen];
+
+/** Начало текста о несохранённых правках: «На экране «Улики»» или «На экранах «Замысел», «Боги»». */
+const onScreens = (labels: readonly string[]) =>
+  `${labels.length === 1 ? "На экране" : "На экранах"} ${labels
+    .map((label) => `«${label}»`)
+    .join(", ")}`;
 
 // Подписи разделов для текста о частично сохранённых правках.
 const SECTION_LABELS: Record<DraftSection, string> = {
@@ -99,6 +166,9 @@ const SECTION_LABELS: Record<DraftSection, string> = {
   npcs: "персонажи",
   relations: "связи",
   items: "предметы",
+  encounters: "бои",
+  monsters: "свои монстры",
+  revelations: "откровения и улики",
 };
 
 /**
@@ -132,6 +202,29 @@ function useDraftRefs(
   return refs;
 }
 
+/**
+ * Справочник монстров SRD: грузится, когда экран впервые его просит (`enabled`), и дальше не
+ * меняется, поэтому ответ не отбрасывается и после ухода с экрана. После сбоя — текст ошибки;
+ * следующий вход на экран пробует снова.
+ */
+function useSrdMonsters(enabled: boolean): SrdMonsters {
+  const api = useApi();
+  const [srd, setSrd] = useState<SrdMonsters>({ list: [], error: null });
+  const requested = useRef(false);
+  useEffect(() => {
+    if (!enabled || requested.current) return;
+    requested.current = true;
+    api.listSrdMonsters().then(
+      (list) => setSrd({ list, error: null }),
+      (failure: unknown) => {
+        requested.current = false;
+        setSrd((current) => ({ ...current, error: errorText(failure) }));
+      },
+    );
+  }, [api, enabled]);
+  return srd;
+}
+
 const isVersionConflict = (failure: unknown) =>
   failure instanceof ApiError && failure.code === "version_conflict";
 
@@ -142,34 +235,30 @@ function ConflictDialog({
   onRefresh: () => void;
   onCancel: () => void;
 }) {
-  const titleId = useId();
   return (
-    <div
-      role="alertdialog"
-      aria-labelledby={titleId}
-      className="authoring-dialog"
+    <AlertDialog
+      title="Черновик изменился, обновить?"
+      actions={
+        <>
+          <Button onClick={onRefresh}>Обновить</Button>
+          <Button variant="secondary" onClick={onCancel}>
+            Отмена
+          </Button>
+        </>
+      }
     >
-      <p id={titleId} className="authoring-dialog__title">
-        Черновик изменился, обновить?
-      </p>
       <p className="screen-muted">
         Его успели поменять в другой вкладке или генерацией. Обновление заменит
         несохранённые правки.
       </p>
-      <div className="screen-actions">
-        <Button onClick={onRefresh}>Обновить</Button>
-        <Button variant="secondary" onClick={onCancel}>
-          Отмена
-        </Button>
-      </div>
-    </div>
+    </AlertDialog>
   );
 }
 
 interface EditorProps {
   initial: Draft;
-  step: EditorStep;
-  onStep: (step: EditorStep) => void;
+  step: EditorScreen;
+  onStep: (step: EditorScreen) => void;
   /** Перечитать черновик с сервера (конфликт версии, сорванный опрос). */
   onReload: () => void;
 }
@@ -182,8 +271,9 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
   const [conflict, setConflict] = useState(false);
   // Несколько записей подряд оборвались не на первой: часть правок уже на сервере.
   const [partial, setPartial] = useState<string | null>(null);
-  // Есть ли несохранённые правки на экранах. Экраны одного раздела («Карта» и «Наполнение»)
-  // предупреждают друг о друге: запись или генерация одного начинает другой заново.
+  // Есть ли несохранённые правки на экранах. Экраны с общим разделом («Карта» и «Наполнение»,
+  // «Наполнение» и «Предметы», «Замысел» и «Улики» через генерацию) предупреждают друг о друге:
+  // запись или генерация одного начинает другой заново.
   const [unsaved, setUnsaved] = useState<Partial<Record<EditorStep, boolean>>>(
     {},
   );
@@ -203,22 +293,35 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
       ) as Record<EditorStep, (dirty: boolean) => void>,
     [],
   );
-  const unsavedElsewhere = (screen: EditorStep) => {
+  /** Предупреждение о несохранённых правках других экранов, чьи разделы задевает запись `written`. */
+  const unsavedIn = (screen: EditorStep, written: readonly DraftSection[]) => {
     const others = EDITOR_STEPS.filter(
       ({ step: other }) =>
         other !== screen &&
         unsaved[other] === true &&
-        STEP_FORMS[other].section === STEP_FORMS[screen].section,
-    ).map(({ label }) => `«${label}»`);
+        STEP_FORMS[other].sections.some((section) => written.includes(section)),
+    ).map(({ label }) => label);
     return others.length === 0
       ? null
-      : `На экране ${others.join(", ")} есть несохранённые правки: они пропадут.`;
+      : `${onScreens(others)} есть несохранённые правки: они пропадут.`;
   };
+  // Проверка и публикация видят только сохранённый черновик (замечание R12 B6).
+  const unsavedScreens = EDITOR_STEPS.filter(
+    ({ step: screen }) => unsaved[screen] === true,
+  ).map(({ label }) => label);
+  const unsavedNote =
+    unsavedScreens.length === 0 ? null : (
+      <p className="authoring-warning">
+        {onScreens(unsavedScreens)} есть несохранённые правки: проверка и
+        публикация их не видят.
+      </p>
+    );
   const refs = useDraftRefs(
     draft.id,
     draft.version,
-    STEP_FORMS[step].refs === true,
+    formOf(step)?.refs === true,
   );
+  const srd = useSrdMonsters(formOf(step)?.srd === true);
   // Набранные, но ещё не отправленные пожелания по шагам. Они живут здесь, а не в форме шага:
   // форма пересоздаётся при каждой смене раздела (например, после «Сохранить раздел»).
   const [typedWishes, setTypedWishes] = useState<
@@ -360,8 +463,11 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
         disabled={activeJobId !== null || busy}
       >
         {EDITOR_STEPS.map(({ step: item, label }) => {
-          const { section, content, Form } = STEP_FORMS[item];
-          const elsewhere = unsavedElsewhere(item);
+          const { sections, generates, generateNote, content, Form } =
+            STEP_FORMS[item];
+          // Запись раздела и генерация шага задевают разные экраны: генерация Замысла — и «Улики».
+          const savingElsewhere = unsavedIn(item, sections);
+          const generatingElsewhere = unsavedIn(item, generates ?? sections);
           return (
             <div key={item} hidden={item !== step}>
               <Card title={label} headingLevel={3}>
@@ -370,11 +476,14 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
                     key={JSON.stringify(content(draft))}
                     draft={draft}
                     refs={refs}
-                    onSave={(data) => void save([{ section, data }])}
+                    srd={srd}
+                    onSave={(data) =>
+                      void save([{ section: sections[0], data }])
+                    }
                     onSaveSections={(writes) => void save(writes)}
                     onLock={(ref, locked) => void lock(ref, locked)}
                     onDirtyChange={markUnsaved[item]}
-                    unsavedElsewhere={elsewhere}
+                    unsavedElsewhere={savingElsewhere}
                     generate={(dirty) => (
                       <GeneratePanel
                         wish={wishOf(item)}
@@ -386,7 +495,8 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
                         }
                         locked={draft.locks.includes(`step:${item}`)}
                         dirty={dirty}
-                        warning={elsewhere}
+                        warning={generatingElsewhere}
+                        note={generateNote}
                         onGenerate={() => void generate(item)}
                       />
                     )}
@@ -409,8 +519,10 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
                         >
                           Перегенерировать
                         </Button>
-                        {elsewhere !== null && (
-                          <p className="authoring-warning">{elsewhere}</p>
+                        {generatingElsewhere !== null && (
+                          <p className="authoring-warning">
+                            {generatingElsewhere}
+                          </p>
                         )}
                       </>
                     )}
@@ -420,6 +532,24 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
             </div>
           );
         })}
+        {/* Проверка и публикация показываются, только пока открыты: так каждый вход на экран
+            берёт свежий отчёт проверки по текущему черновику. */}
+        {step === "review" && (
+          <Card title="Проверка" headingLevel={3}>
+            <div className="screen-stack">
+              {unsavedNote}
+              <ReviewStep draft={draft} onGo={onStep} />
+            </div>
+          </Card>
+        )}
+        {step === "publish" && (
+          <Card title="Публикация" headingLevel={3}>
+            <div className="screen-stack">
+              {unsavedNote}
+              <PublishStep draft={draft} onGo={onStep} />
+            </div>
+          </Card>
+        )}
       </fieldset>
       <ErrorAlert error={error} problems={problems} />
       {partial !== null && (
@@ -441,13 +571,13 @@ interface DraftEditorProps {
   onClose: () => void;
 }
 
-/** Редактор черновика: шаги, формы разделов, генерация с опросом задания и закрепления. */
+/** Редактор черновика: шаги, формы разделов, генерация с опросом задания, закрепления, проверка и публикация. */
 export function DraftEditor({ draftId, onClose }: DraftEditorProps) {
   const api = useApi();
   const load = useCallback(() => api.getDraft(draftId), [api, draftId]);
   const [loaded, reload] = useLoaded(load);
   // Шаг живёт выше редактора: после «Обновить» автор остаётся на том же шаге.
-  const [step, setStep] = useState<EditorStep>("concept");
+  const [step, setStep] = useState<EditorScreen>("concept");
 
   return (
     <Card title="Редактор приключения" icon="scroll">

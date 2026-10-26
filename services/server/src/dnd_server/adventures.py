@@ -1,11 +1,15 @@
-"""Каталог приключений сервера (план B6.3): `CONTENT_DIR` -> `Adventure` и отчёт валидатора.
+"""Каталог приключений сервера (план B6.3; DND-2 B6.1): `CONTENT_DIR` и опубликованное
+конструктором -> `Adventure` и отчёт проверки.
 
-Каталог строится один раз при старте (`lifespan`) и лежит в памяти: `app.state.adventures`. Игры не
-читают его после создания, у каждой игры своя копия приключения в базе (решение владельца «Копия
+Каталог — один словарь в памяти на всё время работы: `app.state.adventures`. При старте (`lifespan`)
+в него читаются папки, затем опубликованное конструктором (`authoring.publish`); публикация
+дописывает его на месте, без перезапуска, и тот же словарь держит Telegram-бот. Игры не читают
+каталог после создания, у каждой игры своя копия приключения в базе (решение владельца «Копия
 в базе»), так что правка или удаление папки действует только на новые игры.
 
 Папки владельца — вход сервера, поэтому загрузка и проверка идут через движок (`load_adventure` с
-пределом размера файлов и без YAML-алиасов, затем `validate`), а не доверяют готовому отчёту.
+пределом размера файлов и без YAML-алиасов) и общую проверку конструктора и генератора
+(`authoring.pipeline.check`: валидатор движка и проверки сервера), а не доверяют готовому отчёту.
 Битая папка пропускается с записью в журнал и старт не роняет. Отчёт валидатора и проблемы
 загрузки называют id скрытых выходов, запертых мест и секретных локаций, поэтому игрокам их не
 выдают: `GET /api/adventures` отдаёт только поля плана, подробности идут в журнал сервера и в
@@ -22,9 +26,10 @@ from starlette.requests import HTTPConnection
 
 from dnd_engine.adventure.loader import AdventureFormatError, load_adventure
 from dnd_engine.adventure.schema import Adventure
-from dnd_engine.adventure.validator import Report, validate
+from dnd_engine.adventure.validator import Report
 from dnd_engine.content import SrdContent
 from dnd_server.auth.deps import current_user
+from dnd_server.authoring.pipeline import check
 from dnd_server.dm.text import safe_traceback
 
 logger = logging.getLogger(__name__)
@@ -37,6 +42,8 @@ MAX_REPORTED_PROBLEMS = 20
 class CatalogEntry(NamedTuple):
     adventure: Adventure
     report: Report
+    # Опубликовано конструктором (а не папка): только такое приключение публикация может обновить.
+    published: bool = False
 
 
 # id приключения -> приключение и отчёт валидатора.
@@ -96,7 +103,7 @@ def _load_entry(folder: Path, srd: SrdContent) -> CatalogEntry | None:
     """Приключение из папки с отчётом; `None` — папка пропущена (причина записана в журнал)."""
     try:
         adventure = load_adventure(folder)
-        return CatalogEntry(adventure, validate(adventure, srd))
+        return CatalogEntry(adventure, check(adventure, srd))
     except AdventureFormatError as exc:
         # Проблемы загрузчика — короткие печатные строки без значений из файлов.
         logger.warning(

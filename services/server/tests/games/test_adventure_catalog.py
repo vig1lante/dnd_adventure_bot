@@ -23,6 +23,7 @@ from dnd_engine.content import MAX_PROBLEM_LENGTH, load_srd
 from dnd_server import adventures
 from dnd_server.adventures import blocking_problems, load_catalog
 from dnd_server.app import create_app
+from dnd_server.authoring.pipeline import check
 from dnd_server.auth.session import SessionSigner
 from dnd_server.config import Settings
 from dnd_server.db.models import User
@@ -206,6 +207,86 @@ def test_blocking_adventure_is_kept_with_its_report_and_the_details_go_to_the_lo
 
     assert catalog["blocked-crypt"].report.blocking
     assert HIDDEN_EXIT_ID in caplog.text  # подробности — в журнал сервера, не игрокам
+
+
+# --- одна проверка для всех путей (дополнение dispatcher B6 §3, §4; security B3 I5) ---
+
+
+CUSTOM_MONSTER = """\
+id: crypt-warden
+name: Страж склепа
+name_en: Crypt Warden
+cr: 2
+xp: {xp}
+ac: 14
+hp: 45
+hp_dice: 6d10+12
+speed: 30
+scores: {{str: 16, dex: 10, con: 14, int: 6, wis: 10, cha: 6}}
+actions:
+  - id: slam
+    name: Удар
+    kind: attack
+    attack_bonus: 5
+    damage: 2d6+3
+    damage_type: bludgeoning
+"""
+
+
+def add_custom_monster(folder: Path, xp: int) -> None:
+    (folder / "monsters").mkdir()
+    (folder / "monsters" / "crypt-warden.yaml").write_text(
+        CUSTOM_MONSTER.format(xp=xp), encoding="utf-8"
+    )
+
+
+def test_the_demo_folder_has_no_custom_statblocks_and_passes_the_shared_check(content_dir):
+    copy_demo(content_dir)
+
+    entry = load_catalog(content_dir, load_srd())["demo-crypt"]
+
+    assert entry.adventure.monsters == {}
+    assert entry.report == check(entry.adventure, load_srd())
+    assert not entry.report.blocking
+
+
+def test_a_folder_with_a_custom_statblock_of_wrong_xp_is_blocking_like_in_the_constructor(
+    content_dir,
+):
+    add_custom_monster(copy_demo(content_dir), xp=1800)
+
+    entry = load_catalog(content_dir, load_srd())["demo-crypt"]
+
+    assert entry.report.blocking
+    assert [i.code for i in entry.report.issues if i.severity == "error"] == ["custom_monster_xp"]
+
+
+def test_a_folder_with_a_custom_statblock_of_the_xp_of_its_cr_is_playable(content_dir):
+    add_custom_monster(copy_demo(content_dir), xp=450)
+
+    entry = load_catalog(content_dir, load_srd())["demo-crypt"]
+
+    assert "crypt-warden" in entry.adventure.monsters
+    assert not entry.report.blocking
+
+
+def test_a_folder_whose_secret_reveals_an_item_lying_elsewhere_is_blocking(content_dir):
+    # Раньше папку проверял голый валидатор, а генератор считал такую находку блокирующей.
+    folder = copy_demo(content_dir)
+    crypt = folder / "locations" / "crypt.yaml"
+    item = "chest-key"  # ключ у Марты, а не в склепе
+    crypt.write_text(
+        crypt.read_text(encoding="utf-8").replace(
+            "      - kind: flag\n        id: treasury-empty",
+            f"      - kind: flag\n        id: treasury-empty\n      - kind: item\n        id: {item}",
+        ),
+        encoding="utf-8",
+    )
+
+    entry = load_catalog(content_dir, load_srd())["demo-crypt"]
+
+    assert "inapplicable_secret_reveal" in {i.code for i in entry.report.issues}
+    assert entry.report.blocking
 
 
 # --- старт сервера ---

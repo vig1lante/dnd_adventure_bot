@@ -33,7 +33,7 @@ const textbox = (form: HTMLElement, name: string) =>
   within(form).getByRole("textbox", { name });
 
 describe("шаг «Замысел»", () => {
-  test("поля показаны из черновика; slug приключения только для чтения", async () => {
+  test("поля показаны из черновика; id приключения — поле Замысла (B6 §2)", async () => {
     const { form } = await openConcept();
 
     expect(textbox(form, "Название")).toHaveValue("Туманная гавань");
@@ -54,10 +54,7 @@ describe("шаг «Замысел»", () => {
     expect(
       within(form).getByRole("switch", { name: "Мат и грубая речь" }),
     ).toBeChecked();
-    expect(form).toHaveTextContent("foggy-harbor");
-    expect(
-      within(form).queryByRole("textbox", { name: /slug|id приключения/ }),
-    ).toBeNull();
+    expect(textbox(form, "id приключения")).toHaveValue("foggy-harbor");
   });
 
   test("сохранение шлёт весь раздел settings с версией: числа — числами", async () => {
@@ -95,6 +92,7 @@ describe("шаг «Замысел»", () => {
       data: {
         title: "Гавань теней",
         journal_intro: "Найти корабль до шторма.",
+        adventure_id: "foggy-harbor",
         pitch: "Корабль исчез в тумане",
         tone: "мрачный",
         target_hours: 4.5,
@@ -123,10 +121,10 @@ describe("шаг «Замысел»", () => {
   });
 
   // Статус шага сервер считает по содержимому раздела (contract-addendum §3): Замысел, заполненный
-  // руками, без id приключения — «черновик»; «готово» он станет после генерации (id даёт concept).
-  test("ручной Замысел после «Сохранить раздел» — «черновик», подсказка про id остаётся", async () => {
+  // руками, без id приключения — «черновик»; «готово» он станет, когда id задан (B6 §2).
+  test("ручной Замысел без id после «Сохранить раздел» — «черновик», id уходит пустым (null)", async () => {
     const draft = draftOf({ version: 1 });
-    renderEditor(draft, {
+    const { server } = renderEditor(draft, {
       [`PUT ${PATH}`]: {
         json: draftOf({
           version: 2,
@@ -150,15 +148,80 @@ describe("шаг «Замысел»", () => {
     );
 
     await vi.waitFor(() => expect(concept()).toHaveTextContent("черновик"));
+    expect(callsTo(server, "PUT", PATH)[0].body).toMatchObject({
+      data: { title: "Маяк", adventure_id: null },
+    });
+  });
+
+  test("пустой черновик: поле id пусто, подсказка — шаблон, генерация и неизменность после публикации", async () => {
+    const { form } = await openConcept(draftOf());
+
+    expect(textbox(form, "id приключения")).toHaveValue("");
     expect(form).toHaveTextContent(
-      "id приключения появится после генерации замысла.",
+      "Строчная латиница, цифры, «-» и «_»; начинается с буквы или цифры; до 64 знаков. Пусто — id даст генерация замысла. После публикации id не меняется.",
     );
   });
 
-  test("пустой черновик: slug появится после генерации замысла", async () => {
-    const { form } = await openConcept(draftOf());
+  test("id задаёт автор: уходит в settings; стёртое поле — null", async () => {
+    const { server, form } = await openConcept();
 
-    expect(form).toHaveTextContent(/появится после генерации замысла/);
+    fireEvent.change(textbox(form, "id приключения"), {
+      target: { value: "harbor-of-shadows" },
+    });
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Сохранить раздел" }),
+    );
+    await vi.waitFor(() =>
+      expect(callsTo(server, "PUT", PATH)).toHaveLength(1),
+    );
+    expect(callsTo(server, "PUT", PATH)[0].body).toMatchObject({
+      version: 7,
+      data: { adventure_id: "harbor-of-shadows" },
+    });
+  });
+
+  test("стёртый id уходит как null", async () => {
+    const { server, form } = await openConcept();
+
+    fireEvent.change(textbox(form, "id приключения"), {
+      target: { value: "  " },
+    });
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Сохранить раздел" }),
+    );
+
+    await vi.waitFor(() =>
+      expect(callsTo(server, "PUT", PATH)).toHaveLength(1),
+    );
+    expect(callsTo(server, "PUT", PATH)[0].body).toMatchObject({
+      data: { adventure_id: null },
+    });
+  });
+
+  test("422 adventure_id_locked после публикации: текст сервера, правка на месте", async () => {
+    renderEditor(FILLED, {
+      [`PUT ${PATH}`]: {
+        status: 422,
+        json: {
+          detail: "Приключение уже опубликовано под этим id",
+          code: "adventure_id_locked",
+        },
+      },
+    });
+    await screen.findByRole("navigation", { name: "Шаги приключения" });
+    const form = screen.getByRole("region", { name: "Замысел" });
+
+    fireEvent.change(textbox(form, "id приключения"), {
+      target: { value: "other-id" },
+    });
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Сохранить раздел" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Приключение уже опубликовано под этим id",
+    );
+    expect(textbox(form, "id приключения")).toHaveValue("other-id");
   });
 });
 
@@ -198,5 +261,52 @@ describe("шаг «Замысел»: модули и закрепление", ()
     expect(
       within(form).getByRole("button", { name: "Сгенерировать шаг" }),
     ).toBeDisabled();
+  });
+});
+
+// --- финальное покрытие блока 6: id приключения (дополнение B6, §2) ---
+
+describe("шаг «Замысел»: формат id приключения", () => {
+  test("id не по шаблону: 422 invalid_data — текст сервера и правило списком, правка на месте", async () => {
+    renderEditor(FILLED, {
+      [`PUT ${PATH}`]: {
+        status: 422,
+        json: {
+          detail: "Данные раздела не прошли проверку.",
+          code: "invalid_data",
+          problems: [
+            "settings.adventure_id: только строчная латиница, цифры, «-» и «_», до 64 знаков",
+          ],
+        },
+      },
+    });
+    await screen.findByRole("navigation", { name: "Шаги приключения" });
+    const form = screen.getByRole("region", { name: "Замысел" });
+
+    fireEvent.change(textbox(form, "id приключения"), {
+      target: { value: "Foggy-Harbor" },
+    });
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Сохранить раздел" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Данные раздела не прошли проверку.",
+    );
+    expect(
+      screen.getByText(
+        "settings.adventure_id: только строчная латиница, цифры, «-» и «_», до 64 знаков",
+      ),
+    ).toBeInTheDocument();
+    expect(textbox(form, "id приключения")).toHaveValue("Foggy-Harbor");
+  });
+
+  // Финальное покрытие B6, D1 (исправлено в fix-раунде 1, дополнение B6 §11 R2): по контракту
+  // B6 §2 id — шаблон EntityId движка, только СТРОЧНАЯ латиница, первый знак — буква или цифра.
+  // Подсказка поля называет это правило, чтобы автор не узнавал его только из отказа сервера.
+  test("подсказка поля называет правило сервера: строчная латиница", async () => {
+    const { form } = await openConcept(draftOf());
+
+    expect(form).toHaveTextContent(/строчн/i);
   });
 });

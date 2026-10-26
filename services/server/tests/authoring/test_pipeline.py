@@ -1539,3 +1539,133 @@ async def test_an_inapplicable_reveal_of_a_locked_location_is_moved_by_its_own_s
     assert result.adventure.locations["lighthouse"] == next(
         loc for loc in draft.locations if loc.id == "lighthouse"
     )
+
+
+# --- свой статблок: опыт по cr (дополнение dispatcher B6 §4) ---
+
+
+def with_custom_monster(adventure: Adventure, **changes: Any) -> Adventure:
+    """Приключение v2, где у своего статблока пепельного жреца заменены поля `changes`."""
+    data = adventure.model_dump(mode="json")
+    data["monsters"]["ash-priest"] |= changes
+    return Adventure.model_validate(data)
+
+
+def srd_xp_by_cr() -> dict[float, int]:
+    return {monster.cr: monster.xp for monster in load_srd().monsters.values()}
+
+
+async def test_the_custom_statblock_of_the_demo_has_the_xp_of_its_cr():
+    adventure = await v2_adventure()
+
+    [priest] = adventure.monsters.values()
+    assert srd_xp_by_cr()[priest.cr] == priest.xp
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"xp": 1800},  # cr из SRD, опыт чужой
+        {"cr": 5, "xp": 1800},  # cr вне данных SRD (там нет cr выше 3)
+        {"cr": 0.3, "xp": 50},  # cr не из таблицы
+    ],
+)
+async def test_a_custom_statblock_whose_xp_does_not_match_its_cr_is_a_blocking_problem(changes):
+    base = await v2_adventure()
+    adventure = with_custom_monster(base, **changes)
+
+    report = check(adventure, load_srd())
+
+    [problem] = [i for i in report.issues if i.code == "custom_monster_xp"]
+    assert (problem.severity, problem.ref) == ("error", "monster:ash-priest")
+    assert owner_step(problem) == "encounters"
+    assert problem.message.startswith("опыт своего монстра должен соответствовать его cr")
+    assert all(f"{cr:g} → {xp}" in problem.message for cr, xp in srd_xp_by_cr().items())
+    assert "1800" not in problem.message and "0.3" not in problem.message
+    assert report.blocking
+    assert report.score == validate(adventure, load_srd()).score - 10
+
+
+async def test_a_locked_custom_statblock_with_wrong_xp_stays_in_the_report_for_the_author():
+    adventure = with_custom_monster(await v2_adventure(), xp=1800)
+
+    [problem] = [i for i in check(adventure, load_srd()).issues if i.code == "custom_monster_xp"]
+
+    assert owner_step(problem, {"monster:ash-priest"}) is None
+
+
+async def test_srd_monsters_of_an_encounter_need_no_xp_rule():
+    adventure = await v2_adventure()
+    without_custom = adventure.model_copy(update={"monsters": {}})
+
+    report = check(without_custom, load_srd())
+
+    assert all(issue.code != "custom_monster_xp" for issue in report.issues)
+
+
+# --- финальное покрытие B6: опыт своего статблока по каждой паре SRD и на краях ---
+
+SRD_PAIRS = sorted({(m.cr, m.xp) for m in load_srd().monsters.values()})
+
+
+@pytest.mark.parametrize(("cr", "xp"), SRD_PAIRS, ids=[f"cr {cr:g}" for cr, _ in SRD_PAIRS])
+async def test_a_custom_statblock_with_the_xp_of_any_srd_cr_passes(cr, xp):
+    adventure = with_custom_monster(await v2_adventure(), cr=cr, xp=xp)
+
+    report = check(adventure, load_srd())
+
+    assert all(issue.code != "custom_monster_xp" for issue in report.issues)
+
+
+def xp_off_by(delta: int) -> list[tuple[float, int]]:
+    return [(cr, xp + delta) for cr, xp in SRD_PAIRS]
+
+
+@pytest.mark.parametrize(
+    ("cr", "xp"),
+    [
+        *xp_off_by(1),
+        *xp_off_by(-1),
+        # Опыт другой строки таблицы SRD.
+        *[(cr, SRD_PAIRS[(n + 1) % len(SRD_PAIRS)][1]) for n, (cr, _) in enumerate(SRD_PAIRS)],
+        # cr вне данных SRD: ноль, между строками, выше таблицы.
+        (0, 0),
+        (0, 10),
+        (0.75, 150),
+        (4, 1100),
+        (30, 155000),
+        # Не число cr: так его читает загрузчик из `.nan`/`.inf` YAML и отрицательного числа.
+        (float("nan"), 25),
+        (float("inf"), 700),
+        (float("-inf"), 25),
+        (-1, 200),
+    ],
+)
+async def test_a_custom_statblock_off_the_srd_table_is_one_blocking_problem(cr, xp):
+    adventure = with_custom_monster(await v2_adventure(), cr=cr, xp=xp)
+
+    report = check(adventure, load_srd())
+
+    [problem] = [i for i in report.issues if i.code == "custom_monster_xp"]
+    assert (problem.severity, problem.ref, owner_step(problem)) == (
+        "error",
+        "monster:ash-priest",
+        "encounters",
+    )
+    assert report.blocking
+
+
+async def test_every_custom_statblock_off_the_table_is_named_separately():
+    # Два своих статблока, оба с чужим опытом: у каждого своя находка со своей ссылкой.
+    base = await v2_adventure()
+    [priest] = base.monsters.values()
+    wrong = {
+        "ash-priest": priest.model_copy(update={"xp": 1}),
+        "ash-twin": priest.model_copy(update={"id": "ash-twin", "xp": priest.xp + 1}),
+    }
+    adventure = base.model_copy(update={"monsters": wrong})
+
+    report = check(adventure, load_srd())
+
+    refs = sorted(i.ref for i in report.issues if i.code == "custom_monster_xp")
+    assert refs == ["monster:ash-priest", "monster:ash-twin"]

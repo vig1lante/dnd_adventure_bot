@@ -1,9 +1,10 @@
 import { useState } from "react";
 import type { SettingsSection } from "../../api/types";
 import { CheckList, Switch, TextAreaField, TextField } from "../fields";
-import { SectionForm, sameData } from "./fields";
+import { SectionForm, parseNumber, sameData } from "./fields";
 import type { StepFormProps } from "./fields";
 import { LockToggle } from "./LockToggle";
+import { ADVENTURE_ID_HINT } from "./labels";
 
 // Модули правил движка (README «Модули правил»). Список только подписывает флажки: допустимые
 // модули проверяет сервер; незнакомый клиенту модуль черновика остаётся в списке как есть.
@@ -35,26 +36,24 @@ const NUMBER_FIELDS = [
 
 type NumberKey = (typeof NUMBER_FIELDS)[number]["key"];
 
-/** Число из поля ввода (запятая или точка); не число — `null`. Пределы проверяет сервер. */
-function numberFrom(text: string, integer: boolean): number | null {
-  const trimmed = text.trim();
-  const value = Number(trimmed.replace(",", "."));
-  if (trimmed === "" || !Number.isFinite(value)) return null;
-  return integer && !Number.isInteger(value) ? null : value;
-}
-
 const numberText = (value: number) => String(value).replace(".", ",");
 
-/** Шаг «Замысел»: раздел `settings` и поля черновика `title`, `journal_intro`. */
+/**
+ * Шаг «Замысел»: раздел `settings` и поля черновика `title`, `journal_intro`, `adventure_id`.
+ * id приключения автор задаёт сам или его даёт генерация замысла (B6 §2); формат и запрет менять
+ * его после публикации проверяет сервер.
+ */
 export function SettingsStep({
   draft,
   onSave,
   onLock,
   generate,
+  onDirtyChange,
 }: StepFormProps) {
   const [form, setForm] = useState({
     title: draft.title,
     journal_intro: draft.journal_intro,
+    adventure_id: draft.adventure_id ?? "",
     pitch: draft.settings.pitch,
     tone: draft.settings.tone,
     modules: draft.settings.modules,
@@ -69,7 +68,7 @@ export function SettingsStep({
   const parsed = Object.fromEntries(
     NUMBER_FIELDS.map(({ key, integer }) => [
       key,
-      numberFrom(numbers[key], integer),
+      parseNumber(numbers[key], integer),
     ]),
   ) as Record<NumberKey, number | null>;
   const { target_hours, party_size, party_level } = parsed;
@@ -77,10 +76,18 @@ export function SettingsStep({
   const data: SettingsSection | null =
     target_hours === null || party_size === null || party_level === null
       ? null
-      : { ...form, target_hours, party_size, party_level };
+      : {
+          ...form,
+          // Пустое поле — id не задан; пробелов в id не бывает.
+          adventure_id: form.adventure_id.trim() || null,
+          target_hours,
+          party_size,
+          party_level,
+        };
   const saved: SettingsSection = {
     title: draft.title,
     journal_intro: draft.journal_intro,
+    adventure_id: draft.adventure_id,
     ...draft.settings,
   };
   const dirty = data === null || !sameData(data, saved);
@@ -95,6 +102,7 @@ export function SettingsStep({
 
   return (
     <SectionForm
+      onDirtyChange={onDirtyChange}
       onSubmit={() => {
         if (data !== null) onSave(data);
       }}
@@ -111,15 +119,19 @@ export function SettingsStep({
         />
       }
     >
-      <p className="screen-muted">
-        {draft.adventure_id === null
-          ? "id приключения появится после генерации замысла."
-          : `id приключения: ${draft.adventure_id}`}
-      </p>
       <TextField
         label="Название"
         value={form.title}
         onChange={(event) => setForm({ ...form, title: event.target.value })}
+      />
+      <TextField
+        label="id приключения"
+        hint={`${ADVENTURE_ID_HINT} Пусто — id даст генерация замысла. После публикации id не меняется.`}
+        autoComplete="off"
+        value={form.adventure_id}
+        onChange={(event) =>
+          setForm({ ...form, adventure_id: event.target.value })
+        }
       />
       <TextAreaField
         label="Завязка"

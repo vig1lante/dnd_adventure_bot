@@ -154,7 +154,8 @@ def sign_init_data(
 
 def check_error_shape(response: httpx.Response) -> None:
     """Контракт ошибок блока: `{"detail": "<строка>"}`; `problems` лишь у 422, списком строк.
-    У 409/422 конструктора (`/api/drafts`) ещё `code` — вид отказа (DND-2 B4, дополнение §4)."""
+    У 409/422 конструктора (`/api/drafts`) ещё `code` — вид отказа (DND-2 B4, дополнение §4), как и
+    у 413/415 импорта архива (DND-2 B6, дополнение §7, §10)."""
     where = f"{response.request.method} {response.request.url.path} -> {response.status_code}"
     try:
         body = response.json()
@@ -165,7 +166,7 @@ def check_error_shape(response: httpx.Response) -> None:
     extra = set(body) - {"detail"}
     if "code" in body and response.request.url.path.startswith("/api/drafts"):
         assert isinstance(body["code"], str) and body["code"], where
-        assert response.status_code in (409, 422), where
+        assert response.status_code in (409, 413, 415, 422), where
         extra.discard("code")
     if extra:
         assert extra == {"problems"} and response.status_code == 422, where

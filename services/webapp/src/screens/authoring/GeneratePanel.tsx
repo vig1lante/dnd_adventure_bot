@@ -12,6 +12,8 @@ interface GeneratePanelProps {
   dirty: boolean;
   /** Несохранённые правки другого экрана того же раздела, которые генерация заменит; `null` — нет. */
   warning?: string | null;
+  /** Что ещё, кроме своего экрана, заменит генерация шага (Замысел — откровения «Улик»). */
+  note?: string;
   onGenerate: () => void;
 }
 
@@ -22,6 +24,7 @@ export function GeneratePanel({
   locked,
   dirty,
   warning = null,
+  note,
   onGenerate,
 }: GeneratePanelProps) {
   return (
@@ -45,6 +48,7 @@ export function GeneratePanel({
             незакреплённые ручные правки. Сначала сохраните раздел, затем
             закрепите то, что хотите сохранить.
           </p>
+          {note !== undefined && <p className="form-field__hint">{note}</p>}
           {dirty && (
             <p className="authoring-warning">
               В шаге есть несохранённые правки: генерация их заменит.

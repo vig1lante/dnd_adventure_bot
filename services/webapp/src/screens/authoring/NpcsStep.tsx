@@ -14,6 +14,7 @@ import {
 import type { StepFormProps } from "./fields";
 import { LockToggle } from "./LockToggle";
 import { RefPicker } from "./RefPicker";
+import { ID_HINT } from "./labels";
 
 const LOCATION = "location:";
 
@@ -42,6 +43,7 @@ export function NpcsStep({
   onLock,
   generate,
   regenerate,
+  onDirtyChange,
 }: StepFormProps) {
   const [npcs, setNpcs] = useState(draft.npcs);
   // Закрепить и перегенерировать можно только NPC, которого знает сервер.
@@ -50,6 +52,7 @@ export function NpcsStep({
 
   return (
     <SectionForm
+      onDirtyChange={onDirtyChange}
       onSubmit={() => onSave(npcs)}
       dirty={dirty}
       dirtyHint={SAVE_FIRST_REGENERATE}
@@ -85,7 +88,7 @@ export function NpcsStep({
           <>
             <TextField
               label="Идентификатор"
-              hint="Латиница, цифры, «-» и «_»: по нему ссылаются на персонажа."
+              hint={`${ID_HINT} По нему ссылаются на персонажа.`}
               autoComplete="off"
               value={npc.id}
               onChange={(event) => update({ id: event.target.value })}

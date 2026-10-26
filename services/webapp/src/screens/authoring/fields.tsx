@@ -1,17 +1,24 @@
-import { useState } from "react";
+import { useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
 import type {
   Draft,
   DraftRef,
   DraftSection,
   JournalFields,
+  SrdMonster,
 } from "../../api/types";
 import { Button } from "../../ui";
-import { Switch, TextAreaField } from "../fields";
+import { Switch, TextAreaField, TextField } from "../fields";
 
 /** Справочник ссылок черновика; `error` — текст сбоя загрузки, список тогда прежний или пуст. */
 export interface DraftRefs {
   list: readonly DraftRef[];
+  error: string | null;
+}
+
+/** Справочник монстров SRD; `error` — текст сбоя загрузки, список тогда пуст. */
+export interface SrdMonsters {
+  list: readonly SrdMonster[];
   error: string | null;
 }
 
@@ -26,6 +33,8 @@ export interface StepFormProps {
   draft: Draft;
   /** Справочник ссылок; грузится только для экранов, где есть выбор ссылок. */
   refs: DraftRefs;
+  /** Справочник монстров SRD; грузится, когда его впервые открывает экран боёв. */
+  srd: SrdMonsters;
   /** Сохранить раздел шага целиком; `data` — форма раздела по контракту. */
   onSave: (data: unknown) => void;
   /** Записать несколько разделов по очереди, каждый с версией после предыдущей записи. */
@@ -39,8 +48,9 @@ export interface StepFormProps {
    */
   regenerate: (target: string, name: string, dirty: boolean) => ReactNode;
   /**
-   * Сообщить редактору, есть ли в форме несохранённые правки. Нужно экранам, которые делят
-   * раздел с другим экраном: запись одного начинает другой заново.
+   * Сообщить редактору, есть ли в форме несохранённые правки (её передают в `SectionForm`):
+   * запись или генерация другого экрана может начать форму заново, а проверка и публикация
+   * видят только сохранённое.
    */
   onDirtyChange: (dirty: boolean) => void;
   /** Предупреждение о несохранённых правках другого экрана того же раздела; `null` — их нет. */
@@ -69,6 +79,8 @@ interface SectionFormProps {
   canSave?: boolean;
   /** В форме есть несохранённые правки: закреплять пока нечего. */
   dirty: boolean;
+  /** Сообщить редактору о несохранённых правках формы (`StepFormProps.onDirtyChange`). */
+  onDirtyChange: (dirty: boolean) => void;
   /** Подсказка при несохранённых правках: что закрыто, пока раздел не сохранён. */
   dirtyHint?: string;
   /** Предупреждение у «Сохранить раздел»: запись заденет чужие несохранённые правки. */
@@ -85,12 +97,19 @@ export function SectionForm({
   onSubmit,
   canSave = true,
   dirty,
+  onDirtyChange,
   dirtyHint = "Сначала сохраните раздел: закрепить можно только сохранённое.",
   warning = null,
   lock,
   generate,
   children,
 }: SectionFormProps) {
+  // Редактор знает о несохранённых правках каждого экрана: о них предупреждают экраны с общими
+  // разделами, проверка и публикация. Ушедшая форма правок больше не держит.
+  useEffect(() => {
+    onDirtyChange(dirty);
+    return () => onDirtyChange(false);
+  }, [dirty, onDirtyChange]);
   return (
     <>
       <form
@@ -196,5 +215,87 @@ export function JournalFieldsEditor({
         onChange={(checked) => onChange({ known_at_start: checked })}
       />
     </>
+  );
+}
+
+/** Число из поля ввода (запятая или точка); не число или дробь там, где нужно целое, — `null`. */
+export function parseNumber(text: string, integer: boolean): number | null {
+  const trimmed = text.trim();
+  const value = Number(trimmed.replace(",", "."));
+  if (trimmed === "" || !Number.isFinite(value)) return null;
+  return integer && !Number.isInteger(value) ? null : value;
+}
+
+/** Есть ли в данных раздела неверное число: `NaN` ставит поле, в котором набрано не число. */
+export function hasBadNumber(value: unknown): boolean {
+  if (typeof value === "number") return Number.isNaN(value);
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    Object.values(value).some(hasBadNumber)
+  );
+}
+
+type NumberFieldProps = { label: string; hint?: string } & (
+  | { optional?: false; value: number; onChange: (value: number) => void }
+  | {
+      /** Пустое поле — `null`: числа нет. */
+      optional: true;
+      value: number | null;
+      onChange: (value: number | null) => void;
+    }
+);
+
+/**
+ * Целое число в поле ввода. Набранный текст живёт в самом поле (как у `LinesField`); пока в нём
+ * не целое число, форма получает `NaN` и не сохраняется (`hasBadNumber`). Пределы проверяет сервер.
+ */
+export function NumberField(props: NumberFieldProps) {
+  const { label, hint, value } = props;
+  const [text, setText] = useState(() => String(value ?? ""));
+  const read = (raw: string) =>
+    props.optional && raw.trim() === ""
+      ? null
+      : (parseNumber(raw, true) ?? Number.NaN);
+  return (
+    <TextField
+      label={label}
+      hint={hint}
+      inputMode="numeric"
+      autoComplete="off"
+      value={text}
+      error={Number.isNaN(read(text)) ? "Нужно целое число." : null}
+      onChange={(event) => {
+        setText(event.target.value);
+        const next = read(event.target.value);
+        if (props.optional) props.onChange(next);
+        else props.onChange(next ?? Number.NaN);
+      }}
+    />
+  );
+}
+
+interface AlertDialogProps {
+  title: string;
+  children: ReactNode;
+  /** Кнопки диалога. */
+  actions: ReactNode;
+}
+
+/** Диалог-вопрос внутри экрана: заголовок, пояснение и кнопки ответа. */
+export function AlertDialog({ title, children, actions }: AlertDialogProps) {
+  const titleId = useId();
+  return (
+    <div
+      role="alertdialog"
+      aria-labelledby={titleId}
+      className="authoring-dialog"
+    >
+      <p id={titleId} className="authoring-dialog__title">
+        {title}
+      </p>
+      {children}
+      <div className="screen-actions">{actions}</div>
+    </div>
   );
 }

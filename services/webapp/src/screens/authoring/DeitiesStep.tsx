@@ -11,6 +11,7 @@ import {
 } from "./fields";
 import type { StepFormProps } from "./fields";
 import { LockToggle } from "./LockToggle";
+import { ID_HINT } from "./labels";
 
 const newDeity = (): Deity => ({
   id: "",
@@ -33,6 +34,7 @@ export function DeitiesStep({
   onSave,
   onLock,
   generate,
+  onDirtyChange,
 }: StepFormProps) {
   const [deities, setDeities] = useState(draft.deities);
   // Закрепить можно только бога, которого знает сервер: у нового ещё нет записанного id.
@@ -41,6 +43,7 @@ export function DeitiesStep({
 
   return (
     <SectionForm
+      onDirtyChange={onDirtyChange}
       onSubmit={() => onSave(deities)}
       dirty={dirty}
       generate={generate(dirty)}
@@ -68,7 +71,7 @@ export function DeitiesStep({
           <>
             <TextField
               label="Идентификатор"
-              hint="Латиница, цифры, «-» и «_»: по нему ссылаются на бога."
+              hint={`${ID_HINT} По нему ссылаются на бога.`}
               autoComplete="off"
               value={deity.id}
               onChange={(event) => update({ id: event.target.value })}

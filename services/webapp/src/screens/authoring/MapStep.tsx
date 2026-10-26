@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { Exit, Location, LocationsSection } from "../../api/types";
 import { SelectField, TextField } from "../fields";
 import { EntityList } from "./EntityList";
@@ -10,7 +10,7 @@ import {
   withCurrent,
 } from "./fields";
 import type { StepFormProps } from "./fields";
-import { DC_OPTIONS } from "./labels";
+import { DC_OPTIONS, ID_HINT } from "./labels";
 import { LockToggle } from "./LockToggle";
 
 // Новая локация — с полями по умолчанию сервера: одна зона «здесь», без связей зон и боя.
@@ -65,8 +65,6 @@ export function MapStep({
   // Закрепить можно только локацию, которую знает сервер.
   const savedIds = new Set(draft.locations.map((location) => location.id));
   const dirty = !sameData(map, sectionOf(draft));
-  // «Наполнение» правит тот же раздел: редактор предупредит его о правках карты.
-  useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
   // «Куда», старт и финал выбираются из локаций формы: выход можно провести и в несохранённую.
   const places = map.locations
     .filter((location) => location.id !== "")
@@ -85,6 +83,7 @@ export function MapStep({
 
   return (
     <SectionForm
+      onDirtyChange={onDirtyChange}
       onSubmit={() => onSave(map)}
       canSave={!offMap(map.start_location) && !offMap(map.finale_location)}
       dirty={dirty}
@@ -118,7 +117,7 @@ export function MapStep({
           <>
             <TextField
               label="Идентификатор"
-              hint="Латиница, цифры, «-» и «_»: по нему ведут выходы."
+              hint={`${ID_HINT} По нему ведут выходы.`}
               autoComplete="off"
               value={location.id}
               onChange={(event) => update({ id: event.target.value })}
@@ -148,7 +147,7 @@ export function MapStep({
                 <>
                   <TextField
                     label="Идентификатор"
-                    hint="Уникален внутри локации."
+                    hint={`${ID_HINT} Уникален внутри локации.`}
                     autoComplete="off"
                     value={exit.id}
                     onChange={(event) => change({ id: event.target.value })}

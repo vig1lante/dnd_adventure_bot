@@ -617,7 +617,10 @@ export type AuthoringStep =
   | "items"
   | "clues";
 
-/** Разделы, которые принимает `PUT /api/drafts/{id}/sections/{section}` (дополнения B4 §2, B5 §1). */
+/**
+ * Разделы, которые принимает `PUT /api/drafts/{id}/sections/{section}` (дополнения B4 §2, B5 §1,
+ * B6 §1): все 12.
+ */
 export type DraftSection =
   | "settings"
   | "world"
@@ -627,7 +630,10 @@ export type DraftSection =
   | "locations"
   | "npcs"
   | "relations"
-  | "items";
+  | "items"
+  | "encounters"
+  | "monsters"
+  | "revelations";
 
 /** Статус шага считает сервер: «пусто / черновик / готово». */
 export type StepStatus = "empty" | "draft" | "ready";
@@ -858,6 +864,124 @@ export interface Item extends JournalFields {
   holder: string;
 }
 
+/** Группа монстров боя: монстр SRD или свой статблок, сколько их и в какой зоне локации. */
+export interface MonsterGroup {
+  monster_id: string;
+  count: number;
+  zone: string;
+}
+
+/** Бой черновика (`Encounter` движка, дополнение B6 §1). */
+export interface Encounter {
+  id: string;
+  /** id локации, где идёт бой. */
+  location_id: string;
+  /** Что запускает бой: знает только мастер. */
+  trigger: string;
+  tactics: string;
+  monsters: MonsterGroup[];
+  /** Зона локации, где бой застаёт героев. */
+  pc_zone: string;
+  /** Финальный или ключевой бой. */
+  boss: boolean;
+}
+
+export type MonsterActionKind = "attack" | "save" | "multiattack" | "other";
+
+export type ActionRange = "melee" | "near" | "far";
+
+/** Действие статблока (`MonsterAction` движка): данные статблока; бросает и считает сервер. */
+export interface MonsterAction {
+  id: string;
+  name: string;
+  kind: MonsterActionKind;
+  attack_bonus: number | null;
+  /** Запись костей урона, например «1d6+2». */
+  damage: string | null;
+  damage_type: string | null;
+  range: ActionRange;
+  save: Ability | null;
+  dc: number | null;
+  half_on_save: boolean;
+  targets: number;
+  condition: string | null;
+  /** id своих действий, которые мультиатака делает подряд. */
+  multiattack: string[];
+  summary: string;
+  reach: boolean;
+  secondary_damage: string | null;
+  secondary_damage_type: string | null;
+}
+
+/** Свой статблок (`MonsterDef` движка). Скорость — в футах, как в правилах; экран показывает метры. */
+export interface MonsterDef {
+  id: string;
+  name: string;
+  name_en: string;
+  cr: number;
+  xp: number;
+  ac: number;
+  hp: number;
+  /** Запись костей хитов, например «2d8+4». */
+  hp_dice: string;
+  speed: number;
+  scores: Record<Ability, number>;
+  saves: Partial<Record<Ability, number>>;
+  skills: Partial<Record<Skill, number>>;
+  resistances: string[];
+  vulnerabilities: string[];
+  immunities: string[];
+  actions: MonsterAction[];
+  traits: string[];
+  tags: string[];
+}
+
+export interface Clue {
+  id: string;
+  description: string;
+  /** Где лежит: `feature:<id>`, `npc:<id>` или `item:<id>`. */
+  where: string;
+}
+
+/** Откровение: вывод, к которому игроки приходят по уликам. */
+export interface Revelation {
+  id: string;
+  statement: string;
+  clues: Clue[];
+}
+
+/** Строка справочника `GET /api/srd/monsters` (дополнение B6, §8). */
+export interface SrdMonster {
+  id: string;
+  name: string;
+  cr: number;
+  xp: number;
+  tags: string[];
+}
+
+/** Находка проверки черновика: `ref` — где найдена, `step` — шаг, который за неё отвечает. */
+export interface Finding {
+  code: string;
+  message: string;
+  ref: string;
+  step: AuthoringStep | null;
+}
+
+/** Ответ `POST /api/drafts/{id}/validate` (дополнения B4 §8, B6 §3). */
+export interface DraftReport {
+  errors: Finding[];
+  warnings: Finding[];
+  score: number;
+  estimated_minutes: number;
+  readiness_percent: number;
+}
+
+/** Ответ `POST /api/drafts/{id}/publish`: 201 — первая публикация, 200 — повторная (B6 §6). */
+export interface PublishResult {
+  adventure_id: string;
+  published_at: string;
+}
+
 export type RefKind =
   "deity" | "faction" | "npc" | "location" | "item" | "encounter";
 
@@ -880,19 +1004,21 @@ export interface DraftSettings {
   profanity: boolean;
 }
 
-/** Данные раздела `settings`: настройки и два поля верхнего уровня черновика. */
+/** Данные раздела `settings`: настройки и три поля верхнего уровня черновика. */
 export interface SettingsSection extends DraftSettings {
   title: string;
   journal_intro: string;
+  /** id приключения (B6 §2); `null` — не задан. После публикации сервер его не меняет. */
+  adventure_id: string | null;
 }
 
-/** Черновик приключения (контракт B4, §1). Бои, монстры и открытия (блок 6) клиент пока не читает. */
+/** Черновик приключения (контракт B4, §1). */
 export interface Draft {
   /** id записи черновика, не slug приключения. */
   id: string;
   version: number;
   title: string;
-  /** slug приключения; `null` до шага concept; в блоке 4 только чтение. */
+  /** slug приключения: его даёт генерация замысла или автор (B6 §2); `null` — не задан. */
   adventure_id: string | null;
   journal_intro: string;
   settings: DraftSettings;
@@ -903,10 +1029,11 @@ export interface Draft {
   locations: Location[];
   npcs: Npc[];
   relations: Relation[];
-  encounters: unknown[];
-  monsters: unknown[];
+  encounters: Encounter[];
+  /** Свои статблоки черновика. */
+  monsters: MonsterDef[];
   items: Item[];
-  revelations: unknown[];
+  revelations: Revelation[];
   start_location: string | null;
   finale_location: string | null;
   /** Закрепления: `<вид>:<id>` или `step:<шаг>`. */

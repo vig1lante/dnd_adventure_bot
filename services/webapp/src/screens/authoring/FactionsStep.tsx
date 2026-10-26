@@ -5,6 +5,7 @@ import { EntityList } from "./EntityList";
 import { JournalFieldsEditor, SectionForm, orNull, sameData } from "./fields";
 import type { StepFormProps } from "./fields";
 import { LockToggle } from "./LockToggle";
+import { ID_HINT } from "./labels";
 
 // Ступени отношения к отряду, общие у фракций и NPC: от −3 до 3.
 export const ATTITUDES = [
@@ -36,6 +37,7 @@ export function FactionsStep({
   onSave,
   onLock,
   generate,
+  onDirtyChange,
 }: StepFormProps) {
   const [factions, setFactions] = useState(draft.factions);
   // Закрепить можно только фракцию, которую знает сервер.
@@ -44,6 +46,7 @@ export function FactionsStep({
 
   return (
     <SectionForm
+      onDirtyChange={onDirtyChange}
       onSubmit={() => onSave(factions)}
       dirty={dirty}
       generate={generate(dirty)}
@@ -71,7 +74,7 @@ export function FactionsStep({
           <>
             <TextField
               label="Идентификатор"
-              hint="Латиница, цифры, «-» и «_»."
+              hint={ID_HINT}
               autoComplete="off"
               value={faction.id}
               onChange={(event) => update({ id: event.target.value })}

@@ -36,6 +36,7 @@ from dnd_server.authoring.sections import (
     draft_report,
     problems,
     step_statuses,
+    steps_written_by,
 )
 from dnd_server.authoring.steps import is_empty, run_step
 from dnd_server.llm.fake import FakeProvider, load_scenario
@@ -95,7 +96,9 @@ def problems_of(section: str, data, draft: AuthoringDraft | None = None) -> list
 # --- раздел и шаг ---
 
 
-def test_the_editor_has_the_sections_of_blocks_4_and_5_each_with_its_step():
+def test_the_editor_has_every_section_of_the_contract_each_with_its_step():
+    # Дополнение B6 §1: все 12 разделов; бои и свои статблоки пишет шаг encounters, откровения —
+    # шаг clues.
     assert SECTION_STEPS == {
         "settings": "concept",
         "world": "world",
@@ -106,20 +109,12 @@ def test_the_editor_has_the_sections_of_blocks_4_and_5_each_with_its_step():
         "npcs": "npcs",
         "relations": "relations",
         "items": "items",
+        "encounters": "encounters",
+        "monsters": "encounters",
+        "revelations": "clues",
     }
-    # Шаги генерации — явный список (дополнение B5 §2): наполнение локаций пишет раздел карты, а
-    # предметы в B5 правятся только вручную.
-    assert EDITOR_STEPS == (
-        "concept",
-        "world",
-        "pantheon",
-        "factions",
-        "plot",
-        "locations",
-        "location_contents",
-        "npcs",
-        "relations",
-    )
+    # Шаги генерации — все 12 шагов генератора (дополнение B6 §1).
+    assert EDITOR_STEPS == STEPS
     assert REQUIRED_STEPS == (
         "concept",
         "plot",
@@ -485,6 +480,54 @@ LONGEST_ANSWERS = {
             for n in range(20)
         ]
     },
+    # Бой: самые длинные тексты и все четыре группы; монстров в бою — не больше 20 (предел раздела
+    # и валидатора, дополнение B6 §5), хотя схема ответа пускает до 20 в каждой группе.
+    "encounters": {
+        "encounters": [
+            {
+                "id": f"e{n}",
+                "location_id": f"{n}" + "a" * 63,  # у локации один бой
+                "trigger": "Я" * 2000,
+                "tactics": "Я" * 2000,
+                "monsters": [{"monster_id": "a" * 64, "count": 5}] * 4,
+                "boss": True,
+            }
+            for n in range(8)
+        ],
+        "monsters": [
+            {
+                "id": f"m{n}",
+                "name": "Я" * 100,
+                "name_en": "A" * 100,
+                "cr": 3,
+                "xp": 700,
+                "ac": 15,
+                "hp": 90,
+                "hp_dice": "12d8+36",
+                "speed": 30,
+                "scores": {"str": 10, "dex": 14, "con": 16, "int": 13, "wis": 17, "cha": 15},
+                "traits": ["Я" * 2000] * 12,
+                "tags": ["Я" * 300] * 12,
+                "actions": [
+                    {"id": f"a{k}", "name": "Я" * 100, "kind": "other", "summary": "Я" * 2000}
+                    for k in range(12)
+                ],
+            }
+            for n in range(3)
+        ],
+    },
+    "clues": {
+        "revelations": [
+            {
+                "revelation_id": f"r{n}",
+                "clues": [
+                    {"id": f"c{n}-{k}", "description": "Я" * 2000, "where": "npc:" + "a" * 64}
+                    for k in range(8)
+                ],
+            }
+            for n in range(5)
+        ]
+    },
 }
 
 
@@ -501,8 +544,16 @@ def section_data(draft: AuthoringDraft, section: str):
 @pytest.mark.parametrize("section", list(SECTION_STEPS))
 async def test_the_longest_answer_a_step_may_give_is_saved_back_by_hand(section):
     step = SECTION_STEPS[section]
-    provider = RecordingProvider({f"generator.{step}": LONGEST_ANSWERS[step]})
-    generated = await run_step(provider, AuthoringDraft(), step)  # ответ прошёл схему шага
+    provider = RecordingProvider(
+        {f"generator.{name}": LONGEST_ANSWERS[name] for name in (step, "concept")}
+    )
+    # Улики наполняют открытия замысла: без них шагу нечего писать.
+    base = (
+        await run_step(provider, AuthoringDraft(), "concept")
+        if step == "clues"
+        else AuthoringDraft()
+    )
+    generated = await run_step(provider, base, step)  # ответ прошёл схему шага
 
     saved = apply_section(AuthoringDraft(), section, section_data(generated, section))
 
@@ -654,7 +705,7 @@ def test_the_filling_steps_have_content_once_their_base_section_is_filled():
         }
     )
 
-    # Открытие без улик — шагу улик есть что наполнять (`steps.is_empty`): шаг пуст.
+    # Ни у одного открытия нет улик — шаг улик пуст (дополнение B6 §3).
     assert step_statuses(without_clues, {})["clues"]["status"] == "empty"
     filled = step_statuses(complete, {})
     assert filled["clues"]["status"] != "empty"
@@ -1417,3 +1468,22 @@ def repeated(build) -> list[dict]:
 def test_repeated_ids_of_a_section_are_named_with_the_path_of_the_section(section, data, line):
     # Reviewer nit B5: строка повтора id шла от черновика целиком, без пути раздела.
     assert problems_of(section, data) == [line]
+
+
+# --- fix-раунд 1 B6 (R5): шаги, чьё время отмечает результат генерации ---
+
+
+@pytest.mark.parametrize(
+    ("step", "written"),
+    [
+        # Замысел пишет и открытия — раздел шага «Улики».
+        ("concept", ["concept", "clues"]),
+        ("locations", ["locations", "location_contents"]),
+        ("location_contents", ["locations", "location_contents"]),
+        ("encounters", ["encounters"]),
+        ("clues", ["clues"]),
+        ("world", ["world"]),
+    ],
+)
+def test_a_generated_step_marks_the_time_of_every_step_whose_section_it_writes(step, written):
+    assert steps_written_by(step) == written

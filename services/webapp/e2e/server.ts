@@ -16,6 +16,8 @@ import { test as base } from "@playwright/test";
 export const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
 const SCENARIO = "services/server/tests/scenarios/e2e_full.yaml";
 const HOST = "127.0.0.1";
+// Файл базы во временной папке стенда; SQLite кладёт рядом свои файлы с тем же началом имени.
+const DB_FILE = "e2e.sqlite3";
 
 // Отсчёты короткие, чтобы вечер уложился в минуты. Привалу хватает времени сказать реплику.
 const COLLECT_SECONDS = "5";
@@ -52,6 +54,12 @@ export interface DndServer {
   readonly port: number;
   /** Останавливает сервер и запускает заново на том же порту и той же базе. */
   restart(): Promise<void>;
+  /**
+   * Останавливает сервер, начинает базу стенда заново (пустая база после миграций) и запускает
+   * сервер на том же порту. Тест убирает так за собой то, что помешало бы следующим: игры
+   * пользователей, черновики и опубликованные приключения (каталог перечитывается при старте).
+   */
+  resetDatabase(): Promise<void>;
   /**
    * Запускает вторую копию `dnd-server` на том же порту и той же базе, пока первая работает, и
    * ждёт её выхода. Вторая копия обязана упасть сразу, не выполнив запуск приложения.
@@ -95,7 +103,7 @@ export function serverEnv(dataDir: string): NodeJS.ProcessEnv {
     APP_ENV: "dev",
     LLM_PROVIDER: "fake",
     FAKE_LLM_SCENARIO: SCENARIO,
-    DATABASE_URL: `sqlite+aiosqlite:///${path.join(dataDir, "e2e.sqlite3")}`,
+    DATABASE_URL: `sqlite+aiosqlite:///${path.join(dataDir, DB_FILE)}`,
     CONTENT_DIR: "content/adventures",
     SESSION_SECRET,
     TELEGRAM_BOT_TOKEN: "",
@@ -341,6 +349,15 @@ export const test = base.extend<object, { server: DndServer }>({
           restart: async () => {
             log.write("\n=== перезапуск сервера ===\n");
             await halt();
+            await start();
+          },
+          resetDatabase: async () => {
+            log.write("\n=== база стенда начата заново ===\n");
+            await halt();
+            for (const name of fs.readdirSync(dataDir)) {
+              if (name.startsWith(DB_FILE)) fs.rmSync(path.join(dataDir, name));
+            }
+            migrate(env);
             await start();
           },
           startSecondCopy: () => runSecondCopy(port, env),

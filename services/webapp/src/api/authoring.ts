@@ -3,14 +3,17 @@ import type {
   AuthoringStep,
   Draft,
   DraftRef,
+  DraftReport,
   DraftSection,
   DraftSummary,
   GenerateBody,
   Job,
+  PublishResult,
+  SrdMonster,
 } from "./types";
 
 /**
- * Методы конструктора приключений (спека §10.3, дополнение к контракту B4). Они входят в общий
+ * Методы конструктора приключений (спека §10.3, дополнения к контракту B4–B6). Они входят в общий
  * клиент `createApi` и ходят через его `request`: тот же токен сессии и те же ошибки по-русски.
  * Каждая запись в черновик несёт `version`: чужая версия даёт 409 `version_conflict`.
  */
@@ -54,5 +57,32 @@ export function authoringApi(request: Request) {
     /** Справочник ссылок черновика для выбора в формах (дополнение B5, §6). */
     listRefs: (draftId: string) =>
       request<DraftRef[]>("GET", `${draftPath(draftId)}/refs`),
+    /** Проверка черновика: находки со ссылками на шаг, балл, время и доля готовности (B6 §3). */
+    validate: (draftId: string) =>
+      request<DraftReport>("POST", `${draftPath(draftId)}/validate`),
+    /** Публикация в каталог; блокирующие ошибки — 422, занятый id — 409 (B6 §6). */
+    publish: (draftId: string) =>
+      request<PublishResult>("POST", `${draftPath(draftId)}/publish`, {
+        body: {},
+      }),
+    /** Архив zip папки приключения v2 (B6 §7). */
+    exportArchive: (draftId: string) =>
+      request<Blob>("GET", `${draftPath(draftId)}/export`, { blob: true }),
+    /**
+     * Новый черновик из архива zip: тело — сам файл с типом `application/zip`, без multipart.
+     * Тип задаётся здесь: браузер не всегда узнаёт его у выбранного файла.
+     */
+    importArchive: (archive: Blob) =>
+      request<Draft>("POST", "/api/drafts/import", {
+        raw: { data: archive, type: "application/zip" },
+      }),
+    /** Копия приключения каталога (папка или опубликованное) в новый черновик (B6 §8). */
+    copyAdventure: (adventureId: string) =>
+      request<Draft>(
+        "POST",
+        `/api/adventures/${encodeURIComponent(adventureId)}/draft`,
+      ),
+    /** Справочник монстров SRD для выбора в боях (B6 §8). */
+    listSrdMonsters: () => request<SrdMonster[]>("GET", "/api/srd/monsters"),
   };
 }

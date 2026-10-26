@@ -526,8 +526,8 @@ async def test_a_body_that_is_not_json_is_422_invalid_data(stand):
     assert_error(response, 422, "invalid_data")
 
 
-@pytest.mark.parametrize("section", ["encounters", "monsters", "revelations", "nope", "SETTINGS"])
-async def test_a_section_outside_blocks_4_and_5_is_unsupported(stand, section):
+@pytest.mark.parametrize("section", ["nope", "SETTINGS", "wishes"])
+async def test_a_section_outside_the_editor_is_unsupported(stand, section):
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -621,8 +621,8 @@ async def test_a_wish_longer_than_2000_characters_is_invalid_wish(stand):
     assert (await stand.draft(author, draft["id"]))["wishes"] == {}
 
 
-@pytest.mark.parametrize("step", ["items", "encounters", "clues", "nope"])
-async def test_a_wish_for_a_step_outside_blocks_4_and_5_is_unsupported(stand, step):
+@pytest.mark.parametrize("step", ["nope", "Concept", "settings"])
+async def test_a_wish_for_a_step_outside_the_generator_is_unsupported(stand, step):
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -692,9 +692,12 @@ DRAFT_ROUTES = {
     ("GET", "/api/drafts/{draft_id}/jobs/{job_id}"): None,
     ("POST", "/api/drafts/{draft_id}/validate"): None,
     ("GET", "/api/drafts/{draft_id}/refs"): None,
+    ("POST", "/api/drafts/{draft_id}/publish"): {},
+    ("GET", "/api/drafts/{draft_id}/export"): None,
+    ("POST", "/api/drafts/import"): None,
 }
 # Маршруты, которым id черновика не нужен: у них нет чужого черновика.
-WITHOUT_DRAFT = {("GET", "/api/drafts"), ("POST", "/api/drafts")}
+WITHOUT_DRAFT = {("GET", "/api/drafts"), ("POST", "/api/drafts"), ("POST", "/api/drafts/import")}
 
 
 def draft_routes(stand: Stand, route_table) -> set[tuple[str, str]]:
@@ -1713,21 +1716,6 @@ async def test_an_encounter_of_a_location_that_does_not_exist_is_kept_and_shown_
     assert ("dangling_ref", "location:harbor", "encounters") in findings(report)
 
 
-async def test_an_encounter_of_a_location_in_a_draft_without_encounters_is_not_reported(stand):
-    # Уточнение dispatcher B5 §8 (принято как есть): находку висящего `encounter_id` проверка
-    # относит к шагу `encounters`, а в черновике без единого боя этот шаг пуст — находка
-    # отбрасывается, хотя сама ссылка записана.
-    author = await stand.author()
-    draft = await stand.new_draft(author)
-
-    written = await saved(stand, author, draft, "locations", map_with(encounter_id="ghost-fight"))
-
-    assert written["locations"][HARBOR]["encounter_id"] == "ghost-fight"
-    assert written["steps"]["encounters"]["status"] == "empty"
-    report = await validate(stand, author, written)
-    assert all(ref != "location:harbor" for _, ref, _ in findings(report)), report
-
-
 async def test_deleting_a_locked_location_unlocks_it_and_leaves_the_exit_to_the_check(stand):
     # Дополнение B5 §5: удаление — запись раздела без сущности; её замок снимается в той же записи,
     # закрепления шага и чужих сущностей остаются, ссылки на удалённое — находки проверки.
@@ -2243,9 +2231,11 @@ async def test_the_start_or_finale_location_is_deleted_only_with_its_field_moved
     assert moved[field] is None and moved["locks"] == []
     assert moved["steps"]["locations"]["status"] == "draft"
     report = await validate(stand, author, moved)
+    # Текст находки — понятный автору (дополнение B6 §3), а не фраза движка о ссылке в никуда.
+    text = {"start_location": "Старт не выбран", "finale_location": "Финал не выбран"}[field]
     assert any(
-        (f["code"], f["ref"], f["step"]) == ("dangling_ref", "adventure", "locations")
-        and f["message"].startswith(f"{field}:")
+        (f["code"], f["ref"], f["step"], f["message"])
+        == ("dangling_ref", "adventure", "locations", text)
         for f in report["errors"]
     ), report
 

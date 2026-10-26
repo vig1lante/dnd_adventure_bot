@@ -32,9 +32,11 @@ from test_drafts_api import (  # noqa: F401  (фикстуры стенда API 
     database_file,
     deities_data,
     factions_data,
+    generated_draft,
     locations_data,
     lock,
     plot_data,
+    put_draft,
     saved,
     section_data,
     served_section,
@@ -217,10 +219,8 @@ async def test_a_target_regenerates_only_that_entity(stand):
 @pytest.mark.parametrize(
     ("body", "code"),
     [
-        ({"step": "items"}, "unsupported_step"),
-        ({"step": "encounters"}, "unsupported_step"),
-        ({"step": "clues"}, "unsupported_step"),
         ({"step": "nope"}, "unsupported_step"),
+        ({"step": "items", "target": "encounter:x"}, "invalid_target"),
         ({"step": "world", "wish": "Я" * 2001}, "invalid_wish"),
         ({"step": "world", "wish": "   "}, "invalid_wish"),
         ({"step": "concept", "target": "revelation:ash-truth"}, "invalid_target"),
@@ -1330,3 +1330,90 @@ async def test_a_job_marks_the_time_of_every_step_of_its_section(stand, step):
     assert after["locations"]["updated_at"] == after["location_contents"]["updated_at"]
     assert after["npcs"]["updated_at"] == before["npcs"]["updated_at"]
     assert all(after[s]["updated_at"] is None for s in ("relations", "items", "concept"))
+
+
+# --- пределы результата задания (дополнение B6 §5) ---
+
+
+def custom_monsters(count: int) -> list[dict[str, Any]]:
+    """`count` своих статблоков демо v2 с разными id (опыт соответствует cr)."""
+    [monster] = v2_answers()["generator.encounters"]["monsters"]
+    return [monster | {"id": f"own-{n}"} for n in range(count)]
+
+
+async def test_a_result_over_the_limits_of_its_section_fails_and_leaves_the_draft(stand):
+    # Повторные цели боя не копят свои статблоки сверх предела черновика (security B3 att.002 I3):
+    # шесть своих статблоков и бой, чей новый ответ приносит седьмой.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    draft = await saved(stand, author, draft, "monsters", custom_monsters(6))
+    encounters = v2_answers()["generator.encounters"]["encounters"]
+    draft = await saved(stand, author, draft, "encounters", encounters)
+
+    started = await generate(stand, author, draft, step="encounters", target="encounter:ash-rite")
+    await stand.app.state.authoring_tasks.join()
+
+    job = await job_of(stand, author, draft, started.json()["id"])
+    assert (job["status"], job["error"]) == ("failed", jobs.OVER_LIMITS)
+    assert job["error"].startswith("Результат генерации не уложился в пределы раздела")
+    after = await stand.draft(author, draft["id"])
+    assert after["version"] == draft["version"]
+    assert [m["id"] for m in after["monsters"]] == [f"own-{n}" for n in range(6)]
+
+
+async def test_a_result_is_checked_only_in_the_sections_it_wrote(stand):
+    # Раздел, который шаг не трогал, может быть каким угодно (например, копия большой папки):
+    # предел проверяется у записанного, а не у всего черновика.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+    draft = await saved(stand, author, draft, "deities", deities_data())
+    async with stand.db() as session:
+        row = await session.get(AdventureDraft, draft["id"])
+        row.data = row.data | {"title": "Я" * 500}
+        await session.commit()
+    draft = await stand.draft(author, draft["id"])
+
+    generated = await run(stand, author, draft, step="factions")
+
+    assert generated["factions"]
+    assert generated["title"] == "Я" * 500
+
+
+async def test_a_generated_fight_of_more_than_twenty_monsters_fails_and_leaves_the_draft(
+    stand, monkeypatch
+):
+    # Финальное покрытие B6: схема ответа шага пускает четыре группы по 20, а в бою раздела — не
+    # больше 20 монстров. Результат шага проходит те же пределы, что ручная запись (дополнение
+    # B6 §5), даже когда ничего не накопилось: черновик и версия остаются прежними.
+    answers = v2_answers()
+    [first, *rest] = answers["generator.encounters"]["encounters"]
+    crowd = [{"monster_id": m, "count": 20} for m in ("ghoul", "zombie", "skeleton", "cultist")]
+    answers["generator.encounters"]["encounters"] = [first | {"monsters": crowd}, *rest]
+    use_provider(monkeypatch, RecordingProvider(answers))
+    author = await stand.author()
+    content = await generated_draft()
+    draft = await put_draft(
+        stand, author, content.model_copy(update={"encounters": (), "monsters": ()})
+    )
+
+    started = await generate(stand, author, draft, step="encounters")
+    await stand.app.state.authoring_tasks.join()
+
+    job = await job_of(stand, author, draft, started.json()["id"])
+    assert (job["status"], job["error"]) == ("failed", jobs.OVER_LIMITS)
+    after = await stand.draft(author, draft["id"])
+    assert {k: v for k, v in after.items() if k != "job"} == {
+        k: v for k, v in draft.items() if k != "job"
+    }
+
+
+async def test_a_concept_job_marks_the_time_of_the_clues_step_too(stand):
+    # Дополнение B6 §11 (R5): генерация Замысла пишет раздел открытий — время шага «Улики» тоже.
+    author = await stand.author()
+    draft = await stand.new_draft(author)
+
+    after = (await run(stand, author, draft, step="concept"))["steps"]
+
+    assert after["concept"]["updated_at"] is not None
+    assert after["clues"]["updated_at"] == after["concept"]["updated_at"]
+    assert after["world"]["updated_at"] is None

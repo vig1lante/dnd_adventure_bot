@@ -1,5 +1,5 @@
-"""Задания генерации шага конструктора (планы B4.1, B5.1; спека Р6, §10.2, §10.3; дополнения
-dispatcher B4 §5, §9 и B5 §2).
+"""Задания генерации шага конструктора (планы B4.1, B5.1, B6.1; спека Р6, §10.2, §10.3; дополнения
+dispatcher B4 §5, §9, B5 §2 и B6 §2, §5).
 
 `create_job` проверяет вход до задания — шаг конструктора (`sections.EDITOR_STEPS`), пожелание
 (`draft.Wish`), цель (та же проверка, что у `run_step`: `steps.target_id`, одна сущность раздела
@@ -10,8 +10,11 @@ dispatcher B4 §5, §9 и B5 §2).
 `run_job` выполняет задание фоновой задачей сервера: `run_step` с провайдером игры и генератора
 (`dm.provider.game_provider`; дешёвую модель просит сам запрос шага, `cheap`). Пока задание идёт,
 правка черновика закрыта (`service`), поэтому результат пишется поверх той же версии и поднимает её;
-если черновик всё же изменился, результат не пишется. Любой сбой — `failed` с безопасным текстом:
-без пожелания, данных черновика и текста исключения (в нём бывают ответ модели и куски настроек).
+если черновик всё же изменился, результат не пишется. Результат проходит те же пределы разделов,
+что ручная запись: не уложился — `failed`, черновик не меняется (так повторные цели боя не копят
+свои статблоки). id приключения опубликованного черновика результат не меняет. Любой сбой —
+`failed` с безопасным текстом: без пожелания, данных черновика и текста исключения (в нём бывают
+ответ модели и куски настроек).
 В журнал сервера — id черновика, шаг, итог, длительность и класс ошибки.
 
 `fail_interrupted_jobs` при старте сервера помечает задания, прерванные остановкой, сорванными:
@@ -27,7 +30,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.exc import StaleDataError
 
-from dnd_server.authoring.sections import steps_written_by
+from dnd_server.authoring.sections import limit_problems, steps_written_by
 from dnd_server.authoring.service import (
     JOB_RUNNING,
     DraftConflict,
@@ -37,6 +40,7 @@ from dnd_server.authoring.service import (
     checked_wish,
     job_out,
     owned_draft,
+    published_id,
     put_into,
     require_editor_step,
     stored_draft,
@@ -62,6 +66,10 @@ FAILED = "Генерация не удалась. Попробуйте ещё р
 NOT_CONFIGURED = "Нейронка для конструктора не настроена: обратитесь к владельцу сервера."
 DRAFT_CHANGED = "Черновик изменился во время генерации: результат не записан."
 RESTARTED = "Генерация прервана: сервер перезапускался."
+OVER_LIMITS = (
+    "Результат генерации не уложился в пределы раздела: черновик не изменён. Сократите раздел "
+    "или закрепите нужное и повторите."
+)
 # Причина отказа записи в журнале: отличает «черновик изменился» от сбоя провайдера.
 DRAFT_CHANGED_REASON = "черновик изменился"
 # Текст журнала, если задача конструктора всё же упадёт мимо `run_job` (`TaskSet.spawn`).
@@ -147,11 +155,12 @@ async def run_job(
             job, row = await _job_and_draft(session, job_id)
         await _set_status(sessionmaker, job_id, JobStatus.RUNNING)
         provider = game_provider(settings, turn_tokens=turn_tokens)
-        result = await run_step(
-            provider, stored_draft(row), job.step, wish=job.wish, target=job.target
-        )
-        error = await _store(sessionmaker, job_id, result, row.version)
-        if error is not None:
+        before = stored_draft(row)
+        result = await run_step(provider, before, job.step, wish=job.wish, target=job.target)
+        if over := limit_problems(before, result):
+            # Пути полей и пределы схем, без значений: их можно в журнал.
+            error, reason = OVER_LIMITS, f"пределы раздела: {'; '.join(over[:3])}"
+        elif (error := await _store(sessionmaker, job_id, result, row.version)) is not None:
             reason = DRAFT_CHANGED_REASON
     except _Gone:
         logger.info("Задание конструктора %s снято: черновик удалён.", job_id)
@@ -192,6 +201,9 @@ async def _store(
         job, row = await _job_and_draft(session, job_id)
         if row.version != version:
             return DRAFT_CHANGED
+        if (locked := await published_id(session, row.id)) is not None:
+            # Замысел предлагает свой id, но опубликованный черновик его не меняет.
+            result = result.model_copy(update={"id": locked})
         put_into(row, result, steps=steps_written_by(job.step))
         job.status = JobStatus.DONE
         job.finished_at = utcnow()

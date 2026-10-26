@@ -5,6 +5,7 @@ import { EntityList } from "./EntityList";
 import { JournalFieldsEditor, SectionForm, sameData } from "./fields";
 import type { StepFormProps } from "./fields";
 import { LockToggle } from "./LockToggle";
+import { ID_HINT } from "./labels";
 
 const EMPTY_WORLD: WorldInfo = { history: "", regions: [], rumors: [] };
 
@@ -24,12 +25,19 @@ const newRumor = (): Rumor => ({
 });
 
 /** Шаг «Мир»: история, края и слухи. Закрепляется только целиком (`step:world`). */
-export function WorldStep({ draft, onSave, onLock, generate }: StepFormProps) {
+export function WorldStep({
+  draft,
+  onSave,
+  onLock,
+  generate,
+  onDirtyChange,
+}: StepFormProps) {
   const [world, setWorld] = useState(draft.world ?? EMPTY_WORLD);
   const dirty = !sameData(world, draft.world ?? EMPTY_WORLD);
 
   return (
     <SectionForm
+      onDirtyChange={onDirtyChange}
       onSubmit={() => onSave(world)}
       dirty={dirty}
       generate={generate(dirty)}
@@ -63,7 +71,7 @@ export function WorldStep({ draft, onSave, onLock, generate }: StepFormProps) {
           <>
             <TextField
               label="Идентификатор"
-              hint="Латиница, цифры, «-» и «_»."
+              hint={ID_HINT}
               autoComplete="off"
               value={region.id}
               onChange={(event) => update({ id: event.target.value })}

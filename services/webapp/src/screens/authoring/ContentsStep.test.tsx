@@ -169,7 +169,7 @@ describe("шаг «Наполнение»: старт и финал вне ка�
 
 describe("шаг «Наполнение»: запись раздела locations", () => {
   test("текст вслух, заметки, зоны и бой уходят разделом locations с версией; карта и старт с финалом как были", async () => {
-    const draft = mapped({ encounters: [encounterOf("crypt-ghouls")] });
+    const draft = mapped({ encounters: [encounterOf({ id: "crypt-ghouls" })] });
     const { server, form } = await openContents(draft);
     pick(form, "crypt");
 
@@ -219,7 +219,7 @@ describe("шаг «Наполнение»: запись раздела locations
     const { server, form } = await openContents(
       mapped({
         locations: [fought],
-        encounters: [encounterOf("crypt-ghouls")],
+        encounters: [encounterOf({ id: "crypt-ghouls" })],
       }),
     );
 

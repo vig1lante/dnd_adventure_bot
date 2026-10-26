@@ -127,6 +127,10 @@ export function errorText(error: unknown): string {
 
 export interface RequestOptions {
   body?: unknown;
+  /** Сырое тело (архив zip импорта): уходит как есть со своим типом, без JSON. */
+  raw?: { data: Blob; type: string };
+  /** Ответ — файл (`Blob`, архив экспорта), а не JSON. Ошибки — те же, по-русски. */
+  blob?: true;
   /**
    * Заголовок Authorization. Не задан — `Bearer <токен сессии>`, если токен есть;
    * `null` — без заголовка (конфигурация и dev-вход).
@@ -153,7 +157,7 @@ export function createApi(
   async function request<T>(
     method: string,
     path: string,
-    { body, authorization }: RequestOptions = {},
+    { body, raw, blob, authorization }: RequestOptions = {},
   ): Promise<T> {
     const token = getToken();
     const credentials =
@@ -164,14 +168,20 @@ export function createApi(
         : authorization;
     const headers: Record<string, string> = { Accept: "application/json" };
     if (credentials !== null) headers.Authorization = credentials;
-    if (body !== undefined) headers["Content-Type"] = "application/json";
+    if (raw !== undefined) headers["Content-Type"] = raw.type;
+    else if (body !== undefined) headers["Content-Type"] = "application/json";
 
     let response: Response;
     try {
       response = await fetchImpl(path, {
         method,
         headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body:
+          raw !== undefined
+            ? raw.data
+            : body === undefined
+              ? undefined
+              : JSON.stringify(body),
       });
     } catch {
       // Причину обрыва (TypeError без подробностей) игроку знать незачем.
@@ -180,7 +190,7 @@ export function createApi(
     if (!response.ok) throw await errorFrom(response);
     if (response.status === 204) return undefined as T;
     try {
-      return (await response.json()) as T;
+      return (blob ? await response.blob() : await response.json()) as T;
     } catch {
       throw new ApiError(response.status, UNEXPECTED_ANSWER);
     }

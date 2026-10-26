@@ -4,7 +4,7 @@ import { SelectField, Switch, TextField } from "../fields";
 import { EntityList } from "./EntityList";
 import { SAVE_FIRST_REGENERATE, SectionForm, sameData } from "./fields";
 import type { StepFormProps } from "./fields";
-import { RELATION_KINDS } from "./labels";
+import { ID_HINT, RELATION_KINDS } from "./labels";
 import { LockToggle } from "./LockToggle";
 import { RefPicker } from "./RefPicker";
 
@@ -52,6 +52,7 @@ function RelationsForm({
   regenerate,
   filter,
   onFilter,
+  onDirtyChange,
 }: RelationsFormProps) {
   const [relations, setRelations] = useState(draft.relations);
   const savedIds = new Set(draft.relations.map((relation) => relation.id));
@@ -69,6 +70,7 @@ function RelationsForm({
 
   return (
     <SectionForm
+      onDirtyChange={onDirtyChange}
       onSubmit={() => onSave(relations)}
       canSave={blocked.length === 0}
       dirty={dirty}
@@ -130,7 +132,7 @@ function RelationsForm({
           <>
             <TextField
               label="Идентификатор"
-              hint="Латиница, цифры, «-» и «_»."
+              hint={ID_HINT}
               autoComplete="off"
               value={relation.id}
               onChange={(event) => update({ id: event.target.value })}

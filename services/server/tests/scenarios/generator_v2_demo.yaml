@@ -310,13 +310,15 @@ json:
         location_id: lamp-room
         trigger: Отряд мешает обряду или нападает на Верана.
         tactics: >-
-          Веран держится у алтаря и бьёт волнами пепла, фанатик прикрывает его, культисты бросаются
-          на тех, кто ближе к лестнице.
+          Веран держится у алтаря и бьёт волнами пепла, фанатики прикрывают его, упырь сторожит
+          лестницу, культисты бросаются на тех, кто ближе к ней.
         boss: true
         monsters:
           - monster_id: ash-priest
             count: 1
           - monster_id: cultist_fanatic
+            count: 3
+          - monster_id: ghoul
             count: 1
           - monster_id: cultist
             count: 6
@@ -324,8 +326,8 @@ json:
       - id: ash-priest
         name: Пепельный жрец
         name_en: Ash Priest
-        cr: 5
-        xp: 1800
+        cr: 3
+        xp: 700
         ac: 15
         hp: 90
         hp_dice: 12d8+36

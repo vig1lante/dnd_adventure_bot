@@ -37,8 +37,9 @@ PUBLIC = frozenset(
 )
 # Какие префиксы вообще бывают у маршрутов приложения; новый префикс требует решения о доступе.
 KNOWN_PREFIXES = ("/health", "/api/", "/ws/", "/internal/")
-# Маршруты только для создателей игр: конструктор приключений (DND-2 B4.1).
-CREATOR_ONLY_PREFIXES = ("/api/drafts",)
+# Маршруты только для создателей игр: конструктор приключений (DND-2 B4.1), копия приключения
+# каталога в черновик и справочник монстров SRD (B6.1).
+CREATOR_ONLY_PREFIXES = ("/api/drafts", "/api/adventures/{adventure_id}/draft", "/api/srd/")
 
 
 @asynccontextmanager
@@ -178,7 +179,16 @@ async def test_every_route_of_the_constructor_is_403_for_a_player_who_may_not_cr
             for route in routes
         }
 
-    assert len(routes) >= 10  # список, создание, чтение, удаление, разделы, задания, проверка
+    # Список, создание, чтение, удаление, разделы, задания, проверка, публикация, экспорт, импорт,
+    # копия приключения и справочник SRD.
+    assert len(routes) >= 15
+    assert {
+        ("POST", "/api/drafts/{draft_id}/publish"),
+        ("GET", "/api/drafts/{draft_id}/export"),
+        ("POST", "/api/drafts/import"),
+        ("POST", "/api/adventures/{adventure_id}/draft"),
+        ("GET", "/api/srd/monsters"),
+    } <= set(routes)
     for route, response in responses.items():
         assert response.status_code == 403, route
         assert isinstance(response.json()["detail"], str), route

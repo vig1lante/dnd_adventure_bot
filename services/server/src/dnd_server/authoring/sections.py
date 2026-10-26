@@ -1,13 +1,15 @@
-"""Разделы черновика в конструкторе на сайте (планы B4.1, B5.1; спека §10.1, §10.3; дополнения
-dispatcher B4 §2, §3, §7, §8 и B5 §1–§5).
+"""Разделы черновика в конструкторе на сайте (планы B4.1, B5.1, B6.1; спека §10.1, §10.3;
+дополнения dispatcher B4 §2, §3, §7, §8, B5 §1–§5 и B6 §1–§5).
 
 Чистые функции без базы и сети над черновиком — контрактом B3 (`AuthoringDraft`), чья форма здесь
 не меняется:
 - раздел ↔ шаг генерации (`SECTION_STEPS`): автор правит замысел, мир, богов, фракции, сюжет (B4),
-  карту с наполнением локаций, NPC, связи и предметы (B5); генерировать можно шаги `EDITOR_STEPS`;
+  карту с наполнением локаций, NPC, связи и предметы (B5), бои, свои статблоки и откровения (B6);
+  генерировать можно все шаги генератора (`EDITOR_STEPS`);
 - `apply_section` — данные раздела от автора, проверенные схемой раздела с пределами API и
   правилами черновика целиком, в новом черновике; замки сущностей, которых в разделе больше нет,
   снимаются; отказ — `InvalidSection` со строками `problems`;
+- `limit_problems` — те же пределы у разделов, которые записал шаг генерации;
 - `step_statuses` — «пусто / черновик / готово» по каждому шагу генератора;
 - `draft_report` — проверка (`pipeline.check`) по заполненным разделам и доля готовности.
 
@@ -17,6 +19,7 @@ dispatcher B4 §2, §3, §7, §8 и B5 §1–§5).
 генерация, автор сохранит обратно без правки, а длиннее ответа модели раздел не станет.
 """
 
+import re
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import Annotated, Any, Self, get_args
@@ -40,25 +43,30 @@ from dnd_engine.adventure.schema import (
     ID_PATTERN,
     Act,
     CheckSpec,
+    Clue,
     Deity,
+    Encounter,
+    EntityId,
     Exit,
     Faction,
     Feature,
     Item,
     Location,
     LocationSecret,
+    MonsterGroup,
     Npc,
     NpcRelation,
     Region,
     Relation,
+    Revelation,
     RevealRef,
     Rumor,
     WorldInfo,
 )
-from dnd_engine.adventure.validator import Issue, Report
+from dnd_engine.adventure.validator import MAX_MONSTERS_PER_ENCOUNTER, Issue, Report
 from dnd_engine.checks import VALID_DCS
 from dnd_engine.combat.model import Zone, ZoneLink
-from dnd_engine.content import load_srd
+from dnd_engine.content import MonsterAction, MonsterDef, load_srd
 from dnd_engine.modules import MODULES
 from dnd_server.adventures import shorten_problems
 from dnd_server.authoring import schemas
@@ -72,11 +80,11 @@ from dnd_server.authoring.draft import (
     to_adventure,
 )
 from dnd_server.authoring.pipeline import check, owner_step
-from dnd_server.authoring.steps import STEP_SECTIONS, is_empty
+from dnd_server.authoring.steps import STEP_SECTIONS
 from dnd_server.llm.base import MAX_LOC_PART_CHARS, printable
 
-# Раздел конструктора -> шаг генератора, который его пишет (дополнения B4 §2 и B5 §1). Раздел карты
-# пишет и наполнение локаций (`location_contents`), предметы в B5 правятся только вручную.
+# Раздел конструктора -> шаг генератора, который его пишет (дополнения B4 §2, B5 §1 и B6 §1).
+# Раздел карты пишет и наполнение локаций (`location_contents`), бои и свои статблоки — шаг боёв.
 SECTION_STEPS = {
     "settings": "concept",
     "world": "world",
@@ -87,19 +95,12 @@ SECTION_STEPS = {
     "npcs": "npcs",
     "relations": "relations",
     "items": "items",
+    "encounters": "encounters",
+    "monsters": "encounters",
+    "revelations": "clues",
 }
-# Шаги, которые конструктор генерирует (дополнение B5 §2) — явный список, а не вывод из разделов.
-EDITOR_STEPS = (
-    "concept",
-    "world",
-    "pantheon",
-    "factions",
-    "plot",
-    "locations",
-    "location_contents",
-    "npcs",
-    "relations",
-)
+# Шаги, которые конструктор генерирует: после B6 — все шаги генератора (дополнение B6 §1).
+EDITOR_STEPS = STEPS
 # Обязательные шаги для доли готовности (спека §10.3, дополнение §8).
 REQUIRED_STEPS = (
     "concept",
@@ -119,6 +120,9 @@ MAX_JOURNAL_INTRO = 2000
 LEVELS = sorted(XP_BUDGET_PER_CHARACTER)
 # Списки строк, у которых нет аналога в схемах ответа (сцены акта, сферы бога), — дополнение §7.
 MAX_LIST_LINES = 12
+# Своих статблоков на черновик (дополнение B6 §5): ответ шага боёв несёт до трёх, а повторные цели
+# боя добавляют новые — без предела черновика они копились бы.
+MAX_DRAFT_MONSTERS = 6
 
 
 class InvalidSection(ValueError):
@@ -162,6 +166,11 @@ class SettingsData(BaseModel):
         AfterValidator(lambda names: tuple(dict.fromkeys(names))),
     ]
     profanity: bool
+    # id приключения ручным автором (дополнение B6 §2): шаблон `EntityId`; пусто — не задан. Поля
+    # нет в теле — id остаётся прежним (клиенты B4/B5 его не шлют).
+    adventure_id: Annotated[
+        EntityId | None, BeforeValidator(lambda value: None if value == "" else value)
+    ] = None
 
 
 def _answer_limit(model: type[BaseModel], field: str) -> int:
@@ -289,13 +298,35 @@ class _Exit(Exit):
     hidden_dc: Difficulty | None = None
 
 
+# Находки места (дополнение B6 §11, по отчёту B6.1 att.002). Предметы и флаги — не больше, чем даёт
+# ответ модели (`FeatureOut.reveals`). Находки-улики дописывает сборка приключения из улик
+# откровений (`clue.where = feature:<id>`), поэтому они в этом пределе не считаются, а ограничены
+# пределами откровений: 5 откровений × 8 улик. Иначе черновик, прошедший пределы, после «экспорт →
+# импорт» или копии опубликованного уже не проходил бы их.
+MAX_PLACE_FINDS = _answer_limit(schemas.FeatureOut, "reveals")
+MAX_PLACE_CLUES = _answer_limit(schemas.CluesOut, "revelations") * _answer_limit(
+    schemas.RevelationCluesOut, "clues"
+)
+
+
+def _place_finds(reveals: tuple[_Reveal, ...]) -> tuple[_Reveal, ...]:
+    clues = sum(reveal.kind == "clue" for reveal in reveals)
+    if len(reveals) - clues > MAX_PLACE_FINDS:
+        raise ValueError(f"не больше {MAX_PLACE_FINDS} находок, кроме улик")
+    if clues > MAX_PLACE_CLUES:
+        raise ValueError(f"не больше {MAX_PLACE_CLUES} находок-улик")
+    return reveals
+
+
 class _Feature(Feature):
     name: NameText
     description: LongText
     check: _Check | None = None
-    reveals: tuple[_Reveal, ...] = Field(
-        default=(), max_length=_answer_limit(schemas.FeatureOut, "reveals")
-    )
+    reveals: Annotated[
+        tuple[_Reveal, ...],
+        Field(max_length=MAX_PLACE_FINDS + MAX_PLACE_CLUES),
+        AfterValidator(_place_finds),
+    ] = ()
     locked_by: LineText | None = None
 
 
@@ -415,8 +446,75 @@ class _Item(Item):
     holder: LineText
 
 
-# Схема данных каждого раздела: формы — модели B3 и движка (дополнения B4 §1, B5 §1), пределы —
-# B4 §7 и B5 §4.
+# Разделы блока 6 (дополнение B6 §1, §5): бои, свои статблоки (модель движка `MonsterDef`) и
+# откровения с уликами. Числа статблока — форма и конечность; разумность чисел, кости и опыт по cr
+# проверяет проверка черновика (`pipeline.check`), а не отказ записи.
+
+
+class _MonsterGroup(MonsterGroup):
+    monster_id: LineText
+    count: int = Field(default=1, ge=1, le=MAX_MONSTERS_PER_ENCOUNTER)
+    zone: LineText = "here"
+
+
+def _monsters_in_a_fight(groups: tuple[_MonsterGroup, ...]) -> tuple[_MonsterGroup, ...]:
+    if sum(group.count for group in groups) > MAX_MONSTERS_PER_ENCOUNTER:
+        raise ValueError(f"всего монстров в бою — не больше {MAX_MONSTERS_PER_ENCOUNTER}")
+    return groups
+
+
+class _Encounter(Encounter):
+    location_id: LineText
+    trigger: LongText
+    tactics: LongText
+    monsters: Annotated[
+        tuple[_MonsterGroup, ...],
+        Field(max_length=_answer_limit(schemas.EncounterOut, "monsters")),
+        AfterValidator(_monsters_in_a_fight),
+    ]
+    pc_zone: LineText = "here"
+
+
+class _Action(MonsterAction):
+    id: LineText
+    name: NameText
+    damage: LineText | None = None
+    damage_type: LineText | None = None
+    condition: LineText | None = None
+    multiattack: tuple[LineText, ...] = Field(default=(), max_length=MAX_LIST_LINES)
+    summary: LongText = ""
+    secondary_damage: LineText | None = None
+    secondary_damage_type: LineText | None = None
+
+
+class _Monster(MonsterDef):
+    # id своего статблока — имя файла `monsters/<id>.yaml`, поэтому шаблон id сущностей.
+    id: EntityId
+    name: NameText
+    name_en: NameText
+    cr: float = Field(ge=0, allow_inf_nan=False)
+    xp: int = Field(ge=0)
+    hp_dice: LineText
+    resistances: tuple[LineText, ...] = Field(default=(), max_length=MAX_LIST_LINES)
+    vulnerabilities: tuple[LineText, ...] = Field(default=(), max_length=MAX_LIST_LINES)
+    immunities: tuple[LineText, ...] = Field(default=(), max_length=MAX_LIST_LINES)
+    actions: tuple[_Action, ...] = Field(max_length=MAX_LIST_LINES)
+    traits: tuple[LongText, ...] = Field(default=(), max_length=MAX_LIST_LINES)
+    tags: tuple[LineText, ...] = Field(default=(), max_length=MAX_LIST_LINES)
+
+
+class _Clue(Clue):
+    description: LongText
+    where: LineText
+
+
+class _Revelation(Revelation):
+    statement: LongText
+    clues: tuple[_Clue, ...] = Field(max_length=_answer_limit(schemas.RevelationCluesOut, "clues"))
+
+
+# Схема данных каждого раздела: формы — модели B3 и движка (дополнения B4 §1, B5 §1, B6 §1),
+# пределы — B4 §7, B5 §4 и B6 §5.
 _SECTION_DATA: dict[str, TypeAdapter[Any]] = {
     "settings": TypeAdapter(SettingsData),
     "world": TypeAdapter(_World),
@@ -434,6 +532,19 @@ _SECTION_DATA: dict[str, TypeAdapter[Any]] = {
     ),
     "items": TypeAdapter(
         Annotated[tuple[_Item, ...], Field(max_length=schemas.MAX_ITEMS), UniqueIds]
+    ),
+    "encounters": TypeAdapter(
+        Annotated[tuple[_Encounter, ...], Field(max_length=schemas.MAX_ENCOUNTERS), UniqueIds]
+    ),
+    "monsters": TypeAdapter(
+        Annotated[tuple[_Monster, ...], Field(max_length=MAX_DRAFT_MONSTERS), UniqueIds]
+    ),
+    "revelations": TypeAdapter(
+        Annotated[
+            tuple[_Revelation, ...],
+            Field(max_length=_answer_limit(schemas.CluesOut, "revelations")),
+            UniqueIds,
+        ]
     ),
 }
 
@@ -556,13 +667,23 @@ def section_steps(section: str) -> list[str]:
     ]
 
 
+# Разделы, которые шаг генерации пишет сверх своего: Замысел пишет и открытия
+# (`steps._merge_concept`, контракт B3), а это раздел шага «Улики» (дополнение B6 §11, R5).
+_ALSO_WRITTEN = {"concept": ("revelations",)}
+
+
 def steps_written_by(step: str) -> list[str]:
-    """Шаги, чьё время отмечает результат шага генерации `step`: все шаги его раздела, как у ручной
-    записи раздела (дополнения B4 §3, B5 §9). Шаг без раздела конструктора — только он сам."""
-    section = next(
+    """Шаги, чьё время отмечает результат шага генерации `step`: все шаги разделов, которые он
+    пишет, как у ручной записи раздела (дополнения B4 §3, B5 §9). Шаг без раздела конструктора —
+    только он сам."""
+    own = next(
         (name for name, main in SECTION_STEPS.items() if main == step), STEP_SECTIONS.get(step)
     )
-    return section_steps(section) if section in SECTION_STEPS else [step]
+    sections = [own, *_ALSO_WRITTEN.get(step, ())]
+    written = [
+        name for section in sections if section in SECTION_STEPS for name in section_steps(section)
+    ]
+    return list(dict.fromkeys(written)) or [step]
 
 
 def _settings_update(data: SettingsData) -> dict[str, Any]:
@@ -575,7 +696,53 @@ def _settings_update(data: SettingsData) -> dict[str, Any]:
         update["title"] = data.title
     if data.journal_intro is not None:
         update["journal_intro"] = data.journal_intro
+    if "adventure_id" in data.model_fields_set:
+        update["id"] = data.adventure_id
     return update
+
+
+def limit_problems(before: AuthoringDraft, after: AuthoringDraft) -> list[str]:
+    """Нарушения пределов API у разделов, которые изменились от `before` к `after` (результат шага
+    генерации, дополнение B6 §5): что не сохранил бы автор, не запишет и генерация. Разделы, которых
+    шаг не трогал, не проверяются: черновик мог прийти из копии папки и быть больше."""
+    old, new = _served_sections(before), _served_sections(after)
+    changed = [section for section in _SECTION_DATA if new[section] != old[section]]
+    found = _section_problems(new, changed)
+    return shorten_problems([line for lines in found.values() for line in lines])
+
+
+def section_problems(draft: AuthoringDraft) -> dict[str, list[str]]:
+    """Нарушения пределов API во всех разделах черновика: `{раздел: строки «<раздел>.<путь>:
+    <предел>»}` без значений. Те же схемы, что у ручной записи раздела: по ним импорт и публикация
+    не пропускают то, что автор не смог бы сохранить (дополнение B6 §11, S2)."""
+    return _section_problems(_served_sections(draft), list(_SECTION_DATA))
+
+
+def _section_problems(served: Mapping[str, Any], sections: Iterable[str]) -> dict[str, list[str]]:
+    found: dict[str, list[str]] = {}
+    for section in sections:
+        if served[section] is None:
+            continue  # раздела нет (мир не задан) — проверять нечего
+        try:
+            _SECTION_DATA[section].validate_python(served[section])
+        except ValidationError as error:
+            found[section] = problems(error.errors(include_input=False), section)
+    return found
+
+
+def _served_sections(draft: AuthoringDraft) -> dict[str, Any]:
+    """Данные каждого раздела в той форме, в какой их шлёт автор (`PUT .../sections/{section}`)."""
+    data = draft.model_dump(mode="json")
+    served = {section: data[section] for section in _SECTION_DATA}
+    served["settings"] = data["settings"] | {
+        "title": draft.title,
+        "journal_intro": draft.journal_intro,
+        "adventure_id": draft.id,
+    }
+    served["locations"] = {
+        name: data[name] for name in ("locations", "start_location", "finale_location")
+    }
+    return served
 
 
 # --- статусы шагов и проверка ---
@@ -587,8 +754,9 @@ def is_step_empty(draft: AuthoringDraft, step: str) -> bool:
     содержимое.
 
     Числа и флажки настроек Замысла имеют умолчания и содержимым не считаются. Наполнение локаций
-    пусто, пока ни у одной локации нет наполнения (`_has_contents`). Шаги B6 — по `steps.is_empty`,
-    а улики пусты ещё и без открытий: наполнять нечего."""
+    пусто, пока ни у одной локации нет наполнения (`_has_contents`). Бои пусты, пока нет ни боя, ни
+    ссылки локации на бой: висящая ссылка — содержимое, её находку автор должен видеть. Улики пусты,
+    пока ни у одного открытия нет улик (дополнение B6 §3). Остальные шаги — по своему разделу."""
     match step:
         case "concept":
             texts = (draft.title, draft.settings.pitch, draft.settings.tone, draft.journal_intro)
@@ -598,13 +766,13 @@ def is_step_empty(draft: AuthoringDraft, step: str) -> bool:
             return world is None or not (world.history.strip() or world.regions or world.rumors)
         case "plot":
             return not (draft.plot.acts or draft.plot.endings or draft.plot.villain)
-        case "pantheon" | "factions" | "locations" | "npcs" | "relations":
-            return not getattr(draft, STEP_SECTIONS[step])
         case "location_contents":
             return not any(_has_contents(draft, location) for location in draft.locations)
+        case "encounters":
+            return not (draft.encounters or any(loc.encounter_id for loc in draft.locations))
         case "clues":
-            return not draft.revelations or is_empty(draft, step)
-    return is_empty(draft, step)
+            return not any(revelation.clues for revelation in draft.revelations)
+    return not getattr(draft, STEP_SECTIONS[step])
 
 
 def _has_contents(draft: AuthoringDraft, location: Location) -> bool:
@@ -682,7 +850,20 @@ def draft_report(draft: AuthoringDraft) -> dict[str, Any]:
 def _finding(issue: Issue) -> dict[str, Any]:
     return {
         "code": issue.code,
-        "message": issue.message,
+        "message": finding_message(issue),
         "ref": issue.ref,
         "step": owner_step(issue),
     }
+
+
+# Пустой старт или финал карты: валидатор говорит о ссылке «location:» в никуда, а автору понятнее
+# «не выбран» (manual B5 nit, дополнение B6 §3). Формат текста валидатора — как в `pipeline`.
+_UNSET_PLACE = re.compile(r"^(start|finale)_location: ссылка ['\"]location:['\"]")
+_UNSET_TEXT = {"start": "Старт не выбран", "finale": "Финал не выбран"}
+
+
+def finding_message(issue: Issue) -> str:
+    """Текст находки для автора: у пустого старта и финала — понятная фраза, иначе текст
+    проверки."""
+    unset = _UNSET_PLACE.match(issue.message) if issue.code == "dangling_ref" else None
+    return _UNSET_TEXT[unset.group(1)] if unset else issue.message

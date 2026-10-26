@@ -3,6 +3,7 @@ import type { Feature, Item } from "../../api/types";
 import { CheckList, Switch, TextAreaField, TextField } from "../fields";
 import { orNull } from "./fields";
 import { CheckField, RevealsField } from "./FindingFields";
+import { ID_HINT } from "./labels";
 
 interface FeatureEditorProps {
   feature: Feature;
@@ -57,7 +58,7 @@ export function FeatureEditor({
     <>
       <TextField
         label="Идентификатор"
-        hint="Латиница, цифры, «-» и «_»; уникален во всём приключении."
+        hint={`${ID_HINT} Уникален во всём приключении.`}
         autoComplete="off"
         value={feature.id}
         onChange={(event) => update({ id: event.target.value })}

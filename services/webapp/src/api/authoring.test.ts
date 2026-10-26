@@ -3,8 +3,11 @@ import { fakeServer } from "../test-setup";
 import type { FakeReply, RecordedCall } from "../test-setup";
 import {
   draftOf,
+  findingOf,
   jobOf,
   locationOf,
+  reportOf,
+  srdMonsterOf,
   summaryOf,
 } from "../screens/authoring/fixtures";
 
@@ -281,5 +284,366 @@ describe("ошибки конструктора: что видит автор", 
 
     await api.getJob("d1", "j/1");
     expect(server.calls[0].path).toBe("/api/drafts/d1/jobs/j%2F1");
+  });
+});
+
+// --- блок 6: проверка, публикация, архив, копия, справочник SRD (дополнение B6 §3, §6–§8) ---
+
+/** Что клиент передал в fetch: тело и заголовки как есть (заглушка разбирает только JSON). */
+const sent = (server: ReturnType<typeof fakeServer>, index = 0) =>
+  vi.mocked(server.fetch).mock.calls[index][1] as RequestInit;
+
+describe("клиент конструктора: проверка и публикация", () => {
+  test("проверка — POST .../validate, отчёт как есть", async () => {
+    const report = reportOf({
+      errors: [findingOf()],
+      score: 90,
+      readiness_percent: 99,
+    });
+    const { api, server } = apiWith({
+      "POST /api/drafts/a%2Fb/validate": { json: report },
+    });
+
+    await expect(api.validate("a/b")).resolves.toEqual(report);
+    expect(server.calls[0].headers.get("Authorization")).toBe("Bearer tok");
+  });
+
+  test("публикация — POST .../publish с телом {}; 201 — id и время", async () => {
+    const result = {
+      adventure_id: "foggy-harbor",
+      published_at: "2026-10-26T18:00:00+00:00",
+    };
+    const { api, server } = apiWith({
+      "POST /api/drafts/d1/publish": { status: 201, json: result },
+    });
+
+    await expect(api.publish("d1")).resolves.toEqual(result);
+    expect(server.calls[0].body).toEqual({});
+  });
+
+  test("отказы публикации: 422 blocking_errors с problems, 409 id_taken и job_running с кодом", async () => {
+    let reply = 0;
+    const replies = [
+      {
+        status: 422,
+        json: {
+          detail: "Есть ошибки проверки.",
+          code: "blocking_errors",
+          problems: ["clues: улик меньше трёх"],
+        },
+      },
+      {
+        status: 409,
+        json: { detail: "Этот id уже занят.", code: "id_taken" },
+      },
+      {
+        status: 409,
+        json: { detail: "Идёт генерация.", code: "job_running" },
+      },
+    ];
+    const { api } = apiWith({
+      "POST /api/drafts/d1/publish": () => replies[reply++],
+    });
+
+    const errors = [
+      await api.publish("d1").catch((e: unknown) => e),
+      await api.publish("d1").catch((e: unknown) => e),
+      await api.publish("d1").catch((e: unknown) => e),
+    ];
+
+    expect(errors[0]).toMatchObject({
+      status: 422,
+      code: "blocking_errors",
+      problems: ["clues: улик меньше трёх"],
+    });
+    expect(errors[1]).toMatchObject({
+      status: 409,
+      code: "id_taken",
+      detail: "Этот id уже занят.",
+    });
+    expect(errors[2]).toMatchObject({ status: 409, code: "job_running" });
+  });
+});
+
+describe("клиент конструктора: архив zip", () => {
+  test("экспорт — GET .../export с токеном, ответ — файл (Blob), а не JSON", async () => {
+    const { api, server } = apiWith({
+      "GET /api/drafts/d1/export": {
+        text: "PK-архив",
+        contentType: "application/zip",
+      },
+    });
+
+    const archive = await api.exportArchive("d1");
+
+    expect(archive).toBeInstanceOf(Blob);
+    await expect(archive.text()).resolves.toBe("PK-архив");
+    expect(server.calls[0].headers.get("Authorization")).toBe("Bearer tok");
+  });
+
+  test("отказ экспорта — те же русские ошибки: 422 no_adventure_id и export_invalid с problems", async () => {
+    let reply = 0;
+    const replies = [
+      {
+        status: 422,
+        json: {
+          detail: "Сначала задайте id приключения.",
+          code: "no_adventure_id",
+        },
+      },
+      {
+        status: 422,
+        json: {
+          detail: "Черновик не собирается в приключение.",
+          code: "export_invalid",
+          problems: ["locations: нет ни одной локации"],
+        },
+      },
+    ];
+    const { api } = apiWith({
+      "GET /api/drafts/d1/export": () => replies[reply++],
+    });
+
+    const noId = await api.exportArchive("d1").catch((e: unknown) => e);
+    const invalid = await api.exportArchive("d1").catch((e: unknown) => e);
+
+    expect(noId).toBeInstanceOf(ApiError);
+    expect(noId).toMatchObject({
+      code: "no_adventure_id",
+      detail: "Сначала задайте id приключения.",
+    });
+    expect(invalid).toMatchObject({
+      code: "export_invalid",
+      problems: ["locations: нет ни одной локации"],
+    });
+  });
+
+  test("импорт — POST /api/drafts/import: сырое тело архива с типом application/zip, ответ 201 Draft", async () => {
+    const draft = draftOf({ id: "d7", adventure_id: "foggy-harbor" });
+    const { api, server } = apiWith({
+      "POST /api/drafts/import": { status: 201, json: draft },
+    });
+    const file = new File(["PK-архив"], "foggy-harbor.zip", {
+      type: "application/zip",
+    });
+
+    await expect(api.importArchive(file)).resolves.toEqual(draft);
+
+    const init = sent(server);
+    // Тело — сам файл, без JSON и без multipart (B6 §7).
+    expect(init.body).toBe(file);
+    expect(server.calls[0].headers.get("Content-Type")).toBe("application/zip");
+    expect(server.calls[0].headers.get("Authorization")).toBe("Bearer tok");
+  });
+
+  test("тип тела — всегда application/zip, даже если браузер не узнал тип файла", async () => {
+    const { api, server } = apiWith({
+      "POST /api/drafts/import": { status: 201, json: draftOf() },
+    });
+
+    await api.importArchive(new File(["PK"], "adventure.zip"));
+
+    expect(server.calls[0].headers.get("Content-Type")).toBe("application/zip");
+  });
+
+  test("отказы импорта: 422 archive_invalid с problems, 413 too_large и 415 unsupported_media с текстом сервера", async () => {
+    let reply = 0;
+    const replies = [
+      {
+        status: 422,
+        json: {
+          detail: "Архив не подходит.",
+          code: "archive_invalid",
+          problems: ["путь выходит за папку приключения"],
+        },
+      },
+      {
+        status: 413,
+        json: { detail: "Архив больше 2 МиБ.", code: "too_large" },
+      },
+      {
+        status: 415,
+        json: { detail: "Нужен архив zip.", code: "unsupported_media" },
+      },
+    ];
+    const { api } = apiWith({
+      "POST /api/drafts/import": () => replies[reply++],
+    });
+    const file = new File(["PK"], "x.zip");
+
+    const errors = [
+      await api.importArchive(file).catch((e: unknown) => e),
+      await api.importArchive(file).catch((e: unknown) => e),
+      await api.importArchive(file).catch((e: unknown) => e),
+    ];
+
+    expect(errors[0]).toMatchObject({
+      status: 422,
+      code: "archive_invalid",
+      problems: ["путь выходит за папку приключения"],
+    });
+    expect(errors[1]).toMatchObject({
+      status: 413,
+      code: "too_large",
+      detail: "Архив больше 2 МиБ.",
+    });
+    expect(errors[2]).toMatchObject({
+      status: 415,
+      code: "unsupported_media",
+      detail: "Нужен архив zip.",
+    });
+  });
+
+  test("обрыв связи при импорте — статус 0 и текст про связь", async () => {
+    const { api } = apiWith({
+      "POST /api/drafts/import": () => {
+        throw new TypeError("Failed to fetch");
+      },
+    });
+
+    const error = await api
+      .importArchive(new File(["PK"], "x.zip"))
+      .catch((e: unknown) => e);
+
+    expect(error).toMatchObject({
+      status: 0,
+      detail: "Нет связи с сервером. Проверьте интернет и попробуйте ещё раз.",
+    });
+  });
+});
+
+describe("клиент конструктора: копия и справочник SRD", () => {
+  test("копия приключения каталога — POST /api/adventures/{id}/draft, id кодируется, ответ 201 Draft", async () => {
+    const draft = draftOf({ id: "d8", adventure_id: "demo-crypt" });
+    const { api, server } = apiWith({
+      "POST /api/adventures/demo%2Fcrypt/draft": { status: 201, json: draft },
+    });
+
+    await expect(api.copyAdventure("demo/crypt")).resolves.toEqual(draft);
+    expect(server.calls[0]).toMatchObject({
+      method: "POST",
+      path: "/api/adventures/demo%2Fcrypt/draft",
+    });
+  });
+
+  test("справочник монстров SRD — GET /api/srd/monsters, список как есть", async () => {
+    const monsters = [
+      srdMonsterOf(),
+      srdMonsterOf({ id: "ghoul", name: "Гуль", cr: 1, xp: 200 }),
+    ];
+    const { api, server } = apiWith({
+      "GET /api/srd/monsters": { json: monsters },
+    });
+
+    await expect(api.listSrdMonsters()).resolves.toEqual(monsters);
+    expect(server.calls[0].headers.get("Authorization")).toBe("Bearer tok");
+  });
+});
+
+// --- финальное покрытие блока 6: файл в ответе и сырое тело — те же русские ошибки ---
+
+describe("клиент: архив — сбои связи и чужие ответы по-русски", () => {
+  test("экспорт: обрыв связи — статус 0 и текст про связь", async () => {
+    const { api } = apiWith({
+      "GET /api/drafts/d1/export": () => {
+        throw new TypeError("Failed to fetch");
+      },
+    });
+
+    await expect(api.exportArchive("d1")).rejects.toMatchObject({
+      status: 0,
+      detail: "Нет связи с сервером. Проверьте интернет и попробуйте ещё раз.",
+    });
+  });
+
+  test.each([
+    [502, "Сервер временно недоступен. Попробуйте ещё раз немного позже."],
+    [404, "Не найдено."],
+  ])(
+    "экспорт: %i от прокси без JSON — русский текст по коду, не тело страницы",
+    async (status, detail) => {
+      const { api } = apiWith({
+        "GET /api/drafts/d1/export": {
+          status,
+          text: "<html>Bad Gateway</html>",
+          contentType: "text/html",
+        },
+      });
+
+      const error = await api.exportArchive("d1").catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).toMatchObject({ status, detail, problems: undefined });
+    },
+  );
+
+  test("экспорт: тело успешного ответа не прочиталось — «Сервер вернул непонятный ответ.»", async () => {
+    const broken = new Response("PK", { status: 200 });
+    Object.defineProperty(broken, "blob", {
+      value: () => Promise.reject(new TypeError("body stream already read")),
+    });
+    const api = createApi(
+      vi.fn(async () => broken) as unknown as typeof fetch,
+      () => "tok",
+    );
+
+    await expect(api.exportArchive("d1")).rejects.toMatchObject({
+      status: 200,
+      detail: "Сервер вернул непонятный ответ.",
+    });
+  });
+
+  test("экспорт: GET без тела и без Content-Type; ответ zip отдаётся файлом даже с Accept JSON", async () => {
+    const { api, server } = apiWith({
+      "GET /api/drafts/d1/export": {
+        text: "PK\u0003\u0004",
+        contentType: "application/zip",
+      },
+    });
+
+    const archive = await api.exportArchive("d1");
+
+    expect(archive.type).toBe("application/zip");
+    expect(sent(server).body).toBeUndefined();
+    expect(server.calls[0].headers.get("Content-Type")).toBeNull();
+  });
+
+  test("импорт: 502 прокси без JSON — русский текст по коду; тело запроса — сам файл", async () => {
+    const { api, server } = apiWith({
+      "POST /api/drafts/import": {
+        status: 502,
+        text: "<html>Bad Gateway</html>",
+        contentType: "text/html",
+      },
+    });
+    const file = new File(["PK"], "x.zip");
+
+    await expect(api.importArchive(file)).rejects.toMatchObject({
+      status: 502,
+      detail: "Сервер временно недоступен. Попробуйте ещё раз немного позже.",
+    });
+    expect(sent(server).body).toBe(file);
+  });
+
+  test("импорт: problems читаются только у 422 — у 413 их нет, даже если сервер прислал", async () => {
+    const { api } = apiWith({
+      "POST /api/drafts/import": {
+        status: 413,
+        json: {
+          detail: "Архив больше 2 МиБ.",
+          code: "too_large",
+          problems: ["лишнее"],
+        },
+      },
+    });
+
+    await expect(
+      api.importArchive(new File(["PK"], "x.zip")),
+    ).rejects.toMatchObject({
+      status: 413,
+      code: "too_large",
+      detail: "Архив больше 2 МиБ.",
+      problems: undefined,
+    });
   });
 });

@@ -5,18 +5,26 @@ import { EntityList } from "./EntityList";
 import { LinesField, SectionForm, orNull, sameData } from "./fields";
 import type { StepFormProps } from "./fields";
 import { LockToggle } from "./LockToggle";
+import { ID_HINT } from "./labels";
 
 const EMPTY_PLOT: Plot = { acts: [], endings: [], villain: null };
 
 const newAct = (): Act => ({ id: "", title: "", summary: "", key_scenes: [] });
 
 /** Шаг «Сюжет»: акты со сценами, концовки и злодей. Закрепляется целиком (`step:plot`). */
-export function PlotStep({ draft, onSave, onLock, generate }: StepFormProps) {
+export function PlotStep({
+  draft,
+  onSave,
+  onLock,
+  generate,
+  onDirtyChange,
+}: StepFormProps) {
   const [plot, setPlot] = useState(draft.plot ?? EMPTY_PLOT);
   const dirty = !sameData(plot, draft.plot ?? EMPTY_PLOT);
 
   return (
     <SectionForm
+      onDirtyChange={onDirtyChange}
       onSubmit={() => onSave(plot)}
       dirty={dirty}
       generate={generate(dirty)}
@@ -42,7 +50,7 @@ export function PlotStep({ draft, onSave, onLock, generate }: StepFormProps) {
           <>
             <TextField
               label="Идентификатор"
-              hint="Латиница, цифры, «-» и «_»."
+              hint={ID_HINT}
               autoComplete="off"
               value={act.id}
               onChange={(event) => update({ id: event.target.value })}

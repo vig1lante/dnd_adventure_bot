@@ -1,7 +1,15 @@
 import {
+  actionOf,
+  clueOf,
   draftOf,
   encounterOf,
   exitOf,
+  findingOf,
+  monsterGroupOf,
+  monsterOf,
+  reportOf,
+  revelationOf,
+  srdMonsterOf,
   featureOf,
   itemOf,
   locationOf,
@@ -129,7 +137,7 @@ describe("заглушки совпадают с формами контракт
       locations: [locationOf({ id: "crypt", name: "" })],
       npcs: [npcOf()],
       items: [itemOf()],
-      encounters: [encounterOf("crypt-ghouls")],
+      encounters: [encounterOf({ id: "crypt-ghouls" })],
     });
 
     expect(refsOf(draft)).toEqual([
@@ -142,5 +150,101 @@ describe("заглушки совпадают с формами контракт
         name: "crypt-ghouls",
       },
     ]);
+  });
+
+  // --- блок 6 (дополнение B6 §1, §3, §6, §8) ---
+
+  test("бой — Encounter движка с группами монстров, зоной героев и боссом", () => {
+    expect(keys(encounterOf())).toEqual(
+      [
+        "id",
+        "location_id",
+        "trigger",
+        "tactics",
+        "monsters",
+        "pc_zone",
+        "boss",
+      ].sort(),
+    );
+    expect(keys(monsterGroupOf())).toEqual(
+      ["monster_id", "count", "zone"].sort(),
+    );
+    expect(encounterOf().pc_zone).toBe("here");
+    expect(encounterOf().boss).toBe(false);
+  });
+
+  test("свой статблок — MonsterDef движка со всеми полями; действие — MonsterAction", () => {
+    expect(keys(monsterOf())).toEqual(
+      [
+        "id",
+        "name",
+        "name_en",
+        "cr",
+        "xp",
+        "ac",
+        "hp",
+        "hp_dice",
+        "speed",
+        "scores",
+        "saves",
+        "skills",
+        "resistances",
+        "vulnerabilities",
+        "immunities",
+        "actions",
+        "traits",
+        "tags",
+      ].sort(),
+    );
+    expect(keys(monsterOf().scores)).toEqual(
+      ["str", "dex", "con", "int", "wis", "cha"].sort(),
+    );
+    expect(keys(actionOf())).toEqual(
+      [
+        "id",
+        "name",
+        "kind",
+        "attack_bonus",
+        "damage",
+        "damage_type",
+        "range",
+        "save",
+        "dc",
+        "half_on_save",
+        "targets",
+        "condition",
+        "multiattack",
+        "summary",
+        "reach",
+        "secondary_damage",
+        "secondary_damage_type",
+      ].sort(),
+    );
+  });
+
+  test("откровение — Revelation с уликами {id, description, where}", () => {
+    expect(keys(revelationOf())).toEqual(["id", "statement", "clues"].sort());
+    expect(keys(clueOf())).toEqual(["id", "description", "where"].sort());
+  });
+
+  test("справочник SRD — {id, name, cr, xp, tags}: полей size/type нет (B6 §8)", () => {
+    expect(keys(srdMonsterOf())).toEqual(
+      ["id", "name", "cr", "xp", "tags"].sort(),
+    );
+  });
+
+  test("отчёт проверки — DraftReport; находка — {code, message, ref, step}", () => {
+    expect(keys(reportOf())).toEqual(
+      [
+        "errors",
+        "warnings",
+        "score",
+        "estimated_minutes",
+        "readiness_percent",
+      ].sort(),
+    );
+    expect(keys(findingOf())).toEqual(
+      ["code", "message", "ref", "step"].sort(),
+    );
   });
 });
