@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Browser, BrowserContext, Page } from "@playwright/test";
+import { className, expectPicked, pickQuickHero } from "./hero.ts";
 import { expectFitsPhone } from "./layout.ts";
 import { artifactsDir, expect, test } from "./server.ts";
 
@@ -294,8 +295,7 @@ const HERO_FIGHTER_KEYS = [
 async function fillQuickForm(player: Player): Promise<void> {
   const { page, hero } = player;
   await button(page, "Быстро").click();
-  await page.getByLabel("Класс", { exact: true }).selectOption(hero.classId);
-  await page.getByLabel("Раса", { exact: true }).selectOption(hero.species);
+  await pickQuickHero(page, hero);
   await page.getByLabel("Опиши героя одной строкой").fill(hero.concept);
   await page.getByLabel("Имя (необязательно)").fill(hero.name);
   await button(page, "Создать героя").click();
@@ -507,9 +507,7 @@ test("шестеро друзей проходят вечер: игра, рау�
       await expect(
         egor.page.getByLabel("Опиши героя одной строкой"),
       ).toHaveValue(egor.hero.concept);
-      await expect(egor.page.getByLabel("Класс", { exact: true })).toHaveValue(
-        egor.hero.classId,
-      );
+      await expectPicked(egor.page, "Класс", className(egor.hero.classId));
       await button(egor.page, "Создать героя").click();
       await expect(
         egor.page.getByRole("switch", { name: "Готов" }),

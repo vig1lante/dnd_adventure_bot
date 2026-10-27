@@ -16,8 +16,10 @@
 import importlib
 import re
 from pathlib import Path
+from typing import get_args
 
 import pytest
+from pydantic import BaseModel
 
 from dnd_server.app import create_app
 from dnd_server.config import Settings
@@ -279,6 +281,17 @@ RESPONSES = [
     ("dnd_server.characters.service.AbilityOption", "AbilityOption", set(), set()),
     ("dnd_server.characters.service.FeatureOption", "FeatureOption", set(), set()),
     ("dnd_server.characters.service.ItemLine", "ItemLine", set(), set()),
+    # Подробности вариантов для карточек создания героя (контракт блока 7, `details`).
+    ("dnd_server.characters.service.TraitDetail", "TraitDetail", set(), set()),
+    ("dnd_server.characters.service.SpeciesDetails", "SpeciesDetails", set(), set()),
+    ("dnd_server.characters.service.ClassFeatureDetail", "ClassFeatureDetail", set(), set()),
+    ("dnd_server.characters.service.ClassDetails", "ClassDetails", set(), set()),
+    ("dnd_server.characters.service.BackgroundDetails", "BackgroundDetails", set(), set()),
+    ("dnd_server.characters.service.SkillDetails", "SkillDetails", set(), set()),
+    ("dnd_server.characters.service.SpellDetails", "SpellDetails", set(), set()),
+    ("dnd_server.characters.service.SummaryDetails", "SummaryDetails", set(), set()),
+    # Черта предыстории и боевой стиль: у обоих `details` (финальное покрытие блока 7).
+    ("dnd_server.characters.service.Described", "Described", set(), set()),
     ("dnd_server.characters.service.QuickChoices", "QuickChoices", set(), set()),
     ("dnd_engine.creation.CharacterChoices", "CharacterChoices", set(), set()),
     ("dnd_engine.character.Persona", "Persona", set(), set()),
@@ -316,3 +329,67 @@ def test_the_comparison_notices_a_field_that_one_side_does_not_have():
     # Контроль сверки полей: разные по составу модель и интерфейс не выдают себя за одинаковые.
     assert model_fields("dnd_server.auth.api.UserOut") != interface_fields("LoginResult")
     assert interface_fields("User") == {"id", "name", "can_create_games"}
+
+
+# --- безымянные вложенные объекты `details`: у клиента они записаны прямо в поле интерфейса ---
+# Сверка выше берёт поля моделей по именам Python и вложенные объекты не раскрывает, поэтому
+# `skill_choices`, `spellcasting` и `feat` подробностей сверяются здесь — по именам ключей ответа.
+
+
+def inline_object_fields(interface: str, field: str) -> set[str]:
+    """Ключи объекта, записанного прямо в поле интерфейса: `skill_choices: { count; from }`."""
+    text = re.sub(r"(?m)^\s*//.*$", "", client_text("types.ts"))
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    body = re.search(rf"export interface {interface}\s*\{{(.*?)\n\}}", text, re.DOTALL)
+    assert body is not None, f"интерфейс {interface} в types.ts не найден"
+    found = re.search(rf"^\s*{field}\??:\s*\{{([^{{}}]*)\}}", body.group(1), re.MULTILINE)
+    assert found is not None, f"у {interface}.{field} нет объекта прямо в поле"
+    return set(re.findall(r"(\w+)\??:", found.group(1)))
+
+
+def nested_model(path: str, field: str) -> type[BaseModel]:
+    """Модель сервера в поле `field` модели `path`; `X | None` разворачивается в `X`."""
+    module, _, name = path.rpartition(".")
+    annotation = getattr(importlib.import_module(module), name).model_fields[field].annotation
+    models = [
+        candidate
+        for candidate in (annotation, *get_args(annotation))
+        if isinstance(candidate, type) and issubclass(candidate, BaseModel)
+    ]
+    assert len(models) == 1, f"в {path}.{field} не одна модель: {models}"
+    return models[0]
+
+
+def sent_names(model: type[BaseModel]) -> set[str]:
+    """Ключи, под которыми поля модели уходят в ответ: с учётом `serialization_alias`."""
+    return {info.serialization_alias or name for name, info in model.model_fields.items()}
+
+
+# (модель сервера, её поле с объектом, у клиента безымянным, интерфейс клиента с тем же полем)
+INLINE_OBJECTS = [
+    ("dnd_server.characters.service.ClassDetails", "skill_choices", "ClassDetails"),
+    ("dnd_server.characters.service.ClassDetails", "spellcasting", "ClassDetails"),
+    ("dnd_server.characters.service.BackgroundDetails", "feat", "BackgroundDetails"),
+]
+
+
+@pytest.mark.parametrize(
+    ("model", "field", "interface"),
+    INLINE_OBJECTS,
+    ids=[f"{interface}.{field}" for _model, field, interface in INLINE_OBJECTS],
+)
+def test_inline_objects_of_details_have_the_same_keys_on_both_sides(model, field, interface):
+    server, client = sent_names(nested_model(model, field)), inline_object_fields(interface, field)
+
+    assert server == client, f"{model}.{field}: сервер {sorted(server)}, клиент {sorted(client)}"
+
+
+def test_the_inline_comparison_goes_by_the_key_from_not_by_the_python_name():
+    # Контроль сверки: `from` — слово Python, поле сервера `from_` уходит в ответ под именем `from`.
+    choices = nested_model("dnd_server.characters.service.ClassDetails", "skill_choices")
+
+    assert inline_object_fields("ClassDetails", "skill_choices") == {"count", "from"}
+    assert set(choices.model_fields) == {"count", "from_"}
+    assert sent_names(choices) == {"count", "from"}
+    magic = inline_object_fields("ClassDetails", "spellcasting")
+    assert magic == {"ability", "cantrips", "prepared"}

@@ -350,7 +350,13 @@ describe("шаги", () => {
       "equipment",
       "persona",
       "backstory",
+      "summary",
     ]);
+  });
+
+  test("последний шаг — «Итог»: идти дальше не нужно, он закончен всегда", () => {
+    expect(stepsOf(rogueDraft(), OPTIONS).at(-1)).toBe("summary");
+    expect(stepComplete("summary", createDraft(OPTIONS), OPTIONS)).toBe(true);
   });
 
   test("вид, класс и предыстория выбраны — шаги завершены", () => {

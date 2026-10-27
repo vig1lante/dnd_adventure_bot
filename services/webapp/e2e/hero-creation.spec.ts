@@ -6,13 +6,16 @@ import type {
   Request,
   Response,
 } from "@playwright/test";
+import { carousel, expectPicked, pickInCarousel, shownCard } from "./hero.ts";
 import { expectFitsPhone, layoutProblems } from "./layout.ts";
 import { expect, test } from "./server.ts";
 
-// Создание героя на настоящем сервере (финальное покрытие B8, решения владельца R1, R4, R9, R10).
-// Юнит-тесты экранов идут на заглушках сервера и держат в руках форму ответов, описанную в плане.
-// Здесь те же экраны разговаривают с настоящим `dnd-server` (dev, `FakeProvider`, временная база)
-// через прокси Vite: если форма ответа сервера разойдётся с типами клиента, тест это покажет.
+// Создание героя на настоящем сервере (финальное покрытие B8, решения владельца R1, R4, R9, R10;
+// «Создание героя 2.0» — блок 7 DND-2, спека §6–§7). Юнит-тесты экранов идут на заглушках
+// сервера и держат в руках форму ответов, описанную в плане. Здесь те же экраны разговаривают
+// с настоящим `dnd-server` (dev, `FakeProvider`, временная база) через прокси Vite: если форма
+// ответа сервера разойдётся с типами клиента, тест это покажет. Подробные карточки сверяются с
+// `details` из того же ответа правил создания, который получил экран.
 // Игры не начинаются: сценарий мастера рассчитан на шестерых игроков (см. six-players.spec.ts),
 // а для героев мастер нужен только как автор описания (`character.flavor`, `character.backstory`).
 
@@ -123,13 +126,302 @@ async function requestOf(
   return matching;
 }
 
-/** Выбор карточки-радио: сама кнопка скрыта стилем, щёлкают по подписи. */
-async function pickCard(page: Page, group: string, label: RegExp) {
-  const radiogroup = page.getByRole("radiogroup", { name: group });
-  await radiogroup.locator("label", { hasText: label }).first().click();
+// --- правила создания с сервера: `details` у вариантов (контракт блока 7) ---
+
+interface Named {
+  id: string;
+  name: string;
+}
+
+/** Запись раздела карточки: черта расы, особенность класса. */
+interface EntryJson {
+  name: string;
+  summary: string;
+  mechanical: boolean;
+  level?: number;
+}
+
+interface SpeciesJson extends Named {
+  details: {
+    description: string;
+    size: string;
+    speed_text: string;
+    traits: EntryJson[];
+  };
+}
+
+interface SpellJson extends Named {
+  details: {
+    school: string;
+    casting_time: string;
+    range_text: string;
+    duration: string;
+    summary: string;
+  };
+}
+
+interface ClassJson extends Named {
+  skill_options: string[];
+  fighting_styles: string[];
+  details: { hit_die: number; features: (EntryJson & { level: number })[] };
+  spellcasting: {
+    cantrip_options: SpellJson[];
+    spell_options: SpellJson[];
+  } | null;
+}
+
+interface BackgroundJson extends Named {
+  skills: string[];
+  details: { tool: string; feat: { name: string; summary: string } };
+}
+
+interface SkillJson extends Named {
+  details: { ability: string; summary: string };
+}
+
+/** Черта или боевой стиль: `details` — только описание. */
+interface DescribedJson extends Named {
+  details: { summary: string };
+}
+
+interface CreationOptionsJson {
+  abilities: Named[];
+  skills: SkillJson[];
+  species: SpeciesJson[];
+  classes: ClassJson[];
+  backgrounds: BackgroundJson[];
+  fighting_styles: DescribedJson[];
+}
+
+/** Вариант по id из ответа сервера; без него тест падает с понятной причиной. */
+function byId<T extends Named>(items: readonly T[], id: string): T {
+  const item = items.find((candidate) => candidate.id === id);
+  if (item === undefined) throw new Error(`в правилах сервера нет «${id}»`);
+  return item;
+}
+
+/** «Создать персонажа»: экран сам загружает правила создания; тест берёт тот же ответ. */
+async function openCreation(page: Page): Promise<CreationOptionsJson> {
+  const answer = await responseTo(
+    page,
+    "GET",
+    "/content/creation-options",
+    () => button(page, "Создать персонажа").click(),
+  );
+  expect(answer.status()).toBe(200);
+  return (await answer.json()) as CreationOptionsJson;
+}
+
+// --- экраны мастера подробного создания ---
+
+/** Полоска мастера: «Шаг 2 из 10: Класс». */
+const progress = (page: Page) => page.getByText(/^Шаг \d+ из \d+: /);
+
+/** Раздел «Итога» по названию шага. */
+const section = (page: Page, name: string) =>
+  page.getByRole("region", { name, exact: true });
+
+/** Строки раздела «Итога»: что выбрано на шаге. */
+const summaryLines = (page: Page, name: string) =>
+  section(page, name).getByRole("listitem");
+
+/** «Изменить» у раздела «Итога»: переход на шаг этого раздела. */
+const editSection = (page: Page, name: string) =>
+  section(page, name).getByRole("button", { name: "Изменить" }).click();
+
+/** Счётчик карусели «N из M». */
+const counterOf = (group: Locator) => group.getByText(/^\d+ из \d+$/);
+
+/** Значение строки подробной карточки «факт — значение» по её подписи. */
+const fact = (card: Locator, label: string) =>
+  card
+    .locator(".ui-detail__fact")
+    .filter({
+      has: card.page().locator("dt", { hasText: new RegExp(`^${label}$`) }),
+    })
+    .locator("dd");
+
+const IN_COMBAT = "действует в бою";
+
+/** Скорость и дистанции приходят с сервера текстом в метрах: «9 м», «10,5 м». */
+const METERS = /^\d+(,\d+)? м$/;
+
+/** На экране нет футов: расстояния только в метрах (спека §6). */
+async function expectNoFeet(scope: Locator, screenName: string) {
+  expect(
+    await scope.innerText(),
+    `${screenName}: расстояния только в метрах`,
+  ).not.toMatch(/фут/i);
+}
+
+/** Записи разделов карточки — ровно данные сервера по порядку, с уровнем и пометкой боя. */
+async function expectEntries(card: Locator, entries: readonly EntryJson[]) {
+  const shown = card.getByRole("listitem");
+  await expect(shown).toHaveCount(entries.length);
+  for (const [index, entry] of entries.entries()) {
+    const item = shown.nth(index);
+    await expect(item).toContainText(entry.name);
+    await expect(item).toContainText(entry.summary);
+    if (entry.level !== undefined) {
+      await expect(item).toContainText(`${entry.level}-й уровень`);
+    }
+    // Механическое правило считает движок: карточка помечает его.
+    if (entry.mechanical) await expect(item).toContainText(IN_COMBAT);
+    else await expect(item).not.toContainText(IN_COMBAT);
+  }
+}
+
+async function expectSpeciesCard(card: Locator, species: SpeciesJson) {
+  const { details } = species;
+  await expect(card).toContainText(details.description);
+  await expect(fact(card, "Размер")).toHaveText(details.size);
+  // Метры ровно как у сервера: клиент футы не переводит.
+  expect(details.speed_text).toMatch(METERS);
+  await expect(fact(card, "Скорость")).toHaveText(details.speed_text);
+  await expectEntries(card, details.traits);
+}
+
+async function expectClassCard(card: Locator, cls: ClassJson) {
+  await expect(fact(card, "Кость хитов")).toHaveText(`к${cls.details.hit_die}`);
+  // Герой третьего уровня: особенности 1–3 уровня, у каждой — свой уровень.
+  expect(new Set(cls.details.features.map(({ level }) => level))).toEqual(
+    new Set([1, 2, 3]),
+  );
+  await expectEntries(card, cls.details.features);
+}
+
+async function expectBackgroundCard(card: Locator, background: BackgroundJson) {
+  await expect(fact(card, "Инструмент")).toHaveText(background.details.tool);
+  await expectEntries(card, [
+    { ...background.details.feat, mechanical: false },
+  ]);
+}
+
+async function expectSpellCard(card: Locator, spell: SpellJson) {
+  const { details } = spell;
+  await expect(fact(card, "Школа")).toHaveText(details.school);
+  await expect(fact(card, "Время сотворения")).toHaveText(details.casting_time);
+  await expect(fact(card, "Дистанция")).toHaveText(details.range_text);
+  await expect(fact(card, "Длительность")).toHaveText(details.duration);
+  await expect(card).toContainText(details.summary);
+}
+
+/** «Подробнее» у каждого заклинания списка: раскрытая карточка — данные сервера. */
+async function expectAllSpellCards(group: Locator, list: readonly SpellJson[]) {
+  await expect(group.getByRole("checkbox")).toHaveCount(list.length);
+  for (const spell of list) {
+    const more = group.getByRole("button", {
+      name: `Подробнее: ${spell.name}`,
+      exact: true,
+    });
+    await more.click();
+    await expect(more).toHaveAttribute("aria-expanded", "true");
+    await expectSpellCard(
+      group.getByRole("article", { name: spell.name, exact: true }),
+      spell,
+    );
+  }
+}
+
+/**
+ * Листает карусель стрелкой «Следующая» от первой карточки до последней и сверяет каждую с
+ * данными сервера. Пока ничего не выбрано, карусель начинается с первого варианта.
+ */
+async function browseAll<T extends Named>(
+  group: Locator,
+  items: readonly T[],
+  check: (card: Locator, item: T) => Promise<void>,
+) {
+  const next = group.getByRole("button", { name: "Следующая" });
+  // Листание без зацикливания: с первой карточки назад некуда, с последней — вперёд.
   await expect(
-    radiogroup.getByRole("radio", { name: label, checked: true }),
-  ).toHaveCount(1);
+    group.getByRole("button", { name: "Предыдущая" }),
+  ).toBeDisabled();
+  for (const [index, item] of items.entries()) {
+    if (index > 0) await next.click();
+    await expect(counterOf(group)).toHaveText(
+      `${index + 1} из ${items.length}`,
+    );
+    const card = shownCard(group);
+    await expect(card).toHaveAccessibleName(item.name);
+    await expect(
+      card.getByRole("button", { name: "Выбрать", pressed: false }),
+    ).toBeVisible();
+    await check(card, item);
+    await expectNoFeet(card, `карточка «${item.name}»`);
+  }
+  await expect(next).toBeDisabled();
+}
+
+/** Свайп мышью по показанной карточке: влево — к следующей, вправо — к предыдущей. */
+async function swipe(group: Locator, direction: "left" | "right") {
+  const card = shownCard(group);
+  // Жест начинается на видимой части карточки — на строке заголовка.
+  const heading = card.getByRole("heading", { level: 3 });
+  await heading.scrollIntoViewIfNeeded();
+  const cardBox = await card.boundingBox();
+  const headingBox = await heading.boundingBox();
+  if (cardBox === null || headingBox === null) {
+    throw new Error("карточка карусели не видна");
+  }
+  const y = headingBox.y + headingBox.height / 2;
+  const left = cardBox.x + cardBox.width * 0.2;
+  const right = cardBox.x + cardBox.width * 0.8;
+  const [from, to] = direction === "left" ? [right, left] : [left, right];
+  const { mouse } = group.page();
+  await mouse.move(from, y);
+  await mouse.down();
+  await mouse.move(to, y, { steps: 8 });
+  await mouse.up();
+}
+
+/**
+ * Шаг «Раса» (спека §7): все карточки стрелками, затем свайп, точки и клавиши; выбор — кнопкой
+ * «Выбрать» на карточке.
+ */
+async function browseAndPickRace(
+  page: Page,
+  species: readonly SpeciesJson[],
+  choice: string,
+) {
+  const races = carousel(page, "Раса");
+  const counter = counterOf(races);
+  const total = species.length;
+  expect(total, "рас в правилах сервера").toBe(9);
+  await expect(button(page, "Далее")).toBeDisabled();
+  await browseAll(races, species, expectSpeciesCard);
+
+  // Свайп: вправо — к предыдущей и влево — обратно; дальше последней не листается.
+  await swipe(races, "right");
+  await expect(counter).toHaveText(`${total - 1} из ${total}`);
+  await expect(shownCard(races)).toHaveAccessibleName(species[total - 2].name);
+  await swipe(races, "left");
+  await expect(counter).toHaveText(`${total} из ${total}`);
+  await swipe(races, "left");
+  await expect(counter).toHaveText(`${total} из ${total}`);
+
+  // Точки названы расами; текущая отмечена.
+  const position = species.findIndex(({ name }) => name === choice) + 1;
+  const dot = races.getByRole("button", { name: choice, exact: true });
+  await dot.click();
+  await expect(counter).toHaveText(`${position} из ${total}`);
+  await expect(dot).toHaveAttribute("aria-current", "true");
+  // Клавиши ←/→ листают, пока фокус внутри карусели (сейчас он на точке).
+  await page.keyboard.press("ArrowRight");
+  await expect(counter).toHaveText(`${position + 1} из ${total}`);
+  await page.keyboard.press("ArrowLeft");
+  await expect(counter).toHaveText(`${position} из ${total}`);
+
+  await shownCard(races).getByRole("button", { name: "Выбрать" }).click();
+  await expectPicked(page, "Раса", choice);
+  // «Выбрано» только у выбранной расы: соседняя карточка по-прежнему предлагает «Выбрать».
+  await races.getByRole("button", { name: "Следующая" }).click();
+  await expect(
+    shownCard(races).getByRole("button", { name: "Выбрать", pressed: false }),
+  ).toBeVisible();
+  await races.getByRole("button", { name: "Предыдущая" }).click();
+  await expectPicked(page, "Раса", choice);
+  await expect(button(page, "Далее")).toBeEnabled();
 }
 
 async function pointBuyScores(page: Page): Promise<Record<string, number>> {
@@ -221,21 +513,73 @@ async function createGameAndInvite(host: Player): Promise<string> {
   return code;
 }
 
-/** Подробный герой: дварф, варвар, солдат; характеристики раскладывает сервер. */
+/** Что выбрал хост в подробном создании: по этому сверяется «Итог». */
+interface HostChoice {
+  scores: Record<string, number>;
+  /** Названия навыков класса в порядке списка. */
+  skills: string[];
+}
+
+/** «Итог» подробного героя хоста: выбор по разделам шагов, всё закончено. */
+async function expectHostSummary(page: Page, { scores, skills }: HostChoice) {
+  await expect(progress(page)).toHaveText("Шаг 10 из 10: Итог");
+  await expect(summaryLines(page, "Раса")).toHaveText(["Дварф"]);
+  await expect(summaryLines(page, "Класс")).toHaveText(["Варвар"]);
+  await expect(summaryLines(page, "Предыстория")).toHaveText(["Солдат"]);
+  await expect(summaryLines(page, "Характеристики")).toHaveText([
+    "Покупка очков",
+    ABILITIES.map((name) => `${name} ${scores[name]}`).join(", "),
+  ]);
+  await expect(summaryLines(page, "Бонус предыстории")).toHaveText([
+    "Сила +2, Телосложение +1",
+  ]);
+  await expect(section(page, "Навыки и выборы класса")).toContainText(
+    `Навыки класса: ${skills.join(", ")}`,
+  );
+  await expect(summaryLines(page, "Характер и внешность")).toHaveText([
+    `Имя: ${HOST_NAME}`,
+    `Замысел: ${HOST_CONCEPT}`,
+  ]);
+  await expect(summaryLines(page, "История героя")).toHaveText([
+    BACKSTORY_FROM_MASTER,
+  ]);
+  await expect(page.getByText("Выбор на этом шаге не закончен.")).toHaveCount(
+    0,
+  );
+  await expect(button(page, "Создать героя")).toBeEnabled();
+}
+
+/**
+ * Подробный герой — мастер по шагам: дварф, варвар, солдат листанием карточек, характеристики
+ * раскладывает сервер, «Подробнее» у навыков, «Итог» с «Изменить» и создание.
+ */
 async function createDetailedHero(host: Player) {
   const { page } = host;
-  await button(page, "Создать персонажа").click();
+  const options = await openCreation(page);
+  const barbarian = byId(options.classes, "barbarian");
+  const soldier = byId(options.backgrounds, "soldier");
   await expect(page.getByText("Создание героя")).toBeVisible();
   await expectFitsPhone(page, "выбор способа создания героя");
   await button(page, "Подробно").click();
 
-  await pickCard(page, "Раса", /Дварф/);
+  await expect(progress(page)).toHaveText("Шаг 1 из 10: Раса");
+  await browseAndPickRace(page, options.species, "Дварф");
   await expectFitsPhone(page, "шаг «Раса»");
   await button(page, "Далее").click();
-  await pickCard(page, "Класс", /Варвар/);
+
+  await expect(progress(page)).toHaveText("Шаг 2 из 10: Класс");
+  await browseAll(carousel(page, "Класс"), options.classes, expectClassCard);
+  await pickInCarousel(page, "Класс", barbarian.name);
   await expectFitsPhone(page, "шаг «Класс»");
   await button(page, "Далее").click();
-  await pickCard(page, "Предыстория", /Солдат/);
+
+  await expect(progress(page)).toHaveText("Шаг 3 из 10: Предыстория");
+  await browseAll(
+    carousel(page, "Предыстория"),
+    options.backgrounds,
+    expectBackgroundCard,
+  );
+  await pickInCarousel(page, "Предыстория", soldier.name);
   await expectFitsPhone(page, "шаг «Предыстория»");
   await button(page, "Далее").click();
 
@@ -283,11 +627,37 @@ async function createDetailedHero(host: Player) {
   await expectFitsPhone(page, "шаг «Бонус предыстории»");
   await button(page, "Далее").click();
 
-  // Навыки класса: варвар выбирает два.
+  // Навыки класса: варвар выбирает два из тех, что не дала предыстория. У каждого навыка —
+  // раскрываемая подробная карточка «Подробнее».
   const skills = page.getByRole("group", { name: /Навыки класса/ });
-  await skills.getByRole("checkbox").nth(0).check({ force: true });
-  await skills.getByRole("checkbox").nth(1).check({ force: true });
-  await expectFitsPhone(page, "шаг «Навыки»");
+  const offered = barbarian.skill_options
+    .filter((id) => !soldier.skills.includes(id))
+    .map((id) => byId(options.skills, id));
+  await expect(skills.getByRole("checkbox")).toHaveCount(offered.length);
+  const chosenSkills = offered.slice(0, 2);
+  const [skill] = chosenSkills;
+  const more = skills.getByRole("button", {
+    name: `Подробнее: ${skill.name}`,
+    exact: true,
+  });
+  await expect(more).toHaveAttribute("aria-expanded", "false");
+  await more.click();
+  await expect(more).toHaveAttribute("aria-expanded", "true");
+  const skillCard = skills.getByRole("article", {
+    name: skill.name,
+    exact: true,
+  });
+  await expect(fact(skillCard, "Характеристика")).toHaveText(
+    byId(options.abilities, skill.details.ability).name,
+  );
+  await expect(skillCard).toContainText(skill.details.summary);
+  await expectNoFeet(skillCard, `карточка навыка «${skill.name}»`);
+  for (const { name } of chosenSkills) {
+    await skills
+      .getByRole("checkbox", { name, exact: true })
+      .check({ force: true });
+  }
+  await expectFitsPhone(page, "шаг «Навыки» с раскрытой карточкой навыка");
   await button(page, "Далее").click();
 
   await expect(page.getByText("Стартовый набор выдаётся сразу")).toBeVisible();
@@ -307,13 +677,33 @@ async function createDetailedHero(host: Player) {
     BACKSTORY_FROM_MASTER,
   );
   await expectFitsPhone(page, "шаг «История героя»");
+  // Кнопка создания — только на «Итоге»: до него ещё один шаг.
+  await expect(button(page, "Создать героя")).toHaveCount(0);
+  await button(page, "Далее").click();
+
+  const choice: HostChoice = {
+    scores,
+    skills: chosenSkills.map(({ name }) => name),
+  };
+  await expectHostSummary(page, choice);
+  // «Изменить» у раздела ведёт на его шаг: карусель открыта на прежнем выборе.
+  await editSection(page, "Класс");
+  await expect(progress(page)).toHaveText("Шаг 2 из 10: Класс");
+  await expectPicked(page, "Класс", barbarian.name);
+  // Вперёд к «Итогу» — ничего не потерялось по дороге.
+  for (let step = 2; step < 10; step += 1) {
+    await button(page, "Далее").click();
+  }
+  await expectHostSummary(page, choice);
+  await expectFitsPhone(page, "шаг «Итог»");
+  await expectNoFeet(page.locator("main"), "шаг «Итог»");
 
   const sent = await requestOf(page, "POST", "/characters", () =>
     button(page, "Создать героя").click(),
   );
   const created = await (await sent.response())?.json();
   await expect(page.getByText("Ваш герой")).toBeVisible();
-  return { sent, created: created as { character: HeroJson }, scores };
+  return { sent, created: created as { character: HeroJson }, choice };
 }
 
 test("три способа создать героя на настоящем сервере", async ({
@@ -335,9 +725,10 @@ test("три способа создать героя на настоящем с
     await expect(friend.page.getByText("Ваш герой")).toBeVisible();
     await expect(host.page.getByText("Игроки (2)")).toBeVisible();
 
-    const { sent, created, scores } =
-      await test.step("Подробно: раскладка очков от сервера, «Помоги написать», создание", () =>
+    const { sent, created, choice } =
+      await test.step("Подробно: мастер по шагам, карточки, раскладка очков от сервера, «Итог», создание", () =>
         createDetailedHero(host));
+    const { scores } = choice;
     const hostHero = created.character;
     // Клиент прислал выбор игрока, а не броски и не итоговые числа персонажа.
     const body = sent.postDataJSON() as {
@@ -360,7 +751,7 @@ test("три способа создать героя на настоящем с
     expect(hostHero.name).toBe(HOST_NAME);
     expect(hostHero.class_id).toBe("barbarian");
 
-    await test.step("«Изменить героя»: форма открывается с прежним выбором (R10)", async () => {
+    await test.step("«Изменить героя»: мастер открывается на «Итоге» с прежним выбором (R10)", async () => {
       const { page } = host;
       const stored = await responseTo(page, "GET", "/characters/mine", () =>
         button(page, "Изменить").click(),
@@ -374,31 +765,30 @@ test("три способа создать героя на настоящем с
       await expect(page.getByText("Изменить героя")).toBeVisible();
       await button(page, "Изменить").click();
       await expect(page.getByText("Подробный герой")).toBeVisible();
-      await expect(
-        page
-          .getByRole("radiogroup", { name: "Раса" })
-          .getByRole("radio", { name: /Дварф/ }),
-      ).toBeChecked();
+      await expectHostSummary(page, choice);
+      await expectFitsPhone(page, "«Итог» при правке героя");
+
+      // Раздел «Раса» ведёт на шаг расы: карусель открыта на дварфе, выбор цел.
+      await editSection(page, "Раса");
+      await expect(progress(page)).toHaveText("Шаг 1 из 10: Раса");
+      await expectPicked(page, "Раса", "Дварф");
+      await expect(counterOf(carousel(page, "Раса"))).toHaveText("2 из 9");
       await button(page, "Далее").click();
-      await expect(
-        page
-          .getByRole("radiogroup", { name: "Класс" })
-          .getByRole("radio", { name: /Варвар/ }),
-      ).toBeChecked();
+      await expectPicked(page, "Класс", "Варвар");
       await button(page, "Далее").click();
-      await expect(
-        page
-          .getByRole("radiogroup", { name: "Предыстория" })
-          .getByRole("radio", { name: /Солдат/ }),
-      ).toBeChecked();
+      await expectPicked(page, "Предыстория", "Солдат");
       await button(page, "Далее").click();
       // Те же очки, которые разложил сервер при создании.
       await expect(page.getByText("Осталось 0 из 27")).toBeVisible();
       expect(await pointBuyScores(page)).toEqual(scores);
+      // «Назад» выбор не теряет.
+      await button(page, "Назад").click();
+      await expectPicked(page, "Предыстория", "Солдат");
       await button(page, "Далее").click();
-      await button(page, "Далее").click();
-      await button(page, "Далее").click();
-      await button(page, "Далее").click();
+      await expect(page.getByText("Осталось 0 из 27")).toBeVisible();
+      for (let step = 4; step < 8; step += 1) {
+        await button(page, "Далее").click();
+      }
       await expect(page.getByLabel("Имя", { exact: true })).toHaveValue(
         HOST_NAME,
       );
@@ -409,6 +799,8 @@ test("три способа создать героя на настоящем с
       await expect(page.getByLabel("Предыстория героя")).toHaveValue(
         BACKSTORY_FROM_MASTER,
       );
+      await button(page, "Далее").click();
+      await expectHostSummary(page, choice);
       // Правка не отправлена: герой в лобби прежний.
       await button(page, "Назад в лобби").click();
       await expect(page.getByText("Ваш герой")).toBeVisible();
@@ -435,6 +827,10 @@ test("три способа создать героя на настоящем с
           page.getByRole("region", { name: "Лист героя" }),
         ).toBeVisible();
         await expectFitsPhone(page, "предпросмотр случайного героя");
+        await expectNoFeet(
+          page.locator("main"),
+          "предпросмотр случайного героя",
+        );
         // Лист показывает числа сервера как есть.
         expect(await sheetScores(page)).toEqual(
           SCORE_KEYS.map((key) => firstPreview.character.scores[key]),
@@ -495,22 +891,34 @@ test("три способа создать героя на настоящем с
       ).toBeVisible();
       await expect(button(page, "Создать заново")).toHaveCount(0);
 
+      // Быстрый герой: класс и раса — листанием карточек, как в подробном создании.
       await button(page, "Быстро").click();
-      await page.getByLabel("Класс", { exact: true }).selectOption("rogue");
-      await page.getByLabel("Раса", { exact: true }).selectOption("halfling");
+      await pickInCarousel(page, "Класс", "Плут");
+      await pickInCarousel(page, "Раса", "Полурослик");
       await page.getByLabel("Опиши героя одной строкой").fill(FRIEND_CONCEPT);
-      await button(page, "Создать героя").click();
+      await expectFitsPhone(page, "форма «Быстро»");
+      await expectNoFeet(page.locator("main"), "форма «Быстро»");
+      // С карточек ушли id выбранных вариантов: карусель выбирает то же, что прежний список.
+      const quick = await requestOf(page, "POST", "/characters", () =>
+        button(page, "Создать героя").click(),
+      );
+      expect(quick.postDataJSON()).toEqual({
+        mode: "quick",
+        class_id: "rogue",
+        species: "halfling",
+        concept: FRIEND_CONCEPT,
+      });
       await expect(page.getByText("Ваш герой")).toBeVisible();
 
-      // Теперь выбор есть: форма «Быстро» открывается заполненной (имя не давали — пусто).
+      // Теперь выбор есть: форма «Быстро» открывается заполненной (имя не давали — пусто),
+      // карусели — на прежних классе и расе.
       await button(page, "Изменить").click();
       await button(page, "Изменить").click();
       await expect(page.getByLabel("Опиши героя одной строкой")).toHaveValue(
         FRIEND_CONCEPT,
       );
-      await expect(page.getByLabel("Класс", { exact: true })).toHaveValue(
-        "rogue",
-      );
+      await expectPicked(page, "Класс", "Плут");
+      await expectPicked(page, "Раса", "Полурослик");
       await expect(page.getByLabel("Имя (необязательно)")).toHaveValue("");
       await button(page, "Назад в лобби").click();
     });
@@ -617,14 +1025,19 @@ test("подробный волшебник: заклинания из наст�
     await button(page, "Создать игру").click();
     await button(page, "Создать").click();
     await expect(page.getByText("Позовите друзей")).toBeVisible();
-    await button(page, "Создать персонажа").click();
+    const options = await openCreation(page);
+    const casting = byId(options.classes, "wizard").spellcasting;
+    if (casting === null) throw new Error("у волшебника на сервере нет магии");
     await button(page, "Подробно").click();
 
-    await pickCard(page, "Раса", /Эльф/);
+    await pickInCarousel(page, "Раса", "Эльф");
     await button(page, "Далее").click();
-    await pickCard(page, "Класс", /Волшебник/);
+    await expect(progress(page)).toHaveText("Шаг 2 из 10: Класс");
+    await pickInCarousel(page, "Класс", "Волшебник");
+    // У заклинателя в мастере появляется шаг «Заклинания».
+    await expect(progress(page)).toHaveText("Шаг 2 из 11: Класс");
     await button(page, "Далее").click();
-    await pickCard(page, "Предыстория", /Мудрец/);
+    await pickInCarousel(page, "Предыстория", "Мудрец");
     await button(page, "Далее").click();
 
     // Ключевая характеристика волшебника — Интеллект: сервер даёт ему больше всех.
@@ -646,11 +1059,18 @@ test("подробный волшебник: заклинания из наст�
     await skills.getByRole("checkbox").nth(1).check({ force: true });
     await button(page, "Далее").click();
 
-    // Шаг заклинаний строится из данных сервера: три заговора и шесть заклинаний.
-    await expect(page.getByText(/Шаг 7 из 10: Заклинания/)).toBeVisible();
+    // Шаг заклинаний строится из данных сервера: три заговора и шесть заклинаний. У каждого
+    // варианта «Подробнее» раскрывает карточку: школа, время, дистанция в метрах, длительность.
+    await expect(progress(page)).toHaveText("Шаг 7 из 11: Заклинания");
     const cantrips = page.getByRole("group", { name: "Заговоры: выберите 3" });
     const spells = page.getByRole("group", { name: "Заклинания: выберите 6" });
     await expect(button(page, "Далее")).toBeDisabled();
+    await expectAllSpellCards(cantrips, casting.cantrip_options);
+    await expectAllSpellCards(spells, casting.spell_options);
+    await expectNoFeet(
+      page.locator("main"),
+      "шаг «Заклинания» с раскрытыми карточками",
+    );
     for (let index = 0; index < 3; index += 1) {
       await cantrips.getByRole("checkbox").nth(index).check({ force: true });
     }
@@ -659,15 +1079,23 @@ test("подробный волшебник: заклинания из наст�
     for (let index = 0; index < 6; index += 1) {
       await spells.getByRole("checkbox").nth(index).check({ force: true });
     }
-    await expectFitsPhone(page, "шаг «Заклинания»");
+    await expectFitsPhone(page, "шаг «Заклинания» с раскрытыми карточками");
     const chosenCantrips = await checkedValues(cantrips);
     const chosenSpells = await checkedValues(spells);
     expect(chosenCantrips).toHaveLength(3);
     expect(chosenSpells).toHaveLength(6);
+    // В «Итоге» заклинания названы так же, как в правилах сервера.
+    const spellLines = [
+      `Заговоры: ${chosenCantrips.map((id) => byId(casting.cantrip_options, id).name).join(", ")}`,
+      `Заклинания: ${chosenSpells.map((id) => byId(casting.spell_options, id).name).join(", ")}`,
+    ];
     await button(page, "Далее").click(); // снаряжение
     await button(page, "Далее").click(); // характер
     await page.getByLabel("Имя", { exact: true }).fill("Мирель");
     await button(page, "Далее").click(); // история
+    await button(page, "Далее").click(); // итог
+    await expect(progress(page)).toHaveText("Шаг 11 из 11: Итог");
+    await expect(summaryLines(page, "Заклинания")).toHaveText(spellLines);
 
     const sent = await requestOf(page, "POST", "/characters", () =>
       button(page, "Создать героя").click(),
@@ -680,13 +1108,14 @@ test("подробный волшебник: заклинания из наст�
     });
     await expect(page.getByText("Ваш герой")).toBeVisible();
 
-    // «Изменить героя»: выбранные заклинания вернулись в форму из ответа `characters/mine`.
+    // «Изменить героя»: мастер открывается на «Итоге», выбранные заклинания вернулись в форму из
+    // ответа `characters/mine`; «Изменить» у раздела ведёт на шаг заклинаний.
     await button(page, "Изменить").click();
     await button(page, "Изменить").click();
-    for (let step = 0; step < 6; step += 1) {
-      await button(page, "Далее").click();
-    }
-    await expect(page.getByText(/Шаг 7 из 10: Заклинания/)).toBeVisible();
+    await expect(progress(page)).toHaveText("Шаг 11 из 11: Итог");
+    await expect(summaryLines(page, "Заклинания")).toHaveText(spellLines);
+    await editSection(page, "Заклинания");
+    await expect(progress(page)).toHaveText("Шаг 7 из 11: Заклинания");
     expect(
       await checkedValues(
         page.getByRole("group", { name: "Заговоры: выберите 3" }),
@@ -697,6 +1126,153 @@ test("подробный волшебник: заклинания из наст�
         page.getByRole("group", { name: "Заклинания: выберите 6" }),
       ),
     ).toEqual(chosenSpells);
+  } finally {
+    await Promise.all(players.map((player) => player.context.close()));
+  }
+});
+
+// Финальное покрытие блока 7: то, чего не проходят герои выше, — навык на выбор человека, боевой
+// стиль с «Подробнее» (`fighting_styles[].details` сервера) и заклинатель без заговоров.
+test("подробный следопыт-человек: навык на выбор, «Подробнее» у боевых стилей и заклинания без заговоров", async ({
+  browser,
+  baseURL,
+}) => {
+  if (baseURL === undefined) throw new Error("baseURL не задан");
+  const players: Player[] = [];
+  try {
+    // dev-3 и dev-4 нельзя: lobby-membership ждёт, что у них ещё нет игр (база стенда общая).
+    const host = await openPlayer(browser, baseURL, "dev-6");
+    players.push(host);
+    const { page } = host;
+    await expect(page.getByText("Вы вошли как dev-6.")).toBeVisible();
+    await button(page, "Создать игру").click();
+    await button(page, "Создать").click();
+    await expect(page.getByText("Позовите друзей")).toBeVisible();
+    const options = await openCreation(page);
+    const ranger = byId(options.classes, "ranger");
+    const soldier = byId(options.backgrounds, "soldier");
+    const casting = ranger.spellcasting;
+    if (casting === null) throw new Error("у следопыта на сервере нет магии");
+    expect(casting.cantrip_options, "заговоров у следопыта нет").toEqual([]);
+    await button(page, "Подробно").click();
+
+    await pickInCarousel(page, "Раса", "Человек");
+    await button(page, "Далее").click();
+    await pickInCarousel(page, "Класс", ranger.name);
+    // Заклинатель и без заговоров: шаг «Заклинания» в мастере есть.
+    await expect(progress(page)).toHaveText("Шаг 2 из 11: Класс");
+    await button(page, "Далее").click();
+    await pickInCarousel(page, "Предыстория", soldier.name);
+    await button(page, "Далее").click();
+
+    await button(page, "Распределить случайно").click();
+    await expect(page.getByText("Осталось 0 из 27")).toBeVisible();
+    await button(page, "Далее").click();
+    await page.getByLabel("Бонус +2", { exact: true }).selectOption("dex");
+    await page.getByLabel("Бонус +1", { exact: true }).selectOption("con");
+    await button(page, "Далее").click();
+
+    // Навыки: три из списка следопыта без навыков солдата; человеку — ещё навык на выбор.
+    await expect(progress(page)).toHaveText(
+      "Шаг 6 из 11: Навыки и выборы класса",
+    );
+    const skills = page.getByRole("group", { name: /Навыки класса/ });
+    const offered = ranger.skill_options.filter(
+      (id) => !soldier.skills.includes(id),
+    );
+    await expect(skills.getByRole("checkbox")).toHaveCount(offered.length);
+    for (let index = 0; index < 3; index += 1) {
+      await skills.getByRole("checkbox").nth(index).check({ force: true });
+    }
+    await page
+      .getByLabel("Навык на выбор (Умелость)", { exact: true })
+      .selectOption("medicine");
+
+    // Боевой стиль: у каждого «Подробнее» раскрывает карточку с описанием сервера, выбор не меняя.
+    const styles = page.getByRole("radiogroup", { name: "Боевой стиль" });
+    await expect(styles.getByRole("radio")).toHaveCount(
+      ranger.fighting_styles.length,
+    );
+    for (const id of ranger.fighting_styles) {
+      const style = byId(options.fighting_styles, id);
+      const more = styles.getByRole("button", {
+        name: `Подробнее: ${style.name}`,
+        exact: true,
+      });
+      await expect(more).toHaveAttribute("aria-expanded", "false");
+      await more.click();
+      await expect(more).toHaveAttribute("aria-expanded", "true");
+      const card = styles.getByRole("article", {
+        name: style.name,
+        exact: true,
+      });
+      await expect(card).toContainText(style.details.summary);
+      await expectNoFeet(card, `карточка стиля «${style.name}»`);
+    }
+    await expect(styles.getByRole("radio", { checked: true })).toHaveCount(0);
+    const archery = byId(options.fighting_styles, "archery");
+    await styles
+      .getByRole("radio", { name: new RegExp(`^${archery.name}`) })
+      .check({ force: true });
+    await expectFitsPhone(
+      page,
+      "шаг «Навыки» с раскрытыми карточками боевых стилей",
+    );
+    await button(page, "Далее").click();
+
+    // Заклинания: группы заговоров нет, у каждого заклинания — карточка с данными сервера.
+    await expect(progress(page)).toHaveText("Шаг 7 из 11: Заклинания");
+    await expect(page.getByRole("group", { name: /^Заговоры/ })).toHaveCount(0);
+    const spells = page.getByRole("group", { name: /^Заклинания: выберите / });
+    await expectAllSpellCards(spells, casting.spell_options);
+    await expectNoFeet(page.locator("main"), "шаг «Заклинания» следопыта");
+    const prepared = Number(
+      /выберите (\d+)/.exec(await spells.locator("legend").innerText())?.[1],
+    );
+    expect(prepared, "заклинаний на выбор").toBeGreaterThan(0);
+    for (let index = 0; index < prepared; index += 1) {
+      await spells.getByRole("checkbox").nth(index).check({ force: true });
+    }
+    await expectFitsPhone(page, "шаг «Заклинания» следопыта");
+    const chosenSpells = await checkedValues(spells);
+    await button(page, "Далее").click(); // снаряжение
+    await button(page, "Далее").click(); // характер
+    await page.getByLabel("Имя", { exact: true }).fill("Ярина");
+    await button(page, "Далее").click(); // история
+    await button(page, "Далее").click(); // итог
+
+    await expect(progress(page)).toHaveText("Шаг 11 из 11: Итог");
+    const skillLines = summaryLines(page, "Навыки и выборы класса");
+    await expect(
+      skillLines.filter({ hasText: /^Навык на выбор: / }),
+    ).toHaveText(`Навык на выбор: ${byId(options.skills, "medicine").name}`);
+    await expect(skillLines.filter({ hasText: /^Боевой стиль: / })).toHaveText(
+      `Боевой стиль: ${archery.name}`,
+    );
+    await expect(summaryLines(page, "Заклинания")).toHaveText([
+      `Заклинания: ${chosenSpells.map((id) => byId(casting.spell_options, id).name).join(", ")}`,
+    ]);
+    await expect(page.getByText("Выбор на этом шаге не закончен.")).toHaveCount(
+      0,
+    );
+
+    const sent = await requestOf(page, "POST", "/characters", () =>
+      button(page, "Создать героя").click(),
+    );
+    expect(sent.postDataJSON()).toMatchObject({
+      mode: "detailed",
+      choices: {
+        species: "human",
+        class_id: "ranger",
+        background: "soldier",
+        extra_skill: "medicine",
+        fighting_style: "archery",
+        cantrips: [],
+        prepared_spells: chosenSpells,
+      },
+    });
+    expect((await sent.response())?.status()).toBe(201);
+    await expect(page.getByText("Ваш герой")).toBeVisible();
   } finally {
     await Promise.all(players.map((player) => player.context.close()));
   }

@@ -1,4 +1,4 @@
-"""Модели SRD-контента (классы, виды, заклинания, предметы, монстры) и загрузчик из YAML.
+"""Модели SRD-контента (классы, виды, навыки, заклинания, предметы, монстры) и загрузчик из YAML.
 
 Механика описана полями, а не текстом. Каждая таблица лежит в своём файле
 `<таблица>.yaml` как список объектов; в `SrdContent` ключ словаря — `id` записи.
@@ -182,6 +182,7 @@ class SpeciesDef(_SrdModel):
     id: str
     name: str
     name_en: str
+    description: str  # 2–3 предложения для карточки расы при создании героя
     size: str
     speed: int
     traits: tuple[TraitDef, ...]
@@ -193,6 +194,9 @@ class BackgroundDef(_SrdModel):
     name_en: str
     ability_options: tuple[Ability, Ability, Ability]
     skills: tuple[Skill, Skill]
+    # Владение инструментом — русский текст для карточки, а не id предмета: инструменты предысторий
+    # в поднабор предметов среза не входят.
+    tool: str
     feat: str  # id черты
     equipment: tuple[str, ...]
     inspiration_triggers: tuple[str, ...]  # 2–3 триггера отыгрыша (модуль bg3_flavor)
@@ -213,11 +217,25 @@ class SpellEffect(_SrdModel):
     repeats: int = 1  # «Волшебная стрела», «Палящий луч»
 
 
+# Восемь школ магии SRD; русские подписи школ — у сервера, движок хранит код.
+SpellSchool = Literal[
+    "abjuration",
+    "conjuration",
+    "divination",
+    "enchantment",
+    "evocation",
+    "illusion",
+    "necromancy",
+    "transmutation",
+]
+
+
 class SpellDef(_SrdModel):
     id: str
     name: str
     name_en: str
     level: int  # 0 — заговор
+    school: SpellSchool
     casting_time: Literal["action", "bonus_action"]
     range: Literal["self", "touch", "engaged", "near", "far"]
     concentration: bool
@@ -322,12 +340,19 @@ class FeatDef(_SrdModel):
     mechanical: bool
 
 
+class SkillDef(_SrdModel):
+    # Название и характеристика навыка — в `abilities.py`; здесь только текст для карточки навыка.
+    id: Skill
+    summary: str  # что проверяет навык и примеры применения
+
+
 class SrdContent(_SrdModel):
     # Имена полей совпадают с именами файлов данных: `classes` читается из classes.yaml.
     classes: dict[str, ClassDef]
     species: dict[str, SpeciesDef]
     backgrounds: dict[str, BackgroundDef]
     feats: dict[str, FeatDef]
+    skills: dict[Skill, SkillDef]
     spells: dict[str, SpellDef]
     items: dict[str, ItemDef]
     monsters: dict[str, MonsterDef]
@@ -452,6 +477,16 @@ def _check_references(srd: SrdContent) -> list[str]:
     return problems
 
 
+def _missing_skills(srd: SrdContent) -> list[str]:
+    """Таблица навыков описывает каждый навык `Skill`: лишние и повторы уже отвергнуты схемой
+    и чтением, здесь — пропуски (по одной проблеме на навык)."""
+    return [
+        f"skills.yaml: нет записи навыка {quoted(skill.value)}"
+        for skill in Skill
+        if skill not in srd.skills
+    ]
+
+
 def _check_default_spells(owner: str, cls: ClassDef, srd: SrdContent) -> list[str]:
     """Заклинания быстрого режима должны существовать и входить в список заклинаний класса."""
     problems = _unknown_ids(owner, "default_spells", cls.default_spells, srd.spells)
@@ -465,8 +500,9 @@ def _check_default_spells(owner: str, cls: ClassDef, srd: SrdContent) -> list[st
 
 def _load_dir(directory: Traversable) -> SrdContent:
     """Читает все таблицы из папки. Сначала собирает проблемы формы по всем файлам сразу;
-    ссылки между таблицами проверяются, только когда форма корректна: иначе запись,
-    не прошедшая проверку формы, дала бы ложную жалобу на «несуществующий id»."""
+    полнота таблицы навыков и ссылки между таблицами проверяются, только когда форма корректна:
+    иначе запись, не прошедшая проверку формы, дала бы ложную жалобу на пропуск или на
+    «несуществующий id»."""
     problems: list[str] = []
     tables: dict[str, dict[str, Any]] = {}
     for name in SrdContent.model_fields:
@@ -479,7 +515,7 @@ def _load_dir(directory: Traversable) -> SrdContent:
         raise ContentError([*problems, *map(_describe_schema_error, exc.errors())]) from None
     if problems:
         raise ContentError(problems)
-    if problems := _check_references(srd):
+    if problems := [*_missing_skills(srd), *_check_references(srd)]:
         raise ContentError(problems)
     return srd
 
@@ -494,7 +530,7 @@ def _load_builtin_srd() -> SrdContent:
 
 
 def load_srd(path: Path | None = None) -> SrdContent:
-    """Читает {classes,species,backgrounds,feats,spells,items,monsters,conditions}.yaml.
+    """Читает {classes,species,backgrounds,feats,skills,spells,items,monsters,conditions}.yaml.
 
     Без пути — встроенные данные пакета (`data/srd/`), результат кешируется;
     с путём — указанная папка, каждый вызов читает её заново.

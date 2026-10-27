@@ -1,9 +1,15 @@
-import type { Skill } from "../../api/types";
+import type { Skill, SpellOption } from "../../api/types";
 import { CheckList, ChoiceList, SelectField } from "../fields";
 import "../screens.css";
 import "./character.css";
 import { grantedSkills, proficientSkills } from "./draft";
+import { nameIn } from "./names";
+import { MoreDetails, SkillCard, SpellCard, SummaryCard } from "./OptionCards";
 import type { StepProps } from "./steps";
+
+// Выбор нескольких вариантов — прежние списки с отметками; у каждого варианта
+// раскрываемая подробная карточка «Подробнее» (решение блока 7: множественный выбор
+// каруселью на телефоне неудобен).
 
 /** Навыки, выборы класса: навыки, компетентность, боевой стиль. */
 export function SkillsStep({ draft, options, update }: StepProps) {
@@ -11,10 +17,20 @@ export function SkillsStep({ draft, options, update }: StepProps) {
   const species = options.species.find((item) => item.id === draft.species);
   if (cls === undefined || species === undefined) return null;
 
-  const skillName = (id: string) =>
-    options.skills.find((skill) => skill.id === id)?.name ?? id;
+  const skillName = (id: string) => nameIn(options.skills, id);
   const granted = grantedSkills(draft, options);
-  const skillChoice = (id: string) => ({ value: id, label: skillName(id) });
+  const skillOption = (id: string) => ({ value: id, label: skillName(id) });
+  const skillChoice = (id: string) => {
+    const skill = options.skills.find((item) => item.id === id);
+    return {
+      ...skillOption(id),
+      more: skill !== undefined && (
+        <MoreDetails name={skill.name}>
+          <SkillCard skill={skill} options={options} />
+        </MoreDetails>
+      ),
+    };
+  };
 
   return (
     <div className="screen-stack">
@@ -45,7 +61,7 @@ export function SkillsStep({ draft, options, update }: StepProps) {
                 (!granted.includes(skill.id) &&
                   !draft.skills.includes(skill.id)),
             )
-            .map((skill) => skillChoice(skill.id))}
+            .map((skill) => skillOption(skill.id))}
           onChange={(value) =>
             update({ extraSkill: (value || null) as Skill | null })
           }
@@ -76,6 +92,11 @@ export function SkillsStep({ draft, options, update }: StepProps) {
               value: id,
               label: style?.name ?? id,
               description: style?.summary,
+              more: style !== undefined && (
+                <MoreDetails name={style.name}>
+                  <SummaryCard item={style} />
+                </MoreDetails>
+              ),
             };
           })}
           onChange={(fightingStyle) => update({ fightingStyle })}
@@ -91,18 +112,18 @@ export function SpellsStep({ draft, options, update }: StepProps) {
     null;
   if (casting === null) return null;
 
-  const spellChoice = (spell: {
-    id: string;
-    name: string;
-    level: number;
-    summary: string;
-  }) => ({
+  const spellChoice = (spell: SpellOption) => ({
     value: spell.id,
     label: spell.name,
     description:
       spell.level === 0
         ? spell.summary
         : `${spell.level}-й уровень. ${spell.summary}`,
+    more: (
+      <MoreDetails name={spell.name}>
+        <SpellCard spell={spell} />
+      </MoreDetails>
+    ),
   });
 
   return (

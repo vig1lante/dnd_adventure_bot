@@ -23,6 +23,7 @@ from dnd_engine.content import (
     MonsterDef,
     SpellDef,
     SpellEffect,
+    SpellSchool,
     SrdContent,
     WeaponProps,
     YamlTooLargeError,
@@ -33,7 +34,17 @@ from dnd_engine.content import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "srd_min"
-TABLES = ("classes", "species", "backgrounds", "feats", "spells", "items", "monsters", "conditions")
+TABLES = (
+    "classes",
+    "species",
+    "backgrounds",
+    "feats",
+    "skills",
+    "spells",
+    "items",
+    "monsters",
+    "conditions",
+)
 
 
 @pytest.fixture
@@ -61,7 +72,8 @@ def load_problems(srd_dir: Path) -> list[str]:
 # --- корректный набор ---
 
 
-def test_fixture_has_all_eight_files():
+def test_fixture_has_a_file_for_every_table():
+    assert set(TABLES) == set(SrdContent.model_fields)
     assert {p.stem for p in FIXTURES.glob("*.yaml")} == set(TABLES)
 
 
@@ -72,6 +84,7 @@ def test_minimal_set_loads():
     assert set(srd.classes) == {"fighter", "wizard"}
     assert set(srd.items) == {"dagger", "leather_armor", "healing_potion"}
     assert set(srd.monsters) == {"goblin_warrior", "bandit_captain"}
+    assert set(srd.skills) == set(Skill)
 
 
 def test_dictionary_keys_are_ids():
@@ -94,6 +107,11 @@ def test_values_become_typed_models():
     assert srd.monsters["bandit_captain"].saves == {Ability.STR: 4, Ability.DEX: 5, Ability.WIS: 2}
     assert srd.items["dagger"].weapon is not None
     assert srd.items["dagger"].weapon.properties == ("finesse", "light", "thrown")
+    assert srd.spells["fire_bolt"].school == "evocation"
+    assert srd.backgrounds["sage"].tool == "Инструменты каллиграфа"
+    assert srd.species["human"].description.startswith("Люди")
+    assert srd.skills[Skill.STEALTH].id is Skill.STEALTH
+    assert srd.skills[Skill.STEALTH].summary.startswith("Двигаться тихо")
 
 
 def test_models_are_frozen():
@@ -267,6 +285,7 @@ def spell_with(**fields) -> SpellDef:
         "concentration": False,
         "duration_rounds": None,
         "classes": ("cleric",),
+        "school": "abjuration",
         "effect": SpellEffect(kind="heal", heal="2d4"),
         "summary": "s",
     }
@@ -298,6 +317,229 @@ def test_spell_flags_are_read_from_yaml(srd_dir):
 
     assert missile.effect.heal_modifier is True
     assert missile.out_of_combat_only is True
+
+
+# --- подробности для карточек создания героя: описание расы, школа, инструмент, навыки ---
+
+HUMAN_DESCRIPTION = "  description: Люди быстро учатся. Они легко приспосабливаются.\n"
+STEALTH_ENTRY = (
+    '- id: stealth\n  summary: "Двигаться тихо и прятаться. Например: прокрасться мимо стражи."\n'
+)
+
+
+@pytest.mark.parametrize(
+    ("table", "old", "new", "field"),
+    [
+        ("species", HUMAN_DESCRIPTION, "", "description"),
+        ("spells", "  level: 0\n  school: evocation\n", "  level: 0\n", "school"),
+        ("backgrounds", "  tool: Инструменты каллиграфа\n", "", "tool"),
+        ("skills", STEALTH_ENTRY, "- id: stealth\n", "summary"),
+    ],
+    ids=["species-description", "spell-school", "background-tool", "skill-summary"],
+)
+def test_card_detail_fields_are_required(srd_dir, table, old, new, field):
+    edit(srd_dir, table, old, new)
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert problems[0].startswith(f"{table}.yaml, запись ")
+    assert f"поле {field}: Field required" in problems[0]
+
+
+def test_spell_school_is_one_of_the_eight_srd_schools():
+    schools = set(get_args(SpellDef.model_fields["school"].annotation))
+
+    assert schools == {
+        "abjuration",
+        "conjuration",
+        "divination",
+        "enchantment",
+        "evocation",
+        "illusion",
+        "necromancy",
+        "transmutation",
+    }
+    with pytest.raises(ValidationError):
+        spell_with(school="chronomancy")
+
+
+def test_skill_table_without_a_skill_is_error(srd_dir):
+    edit(srd_dir, "skills", STEALTH_ENTRY, "")
+
+    problems = load_problems(srd_dir)
+
+    assert problems == ["skills.yaml: нет записи навыка 'stealth'"]
+
+
+def test_every_missing_skill_is_reported_at_once(srd_dir):
+    (srd_dir / "skills.yaml").write_text(
+        "- id: athletics\n  summary: Лазать и прыгать.\n", encoding="utf-8"
+    )
+
+    problems = load_problems(srd_dir)
+
+    assert sorted(problems) == sorted(
+        f"skills.yaml: нет записи навыка {skill.value!r}"
+        for skill in Skill
+        if skill is not Skill.ATHLETICS
+    )
+
+
+def test_skill_table_with_a_repeated_skill_is_error(srd_dir):
+    with (srd_dir / "skills.yaml").open("a", encoding="utf-8") as file:
+        file.write("- id: stealth\n  summary: Ещё раз про скрытность.\n")
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert problems[0].startswith("skills.yaml: дубликат id 'stealth'")
+
+
+def test_skill_table_with_an_unknown_skill_is_error(srd_dir):
+    with (srd_dir / "skills.yaml").open("a", encoding="utf-8") as file:
+        file.write("- id: cooking\n  summary: Готовить еду в походе.\n")
+
+    problems = load_problems(srd_dir)
+
+    # Чужой id отвергает схема: и как ключ таблицы, и как поле id записи.
+    assert problems
+    assert all(p.startswith("skills.yaml, запись 'cooking'") for p in problems), problems
+
+
+def test_the_public_spell_school_type_is_the_type_of_the_field():
+    # Сервер берёт коды школ для своих подписей из `SpellSchool`: перечень должен быть тем же,
+    # что принимает поле заклинания.
+    assert get_args(SpellSchool) == get_args(SpellDef.model_fields["school"].annotation)
+
+
+@pytest.mark.parametrize(
+    "school", ["chronomancy", "Evocation", "Воплощение"], ids=["unknown", "wrong-case", "label"]
+)
+def test_a_wrong_spell_school_names_the_spell_and_lists_every_school(srd_dir, school):
+    # Русская подпись школы живёт у сервера; в данных допустим только код.
+    fire_bolt_school = "  level: 0\n  school: evocation\n"
+    edit(srd_dir, "spells", fire_bolt_school, fire_bolt_school.replace("evocation", school))
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert problems[0].startswith("spells.yaml, запись 'fire_bolt', поле school: ")
+    assert all(f"'{code}'" in problems[0] for code in get_args(SpellSchool)), problems[0]
+
+
+@pytest.mark.parametrize(
+    ("table", "old", "new", "where"),
+    [
+        (
+            "backgrounds",
+            "  tool: Инструменты каллиграфа\n",
+            "  tool:\n",
+            "backgrounds.yaml, запись 'sage', поле tool: ",
+        ),
+        (
+            "backgrounds",
+            "  tool: Инструменты каллиграфа\n",
+            "  tool: [Лютня, Флейта]\n",
+            "backgrounds.yaml, запись 'sage', поле tool: ",
+        ),
+        (
+            "species",
+            HUMAN_DESCRIPTION,
+            "  description: 42\n",
+            "species.yaml, запись 'human', поле description: ",
+        ),
+        (
+            "skills",
+            STEALTH_ENTRY,
+            "- id: stealth\n  summary: [прятаться, красться]\n",
+            "skills.yaml, запись 'stealth', поле summary: ",
+        ),
+    ],
+    ids=["tool-without-value", "tool-list", "description-number", "skill-summary-list"],
+)
+def test_a_card_text_that_is_not_a_string_names_the_file_record_and_field(
+    srd_dir, table, old, new, where
+):
+    # Пустое значение в YAML — это null, а не пустая строка: поле есть, но текста нет.
+    edit(srd_dir, table, old, new)
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert problems[0].startswith(where)
+    assert problems[0].endswith("Input should be a valid string")
+
+
+@pytest.mark.parametrize("line", ["name: Скрытность", "ability: dex"], ids=["name", "ability"])
+def test_a_skill_record_has_no_name_or_ability_of_its_own(srd_dir, line):
+    # Название и характеристика навыка — в abilities.py; вторая копия в skills.yaml могла бы
+    # разойтись с ней, поэтому схема такие поля не принимает.
+    edit(srd_dir, "skills", "- id: stealth\n", f"- id: stealth\n  {line}\n")
+
+    problems = load_problems(srd_dir)
+
+    field = line.split(":")[0]
+    assert problems == [
+        f"skills.yaml, запись 'stealth', поле {field}: Extra inputs are not permitted"
+    ]
+
+
+def test_a_skill_id_in_another_case_is_an_unknown_skill_and_not_a_missing_one(srd_dir):
+    edit(srd_dir, "skills", "- id: stealth\n", "- id: Stealth\n")
+
+    problems = load_problems(srd_dir)
+
+    assert problems
+    assert all(p.startswith("skills.yaml, запись 'Stealth', поле ") for p in problems), problems
+    # Полноту таблицы проверяют только при верной форме: ложной жалобы на пропуск нет.
+    assert not any("нет записи навыка" in p for p in problems), problems
+
+
+def test_a_missing_skill_file_is_one_problem_and_not_one_per_skill(srd_dir):
+    (srd_dir / "skills.yaml").unlink()
+
+    assert load_problems(srd_dir) == ["skills.yaml: файл не найден"]
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("", "ожидался список объектов"),
+        ("id: stealth\nsummary: Тихо.\n", "ожидался список объектов"),
+        ("[stealth", "некорректный YAML"),
+    ],
+    ids=["empty", "mapping", "syntax"],
+)
+def test_a_broken_skill_file_is_one_problem_and_not_one_per_skill(srd_dir, text, reason):
+    (srd_dir / "skills.yaml").write_text(text, encoding="utf-8")
+
+    problems = load_problems(srd_dir)
+
+    assert len(problems) == 1
+    assert problems[0].startswith(f"skills.yaml: {reason}")
+
+
+def test_a_missing_skill_and_a_dangling_reference_are_reported_together(srd_dir):
+    edit(srd_dir, "skills", STEALTH_ENTRY, "")
+    edit(srd_dir, "backgrounds", "feat: magic_initiate", "feat: lucky")
+
+    problems = load_problems(srd_dir)
+
+    assert sorted(problems) == sorted(
+        [
+            "skills.yaml: нет записи навыка 'stealth'",
+            "backgrounds.yaml, запись 'sage': feat ссылается на несуществующий id 'lucky'",
+        ]
+    )
+
+
+def test_the_skill_table_is_keyed_by_skill_and_found_by_its_code():
+    skills = load_srd(FIXTURES).skills
+
+    assert all(type(key) is Skill for key in skills)
+    # Сервер и движок ищут навык и по `Skill`, и по коду строкой — это одна запись.
+    assert skills["stealth"] is skills[Skill.STEALTH]
 
 
 # --- защиты и вторичный урон монстров ---
@@ -933,9 +1175,13 @@ MUTATIONS = {
         Ability.DEX, 30
     ),
     "ресурсы класса": lambda srd: srd.classes["fighter"].resources.clear(),
+    "подменить запись навыка": lambda srd: srd.skills.__setitem__(
+        Skill.STEALTH, srd.skills[Skill.ATHLETICS]
+    ),
     # Разрушающие правки идут последними: иначе следующие падали бы KeyError, а не проверкой.
     "удалить запись из таблицы": lambda srd: srd.items.__delitem__("dagger"),
     "очистить таблицу": lambda srd: srd.monsters.clear(),
+    "убрать навык из таблицы": lambda srd: srd.skills.pop(Skill.STEALTH),
 }
 
 
@@ -945,6 +1191,35 @@ def test_srd_data_rejects_every_mutation(mutate):
 
     with pytest.raises(TypeError):
         mutate(srd)
+
+
+@pytest.mark.parametrize("table", TABLES)
+def test_every_table_refuses_a_new_record(table):
+    # Защита общая для всех таблиц, в том числе для новой таблицы навыков.
+    records = getattr(load_srd(FIXTURES), table)
+    key, record = next(iter(records.items()))
+
+    with pytest.raises(TypeError):
+        records[f"{key}_copy"] = record
+
+
+# Новые поля карточек создания героя: модели неизменяемые, поэтому присвоение отвергается.
+CARD_FIELD_EDITS = {
+    "описание расы": lambda srd: setattr(srd.species["human"], "description", "Другое."),
+    "школа заклинания": lambda srd: setattr(srd.spells["fire_bolt"], "school", "illusion"),
+    "инструмент предыстории": lambda srd: setattr(srd.backgrounds["sage"], "tool", "Лютня"),
+    "описание навыка": lambda srd: setattr(srd.skills[Skill.STEALTH], "summary", "Другое."),
+    "таблица навыков целиком": lambda srd: setattr(srd, "skills", {}),
+}
+
+
+@pytest.mark.parametrize("change", CARD_FIELD_EDITS.values(), ids=CARD_FIELD_EDITS.keys())
+def test_card_detail_fields_cannot_be_reassigned(change):
+    srd = load_srd(FIXTURES)
+
+    with pytest.raises(ValidationError):
+        change(srd)
+    assert srd == load_srd(FIXTURES)
 
 
 def test_dict_fields_with_defaults_are_read_only_too():

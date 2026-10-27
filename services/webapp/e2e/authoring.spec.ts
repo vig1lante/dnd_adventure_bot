@@ -5,6 +5,7 @@ import type {
   Page,
   Response,
 } from "@playwright/test";
+import { pickQuickHero } from "./hero.ts";
 import { expect, test } from "./server.ts";
 
 // Конструктор приключений на настоящем сервере (финальное покрытие блоков 4 и 5 DND-2 и сквозной
@@ -1231,12 +1232,7 @@ test("конструктор III: двенадцать шагов на загл�
 
         await button(page, "Создать персонажа").click();
         await button(page, "Быстро").click();
-        await page
-          .getByLabel("Класс", { exact: true })
-          .selectOption(HOST_HERO.classId);
-        await page
-          .getByLabel("Раса", { exact: true })
-          .selectOption(HOST_HERO.species);
+        await pickQuickHero(page, HOST_HERO);
         await page
           .getByLabel("Опиши героя одной строкой")
           .fill(HOST_HERO.concept);

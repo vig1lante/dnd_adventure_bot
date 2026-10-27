@@ -8,12 +8,13 @@ import "../screens.css";
 import "./character.css";
 import { availableValues, canLower, canRaise, pointBuyLeft } from "./draft";
 import type { Assignment } from "./draft";
+import { METHOD_LABELS } from "./steps";
 import type { StepProps } from "./steps";
 
-const METHODS = [
-  { id: "point_buy", label: "Покупка очков" },
-  { id: "standard_array", label: "Стандартный набор" },
-] as const;
+const METHODS = (["point_buy", "standard_array"] as const).map((id) => ({
+  id,
+  label: METHOD_LABELS[id],
+}));
 
 function PointBuy({ draft, options, update }: StepProps) {
   const scores = draft.pointBuy;

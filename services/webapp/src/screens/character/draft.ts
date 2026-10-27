@@ -36,7 +36,8 @@ export type StepId =
   | "spells"
   | "equipment"
   | "persona"
-  | "backstory";
+  | "backstory"
+  | "summary";
 
 export interface Draft {
   species: string | null;
@@ -428,6 +429,7 @@ export function stepsOf(draft: Draft, options: CreationOptions): StepId[] {
     "equipment",
     "persona",
     "backstory",
+    "summary",
   ];
 }
 
@@ -471,6 +473,7 @@ export function stepComplete(
       return draft.name.trim() !== "";
     case "equipment":
     case "backstory":
+    case "summary":
       return true;
   }
 }

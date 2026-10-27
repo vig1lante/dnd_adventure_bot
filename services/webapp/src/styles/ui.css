@@ -548,3 +548,175 @@
   margin-top: 0.125rem;
   color: var(--color-seal-text);
 }
+
+/*
+ * Карусель: одна карточка, стрелки, счётчик и точки. Горизонтальный жест отдаётся
+ * листанию (touch-action: pan-y), вертикальный остаётся прокруткой страницы.
+ */
+.ui-carousel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  touch-action: pan-y;
+}
+
+.ui-carousel__nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.ui-carousel__arrow {
+  padding-inline: var(--space-3);
+  font-size: var(--text-lg);
+}
+
+.ui-carousel__counter {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-accent-text);
+}
+
+.ui-carousel__slide {
+  min-width: 0;
+}
+
+/* Точки вплотную: зазор между ними даёт сама область нажатия; лишние уходят на вторую строку */
+.ui-carousel__dots {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/*
+ * Точка мала на вид, но нажимается как кнопка: не меньше --tap-size и по ширине, и по высоте
+ * (мобильная вёрстка, e2e/layout.ts). На узком экране девять точек встают в две строки.
+ */
+.ui-carousel__dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--tap-size);
+  min-height: var(--tap-size);
+  padding: 0;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+}
+
+.ui-carousel__dot::before {
+  content: "";
+  width: 0.625rem;
+  height: 0.625rem;
+  background: transparent;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+}
+
+.ui-carousel__dot[aria-current="true"]::before {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+/* Подробная карточка варианта: факты, разделы со списками, действия */
+.ui-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow-wrap: anywhere;
+}
+
+.ui-detail__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.ui-detail__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  color: var(--color-heading);
+}
+
+.ui-detail__subtitle {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.ui-detail__text {
+  margin: 0;
+}
+
+.ui-detail__facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.ui-detail__fact dt {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-accent-text);
+}
+
+.ui-detail__fact dd {
+  margin: 0;
+}
+
+.ui-detail__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ui-detail__section-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-base);
+  color: var(--color-accent-text);
+}
+
+.ui-detail__entries {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ui-detail__entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.ui-detail__entry-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.ui-detail__level {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.ui-detail__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}

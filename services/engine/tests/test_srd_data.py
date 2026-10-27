@@ -1,8 +1,8 @@
-"""Тесты данных SRD 5.2.1: классы, виды, предыстории, черты, предметы, заклинания,
+"""Тесты данных SRD 5.2.1: классы, виды, предыстории, черты, навыки, предметы, заклинания,
 монстры и состояния.
 
 Каждый файл читается и валидируется моделью отдельно (форма и числа SRD), а затем
-`load_srd()` без пути читает все восемь файлов встроенных данных и проверяет ссылки между ними.
+`load_srd()` без пути читает все девять файлов встроенных данных и проверяет ссылки между ними.
 """
 
 import re
@@ -21,6 +21,7 @@ from dnd_engine.content import (
     FeatDef,
     ItemDef,
     MonsterDef,
+    SkillDef,
     SpeciesDef,
     SpellDef,
     SrdContent,
@@ -36,6 +37,7 @@ TABLE_MODELS: dict[str, type[BaseModel]] = {
     "species": SpeciesDef,
     "backgrounds": BackgroundDef,
     "feats": FeatDef,
+    "skills": SkillDef,
     "spells": SpellDef,
     "items": ItemDef,
     "monsters": MonsterDef,
@@ -161,6 +163,13 @@ BACKGROUND_FACTS = {
     "sage": ({CON, INT, WIS}, {Skill.ARCANA, Skill.HISTORY}, "magic_initiate"),
     "soldier": ({STR, DEX, CON}, {Skill.ATHLETICS, Skill.INTIMIDATION}, "savage_attacker"),
 }
+# id предыстории -> владение инструментом (SRD 5.2.1) русским текстом для карточки предыстории.
+BACKGROUND_TOOLS = {
+    "acolyte": "Инструменты каллиграфа",
+    "criminal": "Воровские инструменты",
+    "sage": "Инструменты каллиграфа",
+    "soldier": "Один игровой набор на выбор",
+}
 # magic_initiate не механическая: план B2.4 даёт ей только текст для мастера (заговоры из данных),
 # а выбора заговоров черты и свободного сотворения в движке нет.
 MECHANICAL_FEATS = {"alert", "savage_attacker"}
@@ -168,7 +177,14 @@ MECHANICAL_FEATS = {"alert", "savage_attacker"}
 ID_PATTERN = re.compile(r"[a-z][a-z0-9]*(_[a-z0-9]+)*")
 ENGLISH_NAME_PATTERN = re.compile(r"[A-Za-z' -]+")
 CYRILLIC = re.compile(r"[А-Яа-яЁё]")
+LATIN = re.compile(r"[A-Za-z]")
 MAX_SUMMARY_LENGTH = 300  # кураторский пересказ, а не копия текста SRD
+# Описание расы для карточки: 2–3 предложения своими словами, поэтому предел больше, чем у summary.
+MAX_DESCRIPTION_LENGTH = 500
+# Конец предложения: точка, «!», «?» или многоточие перед пробелом или в конце текста.
+SENTENCE_END = re.compile(r"[.!?…](?=\s|$)")
+# Короче этого summary особенности или черты — заглушка, а не описание для карточки.
+MIN_FEATURE_SUMMARY_LENGTH = 40
 
 
 # --- ожидаемое содержимое предметов, заклинаний, монстров и состояний (SRD 5.2.1, план B2.5) ---
@@ -368,6 +384,39 @@ SPELL_UPCASTS = {
     "scorching_ray": "2d6",
     "aid": "5",
     "prayer_of_healing": "1d8",
+}
+
+# id заклинания -> школа магии по SRD 5.2.1. Лечащие заклинания в SRD 5.2 — ограждение, а
+# «Чудо-ягоды» — вызов (в правилах 2014 года было иначе).
+SPELL_SCHOOLS = {
+    "sacred_flame": "evocation",
+    "guidance": "divination",
+    "spare_the_dying": "necromancy",
+    "fire_bolt": "evocation",
+    "ray_of_frost": "evocation",
+    "shocking_grasp": "evocation",
+    "mage_hand": "conjuration",
+    "light": "evocation",
+    "magic_missile": "evocation",
+    "sleep": "enchantment",
+    "burning_hands": "evocation",
+    "thunderwave": "evocation",
+    "mage_armor": "abjuration",
+    "cure_wounds": "abjuration",
+    "healing_word": "abjuration",
+    "bless": "enchantment",
+    "guiding_bolt": "evocation",
+    "inflict_wounds": "necromancy",
+    "hunters_mark": "divination",
+    "goodberry": "conjuration",
+    "fog_cloud": "conjuration",
+    "detect_magic": "divination",
+    "scorching_ray": "evocation",
+    "misty_step": "conjuration",
+    "hold_person": "enchantment",
+    "aid": "abjuration",
+    "lesser_restoration": "abjuration",
+    "prayer_of_healing": "abjuration",
 }
 
 # ПО -> опыт по таблице 2024.
@@ -643,6 +692,11 @@ def feats() -> dict[str, FeatDef]:
 
 
 @pytest.fixture(scope="module")
+def skills() -> dict[str, SkillDef]:
+    return load_table("skills")
+
+
+@pytest.fixture(scope="module")
 def items() -> dict[str, ItemDef]:
     return load_table("items")
 
@@ -851,6 +905,23 @@ def test_mechanical_species_traits_match_plan(species, species_id):
     assert mechanical == MECHANICAL_TRAITS[species_id]
 
 
+@pytest.mark.parametrize("species_id", SPECIES_IDS)
+def test_species_description_is_two_or_three_russian_sentences(species, species_id):
+    # Карточка расы (спека DND-2, §7): короткий пересказ своими словами, а не копия SRD.
+    description = species[species_id].description
+
+    assert CYRILLIC.search(description)
+    assert len(description) <= MAX_DESCRIPTION_LENGTH
+    assert description == description.strip() and SENTENCE_END.search(description[-1])
+    assert 2 <= len(SENTENCE_END.findall(description)) <= 3
+
+
+def test_species_descriptions_differ(species):
+    descriptions = [kind.description for kind in species.values()]
+
+    assert len(set(descriptions)) == len(descriptions)
+
+
 # --- предыстории и черты ---
 
 
@@ -862,6 +933,12 @@ def test_background_matches_srd(backgrounds, background_id):
     assert set(background.ability_options) == abilities
     assert set(background.skills) == skills
     assert background.feat == feat
+
+
+@pytest.mark.parametrize("background_id", BACKGROUND_IDS)
+def test_background_tool_proficiency_matches_srd(backgrounds, background_id):
+    # Инструмент — русский текст для карточки, а не id предмета: инструментов в items.yaml нет.
+    assert backgrounds[background_id].tool == BACKGROUND_TOOLS[background_id]
 
 
 @pytest.mark.parametrize("background_id", BACKGROUND_IDS)
@@ -881,6 +958,59 @@ def test_background_feats_exist(backgrounds, feats):
 def test_only_planned_feats_are_mechanical(feats):
     assert {feat.id for feat in feats.values() if feat.mechanical} == MECHANICAL_FEATS
     assert set(feats) >= MECHANICAL_FEATS
+
+
+def test_every_feature_up_to_level_three_and_every_feat_has_a_card_summary(classes, feats):
+    # Подробная карточка класса и черты (спека DND-2, §7) показывает summary как описание.
+    summaries = {
+        f"{cls.id}.{feature.id}": feature.summary
+        for cls in classes.values()
+        for feature in cls.features
+        if feature.level <= 3
+    }
+    summaries |= {f"feat {feat.id}": feat.summary for feat in feats.values()}
+
+    assert len(summaries) == sum(len(cls.features) for cls in classes.values()) + len(feats)
+    weak = [
+        owner for owner, text in summaries.items() if len(text.strip()) < MIN_FEATURE_SUMMARY_LENGTH
+    ]
+    assert weak == []
+    assert [owner for owner, text in summaries.items() if len(text) > MAX_SUMMARY_LENGTH] == []
+
+
+# --- навыки ---
+
+
+def test_skill_table_describes_every_skill_exactly_once():
+    ids = [entry["id"] for entry in read_entries("skills")]
+
+    assert sorted(ids) == sorted(skill.value for skill in Skill)
+
+
+@pytest.mark.parametrize("skill", Skill)
+def test_skill_summary_says_what_it_checks_and_gives_examples(skills, skill):
+    summary = skills[skill].summary
+
+    assert CYRILLIC.search(summary)
+    assert len(summary) <= MAX_SUMMARY_LENGTH
+    assert "Например" in summary  # примеры применения для карточки навыка (спека DND-2, §7)
+
+
+@pytest.mark.parametrize("skill", Skill)
+def test_skill_summary_first_says_what_it_checks_then_lists_examples(skills, skill):
+    # Карточка навыка (контракт B7, §2.4): сначала что проверяет навык, затем примеры применения.
+    checks, marker, examples = skills[skill].summary.partition("Например:")
+
+    assert marker, "примеры идут после «Например:»"
+    assert CYRILLIC.search(checks) and checks.strip().endswith(".")
+    assert examples.strip().endswith(".")
+    assert examples.count(",") >= 1  # не меньше двух примеров через запятую
+
+
+def test_skill_summaries_differ(skills):
+    summaries = [skill.summary for skill in skills.values()]
+
+    assert len(set(summaries)) == len(summaries)
 
 
 # --- ссылки на другие файлы и оформление ---
@@ -924,7 +1054,10 @@ def test_names_and_summaries_are_russian_and_short(classes, species, backgrounds
                 (f"{kind.id}.{trait.id} summary", trait.summary),
             ]
     for background in backgrounds.values():
-        texts.append((f"background {background.id}", background.name))
+        texts += [
+            (f"background {background.id}", background.name),
+            (f"background {background.id} tool", background.tool),
+        ]
         texts += [(f"{background.id} trigger", text) for text in background.inspiration_triggers]
     for feat in feats.values():
         texts += [(f"feat {feat.id}", feat.name), (f"feat {feat.id} summary", feat.summary)]
@@ -934,17 +1067,29 @@ def test_names_and_summaries_are_russian_and_short(classes, species, backgrounds
     assert too_long == []
 
 
+def test_card_texts_of_hero_creation_have_no_latin_letters(species, backgrounds, skills):
+    # Эти тексты сервер отдаёт в карточки как есть (контракт B7, §2: всё для игрока — на русском):
+    # код вроде `darkvision` или английское слово вместо русского игрок увидел бы сразу.
+    texts = {f"species {kind.id} description": kind.description for kind in species.values()}
+    texts |= {f"background {item.id} tool": item.tool for item in backgrounds.values()}
+    texts |= {f"skill {skill_id} summary": skill.summary for skill_id, skill in skills.items()}
+
+    assert len(texts) == len(species) + len(backgrounds) + len(Skill)
+    assert [owner for owner, text in texts.items() if LATIN.search(text)] == []
+
+
 # --- полная загрузка встроенных данных ---
 
 
 def test_builtin_data_loads_with_all_references(srd):
-    # load_srd() без пути читает все 8 файлов и проверяет перекрёстные ссылки (ContentError иначе).
+    # load_srd() без пути читает все 9 файлов и проверяет перекрёстные ссылки (ContentError иначе).
     assert isinstance(srd, SrdContent)
     assert {name: len(getattr(srd, name)) for name in SrdContent.model_fields} == {
         "classes": 6,
         "species": 9,
         "backgrounds": 4,
         "feats": 3,
+        "skills": len(Skill),
         "spells": len(SPELL_IDS),
         "items": len(ITEM_IDS),
         "monsters": len(MONSTER_IDS),
@@ -1045,6 +1190,11 @@ def test_background_equipment_exists(srd):
 def test_spells_match_plan(spells):
     assert set(spells) == set(SPELL_IDS)
     assert len(spells) == 28
+
+
+def test_every_spell_has_its_srd_school(spells):
+    assert set(SPELL_SCHOOLS) == set(SPELL_IDS)
+    assert {spell_id: spell.school for spell_id, spell in spells.items()} == SPELL_SCHOOLS
 
 
 @pytest.mark.parametrize("spell_id", SPELL_IDS)

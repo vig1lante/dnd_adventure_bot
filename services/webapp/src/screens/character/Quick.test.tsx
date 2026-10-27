@@ -46,8 +46,22 @@ function renderQuick(route: Route = created(), initial?: QuickChoices) {
   return { server, gated, onBack, onCreated };
 }
 
-const choose = (label: string, value: string) =>
-  fireEvent.change(screen.getByLabelText(label), { target: { value } });
+const carousel = (label: "Класс" | "Раса") =>
+  screen.getByRole("group", { name: label });
+
+/** Выбор в карусели: точкой к варианту, затем «Выбрать» на его карточке. */
+function choose(label: "Класс" | "Раса", name: string) {
+  fireEvent.click(within(carousel(label)).getByRole("button", { name }));
+  fireEvent.click(
+    within(carousel(label)).getByRole("button", { name: /^Выбра(ть|но)$/ }),
+  );
+}
+
+/** Показанная карточка карусели и состояние её кнопки выбора. */
+const shown = (label: "Класс" | "Раса") =>
+  within(carousel(label)).getByRole("article");
+const chosenIn = (label: "Класс" | "Раса") =>
+  within(carousel(label)).queryByRole("button", { name: "Выбрано" });
 
 const typeInto = (label: string, value: string) =>
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
@@ -56,8 +70,8 @@ const submitButton = () =>
   screen.getByRole("button", { name: "Создать героя" });
 
 function fillForm(concept = "Сбежавший из цирка акробат") {
-  choose("Класс", "rogue");
-  choose("Раса", "human");
+  choose("Класс", "Плут");
+  choose("Раса", "Человек");
   typeInto("Опиши героя одной строкой", concept);
 }
 
@@ -65,30 +79,50 @@ const posts = (server: { calls: RecordedCall[] }) =>
   server.calls.filter((call) => call.method === "POST");
 
 describe("форма быстрого героя", () => {
-  test("класс и раса выбираются из правил сервера, названия по-русски", () => {
+  test("класс и раса — карусели карточек из правил сервера, по-русски", () => {
     renderQuick();
 
-    const classes = within(screen.getByLabelText("Класс"));
-    expect(classes.getByRole("option", { name: "Воин" })).toBeInTheDocument();
-    expect(classes.getByRole("option", { name: "Плут" })).toBeInTheDocument();
+    for (const label of ["Класс", "Раса"] as const) {
+      expect(carousel(label)).toHaveAttribute(
+        "aria-roledescription",
+        "карусель",
+      );
+    }
+    for (const name of ["Воин", "Плут", "Волшебник", "Следопыт"]) {
+      expect(
+        within(carousel("Класс")).getByRole("button", { name }),
+      ).toBeInTheDocument();
+    }
+    expect(within(carousel("Класс")).getByText("1 из 4")).toBeInTheDocument();
+    expect(shown("Класс")).toHaveAccessibleName("Воин");
+    expect(shown("Класс")).toHaveTextContent(/Кость хитов\s*к10/);
+    expect(shown("Раса")).toHaveAccessibleName("Человек");
+    expect(shown("Раса")).toHaveTextContent(/Скорость\s*9 м/);
     expect(
-      classes.getByRole("option", { name: "Волшебник" }),
+      within(carousel("Раса")).getByRole("button", { name: "Эльф" }),
     ).toBeInTheDocument();
-    const species = within(screen.getByLabelText("Раса"));
-    expect(species.getByRole("option", { name: "Эльф" })).toBeInTheDocument();
     expect(
       screen.getByLabelText("Опиши героя одной строкой"),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Имя (необязательно)")).toBeInTheDocument();
   });
 
+  test("над каруселями видны подписи «Класс» и «Раса»: на экране их две", () => {
+    renderQuick();
+
+    for (const label of ["Класс", "Раса"] as const) {
+      const caption = screen.getByText(label, { selector: "p" });
+      expect(caption.nextElementSibling).toBe(carousel(label));
+    }
+  });
+
   test("«Создать героя» неактивна, пока нет класса, расы и строки о герое", () => {
     renderQuick();
     expect(submitButton()).toBeDisabled();
 
-    choose("Класс", "rogue");
+    choose("Класс", "Плут");
     expect(submitButton()).toBeDisabled();
-    choose("Раса", "human");
+    choose("Раса", "Человек");
     expect(submitButton()).toBeDisabled();
     typeInto("Опиши героя одной строкой", "   ");
     expect(submitButton()).toBeDisabled();
@@ -96,14 +130,32 @@ describe("форма быстрого героя", () => {
     expect(submitButton()).toBeEnabled();
   });
 
-  test("в форме «Раса», а не «Вид»: устаревших слов нет ни в подписях, ни в списке", () => {
+  test("выбор в карусели отмечает показанную карточку «Выбрано»", () => {
+    renderQuick();
+    expect(chosenIn("Раса")).toBeNull();
+
+    choose("Раса", "Дварф");
+
+    expect(shown("Раса")).toHaveAccessibleName("Дварф");
+    expect(chosenIn("Раса")).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(
+      within(carousel("Раса")).getByRole("button", { name: "Следующая" }),
+    );
+    expect(chosenIn("Раса")).toBeNull();
+  });
+
+  test("в форме «Раса», а не «Вид»: устаревших слов и футов нет ни на одной карточке", () => {
     renderQuick();
 
-    expect(
-      within(screen.getByLabelText("Раса")).getByRole("option", {
-        name: "Выберите расу",
-      }),
-    ).toBeInTheDocument();
+    for (let i = 0; i < 4; i++) {
+      expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
+      fireEvent.click(
+        within(carousel("Раса")).getByRole("button", { name: "Следующая" }),
+      );
+      fireEvent.click(
+        within(carousel("Класс")).getByRole("button", { name: "Следующая" }),
+      );
+    }
     expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
   });
 
@@ -119,7 +171,7 @@ describe("форма быстрого героя", () => {
 describe("отправка формы клавишей Enter", () => {
   test("форма не готова — запроса нет", () => {
     const { server } = renderQuick();
-    choose("Класс", "rogue");
+    choose("Класс", "Плут");
 
     fireEvent.submit(submitButton().closest("form") as HTMLFormElement);
 
@@ -285,8 +337,11 @@ describe("форма с прежним выбором («Изменить гер
   test("поля заполнены прежним выбором", () => {
     renderQuick(created(), { ...STORED_QUICK, name: "Тень" });
 
-    expect(screen.getByLabelText("Класс")).toHaveValue("rogue");
-    expect(screen.getByLabelText("Раса")).toHaveValue("human");
+    // Карусели открыты на прежнем выборе, и он отмечен.
+    expect(shown("Класс")).toHaveAccessibleName("Плут");
+    expect(chosenIn("Класс")).toHaveAttribute("aria-pressed", "true");
+    expect(shown("Раса")).toHaveAccessibleName("Человек");
+    expect(chosenIn("Раса")).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByLabelText("Опиши героя одной строкой")).toHaveValue(
       "Вор-неудачник",
     );
@@ -321,7 +376,7 @@ describe("форма с прежним выбором («Изменить гер
   test("поля можно править: уходит исправленное", async () => {
     const { server, onCreated } = renderQuick(created(), STORED_QUICK);
 
-    choose("Класс", "fighter");
+    choose("Класс", "Воин");
     typeInto("Опиши героя одной строкой", "Бывший стражник");
     typeInto("Имя (необязательно)", "  Борис ");
     fireEvent.click(submitButton());
@@ -339,8 +394,82 @@ describe("форма с прежним выбором («Изменить гер
   test("без прежнего выбора форма пустая, как раньше", () => {
     renderQuick();
 
-    expect(screen.getByLabelText("Класс")).toHaveValue("");
+    expect(chosenIn("Класс")).toBeNull();
+    expect(chosenIn("Раса")).toBeNull();
     expect(screen.getByLabelText("Опиши героя одной строкой")).toHaveValue("");
     expect(submitButton()).toBeDisabled();
+  });
+});
+
+// Финальное покрытие блока 7: карусели внутри формы быстрого героя.
+describe("карусели в форме", () => {
+  test("«Изменить героя»: листание без «Выбрать» выбор не меняет — уходит прежний", async () => {
+    const { server, onCreated } = renderQuick(created(), STORED_QUICK);
+
+    fireEvent.click(
+      within(carousel("Класс")).getByRole("button", { name: "Волшебник" }),
+    );
+    fireEvent.click(
+      within(carousel("Раса")).getByRole("button", { name: "Следующая" }),
+    );
+    expect(shown("Класс")).toHaveAccessibleName("Волшебник");
+    expect(chosenIn("Класс")).toBeNull();
+    fireEvent.click(submitButton());
+
+    await vi.waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(posts(server)[0].body).toMatchObject({
+      class_id: "rogue",
+      species: "human",
+    });
+  });
+
+  test("стрелки, точки, клавиши и «Выбрать» в готовой форме её не отправляют", async () => {
+    const { server, onCreated } = renderQuick();
+    fillForm();
+    expect(submitButton()).toBeEnabled();
+    const classes = carousel("Класс");
+
+    fireEvent.click(within(classes).getByRole("button", { name: "Следующая" }));
+    fireEvent.click(within(classes).getByRole("button", { name: "Воин" }));
+    fireEvent.keyDown(classes, { key: "ArrowRight" });
+    fireEvent.keyDown(classes, { key: "ArrowLeft" });
+    fireEvent.click(within(classes).getByRole("button", { name: "Выбрать" }));
+
+    expect(posts(server)).toHaveLength(0);
+    expect(chosenIn("Класс")).toHaveAttribute("aria-pressed", "true");
+    expect(shown("Класс")).toHaveAccessibleName("Воин");
+    fireEvent.click(submitButton());
+    await vi.waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(posts(server)).toHaveLength(1);
+    expect(posts(server)[0].body).toMatchObject({ class_id: "fighter" });
+  });
+
+  test("карусели независимы: клавиши и свайп листают только свою", () => {
+    renderQuick();
+
+    fireEvent.keyDown(carousel("Класс"), { key: "ArrowRight" });
+    expect(shown("Класс")).toHaveAccessibleName("Плут");
+    expect(shown("Раса")).toHaveAccessibleName("Человек");
+
+    const races = carousel("Раса");
+    // Свайп основным указателем — левой кнопкой мыши (в jsdom isPrimary по умолчанию false).
+    const mouse = { pointerId: 1, isPrimary: true, pointerType: "mouse" };
+    fireEvent.pointerDown(races, { ...mouse, clientX: 300, clientY: 100 });
+    fireEvent.pointerUp(races, { ...mouse, clientX: 100, clientY: 100 });
+    expect(shown("Раса")).toHaveAccessibleName("Эльф");
+    expect(shown("Класс")).toHaveAccessibleName("Плут");
+  });
+
+  test("выбор класса не трогает выбор расы и наоборот", () => {
+    renderQuick();
+
+    choose("Раса", "Полурослик");
+    choose("Класс", "Следопыт");
+    choose("Класс", "Воин");
+
+    expect(shown("Раса")).toHaveAccessibleName("Полурослик");
+    expect(chosenIn("Раса")).toHaveAttribute("aria-pressed", "true");
+    expect(shown("Класс")).toHaveAccessibleName("Воин");
+    expect(chosenIn("Класс")).toHaveAttribute("aria-pressed", "true");
   });
 });

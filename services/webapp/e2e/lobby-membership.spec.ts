@@ -4,6 +4,7 @@ import type {
   BrowserContext,
   Page,
 } from "@playwright/test";
+import { pickQuickHero } from "./hero.ts";
 import { expectFitsPhone } from "./layout.ts";
 import { expect, test } from "./server.ts";
 
@@ -77,12 +78,10 @@ test("лобби: выход, возврат по коду и исключени
       await expect(host.page.getByText("Игроки (2)")).toBeVisible();
       await button(friend.page, "Создать персонажа").click();
       await button(friend.page, "Быстро").click();
-      await friend.page
-        .getByLabel("Класс", { exact: true })
-        .selectOption("rogue");
-      await friend.page
-        .getByLabel("Раса", { exact: true })
-        .selectOption("halfling");
+      await pickQuickHero(friend.page, {
+        classId: "rogue",
+        species: "halfling",
+      });
       await friend.page
         .getByLabel("Опиши героя одной строкой")
         .fill("Карманник, который мечтает о честной жизни");

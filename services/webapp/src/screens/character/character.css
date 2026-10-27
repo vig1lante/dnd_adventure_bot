@@ -214,3 +214,50 @@
   margin: 0;
   overflow-wrap: anywhere;
 }
+
+/*
+ * «Подробнее» под вариантом списка: тихая кнопка вплотную к варианту (без рамки, но с
+ * полной областью нажатия) и раскрытая карточка во всю ширину.
+ */
+.char-more {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-top: calc(-1 * var(--space-2));
+}
+
+.char-more__toggle.ui-button--secondary {
+  min-height: var(--tap-size);
+  padding-inline: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--color-accent-text);
+  border-color: transparent;
+}
+
+.char-more > .ui-detail {
+  align-self: stretch;
+}
+
+/* Итог подробного создания: разделы с «Изменить» */
+.char-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.char-summary__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.char-summary__title {
+  margin: 0;
+  min-width: 0;
+}

@@ -1,94 +1,42 @@
-import type { Ability, FeatureOption } from "../../api/types";
+import type { Ability } from "../../api/types";
 import { ChoiceList, SelectField } from "../fields";
 import "../screens.css";
 import "./character.css";
 import { isBonusFixed } from "./draft";
+import { nameIn } from "./names";
+import { BackgroundCarousel, ClassCarousel, RaceCarousel } from "./OptionCards";
 import type { StepProps } from "./steps";
 
 const abilityName = (options: StepProps["options"], id: Ability) =>
-  options.abilities.find((ability) => ability.id === id)?.name ?? id;
+  nameIn(options.abilities, id);
 
-/** Особенности выбранного варианта: название и суть, чтобы выбирать осознанно. */
-function Features({ items }: { items: readonly FeatureOption[] }) {
-  return (
-    <ul className="char-list">
-      {items.map((item) => (
-        <li key={item.name}>
-          <strong>{item.name}.</strong> {item.summary}
-        </li>
-      ))}
-    </ul>
-  );
-}
+// Раса, класс и предыстория выбираются листанием подробных карточек (спека §7).
 
 export function SpeciesStep({ draft, options, update }: StepProps) {
-  const chosen = options.species.find((item) => item.id === draft.species);
   return (
-    <>
-      <ChoiceList
-        legend="Раса"
-        name="species"
-        value={draft.species}
-        choices={options.species.map((item) => ({
-          value: item.id,
-          label: item.name,
-          description: item.traits.map((trait) => trait.name).join(", "),
-        }))}
-        onChange={(species) => update({ species })}
-      />
-      {chosen !== undefined && <Features items={chosen.traits} />}
-    </>
+    <RaceCarousel
+      options={options}
+      value={draft.species}
+      onChange={(species) => update({ species })}
+    />
   );
 }
 
 export function ClassStep({ draft, options, update }: StepProps) {
-  const chosen = options.classes.find((item) => item.id === draft.classId);
   return (
-    <>
-      <ChoiceList
-        legend="Класс"
-        name="class"
-        value={draft.classId}
-        choices={options.classes.map((item) => ({
-          value: item.id,
-          label: item.name,
-          description: (
-            <>
-              <span>{`Кость хитов к${item.hit_die} · Спасброски: ${item.saving_throws.map((id) => abilityName(options, id)).join(", ")}`}</span>
-              <span>
-                {item.features.map((feature) => feature.name).join(", ")}
-              </span>
-            </>
-          ),
-        }))}
-        onChange={(classId) => update({ classId })}
-      />
-      {chosen !== undefined && <Features items={chosen.features} />}
-    </>
+    <ClassCarousel
+      options={options}
+      value={draft.classId}
+      onChange={(classId) => update({ classId })}
+    />
   );
 }
 
 export function BackgroundStep({ draft, options, update }: StepProps) {
-  const skillName = (id: string) =>
-    options.skills.find((skill) => skill.id === id)?.name ?? id;
-  const featName = (id: string) =>
-    options.feats.find((feat) => feat.id === id)?.name ?? id;
   return (
-    <ChoiceList
-      legend="Предыстория"
-      name="background"
+    <BackgroundCarousel
+      options={options}
       value={draft.background}
-      choices={options.backgrounds.map((item) => ({
-        value: item.id,
-        label: item.name,
-        description: (
-          <>
-            <span>{`Навыки: ${item.skills.map(skillName).join(", ")}`}</span>
-            <span>{`Черта: ${featName(item.feat)}`}</span>
-            <span>{`Бонус к: ${item.ability_options.map((id) => abilityName(options, id)).join(", ")}`}</span>
-          </>
-        ),
-      }))}
       onChange={(background) => update({ background })}
     />
   );

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { createApi } from "../../api/client";
 import { ApiContext } from "../../api/context";
 import type { GameSummary, MyCharacter } from "../../api/types";
@@ -85,6 +85,17 @@ function renderPicker({
 
 const button = (name: string) => screen.getByRole("button", { name });
 const click = (name: string) => fireEvent.click(button(name));
+
+/** Выбор в карусели быстрой формы: точкой к варианту, затем «Выбрать». */
+function chooseCard(carousel: "Класс" | "Раса", name: string) {
+  const group = screen.getByRole("group", { name: carousel });
+  fireEvent.click(within(group).getByRole("button", { name }));
+  fireEvent.click(within(group).getByRole("button", { name: "Выбрать" }));
+}
+
+/** Ни в одной карусели формы ничего не выбрано. */
+const nothingChosen = () =>
+  expect(screen.queryByRole("button", { name: "Выбрано" })).toBeNull();
 
 const optionRequests = (server: { calls: RecordedCall[] }) =>
   server.calls.filter(
@@ -227,7 +238,7 @@ describe("свой герой: запрос и состояния", () => {
     click("Быстро");
 
     await screen.findByRole("heading", { name: "Быстрый герой" });
-    expect(screen.getByLabelText("Класс")).toHaveValue("");
+    nothingChosen();
     expect(screen.getByLabelText("Опиши героя одной строкой")).toHaveValue("");
     // Сообщение о сбое относится к стартовому экрану, у формы его нет.
     expect(screen.queryByText("Сервер сломался.")).toBeNull();
@@ -269,14 +280,7 @@ describe("свой герой: запрос и состояния", () => {
 });
 
 describe("изменить героя: прежний выбор", () => {
-  /** Идёт по шагам подробной формы, ничего не меняя, до кнопки «Создать героя». */
-  function walkToTheEnd() {
-    // Предел нужен, чтобы закрытый шаг (неактивная «Далее») ронял тест, а не вешал его.
-    for (let i = 0; i < 12; i++) {
-      if (screen.queryByRole("button", { name: "Далее" }) === null) return;
-      click("Далее");
-    }
-  }
+  const summarySection = (name: string) => screen.getByRole("region", { name });
 
   test("у героя с выбором — «Изменить героя», предупреждение о замене и два пути", async () => {
     renderPicker({ hero: mineDetailed() });
@@ -301,7 +305,7 @@ describe("изменить героя: прежний выбор", () => {
     expect(screen.getByText(/прежним выбором/)).toHaveTextContent("Подробно");
   });
 
-  test("detailed: «Изменить» открывает подробную форму с прежним выбором, отправка шлёт его", async () => {
+  test("detailed: «Изменить» открывает мастер на «Итоге» с прежним выбором, отправка шлёт его", async () => {
     const { server } = renderPicker({
       hero: mineDetailed(),
       routes: {
@@ -318,10 +322,10 @@ describe("изменить героя: прежний выбор", () => {
     expect(
       await screen.findByRole("heading", { name: "Подробный герой" }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/^Шаг 1 из 9/)).toHaveTextContent("Раса");
-    expect(screen.getByRole("radio", { name: /Эльф/ })).toBeChecked();
-    walkToTheEnd();
-    expect(screen.getByLabelText("Предыстория героя")).toHaveValue(
+    expect(screen.getByText(/^Шаг 10 из 10/)).toHaveTextContent("Итог");
+    expect(summarySection("Раса")).toHaveTextContent("Эльф");
+    expect(summarySection("Класс")).toHaveTextContent("Плут");
+    expect(summarySection("История героя")).toHaveTextContent(
       "Родилась в порту.",
     );
     click("Создать героя");
@@ -356,12 +360,16 @@ describe("изменить героя: прежний выбор", () => {
     await screen.findByRole("heading", { name: "Изменить героя" });
     click("Изменить");
     await screen.findByRole("heading", { name: "Подробный герой" });
-    walkToTheEnd();
-    click("Назад"); // на шаг «Характер и внешность»
+    fireEvent.click(
+      within(summarySection("Характер и внешность")).getByRole("button", {
+        name: "Изменить: Характер и внешность",
+      }),
+    );
     fireEvent.change(screen.getByLabelText("Имя"), {
       target: { value: "Лирой" },
     });
-    click("Далее");
+    click("Далее"); // история героя
+    click("Далее"); // итог
 
     click("Создать героя");
 
@@ -390,8 +398,11 @@ describe("изменить героя: прежний выбор", () => {
     expect(
       await screen.findByRole("heading", { name: "Быстрый герой" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Класс")).toHaveValue("rogue");
-    expect(screen.getByLabelText("Раса")).toHaveValue("human");
+    const chosen = screen.getAllByRole("button", { name: "Выбрано" });
+    expect(chosen.map((item) => item.closest("article"))).toEqual([
+      screen.getByRole("article", { name: "Плут" }),
+      screen.getByRole("article", { name: "Человек" }),
+    ]);
     expect(screen.getByLabelText("Опиши героя одной строкой")).toHaveValue(
       "Вор-неудачник",
     );
@@ -473,8 +484,8 @@ describe("изменить героя: создать заново", () => {
     click("Подробно");
 
     await screen.findByRole("heading", { name: "Подробный герой" });
-    expect(screen.getByText(/^Шаг 1 из 9/)).toHaveTextContent("Раса");
-    expect(screen.queryByRole("radio", { checked: true })).toBeNull();
+    expect(screen.getByText(/^Шаг 1 из 10/)).toHaveTextContent("Раса");
+    nothingChosen();
     expect(button("Далее")).toBeDisabled();
   });
 
@@ -486,8 +497,7 @@ describe("изменить героя: создать заново", () => {
     click("Быстро");
 
     await screen.findByRole("heading", { name: "Быстрый герой" });
-    expect(screen.getByLabelText("Класс")).toHaveValue("");
-    expect(screen.getByLabelText("Раса")).toHaveValue("");
+    nothingChosen();
     expect(screen.getByLabelText("Опиши героя одной строкой")).toHaveValue("");
     expect(screen.getByLabelText("Имя (необязательно)")).toHaveValue("");
   });
@@ -518,12 +528,8 @@ describe("изменить героя: создать заново", () => {
     click("Создать заново");
     click("Быстро");
     await screen.findByRole("heading", { name: "Быстрый герой" });
-    fireEvent.change(screen.getByLabelText("Класс"), {
-      target: { value: "fighter" },
-    });
-    fireEvent.change(screen.getByLabelText("Раса"), {
-      target: { value: "dwarf" },
-    });
+    chooseCard("Класс", "Воин");
+    chooseCard("Раса", "Дварф");
     fireEvent.change(screen.getByLabelText("Опиши героя одной строкой"), {
       target: { value: "Кузнец" },
     });
@@ -569,7 +575,7 @@ describe("изменить героя: прежнего выбора нет", ()
     click("Быстро");
 
     await screen.findByRole("heading", { name: "Быстрый герой" });
-    expect(screen.getByLabelText("Класс")).toHaveValue("");
+    nothingChosen();
     expect(screen.getByLabelText("Опиши героя одной строкой")).toHaveValue("");
   });
 
@@ -580,7 +586,7 @@ describe("изменить героя: прежнего выбора нет", ()
     click("Подробно");
 
     await screen.findByRole("heading", { name: "Подробный герой" });
-    expect(screen.queryByRole("radio", { checked: true })).toBeNull();
+    nothingChosen();
     expect(button("Далее")).toBeDisabled();
   });
 
@@ -721,12 +727,8 @@ describe("после создания", () => {
     await screen.findByRole("heading", { name: "Создание героя" });
     click("Быстро");
     await screen.findByRole("heading", { name: "Быстрый герой" });
-    fireEvent.change(screen.getByLabelText("Класс"), {
-      target: { value: "rogue" },
-    });
-    fireEvent.change(screen.getByLabelText("Раса"), {
-      target: { value: "elf" },
-    });
+    chooseCard("Класс", "Плут");
+    chooseCard("Раса", "Эльф");
     fireEvent.change(screen.getByLabelText("Опиши героя одной строкой"), {
       target: { value: "Акробат" },
     });

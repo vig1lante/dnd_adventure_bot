@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { Fragment, useId } from "react";
 import type {
   InputHTMLAttributes,
   ReactNode,
@@ -174,6 +174,11 @@ export interface Choice {
   /** Пояснение под названием; входит в доступное имя варианта. */
   description?: ReactNode;
   disabled?: boolean;
+  /**
+   * Дополнение после варианта, вне его подписи (например, «Подробнее»): кнопка внутри
+   * <label> недопустима, а её текст попал бы в имя варианта.
+   */
+  more?: ReactNode;
 }
 
 interface ChoiceListProps {
@@ -207,26 +212,28 @@ export function ChoiceList({
     <fieldset className="form-choices" role="radiogroup">
       <legend className="form-legend">{legend}</legend>
       {choices.map((choice) => (
-        <label
-          key={choice.value}
-          className={classNames(
-            "form-choice",
-            choice.disabled && "form-choice--disabled",
-          )}
-        >
-          <input
-            type="radio"
-            name={name}
-            value={choice.value}
-            checked={value === choice.value}
-            disabled={choice.disabled}
-            onChange={() => {
-              // Браузер недоступному варианту событий не шлёт; защита от программных щелчков.
-              if (!choice.disabled) onChange(choice.value);
-            }}
-          />
-          <ChoiceBody choice={choice} />
-        </label>
+        <Fragment key={choice.value}>
+          <label
+            className={classNames(
+              "form-choice",
+              choice.disabled && "form-choice--disabled",
+            )}
+          >
+            <input
+              type="radio"
+              name={name}
+              value={choice.value}
+              checked={value === choice.value}
+              disabled={choice.disabled}
+              onChange={() => {
+                // Браузер недоступному варианту событий не шлёт; защита от программных щелчков.
+                if (!choice.disabled) onChange(choice.value);
+              }}
+            />
+            <ChoiceBody choice={choice} />
+          </label>
+          {choice.more}
+        </Fragment>
       ))}
     </fieldset>
   );
@@ -271,26 +278,28 @@ export function CheckList({
         const checked = chosen.has(choice.value);
         const disabled = choice.disabled === true || (!checked && full);
         return (
-          <label
-            key={choice.value}
-            className={classNames(
-              "form-choice",
-              disabled && "form-choice--disabled",
-            )}
-          >
-            <input
-              type="checkbox"
-              name={name}
-              value={choice.value}
-              checked={checked}
-              disabled={disabled}
-              onChange={(event) => {
-                // Как у ChoiceList: недоступный вариант не отмечается и программным щелчком.
-                if (!disabled) toggle(choice.value, event.target.checked);
-              }}
-            />
-            <ChoiceBody choice={choice} />
-          </label>
+          <Fragment key={choice.value}>
+            <label
+              className={classNames(
+                "form-choice",
+                disabled && "form-choice--disabled",
+              )}
+            >
+              <input
+                type="checkbox"
+                name={name}
+                value={choice.value}
+                checked={checked}
+                disabled={disabled}
+                onChange={(event) => {
+                  // Как у ChoiceList: недоступный вариант не отмечается и программным щелчком.
+                  if (!disabled) toggle(choice.value, event.target.checked);
+                }}
+              />
+              <ChoiceBody choice={choice} />
+            </label>
+            {choice.more}
+          </Fragment>
         );
       })}
     </fieldset>

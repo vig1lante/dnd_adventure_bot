@@ -101,6 +101,20 @@ def test_srd_texts_never_call_the_race_a_kind(srd):
     assert kind_mentions(srd.model_dump_json()) == []
 
 
+def test_the_srd_scan_sees_the_card_texts_of_hero_creation(srd):
+    # Описание расы, инструмент предыстории и описание навыка игрок читает в карточках создания
+    # героя; проверка выше смотрит на дамп SRD, поэтому каждый такой текст должен в него попасть.
+    dump = srd.model_dump_json()
+    texts = [
+        *(kind.description for kind in srd.species.values()),
+        *(background.tool for background in srd.backgrounds.values()),
+        *(skill.summary for skill in srd.skills.values()),
+    ]
+
+    assert len(texts) == len(srd.species) + len(srd.backgrounds) + len(Skill)
+    assert [text for text in texts if text not in dump] == []
+
+
 # --- то, что видит игрок: проблемы создания героя ---
 
 

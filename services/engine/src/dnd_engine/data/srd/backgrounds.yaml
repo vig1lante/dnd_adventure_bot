@@ -1,4 +1,5 @@
 # Четыре предыстории SRD 5.2.1 (CC BY 4.0).
+# tool — владение инструментом из SRD русским текстом для карточки предыстории (не id предмета).
 # equipment — только предметы из поднабора среза; книги, одежда, мелочи и деньги не переносятся.
 # inspiration_triggers — 2–3 повода отыгрыша для вдохновения (модуль bg3_flavor); это не текст SRD.
 - id: acolyte
@@ -6,6 +7,7 @@
   name_en: Acolyte
   ability_options: [int, wis, cha]
   skills: [insight, religion]
+  tool: Инструменты каллиграфа
   feat: magic_initiate
   equipment: [holy_symbol]
   inspiration_triggers:
@@ -17,6 +19,7 @@
   name_en: Criminal
   ability_options: [dex, con, int]
   skills: [sleight_of_hand, stealth]
+  tool: Воровские инструменты
   feat: alert
   equipment: [dagger, thieves_tools]
   inspiration_triggers:
@@ -28,6 +31,7 @@
   name_en: Sage
   ability_options: [con, int, wis]
   skills: [arcana, history]
+  tool: Инструменты каллиграфа
   feat: magic_initiate
   equipment: [quarterstaff]
   inspiration_triggers:
@@ -39,6 +43,7 @@
   name_en: Soldier
   ability_options: [str, dex, con]
   skills: [athletics, intimidation]
+  tool: Один игровой набор на выбор
   feat: savage_attacker
   equipment: [spear, shortbow, healers_kit]
   inspiration_triggers:

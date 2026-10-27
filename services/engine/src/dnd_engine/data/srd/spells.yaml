@@ -3,6 +3,8 @@
 #
 # Соглашения:
 # - classes — только классы среза (cleric, wizard, ranger) из списков заклинаний SRD.
+# - school — школа магии по SRD 5.2.1 (лечащие заклинания там — abjuration, «Чудо-ягоды» —
+#   conjuration); русские подписи школ даёт сервер.
 # - range: self, touch; near — до 18 м (рядом); far — дальше 18 м (далеко).
 # - duration_rounds — длительность в раундах по 6 секунд (минута — 10, час — 600); null —
 #   мгновенное заклинание. У заклинаний с концентрацией длительность обязательна.
@@ -27,6 +29,7 @@
   name: Священное пламя
   name_en: Sacred Flame
   level: 0
+  school: evocation
   casting_time: action
   range: near
   concentration: false
@@ -38,6 +41,7 @@
   name: Указание
   name_en: Guidance
   level: 0
+  school: divination
   casting_time: action
   range: touch
   concentration: true
@@ -49,6 +53,7 @@
   name: Уход за умирающим
   name_en: Spare the Dying
   level: 0
+  school: necromancy
   casting_time: action
   range: near
   concentration: false
@@ -60,6 +65,7 @@
   name: Огненный снаряд
   name_en: Fire Bolt
   level: 0
+  school: evocation
   casting_time: action
   range: far
   concentration: false
@@ -71,6 +77,7 @@
   name: Луч холода
   name_en: Ray of Frost
   level: 0
+  school: evocation
   casting_time: action
   range: near
   concentration: false
@@ -82,6 +89,7 @@
   name: Электрошок
   name_en: Shocking Grasp
   level: 0
+  school: evocation
   casting_time: action
   range: touch
   concentration: false
@@ -93,6 +101,7 @@
   name: Волшебная рука
   name_en: Mage Hand
   level: 0
+  school: conjuration
   casting_time: action
   range: near
   concentration: false
@@ -104,6 +113,7 @@
   name: Свет
   name_en: Light
   level: 0
+  school: evocation
   casting_time: action
   range: touch
   concentration: false
@@ -117,6 +127,7 @@
   name: Волшебная стрела
   name_en: Magic Missile
   level: 1
+  school: evocation
   casting_time: action
   range: far
   concentration: false
@@ -129,6 +140,7 @@
   name: Усыпление
   name_en: Sleep
   level: 1
+  school: enchantment
   casting_time: action
   range: near
   concentration: true
@@ -140,6 +152,7 @@
   name: Огненные ладони
   name_en: Burning Hands
   level: 1
+  school: evocation
   casting_time: action
   range: self
   concentration: false
@@ -152,6 +165,7 @@
   name: Волна грома
   name_en: Thunderwave
   level: 1
+  school: evocation
   casting_time: action
   range: self
   concentration: false
@@ -164,6 +178,7 @@
   name: Доспехи мага
   name_en: Mage Armor
   level: 1
+  school: abjuration
   casting_time: action
   range: touch
   concentration: false
@@ -175,6 +190,7 @@
   name: Лечение ран
   name_en: Cure Wounds
   level: 1
+  school: abjuration
   casting_time: action
   range: touch
   concentration: false
@@ -187,6 +203,7 @@
   name: Лечащее слово
   name_en: Healing Word
   level: 1
+  school: abjuration
   casting_time: bonus_action
   range: near
   concentration: false
@@ -199,6 +216,7 @@
   name: Благословение
   name_en: Bless
   level: 1
+  school: enchantment
   casting_time: action
   range: near
   concentration: true
@@ -210,6 +228,7 @@
   name: Направленный снаряд
   name_en: Guiding Bolt
   level: 1
+  school: evocation
   casting_time: action
   range: far
   concentration: false
@@ -222,6 +241,7 @@
   name: Нанесение ран
   name_en: Inflict Wounds
   level: 1
+  school: necromancy
   casting_time: action
   range: touch
   concentration: false
@@ -234,6 +254,7 @@
   name: Метка охотника
   name_en: Hunter's Mark
   level: 1
+  school: divination
   casting_time: bonus_action
   range: far
   concentration: true
@@ -245,6 +266,7 @@
   name: Чудо-ягоды
   name_en: Goodberry
   level: 1
+  school: conjuration
   casting_time: action
   range: self
   concentration: false
@@ -256,6 +278,7 @@
   name: Туманное облако
   name_en: Fog Cloud
   level: 1
+  school: conjuration
   casting_time: action
   range: far
   concentration: true
@@ -267,6 +290,7 @@
   name: Обнаружение магии
   name_en: Detect Magic
   level: 1
+  school: divination
   casting_time: action
   range: self
   concentration: true
@@ -280,6 +304,7 @@
   name: Палящий луч
   name_en: Scorching Ray
   level: 2
+  school: evocation
   casting_time: action
   range: far
   concentration: false
@@ -292,6 +317,7 @@
   name: Туманный шаг
   name_en: Misty Step
   level: 2
+  school: conjuration
   casting_time: bonus_action
   range: self
   concentration: false
@@ -303,6 +329,7 @@
   name: Удержание личности
   name_en: Hold Person
   level: 2
+  school: enchantment
   casting_time: action
   range: near
   concentration: true
@@ -314,6 +341,7 @@
   name: Подмога
   name_en: Aid
   level: 2
+  school: abjuration
   casting_time: action
   range: near
   concentration: false
@@ -326,6 +354,7 @@
   name: Малое восстановление
   name_en: Lesser Restoration
   level: 2
+  school: abjuration
   casting_time: bonus_action
   range: touch
   concentration: false
@@ -337,6 +366,7 @@
   name: Молитва исцеления
   name_en: Prayer of Healing
   level: 2
+  school: abjuration
   casting_time: action
   range: near
   concentration: false

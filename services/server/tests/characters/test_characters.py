@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, get_args
 
 import httpx
 import pytest
@@ -27,10 +27,10 @@ from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from dnd_engine.abilities import Ability
+from dnd_engine.abilities import Ability, Skill
 from dnd_engine.character import Character, Persona
 from dnd_engine.conditions import ZERO_HP_SOURCE
-from dnd_engine.content import load_srd
+from dnd_engine.content import ArmorProps, SpellDef, SpellSchool, WeaponProps, load_srd
 from dnd_engine.creation import (
     FIGHTING_STYLES,
     POINT_BUY_BUDGET,
@@ -44,6 +44,7 @@ from dnd_engine.creation import (
     random_point_buy,
 )
 from dnd_engine.rng import SeededRng
+from dnd_engine.units import meters_text
 from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.characters import flavor, service
@@ -453,10 +454,12 @@ async def test_creation_options_give_the_form_everything_in_russian(world):
         "Мудрость",
         "Харизма",
     ]
+    # Прежние поля навыка не изменились; блок 7 только добавил `details` для подробной карточки.
     assert by_id(options["skills"])["stealth"] == {
         "id": "stealth",
         "name": "Скрытность",
         "ability": "dex",
+        "details": {"ability": "dex", "summary": srd.skills[Skill.STEALTH].summary},
     }
     assert set(by_id(options["classes"])) == set(srd.classes)
     assert set(by_id(options["species"])) == set(srd.species)
@@ -555,6 +558,733 @@ def test_the_form_describes_the_fighting_styles_with_the_engine_names():
     }
 
     assert shown == {style: tuple(FIGHTING_STYLES[style]) for style in used} != {}
+
+
+# --- подробности вариантов для карточек (`details`, контракт блока 7 §2) ---
+# Верхние поля вариантов — для логики формы, `details` — для подробной карточки. Тексты — из данных
+# движка, подписи кодов (размер, доспехи, школа, время, дистанция, длительность) — у сервера.
+
+# Поля вариантов до блока 7: они и их значения не меняются, `details` только добавляется.
+OLD_OPTION_FIELDS = {
+    "skills": {"id", "name", "ability"},
+    "classes": {
+        "id",
+        "name",
+        "hit_die",
+        "saving_throws",
+        "skill_choices",
+        "skill_options",
+        "expertise_picks",
+        "fighting_styles",
+        "starting_equipment",
+        "features",
+        "spellcasting",
+    },
+    "species": {"id", "name", "traits", "extra_skill", "granted_skills"},
+    "backgrounds": {"id", "name", "ability_options", "skills", "feat", "equipment"},
+    "feats": {"id", "name", "summary"},
+    "fighting_styles": {"id", "name", "summary"},
+}
+OLD_SPELL_FIELDS = {"id", "name", "level", "summary"}
+
+
+@pytest.fixture
+async def form_options(world: World) -> dict[str, Any]:
+    """Ответ `creation-options` вошедшему игроку: игра для опций не нужна."""
+    player = await add_player(world.db, "Игрок", dev_login="dev-1")
+    return await get_options(world, player)
+
+
+def spell_options_of(options: dict[str, Any]) -> list[dict[str, Any]]:
+    """Все заговоры и заклинания из списков всех классов с магией."""
+    return [
+        spell
+        for cls in options["classes"]
+        if cls["spellcasting"]
+        for spell in cls["spellcasting"]["cantrip_options"] + cls["spellcasting"]["spell_options"]
+    ]
+
+
+def is_label(text: str) -> bool:
+    """Русская подпись, а не код: есть кириллица и нет латиницы."""
+    return bool(re.search("[а-яё]", text, re.IGNORECASE)) and not re.search(
+        "[a-z]", text, re.IGNORECASE
+    )
+
+
+async def test_details_are_added_next_to_the_old_fields_of_every_option(form_options):
+    assert set(form_options) == {
+        "level",
+        "abilities",
+        "skills",
+        "standard_array",
+        "point_buy",
+        "background_bonus_shapes",
+        "classes",
+        "species",
+        "backgrounds",
+        "feats",
+        "fighting_styles",
+    }
+    for kind, fields in OLD_OPTION_FIELDS.items():
+        assert all(set(option) == fields | {"details"} for option in form_options[kind]), kind
+    spells = spell_options_of(form_options)
+    assert spells and all(set(spell) == OLD_SPELL_FIELDS | {"details"} for spell in spells)
+
+
+async def test_species_details_tell_size_speed_in_meters_and_every_trait(form_options):
+    srd = load_srd()
+    species = by_id(form_options["species"])
+
+    assert species["dwarf"]["details"] == {
+        # Английское название — для подписи под русским на карточке (спека §7, дополнение §9).
+        "name_en": "Dwarf",
+        "description": srd.species["dwarf"].description,
+        "size": "Средний",
+        "speed": 30,
+        "speed_text": "9 м",
+        "traits": [
+            {"name": trait.name, "summary": trait.summary, "mechanical": trait.mechanical}
+            for trait in srd.species["dwarf"].traits
+        ],
+    }
+    assert species["gnome"]["details"]["size"] == "Маленький"
+    goliath = species["goliath"]["details"]
+    assert (goliath["speed"], goliath["speed_text"]) == (35, "10,5 м")
+    for species_id, option in species.items():
+        details, data = option["details"], srd.species[species_id]
+        assert details["name_en"] == data.name_en != ""
+        assert details["description"] == data.description != ""
+        assert [t["name"] for t in details["traits"]] == [t["name"] for t in option["traits"]]
+    # Пометка «действует в бою» берётся из данных: в ответе есть черты обоих видов.
+    flags = {t["mechanical"] for option in species.values() for t in option["details"]["traits"]}
+    assert flags == {True, False}
+
+
+async def test_class_details_of_a_caster_show_its_magic_at_the_hero_level(form_options):
+    srd = load_srd()
+    wizard = by_id(form_options["classes"])["wizard"]
+    data = srd.classes["wizard"]
+
+    assert wizard["details"] == {
+        "hit_die": 6,
+        "primary": "int",
+        "saves": list(data.saving_throws),
+        "armor": [],
+        "weapons": ["Простое оружие"],
+        "skill_choices": {"count": data.skill_choices, "from": list(data.skill_options)},
+        "features": [
+            {
+                "level": feature.level,
+                "name": feature.name,
+                "summary": feature.summary,
+                "mechanical": feature.mechanical,
+            }
+            for feature in data.features
+            if feature.level <= form_options["level"]
+        ],
+        "spellcasting": {"ability": "int", "cantrips": 3, "prepared": 6},
+    }
+    ranger = by_id(form_options["classes"])["ranger"]["details"]
+    assert ranger["spellcasting"] == {"ability": "wis", "cantrips": 0, "prepared": 4}
+
+
+async def test_class_details_of_a_class_without_magic(form_options):
+    fighter = by_id(form_options["classes"])["fighter"]["details"]
+
+    assert fighter["hit_die"] == 10
+    assert fighter["primary"] == "str"
+    assert fighter["armor"] == ["Лёгкие доспехи", "Средние доспехи", "Тяжёлые доспехи", "Щиты"]
+    assert fighter["weapons"] == ["Простое оружие", "Воинское оружие"]
+    assert fighter["spellcasting"] is None
+    assert {feature["level"] for feature in fighter["features"]} == {1, 2, 3}
+
+
+async def test_class_details_repeat_the_numbers_of_the_old_fields(form_options):
+    srd = load_srd()
+    for cls in form_options["classes"]:
+        details = cls["details"]
+        assert details["primary"] == srd.classes[cls["id"]].ability_priority[0]
+        assert details["hit_die"] == cls["hit_die"]
+        assert details["saves"] == cls["saving_throws"]
+        assert details["skill_choices"] == {
+            "count": cls["skill_choices"],
+            "from": cls["skill_options"],
+        }
+        assert [(f["name"], f["summary"]) for f in details["features"]] == [
+            (f["name"], f["summary"]) for f in cls["features"]
+        ]
+        old = cls["spellcasting"]
+        expected = old and {key: old[key] for key in ("ability", "cantrips", "prepared")}
+        assert details["spellcasting"] == expected, cls["id"]
+
+
+def test_class_details_show_features_only_up_to_the_hero_level():
+    # В срезе все особенности не выше 3-го уровня: особенность 4-го уровня добавлена в копию данных.
+    srd = load_srd()
+    wizard = srd.classes["wizard"]
+    later = wizard.features[0].model_copy(update={"id": "later", "level": 4, "name": "Позже"})
+    classes = {
+        **srd.classes,
+        "wizard": wizard.model_copy(update={"features": (*wizard.features, later)}),
+    }
+
+    options = service.creation_options(srd.model_copy(update={"classes": classes}))
+
+    shown = {c.id: c for c in options.classes}["wizard"].details.features
+    assert "Позже" not in [feature.name for feature in shown]
+    assert len(shown) == len(wizard.features)
+
+
+async def test_background_details_name_the_tool_and_describe_the_feat(form_options):
+    srd = load_srd()
+    backgrounds = by_id(form_options["backgrounds"])
+    soldier, feat = srd.backgrounds["soldier"], srd.feats["savage_attacker"]
+
+    assert backgrounds["soldier"]["details"] == {
+        "abilities": list(soldier.ability_options),
+        "skills": list(soldier.skills),
+        "tool": "Один игровой набор на выбор",
+        "feat": {"id": "savage_attacker", "name": feat.name, "summary": feat.summary},
+        "equipment": backgrounds["soldier"]["equipment"],
+    }
+    for background_id, option in backgrounds.items():
+        details = option["details"]
+        assert details["tool"] == srd.backgrounds[background_id].tool
+        assert details["feat"]["id"] == option["feat"]
+        assert details["feat"]["summary"] == srd.feats[option["feat"]].summary
+        assert details["abilities"] == option["ability_options"]
+        assert details["skills"] == option["skills"]
+        assert details["equipment"] == option["equipment"]
+
+
+async def test_skill_details_tell_the_ability_and_what_the_skill_checks(form_options):
+    srd = load_srd()
+
+    skills = by_id(form_options["skills"])
+
+    assert set(skills) == {skill.value for skill in Skill}
+    for skill_id, option in skills.items():
+        assert option["details"] == {
+            "ability": option["ability"],
+            "summary": srd.skills[Skill(skill_id)].summary,
+        }
+
+
+async def test_spell_details_of_a_cantrip_and_of_a_spell(form_options):
+    srd = load_srd()
+    wizard = by_id(form_options["classes"])["wizard"]["spellcasting"]
+    cleric = by_id(form_options["classes"])["cleric"]["spellcasting"]
+    ranger = by_id(form_options["classes"])["ranger"]["spellcasting"]
+
+    assert by_id(wizard["cantrip_options"])["fire_bolt"]["details"] == {
+        "school": "Воплощение",
+        "casting_time": "Действие",
+        "range_text": "Далеко, дальше 18 м",
+        "duration": "Мгновенно",
+        "summary": srd.spells["fire_bolt"].summary,
+    }
+    assert by_id(wizard["spell_options"])["detect_magic"]["details"] == {
+        "school": "Прорицание",
+        "casting_time": "Действие",
+        "range_text": "На себя",
+        "duration": "10 минут, концентрация",
+        "summary": srd.spells["detect_magic"].summary,
+    }
+    guidance = by_id(cleric["cantrip_options"])["guidance"]["details"]
+    assert (guidance["range_text"], guidance["duration"]) == ("Касание", "1 минута, концентрация")
+    prayer = by_id(cleric["spell_options"])["prayer_of_healing"]["details"]
+    assert prayer["casting_time"] == "Несколько минут, только вне боя"
+    assert (prayer["school"], prayer["range_text"]) == ("Ограждение", "Близко, до 18 м")
+    hunters_mark = by_id(ranger["spell_options"])["hunters_mark"]["details"]
+    assert hunters_mark["casting_time"] == "Бонусное действие"
+    assert hunters_mark["duration"] == "1 час, концентрация"
+    for spell in spell_options_of(form_options):
+        assert spell["details"]["summary"] == spell["summary"]
+
+
+async def test_feat_and_fighting_style_details_carry_the_summary(form_options):
+    for kind in ("feats", "fighting_styles"):
+        for option in form_options[kind]:
+            assert option["details"] == {"summary": option["summary"]}, option["id"]
+
+
+# Длительность (раунды, концентрация) -> текст. Первые строки — все сочетания из данных SRD
+# (тест ниже следит, что новые не появились без строки здесь), остальные — склонение.
+DURATIONS = [
+    (None, False, "Мгновенно"),
+    (1, False, "1 раунд"),
+    (10, False, "1 минута"),
+    (10, True, "1 минута, концентрация"),
+    (100, True, "10 минут, концентрация"),
+    (600, False, "1 час"),
+    (600, True, "1 час, концентрация"),
+    (4800, False, "8 часов"),
+    (14400, False, "24 часа"),
+    (2, False, "2 раунда"),
+    (5, False, "5 раундов"),
+    (11, False, "11 раундов"),
+    (12, False, "12 раундов"),
+    (21, False, "21 раунд"),
+    (22, True, "22 раунда, концентрация"),
+    (20, False, "2 минуты"),
+    (50, False, "5 минут"),
+    (110, False, "11 минут"),
+    (210, False, "21 минута"),
+    (1200, False, "2 часа"),
+    (3000, False, "5 часов"),
+    (6600, False, "11 часов"),
+    (7200, False, "12 часов"),
+    (12600, False, "21 час"),
+    (None, True, "Мгновенно, концентрация"),
+]
+
+
+@pytest.mark.parametrize(("rounds", "concentration", "text"), DURATIONS)
+def test_spell_duration_is_said_in_hours_minutes_or_rounds(rounds, concentration, text):
+    assert service.duration_text(rounds, concentration) == text
+
+
+def test_every_duration_in_the_srd_data_is_checked():
+    spells = load_srd().spells.values()
+
+    in_data = {(spell.duration_rounds, spell.concentration) for spell in spells}
+
+    assert in_data <= {(rounds, concentration) for rounds, concentration, _text in DURATIONS}
+    assert {rounds for rounds, _concentration in in_data} == {None, 1, 10, 100, 600, 4800, 14400}
+
+
+@pytest.mark.parametrize(
+    ("casting_time", "out_of_combat_only", "text"),
+    [
+        ("action", False, "Действие"),
+        ("bonus_action", False, "Бонусное действие"),
+        ("action", True, "Несколько минут, только вне боя"),
+        ("bonus_action", True, "Несколько минут, только вне боя"),
+    ],
+)
+def test_casting_time_is_said_in_russian(casting_time, out_of_combat_only, text):
+    assert service.casting_time_text(casting_time, out_of_combat_only) == text
+
+
+RANGES = {
+    "self": "На себя",
+    "touch": "Касание",
+    "engaged": "Вплотную, 1,5 м",
+    "near": "Близко, до 18 м",
+    "far": "Далеко, дальше 18 м",
+}
+
+
+def test_every_range_category_is_said_in_meters():
+    # Движок решает дистанцию заклинания зоной: каждая категория схемы, а не только из данных.
+    assert set(RANGES) == set(get_args(SpellDef.model_fields["range"].annotation))
+
+    assert dict(service.SPELL_RANGES) == RANGES
+
+
+def test_every_code_of_the_srd_data_has_a_russian_label():
+    srd = load_srd()
+    codes = {
+        "size": ({s.size for s in srd.species.values()}, service.SIZE_NAMES),
+        "armor": ({a for c in srd.classes.values() for a in c.armor}, service.ARMOR_NAMES),
+        "weapons": ({w for c in srd.classes.values() for w in c.weapons}, service.WEAPON_NAMES),
+        # Школа и время сотворения — перечни схемы движка: подпись есть у каждого значения.
+        "school": (set(get_args(SpellSchool)), service.SCHOOL_NAMES),
+        "casting_time": (
+            set(get_args(SpellDef.model_fields["casting_time"].annotation)),
+            service.CASTING_TIMES,
+        ),
+        "range": (set(get_args(SpellDef.model_fields["range"].annotation)), service.SPELL_RANGES),
+    }
+
+    for kind, (used, labels) in codes.items():
+        assert used and used <= set(labels), kind
+        assert all(is_label(label) for label in labels.values()), kind
+    assert dict(service.SCHOOL_NAMES) == {
+        "abjuration": "Ограждение",
+        "conjuration": "Вызов",
+        "divination": "Прорицание",
+        "enchantment": "Очарование",
+        "evocation": "Воплощение",
+        "illusion": "Иллюзия",
+        "necromancy": "Некромантия",
+        "transmutation": "Преобразование",
+    }
+
+
+async def test_details_show_labels_instead_of_codes_and_no_feet(form_options):
+    labels = [option["details"]["size"] for option in form_options["species"]]
+    labels += [option["details"]["speed_text"] for option in form_options["species"]]
+    for cls in form_options["classes"]:
+        labels += cls["details"]["armor"] + cls["details"]["weapons"]
+    for spell in spell_options_of(form_options):
+        details = spell["details"]
+        labels += [details[key] for key in ("school", "casting_time", "range_text", "duration")]
+
+    assert labels and all(is_label(label) for label in labels), labels
+    # Расстояния только в метрах: во всём ответе нет ни одного «фут».
+    assert "фут" not in json.dumps(form_options, ensure_ascii=False).lower()
+
+
+# --- финальное покрытие блока 7 (B7.coverage): ответ целиком, все коды, старые поля, приватность
+# Подписи кодов по контракту блока (§2.1, §2.2, §2.5) — собственные таблицы теста, а не таблицы
+# сервера: так ответ сверяется с контрактом, а не сам с собой.
+SIZE_LABELS = {"medium": "Средний", "small": "Маленький"}
+ARMOR_LABELS = {
+    "light": "Лёгкие доспехи",
+    "medium": "Средние доспехи",
+    "heavy": "Тяжёлые доспехи",
+    "shield": "Щиты",
+}
+WEAPON_LABELS = {"simple": "Простое оружие", "martial": "Воинское оружие"}
+SCHOOL_LABELS = {
+    "abjuration": "Ограждение",
+    "conjuration": "Вызов",
+    "divination": "Прорицание",
+    "enchantment": "Очарование",
+    "evocation": "Воплощение",
+    "illusion": "Иллюзия",
+    "necromancy": "Некромантия",
+    "transmutation": "Преобразование",
+}
+CASTING_LABELS = {"action": "Действие", "bonus_action": "Бонусное действие"}
+OUT_OF_COMBAT = "Несколько минут, только вне боя"
+
+
+async def test_the_http_answer_is_the_service_model_serialized_whole(form_options):
+    # FastAPI отдаёт ровно то, что дают `model_dump` и `model_dump_json`: ключ `from`, а не `from_`.
+    model = service.creation_options(load_srd())
+
+    assert form_options == model.model_dump(mode="json") == json.loads(model.model_dump_json())
+
+
+async def test_skill_choices_go_out_under_the_key_from_over_http(world):
+    player = await add_player(world.db, "Игрок", dev_login="dev-1")
+
+    response = await world.http.get("/api/content/creation-options", headers=player.headers)
+
+    assert response.status_code == 200, response.text
+    assert "from_" not in response.text
+    classes = response.json()["classes"]
+    assert classes
+    for cls in classes:
+        assert set(cls["details"]["skill_choices"]) == {"count", "from"}, cls["id"]
+
+
+def test_skill_choices_say_from_in_every_kind_of_dump():
+    choices = service.SkillChoicesDetail(count=2, from_=[Skill.STEALTH, Skill.ATHLETICS])
+    model = service.creation_options(load_srd())
+    wizard = {cls.id: cls for cls in model.classes}["wizard"]
+
+    assert choices.model_dump() == {"count": 2, "from": [Skill.STEALTH, Skill.ATHLETICS]}
+    assert choices.model_dump(mode="json") == {"count": 2, "from": ["stealth", "athletics"]}
+    assert json.loads(choices.model_dump_json()) == {"count": 2, "from": ["stealth", "athletics"]}
+    # Имя ключа сохраняется и внутри родителей — вплоть до всего ответа.
+    assert set(wizard.details.model_dump()["skill_choices"]) == {"count", "from"}
+    assert set(wizard.model_dump(mode="json")["details"]["skill_choices"]) == {"count", "from"}
+    assert "from_" not in model.model_dump_json()
+
+
+def test_the_answer_model_is_rebuilt_from_its_own_dump():
+    # Ответ уходит с ключом `from`, и модель принимает его обратно: ни смена версии FastAPI (с
+    # повторной проверкой ответа), ни разбор ответа своей же моделью не ломаются на `from_`.
+    model = service.creation_options(load_srd())
+
+    assert service.CreationOptions.model_validate(model.model_dump()) == model
+    assert service.CreationOptions.model_validate(model.model_dump(mode="json")) == model
+    assert service.CreationOptions.model_validate_json(model.model_dump_json()) == model
+    choices = service.SkillChoicesDetail.model_validate({"count": 1, "from": ["stealth"]})
+    assert choices.model_dump() == {"count": 1, "from": [Skill.STEALTH]}
+    # По имени поля модель по-прежнему собирается в коде сервера.
+    assert service.SkillChoicesDetail(count=1, from_=[Skill.STEALTH]) == choices
+
+
+def test_the_openapi_schema_promises_details_and_the_key_from(settings):
+    schemas = create_app(settings).openapi()["components"]["schemas"]
+
+    choices = schemas["SkillChoicesDetail"]
+    assert set(choices["properties"]) == set(choices["required"]) == {"count", "from"}
+    # `details` обязателен у каждого вида варианта (контракт блока 7, §2).
+    for option in (
+        "SkillOption",
+        "Described",
+        "SpellOption",
+        "ClassOption",
+        "SpeciesOption",
+        "BackgroundOption",
+    ):
+        assert "details" in schemas[option]["required"], option
+
+
+# Склонение на остальных границах (3–4, 13–14, 22–25, сотни 101/102/111/112) у всех трёх единиц
+# и выбор единицы: кратно минуте, но не часу (590, 610, 900), не кратно минуте (605).
+MORE_DURATIONS = [
+    (3, "3 раунда"),
+    (4, "4 раунда"),
+    (9, "9 раундов"),
+    (13, "13 раундов"),
+    (14, "14 раундов"),
+    (23, "23 раунда"),
+    (25, "25 раундов"),
+    (101, "101 раунд"),
+    (102, "102 раунда"),
+    (111, "111 раундов"),
+    (112, "112 раундов"),
+    (605, "605 раундов"),
+    (30, "3 минуты"),
+    (40, "4 минуты"),
+    (130, "13 минут"),
+    (140, "14 минут"),
+    (220, "22 минуты"),
+    (590, "59 минут"),
+    (610, "61 минута"),
+    (900, "90 минут"),
+    (1010, "101 минута"),
+    (1110, "111 минут"),
+    (1800, "3 часа"),
+    (2400, "4 часа"),
+    (6000, "10 часов"),
+    (7800, "13 часов"),
+    (8400, "14 часов"),
+    (13200, "22 часа"),
+    (60600, "101 час"),
+    (66600, "111 часов"),
+]
+
+
+@pytest.mark.parametrize(("rounds", "text"), MORE_DURATIONS)
+def test_spell_duration_declines_on_every_boundary_with_and_without_concentration(rounds, text):
+    assert service.duration_text(rounds, False) == text
+    assert service.duration_text(rounds, True) == f"{text}, концентрация"
+
+
+# Раунд — 6 секунд: в минуте 10 раундов, в часе 600.
+MINUTE_ROUNDS = 10
+HOUR_ROUNDS = 600
+DURATION_UNITS = {
+    "раунд": 1,
+    "раунда": 1,
+    "раундов": 1,
+    "минута": MINUTE_ROUNDS,
+    "минуты": MINUTE_ROUNDS,
+    "минут": MINUTE_ROUNDS,
+    "час": HOUR_ROUNDS,
+    "часа": HOUR_ROUNDS,
+    "часов": HOUR_ROUNDS,
+}
+
+
+def test_a_duration_keeps_every_round_and_takes_the_largest_whole_unit():
+    for rounds in range(1, 6001):
+        number, word = service.duration_text(rounds, False).split(" ")
+        unit = DURATION_UNITS[word]
+        # Число в выбранной единице возвращает ровно столько раундов, сколько в данных.
+        assert int(number) * unit == rounds, rounds
+        # Более крупная единица не подошла бы: число в ней вышло бы дробным.
+        bigger = [size for size in (MINUTE_ROUNDS, HOUR_ROUNDS) if size > unit]
+        assert all(rounds % size for size in bigger), rounds
+
+
+async def test_every_spell_of_the_answer_is_described_by_the_tables_of_the_contract(form_options):
+    srd = load_srd()
+    durations = {(rounds, concentration): text for rounds, concentration, text in DURATIONS}
+    spells = spell_options_of(form_options)
+
+    # Списки классов вместе дают все заклинания среза: каждое проверяется через HTTP.
+    assert {spell["id"] for spell in spells} == set(srd.spells)
+    for spell in spells:
+        data = srd.spells[spell["id"]]
+        casting = OUT_OF_COMBAT if data.out_of_combat_only else CASTING_LABELS[data.casting_time]
+        assert spell["details"] == {
+            "school": SCHOOL_LABELS[data.school],
+            "casting_time": casting,
+            "range_text": RANGES[data.range],
+            "duration": durations[(data.duration_rounds, data.concentration)],
+            "summary": data.summary,
+        }, spell["id"]
+
+
+def test_labels_cover_every_code_of_the_engine_schema_word_for_word():
+    # Доспехи и оружие у класса — строки, но их перечни есть в схеме предметов движка: подпись
+    # нужна каждому коду схемы, а не только встретившемуся в данных.
+    armor_kinds = set(get_args(ArmorProps.model_fields["kind"].annotation))
+    weapon_categories = set(get_args(WeaponProps.model_fields["category"].annotation))
+    casting_times = set(get_args(SpellDef.model_fields["casting_time"].annotation))
+
+    assert armor_kinds == set(ARMOR_LABELS)
+    assert weapon_categories == set(WEAPON_LABELS)
+    assert casting_times == set(CASTING_LABELS)
+    assert set(get_args(SpellSchool)) == set(SCHOOL_LABELS)
+    assert dict(service.SIZE_NAMES) == SIZE_LABELS
+    assert dict(service.ARMOR_NAMES) == ARMOR_LABELS
+    assert dict(service.WEAPON_NAMES) == WEAPON_LABELS
+    assert dict(service.CASTING_TIMES) == CASTING_LABELS
+    assert dict(service.SCHOOL_NAMES) == SCHOOL_LABELS
+    assert service.OUT_OF_COMBAT_CASTING == OUT_OF_COMBAT
+    labels = [
+        *SIZE_LABELS.values(),
+        *ARMOR_LABELS.values(),
+        *WEAPON_LABELS.values(),
+        *SCHOOL_LABELS.values(),
+        *CASTING_LABELS.values(),
+        OUT_OF_COMBAT,
+        *service.SPELL_RANGES.values(),
+    ]
+    assert all(is_label(label) and "фут" not in label.lower() for label in labels), labels
+
+
+async def test_every_class_and_species_card_shows_its_codes_as_labels_in_data_order(form_options):
+    srd = load_srd()
+
+    for cls in form_options["classes"]:
+        data, details = srd.classes[cls["id"]], cls["details"]
+        assert details["armor"] == [ARMOR_LABELS[armor] for armor in data.armor], cls["id"]
+        assert details["weapons"] == [WEAPON_LABELS[weapon] for weapon in data.weapons], cls["id"]
+        assert all(f["level"] <= form_options["level"] for f in details["features"]), cls["id"]
+    for species in form_options["species"]:
+        data, details = srd.species[species["id"]], species["details"]
+        assert details["size"] == SIZE_LABELS[data.size], species["id"]
+        # Число правил — как в данных, текст — в метрах по правилу движка, без футов.
+        assert (details["speed"], details["speed_text"]) == (data.speed, meters_text(data.speed))
+        assert re.fullmatch(r"\d+(,\d)? м", details["speed_text"]), details["speed_text"]
+        assert [(t["name"], t["summary"]) for t in details["traits"]] == [
+            (t["name"], t["summary"]) for t in species["traits"]
+        ], species["id"]
+
+
+async def test_codes_in_details_are_named_by_the_same_answer(form_options):
+    # Коды характеристик и навыков карточка называет по `abilities` и `skills` того же ответа.
+    abilities = {ability["id"] for ability in form_options["abilities"]}
+    skills = {skill["id"] for skill in form_options["skills"]}
+    feats = {feat["id"] for feat in form_options["feats"]}
+
+    for cls in form_options["classes"]:
+        details = cls["details"]
+        assert {details["primary"], *details["saves"]} <= abilities, cls["id"]
+        assert set(details["skill_choices"]["from"]) <= skills, cls["id"]
+        magic = details["spellcasting"]
+        assert magic is None or magic["ability"] in abilities, cls["id"]
+    for background in form_options["backgrounds"]:
+        details = background["details"]
+        assert set(details["abilities"]) <= abilities, background["id"]
+        assert set(details["skills"]) <= skills, background["id"]
+        assert details["feat"]["id"] in feats, background["id"]
+    assert all(skill["details"]["ability"] in abilities for skill in form_options["skills"])
+
+
+async def test_texts_of_the_cards_are_russian_and_not_empty(form_options):
+    def russian(text: str) -> bool:
+        return bool(re.search("[а-яё]", text, re.IGNORECASE))
+
+    texts = [skill["details"]["summary"] for skill in form_options["skills"]]
+    for species in form_options["species"]:
+        details = species["details"]
+        texts.append(details["description"])
+        texts += [part for trait in details["traits"] for part in (trait["name"], trait["summary"])]
+    for cls in form_options["classes"]:
+        features = cls["details"]["features"]
+        texts += [part for feature in features for part in (feature["name"], feature["summary"])]
+    for background in form_options["backgrounds"]:
+        details = background["details"]
+        texts += [details["tool"], details["feat"]["name"], details["feat"]["summary"]]
+    for kind in ("feats", "fighting_styles"):
+        texts += [option["details"]["summary"] for option in form_options[kind]]
+    texts += [spell["details"]["summary"] for spell in spell_options_of(form_options)]
+
+    assert texts and all(russian(text) for text in texts)
+    # Ни русских «футов», ни английских единиц: расстояния игроку — только в метрах.
+    answer = json.dumps(form_options, ensure_ascii=False)
+    assert not re.search(r"\b(ft|feet|foot)\b", answer, re.IGNORECASE)
+
+
+async def test_old_fields_keep_their_nested_shape_and_values(form_options):
+    # Блок 7 только добавил `details`: вложенные старые объекты не получили новых ключей.
+    srd = load_srd()
+    level = form_options["level"]
+
+    assert all(set(ability) == {"id", "name"} for ability in form_options["abilities"])
+    assert set(form_options["point_buy"]) == {"budget", "costs"}
+    for cls in form_options["classes"]:
+        data = srd.classes[cls["id"]]
+        assert (cls["name"], cls["hit_die"], cls["skill_choices"]) == (
+            data.name,
+            data.hit_die,
+            data.skill_choices,
+        )
+        assert cls["skill_options"] == list(data.skill_options)
+        assert cls["fighting_styles"] == list(data.fighting_styles)
+        assert cls["features"] == [
+            {"name": f.name, "summary": f.summary} for f in data.features if f.level <= level
+        ]
+        assert all(set(line) == {"id", "name", "qty"} for line in cls["starting_equipment"])
+        magic = cls["spellcasting"]
+        assert magic is None or set(magic) == {
+            "ability",
+            "cantrips",
+            "prepared",
+            "cantrip_options",
+            "spell_options",
+        }
+    for species in form_options["species"]:
+        data = srd.species[species["id"]]
+        assert species["name"] == data.name
+        # У старых черт нет пометки `mechanical`: она только в `details`.
+        assert species["traits"] == [{"name": t.name, "summary": t.summary} for t in data.traits]
+    for background in form_options["backgrounds"]:
+        data = srd.backgrounds[background["id"]]
+        assert (background["name"], background["feat"]) == (data.name, data.feat)
+        assert background["ability_options"] == list(data.ability_options)
+        assert background["skills"] == list(data.skills)
+        assert all(set(line) == {"id", "name", "qty"} for line in background["equipment"])
+    for feat in form_options["feats"]:
+        data = srd.feats[feat["id"]]
+        assert (feat["name"], feat["summary"]) == (data.name, data.summary)
+    for spell in spell_options_of(form_options):
+        data = srd.spells[spell["id"]]
+        old = {key: spell[key] for key in OLD_SPELL_FIELDS}
+        assert old == {
+            "id": data.id,
+            "name": data.name,
+            "level": data.level,
+            "summary": data.summary,
+        }
+
+
+async def test_the_answer_is_the_same_for_everyone_and_carries_no_player_data(settings, db):
+    # Ответ — публичные данные правил: он одинаков для хоста, игрока с героем и постороннего и не
+    # несёт ни ключей, ни данных игроков. Узнаваемые ключи моделей кладутся в настройки; токен
+    # бота не задаётся — с ним старт приложения начал бы опрос Telegram.
+    keys = {
+        "anthropic_api_key": SecretStr("sk-ant-LEAK-creation-options"),
+        "openai_compat_api_key": SecretStr("sk-compat-LEAK-creation-options"),
+    }
+    async with start_world(settings.model_copy(update=keys), db) as world:
+        game, host, [friend] = await make_game(world, friends=1)
+        created = await create(world, friend, game["id"], detailed_body())
+        assert created.status_code == 201, created.text
+        outsider = await add_player(world.db, "Посторонний", tg_id=9999)
+        players = (host, friend, outsider)
+
+        answers = [
+            await world.http.get("/api/content/creation-options", headers=player.headers)
+            for player in players
+        ]
+
+    assert [answer.status_code for answer in answers] == [200, 200, 200]
+    assert answers[0].json() == answers[1].json() == answers[2].json()
+    private = [
+        SESSION_SECRET,
+        "LEAK",
+        game["id"],
+        game["code"],
+        created.json()["character"]["id"],
+        detailed_choices()["name"],
+        detailed_choices()["persona"]["concept"],
+        *(player.id for player in players),
+        *(player.headers["Authorization"].removeprefix("Bearer ") for player in players),
+    ]
+    assert [value for value in private if value in answers[0].text] == []
 
 
 @pytest.mark.parametrize("class_id", sorted(load_srd().classes))

@@ -7,16 +7,18 @@ import type {
   QuickChoices,
 } from "../../api/types";
 import { Button, Card, Loading } from "../../ui";
-import { ErrorAlert, SelectField, TextField } from "../fields";
+import { ErrorAlert, TextField } from "../fields";
 import { useAction } from "../hooks";
 import "../screens.css";
 import { LIMITS } from "./draft";
+import { ClassCarousel, RaceCarousel } from "./OptionCards";
 import { CreatedNotice } from "./shared";
 import type { CharacterFormProps } from "./shared";
 
 /**
- * Быстрый герой: класс, раса и строка о герое; имя и описание пишет мастер. «Изменить героя»
- * открывает форму с прежним выбором (`initial`), иначе она пустая.
+ * Быстрый герой: класс, раса и строка о герое; имя и описание пишет мастер. Класс и раса
+ * выбираются листанием карточек. «Изменить героя» открывает форму с прежним выбором
+ * (`initial`), иначе она пустая.
  */
 export function Quick({
   gameId,
@@ -60,26 +62,23 @@ export function Quick({
   return (
     <Card title="Быстрый герой" icon="candle">
       <form className="screen-stack" onSubmit={(event) => void submit(event)}>
-        <SelectField
-          label="Класс"
-          placeholder="Выберите класс"
-          value={classId}
-          options={options.classes.map(({ id, name }) => ({
-            value: id,
-            label: name,
-          }))}
-          onChange={setClassId}
-        />
-        <SelectField
-          label="Раса"
-          placeholder="Выберите расу"
-          value={species}
-          options={options.species.map(({ id, name }) => ({
-            value: id,
-            label: name,
-          }))}
-          onChange={setSpecies}
-        />
+        {/* Карусели две, поэтому у каждой видимая подпись. */}
+        <div>
+          <p className="form-legend">Класс</p>
+          <ClassCarousel
+            options={options}
+            value={classId || null}
+            onChange={setClassId}
+          />
+        </div>
+        <div>
+          <p className="form-legend">Раса</p>
+          <RaceCarousel
+            options={options}
+            value={species || null}
+            onChange={setSpecies}
+          />
+        </div>
         <TextField
           label="Опиши героя одной строкой"
           hint="Например: сбежавший из цирка акробат, который боится темноты."

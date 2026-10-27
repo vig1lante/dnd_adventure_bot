@@ -347,6 +347,194 @@ describe("CheckList", () => {
   });
 });
 
+// Дополнение варианта (`more`): например, кнопка «Подробнее» с карточкой. Внутри <label> ему
+// не место: кнопка там недопустима, а её текст попал бы в имя флажка.
+describe("дополнение варианта (more)", () => {
+  const withMore: Choice[] = [
+    {
+      value: "a",
+      label: "Скрытность",
+      description: "Ловкость",
+      more: <button type="button">Подробнее о скрытности</button>,
+    },
+    { value: "b", label: "Обман" },
+  ];
+
+  test("CheckList: дополнение после варианта, вне подписи; щелчок по нему не отмечает", () => {
+    const onChange = vi.fn();
+    render(
+      <CheckList
+        legend="Навыки"
+        name="skills"
+        choices={withMore}
+        values={[]}
+        onChange={onChange}
+      />,
+    );
+
+    const box = screen.getByRole("checkbox", { name: /Скрытность/ });
+    const more = screen.getByRole("button", { name: "Подробнее о скрытности" });
+    expect(box).toHaveAccessibleName(/^Скрытность\s*Ловкость$/);
+    expect(more.closest("label")).toBeNull();
+    expect(box.closest("label")?.nextElementSibling).toBe(more);
+    expect(screen.getByRole("group", { name: "Навыки" })).toContainElement(
+      more,
+    );
+
+    fireEvent.click(more);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test("ChoiceList: дополнение после варианта, вне подписи; щелчок по нему не выбирает", () => {
+    const onChange = vi.fn();
+    render(
+      <ChoiceList
+        legend="Навык"
+        name="skill"
+        choices={withMore}
+        value={null}
+        onChange={onChange}
+      />,
+    );
+
+    const radio = screen.getByRole("radio", { name: /Скрытность/ });
+    const more = screen.getByRole("button", { name: "Подробнее о скрытности" });
+    expect(radio).toHaveAccessibleName(/^Скрытность\s*Ловкость$/);
+    expect(more.closest("label")).toBeNull();
+    expect(radio.closest("label")?.nextElementSibling).toBe(more);
+
+    fireEvent.click(more);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test("без дополнения разметка прежняя: в группе только подписи вариантов", () => {
+    render(
+      <CheckList
+        legend="Навыки"
+        name="skills"
+        choices={[{ value: "b", label: "Обман" }]}
+        values={[]}
+        onChange={() => {}}
+      />,
+    );
+
+    const group = screen.getByRole("group", { name: "Навыки" });
+    expect(
+      [...group.children].map((child) => child.tagName.toLowerCase()),
+    ).toEqual(["legend", "label"]);
+  });
+});
+
+// Финальное покрытие блока 7: пограничные случаи дополнения варианта.
+describe("дополнение варианта (more): пограничные случаи", () => {
+  test("ChoiceList без дополнения: разметка прежняя, в группе только подписи вариантов", () => {
+    render(
+      <ChoiceList
+        legend="Форма бонуса"
+        name="shape"
+        choices={[
+          { value: "0", label: "+2, +1" },
+          { value: "1", label: "+1, +1, +1" },
+        ]}
+        value="0"
+        onChange={() => {}}
+      />,
+    );
+
+    const group = screen.getByRole("radiogroup", { name: "Форма бонуса" });
+    expect(
+      [...group.children].map((child) => child.tagName.toLowerCase()),
+    ).toEqual(["legend", "label", "label"]);
+  });
+
+  test("пустое дополнение (false, null) ничего не добавляет: разметка как без него", () => {
+    render(
+      <CheckList
+        legend="Навыки"
+        name="skills"
+        choices={[
+          { value: "a", label: "Скрытность", more: false },
+          { value: "b", label: "Обман", more: null },
+        ]}
+        values={[]}
+        onChange={() => {}}
+      />,
+    );
+
+    const group = screen.getByRole("group", { name: "Навыки" });
+    expect(
+      [...group.children].map((child) => child.tagName.toLowerCase()),
+    ).toEqual(["legend", "label", "label"]);
+  });
+
+  test("CheckList: у недоступного варианта (набрано до предела) дополнение работает", () => {
+    const onMore = vi.fn();
+    const onChange = vi.fn();
+    render(
+      <CheckList
+        legend="Навыки: выберите 1"
+        name="skills"
+        choices={[
+          { value: "a", label: "Скрытность" },
+          {
+            value: "b",
+            label: "Обман",
+            more: (
+              <button type="button" onClick={onMore}>
+                Подробнее: Обман
+              </button>
+            ),
+          },
+        ]}
+        values={["a"]}
+        max={1}
+        onChange={onChange}
+      />,
+    );
+
+    expect(screen.getByRole("checkbox", { name: "Обман" })).toBeDisabled();
+    const more = screen.getByRole("button", { name: "Подробнее: Обман" });
+    expect(more).toBeEnabled();
+    fireEvent.click(more);
+
+    expect(onMore).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test("ChoiceList: у недоступного варианта дополнение работает и выбор не меняет", () => {
+    const onMore = vi.fn();
+    const onChange = vi.fn();
+    render(
+      <ChoiceList
+        legend="Боевой стиль"
+        name="style"
+        choices={[
+          {
+            value: "archery",
+            label: "Стрельба",
+            disabled: true,
+            more: (
+              <button type="button" onClick={onMore}>
+                Подробнее: Стрельба
+              </button>
+            ),
+          },
+        ]}
+        value={null}
+        onChange={onChange}
+      />,
+    );
+
+    expect(screen.getByRole("radio", { name: "Стрельба" })).toBeDisabled();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Подробнее: Стрельба" }),
+    );
+
+    expect(onMore).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
 describe("поля без подсказки и ошибки", () => {
   test("многострочное поле допустимо и ни на что не ссылается", () => {
     render(<TextAreaField label="Внешность" value="" onChange={() => {}} />);

@@ -6,8 +6,17 @@ export { Button } from "./Button";
 export type { ButtonProps } from "./Button";
 export { Card } from "./Card";
 export type { CardProps } from "./Card";
+export { Carousel } from "./Carousel";
+export type { CarouselItem, CarouselProps } from "./Carousel";
 export { Countdown } from "./Countdown";
 export type { CountdownProps } from "./Countdown";
+export { DetailCard } from "./DetailCard";
+export type {
+  DetailCardProps,
+  DetailEntry,
+  DetailFact,
+  DetailSection,
+} from "./DetailCard";
 export { HpBar } from "./HpBar";
 export type { HpBarProps } from "./HpBar";
 export { Icon } from "./icons";

@@ -251,16 +251,98 @@ export interface AbilityOption {
   name: string;
 }
 
+// --- подробности вариантов для карточек (`details`, контракт блока 7) ---
+// Верхние поля вариантов — для логики формы, `details` — для подробной карточки: часть данных
+// нарочно повторяется. Коды характеристик и навыков названия не несут: их берут из
+// `CreationOptions.abilities` и `.skills`. Тексты — по-русски, расстояния — только в метрах.
+
+/** Черта расы. `mechanical` — действует в бою (её учитывает движок). */
+export interface TraitDetail {
+  name: string;
+  summary: string;
+  mechanical: boolean;
+}
+
+export interface SpeciesDetails {
+  /** Английское название расы (спека §7: «название и английское»). */
+  name_en: string;
+  /** 2–3 предложения о расе. */
+  description: string;
+  /** Подпись сервера: «Средний» или «Маленький». */
+  size: string;
+  /** Футы, число правил: игроку не показывается. */
+  speed: number;
+  /** Скорость текстом в метрах («9 м»): единственное, что видит игрок. */
+  speed_text: string;
+  traits: TraitDetail[];
+}
+
+/** Особенность класса до уровня героя (`CreationOptions.level`). */
+export interface ClassFeatureDetail {
+  level: number;
+  name: string;
+  summary: string;
+  mechanical: boolean;
+}
+
+export interface ClassDetails {
+  hit_die: number;
+  /** Основная характеристика класса. */
+  primary: Ability;
+  saves: Ability[];
+  /** Русские подписи; пустой список — класс без доспехов. */
+  armor: string[];
+  weapons: string[];
+  skill_choices: { count: number; from: Skill[] };
+  features: ClassFeatureDetail[];
+  /** Числа на уровне героя; `null` — класс без магии. */
+  spellcasting: { ability: Ability; cantrips: number; prepared: number } | null;
+}
+
+export interface BackgroundDetails {
+  /** Три характеристики для прибавки. */
+  abilities: Ability[];
+  skills: Skill[];
+  /** Владение инструментом, русский текст. */
+  tool: string;
+  feat: { id: string; name: string; summary: string };
+  equipment: ItemLine[];
+}
+
+export interface SkillDetails {
+  ability: Ability;
+  /** Что проверяет навык и примеры применения. */
+  summary: string;
+}
+
+export interface SpellDetails {
+  /** Подпись школы магии. */
+  school: string;
+  casting_time: string;
+  /** Дистанция текстом в метрах. */
+  range_text: string;
+  duration: string;
+  summary: string;
+}
+
+/** Подробности черты и боевого стиля. */
+export interface SummaryDetails {
+  summary: string;
+}
+
 export interface SkillOption {
   id: Skill;
   name: string;
   ability: Ability;
+  details: SkillDetails;
 }
 
+/** Черта предыстории или боевой стиль. */
 export interface Described {
   id: string;
   name: string;
   summary: string;
+  details: SummaryDetails;
 }
 
 export interface FeatureOption {
@@ -279,6 +361,7 @@ export interface SpellOption {
   name: string;
   level: number;
   summary: string;
+  details: SpellDetails;
 }
 
 export interface SpellcastingOption {
@@ -304,6 +387,7 @@ export interface ClassOption {
   starting_equipment: ItemLine[];
   features: FeatureOption[];
   spellcasting: SpellcastingOption | null;
+  details: ClassDetails;
 }
 
 export interface SpeciesOption {
@@ -313,6 +397,7 @@ export interface SpeciesOption {
   /** Нужен навык на выбор (Умелость человека). */
   extra_skill: boolean;
   granted_skills: Skill[];
+  details: SpeciesDetails;
 }
 
 export interface BackgroundOption {
@@ -323,6 +408,7 @@ export interface BackgroundOption {
   /** Id черты из `feats`. */
   feat: string;
   equipment: ItemLine[];
+  details: BackgroundDetails;
 }
 
 export interface CreationOptions {

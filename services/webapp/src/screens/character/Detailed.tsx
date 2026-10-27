@@ -28,13 +28,16 @@ import type { CharacterFormProps } from "./shared";
 import { STEP_TITLES } from "./steps";
 import type { StepProps } from "./steps";
 import { BackstoryStep, PersonaStep } from "./StorySteps";
+import { SummaryStep } from "./SummaryStep";
 import { useBackstoryHelp } from "./useBackstoryHelp";
 
 /**
  * Подробное создание героя по шагам. Клиент только подсказывает (что ещё не выбрано,
  * сколько осталось очков); выбор целиком уходит на сервер, и его проверка — окончательная:
  * отказ правил (422) показывается списком проблем, выбор при этом не теряется.
- * «Изменить героя» открывает форму с прежним выбором (`initial`), иначе она пустая.
+ * Последний шаг — «Итог»: выбор по разделам с «Изменить» и кнопка создания.
+ * «Изменить героя» открывает мастер сразу на «Итоге» с прежним выбором (`initial`),
+ * иначе форма пустая и начинается с расы.
  */
 export function Detailed({
   gameId,
@@ -49,7 +52,10 @@ export function Detailed({
       ? createDraft(options)
       : draftFromChoices(initial, options),
   );
-  const [position, setPosition] = useState(0);
+  // Текущий шаг хранится по имени: «Изменить» в итоге ведёт прямо на шаг раздела.
+  const [current, setCurrent] = useState<StepId>(
+    initial === undefined ? "species" : "summary",
+  );
   const submit = useAction();
 
   const update = useCallback(
@@ -60,8 +66,9 @@ export function Detailed({
   const help = useBackstoryHelp(gameId, draft, update);
 
   const steps = stepsOf(draft, options);
-  // Шагов может стать меньше (класс без заклинаний): позиция не выходит за список.
-  const index = Math.min(position, steps.length - 1);
+  // Шаг заклинаний пропадает со сменой класса; с него класс не сменить, но на всякий случай
+  // пропавший шаг ведёт к первому, а не ломает экран.
+  const index = Math.max(steps.indexOf(current), 0);
   const step = steps[index];
   const isLast = index === steps.length - 1;
   const busy = submit.busy || help.busy;
@@ -100,6 +107,14 @@ export function Detailed({
     backstory: () => (
       <BackstoryStep draft={draft} update={update} help={help} />
     ),
+    summary: () => (
+      <SummaryStep
+        draft={draft}
+        options={options}
+        steps={steps}
+        onEdit={setCurrent}
+      />
+    ),
   };
 
   return (
@@ -128,7 +143,7 @@ export function Detailed({
           <Button
             variant="secondary"
             disabled={busy}
-            onClick={index === 0 ? onBack : () => setPosition(index - 1)}
+            onClick={index === 0 ? onBack : () => setCurrent(steps[index - 1])}
           >
             Назад
           </Button>
@@ -141,7 +156,10 @@ export function Detailed({
               Создать героя
             </Button>
           ) : (
-            <Button disabled={!canGoOn} onClick={() => setPosition(index + 1)}>
+            <Button
+              disabled={!canGoOn || busy}
+              onClick={() => setCurrent(steps[index + 1])}
+            >
               Далее
             </Button>
           )}

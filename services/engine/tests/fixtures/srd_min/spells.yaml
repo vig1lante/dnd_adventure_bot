@@ -2,6 +2,7 @@
   name: Огненный снаряд
   name_en: Fire Bolt
   level: 0
+  school: evocation
   casting_time: action
   range: far
   concentration: false
@@ -17,6 +18,7 @@
   name: Волшебная стрела
   name_en: Magic Missile
   level: 1
+  school: evocation
   casting_time: action
   range: far
   concentration: false

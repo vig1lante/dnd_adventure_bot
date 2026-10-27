@@ -3,6 +3,7 @@
   name_en: Sage
   ability_options: [con, int, wis]
   skills: [arcana, history]
+  tool: Инструменты каллиграфа
   feat: magic_initiate
   equipment: [dagger]
   inspiration_triggers:

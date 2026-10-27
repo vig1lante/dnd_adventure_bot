@@ -1,6 +1,7 @@
 - id: human
   name: Человек
   name_en: Human
+  description: Люди быстро учатся. Они легко приспосабливаются.
   size: medium
   speed: 30
   traits:

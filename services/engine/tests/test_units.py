@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import dnd_engine
+from dnd_engine.content import SrdContent
 from dnd_engine.units import meters, meters_text, meters_text_pair
 
 # Футы -> (метры, текст для людей).
@@ -103,3 +104,9 @@ def test_engine_messages_and_comments_have_no_feet(path):
 def test_the_scans_see_all_srd_tables_and_the_combat_engine():
     assert {p.stem for p in SRD_FILES} >= {"monsters", "items", "species", "classes", "spells"}
     assert ENGINE_DIR / "combat" / "engine.py" in ENGINE_MODULES
+
+
+def test_the_feet_scan_reads_the_file_of_every_srd_table():
+    # Каждая таблица загрузчика (и новая skills.yaml с текстами карточек навыков) проверяется
+    # на футы; лишних файлов, которые загрузчик не читает, в папке данных нет.
+    assert {p.stem for p in SRD_FILES} == set(SrdContent.model_fields)

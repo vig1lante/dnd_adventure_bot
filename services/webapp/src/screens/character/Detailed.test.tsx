@@ -5,7 +5,14 @@ import { sessionToken } from "../../store/game";
 import { fakeServer, signInAs } from "../../test-setup";
 import type { FakeReply, RecordedCall } from "../../test-setup";
 import { Detailed } from "./Detailed";
-import { OPTIONS, OUTDATED_WORDS, holdRequests, previewHero } from "./fixtures";
+import type { CharacterChoices } from "../../api/types";
+import {
+  OPTIONS,
+  OUTDATED_WORDS,
+  STORED_DETAILED,
+  holdRequests,
+  previewHero,
+} from "./fixtures";
 
 const CREATE = "POST /api/games/g1/characters";
 const RANDOM = "POST /api/games/g1/characters/random-abilities";
@@ -21,6 +28,7 @@ const CREATED: FakeReply = {
 function renderDetailed(
   routes: Record<string, Route> = {},
   options: typeof OPTIONS = OPTIONS,
+  initial?: CharacterChoices,
 ) {
   signInAs();
   const server = fakeServer({ [CREATE]: CREATED, ...routes });
@@ -32,6 +40,7 @@ function renderDetailed(
       <Detailed
         gameId="g1"
         options={options}
+        initial={initial}
         onBack={onBack}
         onCreated={onCreated}
       />
@@ -53,6 +62,19 @@ const pick = (group: string | RegExp, option: string | RegExp) =>
       name: option,
     }),
   );
+
+/** Выбор в карусели: точкой к варианту, затем «Выбрать» на его карточке. */
+function pickCard(carousel: string, option: string | RegExp) {
+  const group = screen.getByRole("group", { name: carousel });
+  fireEvent.click(within(group).getByRole("button", { name: option }));
+  fireEvent.click(
+    within(group).getByRole("button", { name: /^Выбра(ть|но)$/ }),
+  );
+}
+
+/** Карточка, показанная в карусели. */
+const shownCard = (carousel: string) =>
+  within(screen.getByRole("group", { name: carousel })).getByRole("article");
 
 const tick = (group: string | RegExp, option: string | RegExp) =>
   fireEvent.click(
@@ -100,11 +122,11 @@ function chooseOrigin(
   klass = /Плут/,
   background = /Преступник/,
 ) {
-  pick("Раса", species);
+  pickCard("Раса", species);
   next();
-  pick("Класс", klass);
+  pickCard("Класс", klass);
   next();
-  pick("Предыстория", background);
+  pickCard("Предыстория", background);
   next();
 }
 
@@ -149,6 +171,12 @@ function reachBackstory() {
   next();
 }
 
+/** Доходит до «Итога»: там кнопка «Создать героя». */
+function reachSummary() {
+  reachBackstory();
+  next();
+}
+
 const posts = (server: { calls: RecordedCall[] }, route: string) =>
   server.calls.filter((call) => `${call.method} ${call.path}` === route);
 
@@ -158,79 +186,80 @@ describe("путь по шагам", () => {
   test("начинается с расы; «Далее» ждёт выбора, «Назад» на первом шаге выходит к способам", () => {
     const { onBack } = renderDetailed();
 
-    expect(progress()).toHaveTextContent("Шаг 1 из 9: Раса");
+    expect(progress()).toHaveTextContent("Шаг 1 из 10: Раса");
     expect(button("Далее")).toBeDisabled();
-    pick("Раса", /Эльф/);
+    pickCard("Раса", /Эльф/);
     expect(button("Далее")).toBeEnabled();
     click("Назад");
 
     expect(onBack).toHaveBeenCalledTimes(1);
   });
 
-  test("раса, класс и предыстория показаны названиями сервера с пояснениями", () => {
+  test("раса, класс и предыстория — карусели карточек с подробностями сервера", () => {
     renderDetailed();
 
-    const species = screen.getByRole("radiogroup", { name: "Раса" });
-    expect(within(species).getAllByRole("radio")).toHaveLength(3);
-    expect(
-      within(species).getByRole("radio", { name: /Острые чувства/ }),
-    ).toBeInTheDocument();
-    pick("Раса", /Эльф/);
+    const species = screen.getByRole("group", { name: "Раса" });
+    expect(species).toHaveAttribute("aria-roledescription", "карусель");
+    expect(within(species).getByText("1 из 4")).toBeInTheDocument();
+    pickCard("Раса", /Эльф/);
+    expect(shownCard("Раса")).toHaveTextContent("Острые чувства");
+    expect(shownCard("Раса")).toHaveTextContent("10,5 м");
     next();
-    expect(progress()).toHaveTextContent("Шаг 2 из 9: Класс");
-    expect(
-      screen.getByRole("radio", { name: /Плут.*к8.*Скрытая атака/ }),
-    ).toBeInTheDocument();
-    pick("Класс", /Плут/);
+    expect(progress()).toHaveTextContent("Шаг 2 из 10: Класс");
+    pickCard("Класс", /Плут/);
+    expect(shownCard("Класс")).toHaveTextContent(/Кость хитов\s*к8/);
+    expect(shownCard("Класс")).toHaveTextContent("Скрытая атака");
     next();
-    expect(progress()).toHaveTextContent("Шаг 3 из 9: Предыстория");
-    expect(
-      screen.getByRole("radio", { name: /Преступник.*Бдительный/ }),
-    ).toBeInTheDocument();
+    expect(progress()).toHaveTextContent("Шаг 3 из 10: Предыстория");
+    pickCard("Предыстория", /Преступник/);
+    expect(shownCard("Предыстория")).toHaveTextContent(
+      /Инструмент\s*Воровские инструменты/,
+    );
+    expect(shownCard("Предыстория")).toHaveTextContent("Бдительный");
   });
 
-  test("под списком — особенности именно выбранной расы и класса, а не соседних", () => {
+  test("выбор расы из карусели: «Выбрать» отмечает показанную карточку", () => {
     renderDetailed();
-    expect(screen.queryByText(/Внимательность\./)).toBeNull();
+    const species = screen.getByRole("group", { name: "Раса" });
 
-    pick("Раса", /Эльф/);
-    const elfTrait = screen.getByText(/Острые чувства\./, {
-      selector: "strong",
-    });
-    expect(elfTrait.closest("li")).toHaveTextContent("Внимательность.");
-    expect(
-      screen.queryByText(/Тёмное зрение\./, { selector: "strong" }),
-    ).toBeNull();
+    fireEvent.click(within(species).getByRole("button", { name: "Следующая" }));
+    fireEvent.click(within(species).getByRole("button", { name: "Следующая" }));
+    expect(shownCard("Раса")).toHaveAccessibleName("Дварф");
+    fireEvent.click(within(species).getByRole("button", { name: "Выбрать" }));
 
-    pick("Раса", /Дварф/);
     expect(
-      screen.getByText(/Тёмное зрение\./, { selector: "strong" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/Острые чувства\./, { selector: "strong" }),
-    ).toBeNull();
+      within(species).getByRole("button", { name: "Выбрано" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(button("Далее")).toBeEnabled();
+  });
 
+  test("карточка класса: особенности с уровнем и кость хитов", () => {
+    renderDetailed();
+    pickCard("Раса", /Эльф/);
     next();
-    pick("Класс", /Плут/);
-    expect(
-      screen.getByText(/Скрытая атака\./, { selector: "strong" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/Колдовство\./, { selector: "strong" }),
-    ).toBeNull();
+
+    pickCard("Класс", /Воин/);
+
+    const fighter = shownCard("Класс");
+    expect(fighter).toHaveAccessibleName("Воин");
+    expect(fighter).toHaveTextContent(/Кость хитов\s*к10/);
+    const features = within(
+      within(fighter).getByRole("region", { name: "Особенности" }),
+    ).getAllByRole("listitem");
+    expect(features[0]).toHaveTextContent(/Боевой стиль.*1-й уровень/);
+    expect(features[2]).toHaveTextContent(/Всплеск действий.*2-й уровень/);
+    expect(features[2]).toHaveTextContent("действует в бою");
   });
 
   test("первый шаг называется «Раса»: устаревших слов на нём нет", () => {
     renderDetailed();
-    pick("Раса", /Дварф/);
+    pickCard("Раса", /Дварф/);
 
-    expect(
-      screen.getByRole("radiogroup", { name: "Раса" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Раса" })).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
   });
 
-  test("весь путь волшебника, все десять шагов: нигде нет ни «вид», ни футов", () => {
+  test("весь путь волшебника, все одиннадцать шагов: нигде нет ни «вид», ни футов", () => {
     renderDetailed();
     const shown: string[] = [];
     // Шаг проверяется после выбора на нём: выбор открывает пояснения и особенности.
@@ -239,13 +268,13 @@ describe("путь по шагам", () => {
       expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
     };
 
-    pick("Раса", /Эльф/);
+    pickCard("Раса", /Эльф/);
     checkStep();
     next();
-    pick("Класс", /Волшебник/);
+    pickCard("Класс", /Волшебник/);
     checkStep();
     next();
-    pick("Предыстория", /Преступник/);
+    pickCard("Предыстория", /Преступник/);
     checkStep();
     next();
     click("Стандартный набор");
@@ -272,31 +301,56 @@ describe("путь по шагам", () => {
     checkStep();
     next();
     checkStep(); // история героя
+    next();
+    checkStep(); // итог
 
-    // Пока класс не выбран, шага заклинаний нет: шагов девять.
+    // Пока класс не выбран, шага заклинаний нет: шагов десять.
     expect(shown).toEqual([
-      "Шаг 1 из 9: Раса",
-      "Шаг 2 из 10: Класс",
-      "Шаг 3 из 10: Предыстория",
-      "Шаг 4 из 10: Характеристики",
-      "Шаг 5 из 10: Бонус предыстории",
-      "Шаг 6 из 10: Навыки и выборы класса",
-      "Шаг 7 из 10: Заклинания",
-      "Шаг 8 из 10: Снаряжение",
-      "Шаг 9 из 10: Характер и внешность",
-      "Шаг 10 из 10: История героя",
+      "Шаг 1 из 10: Раса",
+      "Шаг 2 из 11: Класс",
+      "Шаг 3 из 11: Предыстория",
+      "Шаг 4 из 11: Характеристики",
+      "Шаг 5 из 11: Бонус предыстории",
+      "Шаг 6 из 11: Навыки и выборы класса",
+      "Шаг 7 из 11: Заклинания",
+      "Шаг 8 из 11: Снаряжение",
+      "Шаг 9 из 11: Характер и внешность",
+      "Шаг 10 из 11: История героя",
+      "Шаг 11 из 11: Итог",
     ]);
   });
 
   test("«Назад» возвращает на прошлый шаг, выбор сохраняется", () => {
     renderDetailed();
-    pick("Раса", /Дварф/);
+    pickCard("Раса", /Дварф/);
     next();
 
     click("Назад");
 
-    expect(progress()).toHaveTextContent("Шаг 1 из 9: Раса");
-    expect(screen.getByRole("radio", { name: /Дварф/ })).toBeChecked();
+    expect(progress()).toHaveTextContent("Шаг 1 из 10: Раса");
+    // Карусель открывается на выбранной карточке, и она отмечена.
+    expect(shownCard("Раса")).toHaveAccessibleName("Дварф");
+    expect(
+      within(shownCard("Раса")).getByRole("button", { name: "Выбрано" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("переход шагов сохраняет черновик: назад к расе и классу и снова вперёд", () => {
+    renderDetailed();
+    chooseOrigin(/Дварф/, /Волшебник/, /Прислужник/);
+    expect(progress()).toHaveTextContent("Характеристики");
+
+    click("Назад");
+    expect(shownCard("Предыстория")).toHaveAccessibleName("Прислужник");
+    click("Назад");
+    expect(shownCard("Класс")).toHaveAccessibleName("Волшебник");
+    click("Назад");
+    expect(shownCard("Раса")).toHaveAccessibleName("Дварф");
+    next();
+    next();
+    next();
+
+    expect(progress()).toHaveTextContent("Шаг 4 из 11: Характеристики");
   });
 
   test("пока шаг не закончен, под кнопками подсказка, что делать", () => {
@@ -305,7 +359,7 @@ describe("путь по шагам", () => {
     expect(
       screen.getByText(/закончите выбор на этом шаге/),
     ).toBeInTheDocument();
-    pick("Раса", /Эльф/);
+    pickCard("Раса", /Эльф/);
     expect(screen.queryByText(/закончите выбор на этом шаге/)).toBeNull();
   });
 
@@ -321,7 +375,7 @@ describe("путь по шагам", () => {
     });
     renderDetailed();
     expect(scrollIntoView).not.toHaveBeenCalled();
-    pick("Раса", /Эльф/);
+    pickCard("Раса", /Эльф/);
 
     next();
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
@@ -332,13 +386,13 @@ describe("путь по шагам", () => {
 
   test("шаг заклинаний появляется только у заклинателя", () => {
     renderDetailed();
-    pick("Раса", /Эльф/);
+    pickCard("Раса", /Эльф/);
     next();
 
-    pick("Класс", /Волшебник/);
+    pickCard("Класс", /Волшебник/);
+    expect(progress()).toHaveTextContent("Шаг 2 из 11");
+    pickCard("Класс", /Плут/);
     expect(progress()).toHaveTextContent("Шаг 2 из 10");
-    pick("Класс", /Плут/);
-    expect(progress()).toHaveTextContent("Шаг 2 из 9");
   });
 
   test("смена класса после выбора навыков не оставляет прежний выбор", () => {
@@ -352,7 +406,7 @@ describe("путь по шагам", () => {
     click("Назад");
     click("Назад");
     click("Назад");
-    pick("Класс", /Воин/);
+    pickCard("Класс", /Воин/);
     next();
     next();
     next();
@@ -429,6 +483,7 @@ describe("характеристики: покупка очков", () => {
     next();
     typeInto("Имя", "Лира");
     next();
+    next(); // итог
 
     click("Создать героя");
 
@@ -688,6 +743,7 @@ describe("характеристики: распределить случайн�
     next();
     typeInto("Имя", "Лира");
     next();
+    next(); // итог
 
     click("Создать героя");
 
@@ -834,6 +890,7 @@ describe("бонус предыстории", () => {
     next();
     typeInto("Имя", "Лира");
     next();
+    next(); // итог
 
     click("Создать героя");
 
@@ -1036,6 +1093,7 @@ describe("заклинания", () => {
     next(); // снаряжение
     typeInto("Имя", "Мирра");
     next();
+    next(); // итог
 
     click("Создать героя");
 
@@ -1102,6 +1160,298 @@ describe("характер и внешность", () => {
   });
 });
 
+// --- подробные карточки вариантов списка ---
+
+describe("«Подробнее» у вариантов списка", () => {
+  test("навык класса: характеристика и примеры; нажатие не отмечает флажок", () => {
+    renderDetailed();
+    chooseOrigin();
+    standardArray();
+    bonusDexCon();
+    const skills = screen.getByRole("group", { name: /Навыки класса/ });
+
+    const more = within(skills).getByRole("button", {
+      name: "Подробнее: Акробатика",
+    });
+    expect(more).toHaveAttribute("aria-expanded", "false");
+    expect(within(skills).queryByRole("article")).toBeNull();
+    fireEvent.click(more);
+
+    const card = within(skills).getByRole("article", { name: "Акробатика" });
+    expect(card).toHaveTextContent(/Характеристика\s*Ловкость/);
+    expect(card).toHaveTextContent("Удержать равновесие на карнизе, кувырок.");
+    expect(classSkill(/Акробатика/)).not.toBeChecked();
+    expect(classSkill(/Акробатика/)).toHaveAccessibleName(/^Акробатика$/);
+  });
+
+  test("заклинание: школа, время, дистанция в метрах, длительность и описание", () => {
+    renderDetailed();
+    chooseOrigin(/Эльф/, /Волшебник/);
+    standardArray();
+    bonusDexCon();
+    tick(/Навыки класса/, /Магия/);
+    tick(/Навыки класса/, /История/);
+    next();
+    const spells = screen.getByRole("group", { name: /^Заклинания/ });
+
+    fireEvent.click(
+      within(spells).getByRole("button", { name: "Подробнее: Сон" }),
+    );
+
+    const card = within(spells).getByRole("article", { name: "Сон" });
+    expect(card).toHaveTextContent(/Школа\s*Очарование/);
+    expect(card).toHaveTextContent(/Время сотворения\s*Действие/);
+    expect(card).toHaveTextContent(/Дистанция\s*Близко, до 18 м/);
+    expect(card).toHaveTextContent(/Длительность\s*1 минута, концентрация/);
+    expect(card).toHaveTextContent("Усыпляет.");
+  });
+
+  test("все карточки заговоров и заклинаний открыты — нигде нет футов", () => {
+    renderDetailed();
+    chooseOrigin(/Эльф/, /Волшебник/);
+    standardArray();
+    bonusDexCon();
+    tick(/Навыки класса/, /Магия/);
+    tick(/Навыки класса/, /История/);
+    next();
+
+    for (const more of screen.getAllByRole("button", { name: /^Подробнее/ })) {
+      fireEvent.click(more);
+    }
+
+    expect(screen.getAllByRole("article")).toHaveLength(6);
+    expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
+  });
+
+  test("боевой стиль: описание из подробностей; выбор стиля не меняется", () => {
+    renderDetailed();
+    chooseOrigin(/Эльф/, /Воин/);
+    standardArray();
+    bonusDexCon();
+    const styles = screen.getByRole("radiogroup", { name: "Боевой стиль" });
+
+    fireEvent.click(
+      within(styles).getByRole("button", { name: "Подробнее: Стрельба" }),
+    );
+
+    expect(
+      within(styles).getByRole("article", { name: "Стрельба" }),
+    ).toHaveTextContent("+2 к дальним атакам.");
+    expect(
+      within(styles).getByRole("radio", { name: /Стрельба/ }),
+    ).not.toBeChecked();
+  });
+});
+
+// --- итог ---
+
+const section = (name: string) => screen.getByRole("region", { name });
+/** «Изменить» раздела: видимый текст «Изменить», имя для чтения с экрана — с разделом (R5). */
+const editIn = (name: string) =>
+  fireEvent.click(
+    within(section(name)).getByRole("button", { name: `Изменить: ${name}` }),
+  );
+
+const ROGUE_SECTIONS = [
+  "Раса",
+  "Класс",
+  "Предыстория",
+  "Характеристики",
+  "Бонус предыстории",
+  "Навыки и выборы класса",
+  "Снаряжение",
+  "Характер и внешность",
+  "История героя",
+];
+
+describe("итог", () => {
+  test("после истории героя — «Итог»: выбор по разделам, у каждого «Изменить»", () => {
+    renderDetailed();
+    reachSummary();
+
+    expect(progress()).toHaveTextContent("Шаг 10 из 10: Итог");
+    expect(section("Раса")).toHaveTextContent("Эльф");
+    expect(section("Класс")).toHaveTextContent("Плут");
+    expect(section("Предыстория")).toHaveTextContent("Преступник");
+    expect(section("Характеристики")).toHaveTextContent("Стандартный набор");
+    expect(section("Характеристики")).toHaveTextContent(
+      "Сила 8, Ловкость 15, Телосложение 14, Интеллект 13, Мудрость 10, Харизма 12",
+    );
+    expect(section("Бонус предыстории")).toHaveTextContent(
+      "Ловкость +2, Телосложение +1",
+    );
+    const skills = section("Навыки и выборы класса");
+    expect(skills).toHaveTextContent(
+      "Навыки класса: Акробатика, Обман, Проницательность, Убеждение",
+    );
+    expect(skills).toHaveTextContent(
+      "От предыстории и расы: Ловкость рук, Скрытность, Внимательность",
+    );
+    expect(skills).toHaveTextContent(
+      "Компетентность: Скрытность, Внимательность",
+    );
+    expect(section("Снаряжение")).toHaveTextContent(
+      "Кинжал × 2, Воровские инструменты × 1, Кинжал × 1",
+    );
+    expect(section("Характер и внешность")).toHaveTextContent("Имя: Лира");
+    expect(section("История героя")).toHaveTextContent("Пока пусто.");
+    for (const name of ROGUE_SECTIONS) {
+      const edit = within(section(name)).getByRole("button", {
+        name: `Изменить: ${name}`,
+      });
+      expect(edit, name).toHaveTextContent(/^Изменить$/);
+      expect(edit, name).toBeEnabled();
+      // Общая кнопка: её область нажатия не меньше --tap-size (Carousel.test, e2e/layout.ts).
+      expect(edit, name).toHaveClass("ui-button");
+    }
+    // Имена кнопок различаются: диктор читает их списком без повторов.
+    const names = screen
+      .getAllByRole("button", { name: /^Изменить/ })
+      .map((edit) => edit.getAttribute("aria-label"));
+    expect(new Set(names).size).toBe(ROGUE_SECTIONS.length);
+    // У плута нет магии: раздела заклинаний нет.
+    expect(screen.queryByRole("region", { name: "Заклинания" })).toBeNull();
+    expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
+  });
+
+  test("«Создать героя» только на «Итоге», «Далее» там нет", () => {
+    renderDetailed();
+    reachBackstory();
+    expect(screen.queryByRole("button", { name: "Создать героя" })).toBeNull();
+
+    next();
+
+    expect(button("Создать героя")).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Далее" })).toBeNull();
+  });
+
+  test("у волшебника в итоге заговоры и заклинания; описание героя — заполненными полями", () => {
+    renderDetailed();
+    chooseOrigin(/Эльф/, /Волшебник/);
+    standardArray();
+    bonusDexCon();
+    tick(/Навыки класса/, /Магия/);
+    tick(/Навыки класса/, /История/);
+    next();
+    tick(/Заговоры/, /Огненная стрела/);
+    tick(/Заговоры/, /Свет/);
+    tick(/Заклинания/, /Щит/);
+    tick(/Заклинания/, /Сон/);
+    next();
+    next(); // снаряжение
+    typeInto("Имя", "Мирра");
+    typeInto("Внешность", "Седая прядь.");
+    next();
+    typeInto("Предыстория героя", "Ученица мага.");
+    next();
+
+    expect(section("Заклинания")).toHaveTextContent(
+      "Заговоры: Огненная стрела, Свет",
+    );
+    expect(section("Заклинания")).toHaveTextContent("Заклинания: Щит, Сон");
+    const persona = section("Характер и внешность");
+    expect(persona).toHaveTextContent("Имя: Мирра");
+    expect(persona).toHaveTextContent("Внешность: Седая прядь.");
+    expect(persona).not.toHaveTextContent("Идеалы");
+    expect(section("История героя")).toHaveTextContent("Ученица мага.");
+  });
+
+  test("«Изменить» ведёт на шаг раздела; выбор цел, «Далее» снова доводит до итога", () => {
+    renderDetailed();
+    reachSummary();
+
+    editIn("Раса");
+
+    expect(progress()).toHaveTextContent("Шаг 1 из 10: Раса");
+    expect(shownCard("Раса")).toHaveAccessibleName("Эльф");
+    for (let i = 0; i < 9; i++) next();
+    expect(progress()).toHaveTextContent("Шаг 10 из 10: Итог");
+    expect(section("Характер и внешность")).toHaveTextContent("Имя: Лира");
+    expect(button("Создать героя")).toBeEnabled();
+  });
+
+  test("правка через «Изменить» уходит на сервер", async () => {
+    const { server, onCreated } = renderDetailed();
+    reachSummary();
+
+    editIn("Характер и внешность");
+    expect(progress()).toHaveTextContent("Характер и внешность");
+    typeInto("Имя", "Лирой");
+    next();
+    next();
+    click("Создать героя");
+
+    await vi.waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(posts(server, CREATE)[0].body).toMatchObject({
+      choices: { name: "Лирой", species: "elf", class_id: "rogue" },
+    });
+  });
+});
+
+describe("«Изменить героя»: мастер с прежним выбором", () => {
+  test("открывается сразу на «Итоге» с прежним выбором", () => {
+    renderDetailed({}, OPTIONS, STORED_DETAILED);
+
+    expect(progress()).toHaveTextContent("Шаг 10 из 10: Итог");
+    expect(section("Раса")).toHaveTextContent("Эльф");
+    expect(section("Класс")).toHaveTextContent("Плут");
+    expect(section("Характеристики")).toHaveTextContent("Покупка очков");
+    expect(section("Характеристики")).toHaveTextContent(
+      "Сила 8, Ловкость 15, Телосложение 14, Интеллект 13, Мудрость 10, Харизма 12",
+    );
+    expect(section("Характер и внешность")).toHaveTextContent(
+      "Замысел: Вор-неудачник",
+    );
+    expect(section("История героя")).toHaveTextContent("Родилась в порту.");
+    expect(button("Создать героя")).toBeEnabled();
+  });
+
+  test("отправка без правок шлёт тот же выбор", async () => {
+    const { server, onCreated } = renderDetailed({}, OPTIONS, STORED_DETAILED);
+
+    click("Создать героя");
+
+    await vi.waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(posts(server, CREATE)[0].body).toEqual({
+      mode: "detailed",
+      choices: {
+        ...STORED_DETAILED,
+        persona: { concept: "Вор-неудачник", backstory: "Родилась в порту." },
+      },
+    });
+  });
+
+  test("«Назад» с «Итога» идёт по шагам и ничего не теряет", () => {
+    const { onBack } = renderDetailed({}, OPTIONS, STORED_DETAILED);
+
+    click("Назад");
+    expect(progress()).toHaveTextContent("История героя");
+    expect(screen.getByLabelText("Предыстория героя")).toHaveValue(
+      "Родилась в порту.",
+    );
+    click("Назад");
+    expect(screen.getByLabelText("Имя")).toHaveValue("Лира");
+    for (let i = 0; i < 6; i++) click("Назад");
+    expect(progress()).toHaveTextContent("Шаг 2 из 10: Класс");
+    expect(shownCard("Класс")).toHaveAccessibleName("Плут");
+    click("Назад");
+    expect(shownCard("Раса")).toHaveAccessibleName("Эльф");
+    expect(onBack).not.toHaveBeenCalled();
+  });
+
+  test("выбор, которого правила уже не допускают: раздел помечен, создать нельзя", () => {
+    renderDetailed({}, OPTIONS, { ...STORED_DETAILED, class_id: "bard" });
+
+    expect(progress()).toHaveTextContent("Итог");
+    expect(section("Класс")).toHaveTextContent("Пока пусто.");
+    expect(section("Класс")).toHaveTextContent(
+      "Выбор на этом шаге не закончен.",
+    );
+    expect(section("Раса")).not.toHaveTextContent("не закончен");
+    expect(button("Создать героя")).toBeDisabled();
+  });
+});
+
 describe("отправка и отказы", () => {
   test("полный выбор уходит как mode detailed; числа клиент не присылает", async () => {
     const { server, onCreated } = renderDetailed();
@@ -1111,6 +1461,7 @@ describe("отправка и отказы", () => {
     typeInto("Внешность", "Худая, быстрая.");
     next();
     typeInto("Предыстория героя", "Родилась в порту.");
+    next(); // итог
 
     click("Создать героя");
 
@@ -1161,7 +1512,7 @@ describe("отправка и отказы", () => {
             }
           : CREATED,
     });
-    reachBackstory();
+    reachSummary();
 
     click("Создать героя");
 
@@ -1180,7 +1531,9 @@ describe("отправка и отказы", () => {
 
     // Возврат назад ничего не стёр.
     click("Назад");
+    click("Назад");
     expect(screen.getByLabelText("Имя")).toHaveValue("Лира");
+    next();
     next();
     click("Создать героя");
 
@@ -1190,7 +1543,7 @@ describe("отправка и отказы", () => {
 
   test("пока идёт отправка, кнопка заблокирована и второй запрос не уходит", async () => {
     const { gated, server, onCreated } = renderDetailed();
-    reachBackstory();
+    reachSummary();
     const release = gated.hold("/api/games/g1/characters");
 
     click("Создать героя");
@@ -1213,14 +1566,14 @@ describe("отправка и отказы", () => {
         json: { detail: "Игра уже началась: персонажа больше нельзя менять." },
       },
     });
-    reachBackstory();
+    reachSummary();
 
     click("Создать героя");
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Игра уже началась",
-    );
-    expect(screen.queryByRole("listitem")).toBeNull();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Игра уже началась");
+    // Списка проблем нет; строки «Итога» — не он.
+    expect(within(alert).queryByRole("listitem")).toBeNull();
     expect(document.querySelector(".form-problems")).toBeNull();
   });
 });
@@ -1301,7 +1654,8 @@ describe("«Помоги написать»", () => {
 
     expect(await screen.findByRole("status")).toHaveTextContent("Мастер пишет");
     expect(button("Помоги написать")).toBeDisabled();
-    expect(button("Создать героя")).toBeDisabled();
+    // К «Итогу» и созданию не уйти, пока мастер пишет.
+    expect(button("Далее")).toBeDisabled();
     fireEvent.click(button("Помоги написать"));
     expect(
       gated.started.filter((line) => line.endsWith("/backstory-help")),
@@ -1349,5 +1703,277 @@ describe("«Помоги написать»", () => {
       "Родилась в порту.",
     );
     expect(button("Помоги написать")).toBeEnabled();
+  });
+});
+
+// --- финальное покрытие блока 7: «Итог», «Изменить» и смена класса ---
+
+/** Строки раздела «Итога» по порядку. */
+const linesOf = (name: string) =>
+  within(section(name))
+    .queryAllByRole("listitem")
+    .map((item) => item.textContent);
+
+/** Прежний выбор волшебника: эльф, преступник, два заговора и два заклинания. */
+const STORED_WIZARD: CharacterChoices = {
+  ...STORED_DETAILED,
+  name: "Мирра",
+  class_id: "wizard",
+  skills: ["arcana", "history"],
+  expertise: [],
+  cantrips: ["fire_bolt", "light"],
+  prepared_spells: ["shield", "sleep"],
+};
+
+describe("итог: «Изменить» у каждого раздела", () => {
+  test.each(ROGUE_SECTIONS.map((name, index) => [name, index + 1] as const))(
+    "«Изменить» у «%s» ведёт на шаг %i из 10",
+    (name, number) => {
+      renderDetailed({}, OPTIONS, STORED_DETAILED);
+
+      editIn(name);
+
+      expect(progress()).toHaveTextContent(`Шаг ${number} из 10: ${name}`);
+    },
+  );
+
+  test("у волшебника «Изменить» у «Заклинания» — на шаг 7 из 11, отметки прежние", () => {
+    renderDetailed({}, OPTIONS, STORED_WIZARD);
+    expect(progress()).toHaveTextContent("Шаг 11 из 11: Итог");
+    expect(linesOf("Заклинания")).toEqual([
+      "Заговоры: Огненная стрела, Свет",
+      "Заклинания: Щит, Сон",
+    ]);
+
+    editIn("Заклинания");
+
+    expect(progress()).toHaveTextContent("Шаг 7 из 11: Заклинания");
+    for (const name of [/Огненная стрела/, /Свет/]) {
+      expect(
+        within(screen.getByRole("group", { name: /^Заговоры/ })).getByRole(
+          "checkbox",
+          { name },
+        ),
+      ).toBeChecked();
+    }
+    for (const name of [/Щит/, /Сон/]) {
+      expect(
+        within(screen.getByRole("group", { name: /^Заклинания/ })).getByRole(
+          "checkbox",
+          { name },
+        ),
+      ).toBeChecked();
+    }
+  });
+
+  test("«Назад» с «Итога» волшебника доходит до заклинаний и ничего не теряет", () => {
+    renderDetailed({}, OPTIONS, STORED_WIZARD);
+
+    for (let i = 0; i < 4; i++) click("Назад");
+
+    expect(progress()).toHaveTextContent("Шаг 7 из 11: Заклинания");
+    expect(screen.getAllByRole("checkbox", { checked: true })).toHaveLength(4);
+    for (let i = 0; i < 4; i++) next();
+    expect(progress()).toHaveTextContent("Шаг 11 из 11: Итог");
+    expect(button("Создать героя")).toBeEnabled();
+  });
+});
+
+describe("итог: строки разделов для разных героев", () => {
+  test("человек-воин: навык на выбор и боевой стиль — отдельными строками", () => {
+    renderDetailed({}, OPTIONS, {
+      ...STORED_DETAILED,
+      species: "human",
+      class_id: "fighter",
+      skills: ["athletics", "history"],
+      extra_skill: "medicine",
+      expertise: [],
+      fighting_style: "defense",
+    });
+
+    expect(progress()).toHaveTextContent("Шаг 10 из 10: Итог");
+    expect(linesOf("Раса")).toEqual(["Человек"]);
+    expect(linesOf("Класс")).toEqual(["Воин"]);
+    expect(linesOf("Навыки и выборы класса")).toEqual([
+      "Навыки класса: Атлетика, История",
+      "Навык на выбор: Медицина",
+      "От предыстории и расы: Ловкость рук, Скрытность",
+      "Боевой стиль: Оборона",
+    ]);
+    expect(screen.queryByText("Выбор на этом шаге не закончен.")).toBeNull();
+    expect(button("Создать героя")).toBeEnabled();
+  });
+
+  test("бонус +1/+1/+1 — три характеристики по единице", () => {
+    renderDetailed({}, OPTIONS, {
+      ...STORED_DETAILED,
+      background_bonus: { dex: 1, con: 1, int: 1 },
+    });
+
+    expect(linesOf("Бонус предыстории")).toEqual([
+      "Ловкость +1, Телосложение +1, Интеллект +1",
+    ]);
+    expect(button("Создать героя")).toBeEnabled();
+  });
+
+  test("заклинатель без заговоров: в разделе «Заклинания» только заклинания", () => {
+    renderDetailed({}, OPTIONS, {
+      ...STORED_DETAILED,
+      class_id: "ranger",
+      skills: ["athletics", "insight", "nature"],
+      expertise: [],
+      cantrips: [],
+      prepared_spells: ["hunters_mark", "cure_wounds"],
+    });
+
+    expect(progress()).toHaveTextContent("Шаг 11 из 11: Итог");
+    expect(linesOf("Заклинания")).toEqual([
+      "Заклинания: Метка охотника, Лечение ран",
+    ]);
+    expect(button("Создать героя")).toBeEnabled();
+  });
+});
+
+describe("смена класса через «Изменить» на «Итоге»", () => {
+  test("плут → волшебник: шагов становится 11, позиция на шаге класса цела, заклинания встают седьмым шагом", async () => {
+    const { server, onCreated } = renderDetailed({}, OPTIONS, STORED_DETAILED);
+    editIn("Класс");
+    expect(progress()).toHaveTextContent("Шаг 2 из 10: Класс");
+
+    pickCard("Класс", /Волшебник/);
+    expect(progress()).toHaveTextContent("Шаг 2 из 11: Класс");
+    pickCard("Класс", /Плут/);
+    expect(progress()).toHaveTextContent("Шаг 2 из 10: Класс");
+    pickCard("Класс", /Волшебник/);
+    expect(progress()).toHaveTextContent("Шаг 2 из 11: Класс");
+
+    next();
+    expect(progress()).toHaveTextContent("Шаг 3 из 11: Предыстория");
+    expect(shownCard("Предыстория")).toHaveAccessibleName("Преступник");
+    next();
+    next();
+    next();
+    expect(progress()).toHaveTextContent("Шаг 6 из 11: Навыки и выборы класса");
+    // Навык плута, которого у волшебника нет, снят; общий (Проницательность) остался.
+    expect(classSkill(/Проницательность/)).toBeChecked();
+    tick(/Навыки класса/, /История/);
+    next();
+    expect(progress()).toHaveTextContent("Шаг 7 из 11: Заклинания");
+    tick(/Заговоры/, /Огненная стрела/);
+    tick(/Заговоры/, /Свет/);
+    tick(/Заклинания/, /Щит/);
+    tick(/Заклинания/, /Сон/);
+    next();
+    expect(progress()).toHaveTextContent("Шаг 8 из 11: Снаряжение");
+    next();
+    expect(screen.getByLabelText("Имя")).toHaveValue("Лира");
+    next();
+    expect(screen.getByLabelText("Предыстория героя")).toHaveValue(
+      "Родилась в порту.",
+    );
+    next();
+
+    expect(progress()).toHaveTextContent("Шаг 11 из 11: Итог");
+    expect(linesOf("Класс")).toEqual(["Волшебник"]);
+    expect(linesOf("Заклинания")).toEqual([
+      "Заговоры: Огненная стрела, Свет",
+      "Заклинания: Щит, Сон",
+    ]);
+    expect(screen.queryByText("Выбор на этом шаге не закончен.")).toBeNull();
+    click("Создать героя");
+    await vi.waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(posts(server, CREATE)[0].body).toMatchObject({
+      mode: "detailed",
+      choices: {
+        name: "Лира",
+        class_id: "wizard",
+        skills: ["history", "insight"],
+        expertise: [],
+        cantrips: ["fire_bolt", "light"],
+        prepared_spells: ["shield", "sleep"],
+      },
+    });
+  });
+
+  test("волшебник → воин: шаг заклинаний пропадает без пропуска номеров, заклинания на сервер не уходят", async () => {
+    const { server, onCreated } = renderDetailed({}, OPTIONS, STORED_WIZARD);
+    editIn("Класс");
+    expect(progress()).toHaveTextContent("Шаг 2 из 11: Класс");
+
+    pickCard("Класс", /Воин/);
+    expect(progress()).toHaveTextContent("Шаг 2 из 10: Класс");
+    for (let i = 0; i < 4; i++) next();
+    expect(progress()).toHaveTextContent("Шаг 6 из 10: Навыки и выборы класса");
+    tick(/Навыки класса/, /Атлетика/);
+    pick("Боевой стиль", /Оборона/);
+    next();
+    expect(progress()).toHaveTextContent("Шаг 7 из 10: Снаряжение");
+    for (let i = 0; i < 3; i++) next();
+
+    expect(progress()).toHaveTextContent("Шаг 10 из 10: Итог");
+    expect(screen.queryByRole("region", { name: "Заклинания" })).toBeNull();
+    expect(linesOf("Навыки и выборы класса")).toContain(
+      "Боевой стиль: Оборона",
+    );
+    click("Создать героя");
+    await vi.waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(posts(server, CREATE)[0].body).toMatchObject({
+      choices: {
+        name: "Мирра",
+        class_id: "fighter",
+        skills: ["athletics", "history"],
+        fighting_style: "defense",
+        cantrips: [],
+        prepared_spells: [],
+      },
+    });
+  });
+});
+
+describe("«Подробнее» у недоступных вариантов и у компетентности", () => {
+  test("навыков набрано до предела: у недоступного навыка «Подробнее» всё равно раскрывается", () => {
+    renderDetailed();
+    chooseOrigin();
+    standardArray();
+    bonusDexCon();
+    for (const name of [
+      /Акробатика/,
+      /Обман/,
+      /Проницательность/,
+      /Убеждение/,
+    ]) {
+      tick(/Навыки класса/, name);
+    }
+    expect(classSkill(/Анализ/)).toBeDisabled();
+    const skills = screen.getByRole("group", { name: /Навыки класса/ });
+
+    fireEvent.click(
+      within(skills).getByRole("button", { name: "Подробнее: Анализ" }),
+    );
+
+    expect(
+      within(skills).getByRole("article", { name: "Анализ" }),
+    ).toHaveTextContent(/Характеристика\s*Интеллект/);
+    expect(classSkill(/Анализ/)).not.toBeChecked();
+  });
+
+  test("компетентность: у каждого навыка героя своя карточка «Подробнее»", () => {
+    renderDetailed();
+    chooseOrigin();
+    standardArray();
+    bonusDexCon();
+    tick(/Навыки класса/, /Акробатика/);
+    const expertise = screen.getByRole("group", { name: /Компетентность/ });
+
+    fireEvent.click(
+      within(expertise).getByRole("button", { name: "Подробнее: Скрытность" }),
+    );
+
+    expect(
+      within(expertise).getByRole("article", { name: "Скрытность" }),
+    ).toHaveTextContent("Подкрасться к часовому, спрятаться.");
+    expect(
+      within(expertise).getByRole("checkbox", { name: /Скрытность/ }),
+    ).not.toBeChecked();
   });
 });

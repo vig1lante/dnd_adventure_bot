@@ -1,4 +1,4 @@
-import type { CreationOptions } from "../../api/types";
+import type { AbilityMethod, CreationOptions } from "../../api/types";
 import type { Draft, StepId } from "./draft";
 
 /** Что получает каждый шаг подробного создания. */
@@ -20,4 +20,10 @@ export const STEP_TITLES: Record<StepId, string> = {
   equipment: "Снаряжение",
   persona: "Характер и внешность",
   backstory: "История героя",
+  summary: "Итог",
+};
+
+export const METHOD_LABELS: Record<AbilityMethod, string> = {
+  point_buy: "Покупка очков",
+  standard_array: "Стандартный набор",
 };
