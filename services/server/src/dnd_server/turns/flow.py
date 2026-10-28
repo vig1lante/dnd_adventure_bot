@@ -47,12 +47,22 @@
 раз; остановленный бой хост продолжает кнопкой «Повторить».
 
 Привал (план B7.6, спека §5.5) идёт той же машиной с фазой `camp`. Когда мастер начал привал
-(`start_camp`), `scene_follow_up` ведёт игру в `camp`, `dm.turn` ставит срок `games.camp_seconds` в
-транзакции хода, а `_announce_next` ставит отсчёт (ключ планировщика — игра, как у сбора и боя) и
-зовёт игроков. Игроки оставляют реплики героев (`camp_line`), хост продлевает привал (`camp_extend`)
+(`start_camp`), `scene_follow_up` ведёт игру в `camp`, `dm.turn` ставит срок привала в транзакции
+хода, а `_announce_next` ставит отсчёт (ключ планировщика — игра, как у сбора и боя) и зовёт
+игроков. Игроки оставляют реплики героев (`camp_line`), хост продлевает привал (`camp_extend`)
 или заканчивает его (`camp_end`). Конец привала — только отсчёт (`on_deadline`) или хост: оба идут в
-`close_camp`, который просит ход мастера «конец привала»; длинный отдых входит в этот ход (`dm.turn`
+`close_camp`, который просит ход мастера «конец привала»; отдых входит в этот ход (`dm.turn`
 и `dm.camp_flow`). Когда ход зарезервирован, отсчёт игры снимается: срок в базе уже обнулён.
+
+Привалы по кнопке хоста (DND-2 §13, блок B9). Хост в обсуждении вне боя начинает короткий или
+долгий привал (`start_rest`) без хода мастера: под блокировкой игры движок меняет сцену
+(`campfire.begin_rest`), и одной транзакцией пишутся новая версия состояния, открытый ход
+«конец привала», фаза `camp` и срок вида привала (`games.short_rest_seconds` или
+`games.camp_seconds`). Привал любого вида начинается кадром `rest_started` всем, за ним фоновой
+задачей идут личные идеи для рассказа (`dm.rest_ideas`). На коротком привале герой тратит кости
+хитов (`spend_hit_die`): бросает генератор сервера, новая версия состояния, карточка броска всем.
+Дальше привал идёт так же, как привал мастера, и кончается тем же ходом «конец привала»; вид
+отдыха движок берёт из сцены, поэтому перезапуск сервера сохраняет и вид, и остаток срока.
 
 Начало игры (план B7.8, спека §8.1 и §10) идёт той же машиной. `FlowHooks` — `GameHooks` приложения:
 после «Начать» (игра в `weaving`) он запускает вплетение героев и открытие игры (`start_weaving`,
@@ -73,11 +83,17 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import FastAPI
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from dnd_engine import rest as rest_rules
+from dnd_engine.adventure.loader import adventure_from_data
+from dnd_engine.character import Character
+from dnd_engine.events import RollEvent
+from dnd_engine.modules import build_ruleset
+from dnd_engine.modules.campfire import begin_rest
 from dnd_engine.state import GameState, SceneType
 from dnd_server.bot.notify import (
     Notifier,
@@ -104,13 +120,21 @@ from dnd_server.db.models import (
     TurnPhase,
     TurnStatus,
 )
-from dnd_server.dm.camp_flow import CAMP_EXTENSION, CAMP_LINES_PER_HERO
+from dnd_server.dm.camp_flow import (
+    CAMP_EXTENSION,
+    CAMP_LINES_PER_HERO,
+    RestKind,
+    is_short_rest,
+    rest_kind,
+    rest_seconds,
+)
 from dnd_server.dm.combat_flow import (
     DODGE_TEXT,
     MAX_AUTO_TURNS,
     master_moves_next,
     waiting_hero,
 )
+from dnd_server.dm.rest_ideas import IDEAS_TASK_FAILED, offer_rest_ideas
 from dnd_server.dm.text import safe_traceback
 from dnd_server.dm.turn import (
     Deps,
@@ -124,11 +148,15 @@ from dnd_server.dm.weaving import begin_weaving
 from dnd_server.games.hooks import send_to_game
 from dnd_server.games.service import Conflict, Forbidden, GameError, Invalid, NotFound
 from dnd_server.realtime.views import (
+    character_event,
+    feed_entries,
     feed_item_event,
     feed_withdrawn_event,
+    party_event,
     phase_event,
     phase_view,
     player_status_event,
+    rest_started_event,
 )
 from dnd_server.turns.timers import Action, Scheduler, TaskSet
 
@@ -140,6 +168,9 @@ COLLECT_EXTENSION = timedelta(seconds=60)
 READY_STATUSES = (ActionStatus.SUBMITTED, ActionStatus.PASS)
 SHOWN_STATUSES = (ActionStatus.SUBMITTED, ActionStatus.AUTO_SUBMITTED)
 CLOSED_STATUSES = (ActionStatus.AUTO_SUBMITTED, ActionStatus.AUTO_PASS)
+
+# Подпись карточки броска кости хитов (дополнение контракта B9, §3).
+HIT_DIE_LABEL = "Кость хитов"
 
 SERVER_RESTARTED = "Сервер перезапущен во время хода: попытка прервана"
 MASTER_LOST = "У разбора нет мастера: не записались ни результат, ни неудача — попытка прервана"
@@ -630,8 +661,8 @@ async def _announce_next(flow: Flow, game_id: str, *, started: bool = False) -> 
         game = await session.get(Game, game_id)
         state = None if game is None else await _state_of(session, game)
         players = await _players(session, game_id)
-    if game is not None and game.turn_phase == TurnPhase.CAMP:
-        await _begin_camp(flow, game, [player.user_id for player in players])
+    if game is not None and game.turn_phase == TurnPhase.CAMP and state is not None:
+        await _begin_camp(flow, game, [player.user_id for player in players], rest_kind(state))
         return False
     if game is not None and game.turn_phase == TurnPhase.COMBAT_WAIT and state is not None:
         hero = waiting_hero(state)
@@ -645,15 +676,21 @@ async def _announce_next(flow: Flow, game_id: str, *, started: bool = False) -> 
     return False
 
 
-async def _begin_camp(flow: Flow, game: Game, user_ids: list[str]) -> None:
-    """Привал начался: отсчёт на срок игры и зов к костру. Если хост успел поставить игру на паузу,
-    отсчёта нет (его вернёт «Продолжить»), а звать к костру рано."""
+async def _begin_camp(flow: Flow, game: Game, user_ids: list[str], kind: RestKind) -> None:
+    """Мастер начал привал: отсчёт на срок игры и зов к костру. Если хост успел поставить игру на
+    паузу, отсчёта нет (его вернёт «Продолжить»), а звать к костру рано."""
     if game.phase != GamePhase.PLAYING or game.deadline_at is None:
         return
     _arm(flow, game)
+    await _call_to_camp(flow, game, user_ids, kind)
+
+
+async def _call_to_camp(flow: Flow, game: Game, user_ids: list[str], kind: RestKind) -> None:
+    """Зов к костру: сколько осталось и что делать на привале этого вида."""
+    assert game.deadline_at is not None
     left = round((game.deadline_at - flow.scheduler.now()).total_seconds())
-    logger.info("Игра %s: привал, отсчёт %d с.", game.id, game.camp_seconds)
-    await _notify(flow, user_ids, camp_text(left))
+    logger.info("Игра %s: привал (%s), отсчёт %d с.", game.id, kind, rest_seconds(game, kind))
+    await _notify(flow, user_ids, camp_text(left, short=kind == "short"))
 
 
 async def phase_now(flow: Flow, game_id: str) -> dict[str, Any]:
@@ -811,6 +848,125 @@ async def camp_line(flow: Flow, game_id: str, user_id: str, text: str) -> Messag
     return message
 
 
+async def start_rest(flow: Flow, game_id: str, user_id: str, kind: RestKind) -> dict[str, Any]:
+    """«Короткий привал» или «Долгий привал» хоста: привал начинается сразу, без хода мастера.
+
+    Только хост, только в обсуждении идущей игры вне боя и без уже отправленных ходов игроков:
+    иначе отказ (`Conflict`, 409). Остальные отказы — правила движка (`RestError`: бой в состоянии,
+    уже привал, предел коротких привалов приключения). Всё под блокировкой игры одной
+    транзакцией: новая версия состояния со сценой `camp` и видом привала, открытый ход становится
+    «концом привала», фаза `camp`, срок вида. После коммита — фаза и `rest_started` всем, отсчёт,
+    зов к костру и фоновая задача идей для рассказа."""
+    async with _locked(flow, game_id) as session:
+        game = await _host(session, game_id, user_id)
+        _require_playing(game)
+        if game.turn_phase == TurnPhase.CAMP:
+            raise Conflict("Привал уже идёт: второй начать нельзя.")
+        if game.turn_phase == TurnPhase.COMBAT_WAIT:
+            raise Conflict("В бою привал невозможен: сначала закончите бой.")
+        if game.turn_phase != TurnPhase.DISCUSSION:
+            raise Conflict("Начать привал можно, пока игроки обсуждают ход.")
+        turn = await _current_turn(session, game)
+        rows = await _actions(session, turn.id)
+        if any(row.status == ActionStatus.SUBMITTED for row in rows.values()):
+            raise Conflict("Игроки уже отправили ходы: сначала разберите раунд.")
+        state = await _state_of(session, game)
+        if state is None:
+            raise Conflict("У игры ещё нет состояния: привал начать нельзя.")
+        adventure = adventure_from_data(game.adventure_data)
+        try:
+            camped, _events = begin_rest(
+                state, kind, build_ruleset(state.rules), content=flow.dm.srd, adventure=adventure
+            )
+        except rest_rules.RestError as refusal:
+            raise Conflict(str(refusal)) from None
+        await _save_state(session, game, camped)
+        turn.kind = TurnKind.CAMP_END
+        game.turn_phase = TurnPhase.CAMP
+        game.deadline_at = flow.scheduler.now() + timedelta(seconds=rest_seconds(game, kind))
+        game.rest_ideas = None
+        await session.commit()
+        _arm(flow, game)
+        started = (rest_started_event(game, camped), AUDIENCE_ALL)
+        await _send(flow, game_id, [await _phase_delivery(session, game), started])
+        user_ids = [player.user_id for player in await _players(session, game_id)]
+    logger.info("Игра %s: хост начал привал (%s).", game_id, kind)
+    flow.tasks.spawn(
+        offer_rest_ideas(game_id, turn.id, deps=flow.dm), failure_text=IDEAS_TASK_FAILED
+    )
+    await _call_to_camp(flow, game, user_ids, kind)
+    return await phase_now(flow, game_id)
+
+
+async def spend_hit_die(flow: Flow, game_id: str, user_id: str) -> Character:
+    """«Потратить кость хитов»: герой игрока тратит одну кость на коротком привале.
+
+    Бросает генератор сервера (`Deps.rng`), правила считает движок (`rest.spend_hit_die`); клиент
+    чисел не присылает. Под блокировкой игры одной транзакцией: новая версия состояния и карточка
+    броска для всех (сообщение вне хода мастера: «Перегенерировать» её не снимает, а сама
+    «Перегенерировать» после неё отказывает). После коммита — карточка и отряд всем, лист героя его
+    игроку. Отказ (409): не короткий привал, нет героя, герой погиб, костей не осталось."""
+    async with _locked(flow, game_id) as session:
+        game, player = await _member(session, game_id, user_id)
+        _require_playing(game)
+        state = await _state_of(session, game)
+        if game.turn_phase != TurnPhase.CAMP or state is None or not is_short_rest(state):
+            raise Conflict("Кости хитов тратят только на коротком привале.")
+        hero = state.party.get(player.character_id or "")
+        if hero is None:
+            raise Conflict("У вас нет героя в этой игре.")
+        try:
+            rested, rolled = rest_rules.spend_hit_die(hero, flow.dm.srd, flow.dm.rng)
+        except rest_rules.RestError as refusal:
+            raise Conflict(str(refusal)) from None
+        after = state.model_copy(deep=True)
+        after.party[hero.id] = rested
+        await _save_state(session, game, after)
+        adventure = adventure_from_data(game.adventure_data)
+        card = RollEvent(audience=AUDIENCE_ALL, actor_id=hero.id, label=HIT_DIE_LABEL, roll=rolled)
+        entries = feed_entries(
+            [card],
+            before=state,
+            after=after,
+            adventure=adventure,
+            srd=flow.dm.srd,
+            secret_actors=(),
+        )
+        messages = [
+            Message(
+                game_id=game_id,
+                turn_id=None,
+                audience=entry.audience,
+                kind=entry.kind,
+                text=entry.text,
+                data=entry.data,
+            )
+            for entry in entries
+        ]
+        session.add_all(messages)
+        await session.flush()
+        await session.commit()
+        deliveries: list[Delivery] = [(feed_item_event(m), m.audience) for m in messages]
+        deliveries.append((party_event(after, flow.dm.srd), AUDIENCE_ALL))
+        deliveries.append((character_event(rested, flow.dm.srd, adventure, after), user_id))
+        await _send(flow, game_id, deliveries)
+    logger.info("Игра %s: герой %s потратил кость хитов.", game_id, hero.id)
+    return rested
+
+
+async def _save_state(session: AsyncSession, game: Game, state: GameState) -> None:
+    """Новая версия состояния игры вне хода мастера (привал по кнопке, кость хитов).
+
+    Версии растут только вперёд: следующая — наибольшая в базе плюс один, как у хода мастера.
+    Открытый ход хранит прежнюю версию начала: так «Перегенерировать» видит изменения вне хода."""
+    newest = await session.scalar(
+        select(func.max(GameStateSnapshot.version)).where(GameStateSnapshot.game_id == game.id)
+    )
+    state.version = (newest or game.state_version) + 1
+    session.add(GameStateSnapshot.from_state(state))
+    game.state_version = state.version
+
+
 async def camp_end(flow: Flow, game_id: str, user_id: str) -> dict[str, Any]:
     """«Закончить привал»: хост не дожидается отсчёта (спека §5.5)."""
     async with _locked(flow, game_id) as session:
@@ -822,7 +978,7 @@ async def camp_end(flow: Flow, game_id: str, user_id: str) -> dict[str, Any]:
 async def close_camp(
     flow: Flow, game_id: str, *, turn_id: str | None = None, due: bool = False
 ) -> None:
-    """Привал кончился: просит у мастера ход «конец привала» (длинный отдых и рассказ об утре).
+    """Привал кончился: просит у мастера ход «конец привала» (отдых по виду привала и рассказ).
 
     Конец привала решает только сервер: отсчёт или хост, модель привал не заканчивает. Отказ —
     `GameError`: привала нет, ход уже другой, срок отодвинули, мастера успел позвать другой путь

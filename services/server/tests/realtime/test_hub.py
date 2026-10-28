@@ -260,6 +260,9 @@ def test_event_types_are_those_of_the_plan():
         "lobby",
         "journal_entry",
         "journal",
+        "rest_started",
+        "rest_idea",
+        "rest_ended",
         "error",
     } == EVENT_TYPES
 

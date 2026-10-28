@@ -1365,6 +1365,9 @@ SERVICE_ROLE_MODULES = {
     "authoring/steps.py",  # шаги генератора приключений по ролям (cheap=True)
     "characters/flavor.py",  # описание героя и «помоги написать» (cheap=True)
     "dm/chronicle.py",  # летопись (cheap=True)
+    # Идеи для рассказа у костра `campfire_host` (cheap=True; дополнение контракта B9 §1 п. 1: у
+    # CLI — CLAUDE_CLI_CHEAP_MODEL, адаптер не меняется; роль на пересмотр владельцем в §11).
+    "dm/rest_ideas.py",
     "dm/weaving.py",  # вплетение (cheap=False: у API — основная модель, у CLI — дешёвая по §11)
 }
 

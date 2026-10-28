@@ -20,9 +20,9 @@
 import ast
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 import pytest
 import yaml
+from adventure_secrets import hidden_texts
 from pydantic import SecretStr
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -40,13 +41,25 @@ from dnd_engine.character import Character
 from dnd_engine.content import SrdContent, load_srd
 from dnd_engine.creation import quick_character
 from dnd_engine.events import RestEvent, SceneEvent
+from dnd_engine.journal import JournalEntry
 from dnd_engine.modules import build_ruleset
-from dnd_engine.rng import ScriptedRng
-from dnd_engine.state import GameState, GameTime, RulesRef, Scene, SceneType
+from dnd_engine.rest import spend_hit_die
+from dnd_engine.rng import ScriptedRng, SeededRng, SystemRng
+from dnd_engine.state import (
+    Chronicle,
+    GameState,
+    GameTime,
+    PcHook,
+    RulesRef,
+    Scene,
+    SceneType,
+    Spotlight,
+)
 from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.config import Settings
 from dnd_server.db.models import (
+    ActionStatus,
     DmTurnLog,
     Game,
     GamePhase,
@@ -54,6 +67,7 @@ from dnd_server.db.models import (
     GameStateSnapshot,
     Message,
     MessageKind,
+    PlayerAction,
     PlayerCharacter,
     Turn,
     TurnKind,
@@ -62,7 +76,7 @@ from dnd_server.db.models import (
     User,
     new_id,
 )
-from dnd_server.dm import camp_flow
+from dnd_server.dm import camp_flow, rest_ideas
 from dnd_server.dm import provider as provider_module
 from dnd_server.dm.camp_flow import (
     CAMP_EXTENSION,
@@ -71,7 +85,8 @@ from dnd_server.dm.camp_flow import (
     end_camp,
 )
 from dnd_server.dm.turn import Deps, run_dm_turn
-from dnd_server.llm.base import ProviderError, TurnRequest, TurnResult, Usage
+from dnd_server.llm.base import JsonRequest, ProviderError, TurnRequest, TurnResult, Usage
+from dnd_server.llm.fake import FakeProvider
 from dnd_server.realtime.views import snapshot_for
 from dnd_server.turns import flow as flow_module
 from dnd_server.turns.timers import ManualScheduler
@@ -85,6 +100,7 @@ SESSION_SECRET = "camp-session-secret-0123456789-abcdefghij"
 TIMEOUT_S = 5
 T0 = datetime(2030, 5, 1, 12, 0, 0, tzinfo=UTC)
 CAMP_SECONDS = 300
+SHORT_REST_SECONDS = 120
 HEROES = {  # ключ -> (имя, класс, вид); ключ же — id героя
     "alice": ("Алиса", "fighter", "human"),
     "boris": ("Борис", "rogue", "elf"),
@@ -322,6 +338,7 @@ def settings(settings: Settings, tmp_path: Path) -> Settings:
             "session_secret": SecretStr(SESSION_SECRET),
             "content_dir": tmp_path / "content",
             "camp_seconds": CAMP_SECONDS,
+            "short_rest_seconds": SHORT_REST_SECONDS,
         }
     )
 
@@ -354,6 +371,7 @@ async def seed_game(
         "collect_seconds": 120,
         "hurry_seconds": 60,
         "camp_seconds": CAMP_SECONDS,
+        "short_rest_seconds": SHORT_REST_SECONDS,
         "started_at": T0,
         "clock_at": T0,
     } | dict(game_fields or {})
@@ -549,14 +567,19 @@ def camp(settings, db, srd, adventure, tmp_path) -> CampTable:
     """Приложение с игрой: `async with camp() as table`.
 
     По умолчанию отряд уже у костра: фаза `camp`, срок `T0 + camp_seconds`, открыт ход «конец
-    привала». `in_camp=False` — игра в обсуждении (сцена исследования), мастер начнёт привал сам.
-    `scenario` — ходы мастера (по умолчанию утро), `game_fields` — поля игры."""
+    привала». `in_camp=False` — игра в обсуждении (сцена исследования), мастер начнёт привал сам
+    или хост кнопкой. `scenario` — ходы мастера (по умолчанию утро), `json_answers` — ответы JSON
+    сценария по `purpose`, `scenario_file` — готовый сценарий вместо них; `shape` правит состояние
+    перед записью, `game_fields` — поля игры."""
 
     @asynccontextmanager
     async def open_table(
         *,
         in_camp: bool = True,
         scenario: Sequence[dict[str, Any]] | None = None,
+        json_answers: Mapping[str, Any] | None = None,
+        scenario_file: Path | None = None,
+        shape: Callable[[GameState], None] | None = None,
         rng: Any = None,
         game_fields: Mapping[str, Any] | None = None,
     ) -> AsyncIterator[Table]:
@@ -564,6 +587,8 @@ def camp(settings, db, srd, adventure, tmp_path) -> CampTable:
         scene = SceneType.CAMP if in_camp else SceneType.EXPLORATION
         users = {key: seat.user_id for key, seat in seats.items()}
         state = camp_state(srd, adventure, users, scene=scene)
+        if shape is not None:
+            shape(state)
         fields = {"deadline_at": T0 + timedelta(seconds=CAMP_SECONDS)} if in_camp else {}
         setup = await seed_game(
             db,
@@ -574,9 +599,11 @@ def camp(settings, db, srd, adventure, tmp_path) -> CampTable:
             turn_kind=TurnKind.CAMP_END if in_camp else TurnKind.ROUND,
             game_fields=fields | dict(game_fields or {}),
         )
-        path = tmp_path / "scenario.yaml"
-        turns = list(scenario) if scenario is not None else [morning_turn()]
-        path.write_text(yaml.safe_dump({"turns": turns}, allow_unicode=True), "utf-8")
+        path = scenario_file or tmp_path / "scenario.yaml"
+        if scenario_file is None:
+            turns = list(scenario) if scenario is not None else [morning_turn()]
+            written = {"turns": turns, "json": dict(json_answers or {})}
+            path.write_text(yaml.safe_dump(written, allow_unicode=True), "utf-8")
         run_settings = settings.model_copy(update={"fake_llm_scenario": path})
         async with running_table(run_settings, db, srd, setup, rng=rng) as table:
             yield table
@@ -950,7 +977,11 @@ async def test_a_line_or_an_idle_camp_never_calls_the_master(camp):
         assert (await table.state()).scene.type == SceneType.CAMP
 
 
-@pytest.mark.parametrize("name", ["camp-end", "camp-extend"])
+# `rest-*` (блок B9) — те же кнопки привала под новыми путями, `camp-*` остаются рабочими.
+CAMP_BUTTONS = ["camp-end", "camp-extend", "rest-end", "rest-extend"]
+
+
+@pytest.mark.parametrize("name", CAMP_BUTTONS)
 async def test_the_camp_buttons_are_for_the_host_only_and_only_for_a_stranger_404(camp, db, name):
     async with camp() as table:
         assert (await table.host(name, "boris")).status_code == 403
@@ -967,7 +998,7 @@ async def test_the_camp_buttons_are_for_the_host_only_and_only_for_a_stranger_40
         assert await table.logs() == []
 
 
-@pytest.mark.parametrize("name", ["camp-end", "camp-extend"])
+@pytest.mark.parametrize("name", CAMP_BUTTONS)
 @pytest.mark.parametrize(
     "values",
     [
@@ -1297,3 +1328,1591 @@ async def test_the_camp_end_can_be_started_without_the_buttons_as_the_retry_does
         state = await table.state()
         assert state.scene.type == SceneType.EXPLORATION
         assert (await table.game()).turn_phase == TurnPhase.DISCUSSION
+
+
+# --- привал по кнопке хоста: короткий и долгий (DND-2, блок B9) ---
+
+REST_SCENARIO = REPO_ROOT / "services" / "server" / "tests" / "scenarios" / "rest.yaml"
+REST_REFUSAL_REGENERATE = "После хода мастера игра уже изменилась: перегенерировать нельзя."
+SENT_MOVES_REFUSAL = "Игроки уже отправили ходы: сначала разберите раунд."
+END_OF_THE_SHORT_REST = "Угли тлеют, отряд переводит дух и собирается в путь."  # из rest.yaml
+IDEA_OF = {  # тексты идей rest.yaml по героям
+    "alice": "Расскажи, кто научил тебя держать меч и чем ты ему обязан.",
+    "boris": "Вспомни город, из которого ты сбежал, и что там осталось.",
+    "vera": "Расскажи о храме, где ты впервые услышал голос бога.",
+}
+IDEAS_PURPOSE = "campfire.ideas"
+
+
+def round_turn(story: str = "Отряд осматривается у ворот.") -> dict[str, Any]:
+    return scenario_turn(tool("chronicle", entry="Отряд осмотрелся."), say(story))
+
+
+def focus(**turns_since_focus: int) -> Callable[[GameState], None]:
+    """Правка состояния: сколько ходов каждый герой не был в фокусе рассказа."""
+
+    def shape(state: GameState) -> None:
+        state.spotlight = {
+            key: Spotlight(turns_since_focus=turns) for key, turns in turns_since_focus.items()
+        }
+
+    return shape
+
+
+async def start_rest(table: Table, kind: str = "short", key: str = "alice") -> httpx.Response:
+    return await table.call(key, "POST", "/host/rest", json={"kind": kind})
+
+
+async def spend_die(table: Table, key: str) -> httpx.Response:
+    return await table.call(key, "POST", "/rest/hit-dice")
+
+
+async def play_a_round(table: Table) -> None:
+    """Игроки спасовали, мастер разобрал раунд: у игры есть разобранный ход, фаза обсуждения."""
+    for key in HEROES:
+        await table.pass_(key)
+    assert (await table.host("collect")).status_code == 200
+    await table.settle()
+    assert (await table.game()).turn_phase == TurnPhase.DISCUSSION
+
+
+async def rest_of(table: Table, key: str) -> dict[str, Any] | None:
+    async with table.db() as session:
+        user = await session.get(User, table.user_id(key))
+        return (await snapshot_for(session, user, table.game_id, srd=table.srd))["rest"]
+
+
+def frame_types(table: Table) -> list[str]:
+    return [payload["type"] for _game, payload, _who in table.broadcaster.sent]
+
+
+@pytest.fixture
+def json_requests(monkeypatch: pytest.MonkeyPatch) -> list[JsonRequest]:
+    """Запросы JSON к `FakeProvider` по порядку: счёт вызовов модели идёт по `purpose`."""
+    requests: list[JsonRequest] = []
+    real = FakeProvider.complete_json
+
+    async def recording(self: FakeProvider, req: JsonRequest, schema: Any) -> Any:
+        requests.append(req)
+        return await real(self, req, schema)
+
+    monkeypatch.setattr(FakeProvider, "complete_json", recording)
+    return requests
+
+
+def of_purpose(requests: list[JsonRequest], purpose: str = IDEAS_PURPOSE) -> list[JsonRequest]:
+    return [req for req in requests if req.purpose == purpose]
+
+
+# начало привала
+
+
+async def test_the_host_starts_a_short_rest_at_once_without_the_master(camp, json_requests):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        turn_before = (await table.game()).current_turn_id
+
+        response = await start_rest(table, "short")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["turn_phase"] == "camp"
+        deadline = T0 + timedelta(seconds=SHORT_REST_SECONDS)
+        game = await table.game()
+        assert (game.turn_phase, game.deadline_at) == (TurnPhase.CAMP, deadline)
+        assert table.scheduler.pending() == {table.game_id: deadline}
+        assert game.current_turn_id == turn_before  # открытый ход стал «концом привала»
+        [opened] = await table.turns()
+        assert (opened.kind, opened.status) == (TurnKind.CAMP_END, TurnStatus.OPEN)
+        state = await table.state()
+        assert (state.version, state.scene.type, state.scene.rest) == (2, SceneType.CAMP, "short")
+        assert state.party["alice"].hp == 1  # отдых будет в конце привала, а не в начале
+        assert await table.logs() == []  # мастер не думал
+        await table.settle()
+        assert await table.logs() == []
+        assert [req.purpose for req in json_requests] == [IDEAS_PURPOSE]
+
+
+async def test_the_start_of_a_rest_is_told_to_everybody_with_its_kind_and_deadline(camp):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        await start_rest(table, "short")
+        await table.settle()
+
+        [(started, audience)] = table.broadcaster.of_type("rest_started")
+        deadline = T0 + timedelta(seconds=SHORT_REST_SECONDS)
+        assert started == {
+            "type": "rest_started",
+            "kind": "short",
+            "deadline_at": deadline.isoformat(),
+        }
+        assert audience == "all"
+        assert ("playing", "camp") in table.phases_sent()
+        types = frame_types(table)
+        assert types.index("rest_started") < types.index("rest_idea")
+        for key in HEROES:
+            [text] = table.notifier.texts_for(table.user_id(key))
+            assert "Короткий привал" in text and str(SHORT_REST_SECONDS) in text
+
+
+async def test_the_host_starts_a_long_rest_for_the_camp_seconds_of_the_game(camp):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        response = await start_rest(table, "long")
+
+        assert response.status_code == 200, response.text
+        deadline = T0 + timedelta(seconds=CAMP_SECONDS)
+        assert (await table.game()).deadline_at == deadline
+        assert (await table.state()).scene.rest == "long"
+        [(started, _who)] = table.broadcaster.of_type("rest_started")
+        assert (started["kind"], started["deadline_at"]) == ("long", deadline.isoformat())
+        for key in HEROES:
+            [text] = table.notifier.texts_for(table.user_id(key))
+            assert "костр" in text and str(CAMP_SECONDS) in text
+            assert "Короткий" not in text
+        await table.settle()
+
+
+async def test_the_short_rest_lasts_the_short_rest_seconds_of_the_game(camp):
+    async with camp(
+        in_camp=False, scenario_file=REST_SCENARIO, game_fields={"short_rest_seconds": 45}
+    ) as table:
+        await start_rest(table, "short")
+
+        assert (await table.game()).deadline_at == T0 + timedelta(seconds=45)
+        await table.settle()
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"turn_phase": TurnPhase.COLLECTING},
+        {"turn_phase": TurnPhase.RESOLVING},
+        {"turn_phase": TurnPhase.COMBAT_WAIT},
+        {"turn_phase": TurnPhase.DM_FAILED},
+        {"phase": GamePhase.PAUSED},
+        {"phase": GamePhase.FINISHED},
+        {"phase": GamePhase.WEAVING},
+    ],
+    ids=["сбор", "разбор", "бой", "мастер не справился", "пауза", "игра окончена", "вплетение"],
+)
+async def test_a_rest_cannot_start_outside_the_discussion_of_a_playing_game(
+    camp, json_requests, values
+):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        await table.update_game(**values)
+
+        for kind in ("short", "long"):
+            response = await start_rest(table, kind)
+            assert response.status_code == 409, response.text
+            assert isinstance(response.json()["detail"], str)
+        assert (await table.game()).state_version == 1
+        assert table.scheduler.pending() == {}
+        assert table.broadcaster.of_type("rest_started") == []
+        await table.settle()
+        assert json_requests == [] and await table.logs() == []
+
+
+async def test_a_rest_cannot_start_in_combat_or_during_another_rest(camp):
+    async with camp() as table:  # отряд уже у костра
+        refused = await start_rest(table, "short")
+
+        assert refused.status_code == 409
+        assert refused.json()["detail"] == "Привал уже идёт: второй начать нельзя."
+        await table.update_game(turn_phase=TurnPhase.COMBAT_WAIT)
+        in_combat = await start_rest(table, "long")
+        assert in_combat.status_code == 409 and "бою" in in_combat.json()["detail"]
+        assert (await table.game()).state_version == 1
+
+
+async def test_a_short_rest_over_the_limit_of_the_adventure_is_409_and_a_long_one_starts(camp):
+    def tired(state: GameState) -> None:
+        state.short_rests_since_long = 2  # предел bg3_flavor: два коротких между долгими
+
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, shape=tired) as table:
+        refused = await start_rest(table, "short")
+
+        assert refused.status_code == 409
+        assert "долгий привал" in refused.json()["detail"]
+        assert (await table.game()).turn_phase == TurnPhase.DISCUSSION
+        assert (await start_rest(table, "long")).status_code == 200
+        await table.settle()
+
+
+async def test_a_rest_is_409_once_a_player_has_sent_a_move(camp):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        await table.call("boris", "PUT", "/action", json={"text": "Иду к воротам"})
+        assert (await table.call("boris", "POST", "/action/submit")).status_code == 200
+
+        refused = await start_rest(table, "short")
+
+        assert refused.status_code == 409
+        assert refused.json()["detail"] == SENT_MOVES_REFUSAL
+        assert (await table.game()).turn_phase == TurnPhase.DISCUSSION
+        assert (await table.state()).scene.type == SceneType.EXPLORATION
+
+
+async def test_a_pass_or_a_draft_does_not_hold_the_rest_back(camp):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        await table.pass_("boris")
+        await table.call("vera", "PUT", "/action", json={"text": "Думаю"})
+
+        response = await start_rest(table, "short")
+
+        assert response.status_code == 200, response.text
+        await table.settle()
+
+
+async def test_only_the_host_starts_a_rest_and_a_stranger_gets_404(camp, db):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        assert (await start_rest(table, "short", key="boris")).status_code == 403
+        async with db() as session:
+            stranger = User(dev_login="dev-9", name="Чужой")
+            session.add(stranger)
+            await session.commit()
+        headers = {"Authorization": f"Bearer {SessionSigner(SESSION_SECRET).issue(stranger.id)}"}
+        url = f"/api/games/{table.game_id}/host/rest"
+
+        assert (
+            await table.http.post(url, json={"kind": "short"}, headers=headers)
+        ).status_code == (404)
+        assert (await table.http.post(url, json={"kind": "short"})).status_code == 401
+        assert (await table.game()).turn_phase == TurnPhase.DISCUSSION
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"kind": "medium"}, {}, {"kind": "short", "seconds": 5}, {"kind": 1}, None],
+    ids=["неизвестный вид", "без вида", "лишнее поле", "не строка", "без тела"],
+)
+async def test_a_malformed_rest_request_is_422_and_changes_nothing(camp, body):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        options = {} if body is None else {"json": body}
+        response = await table.call("alice", "POST", "/host/rest", **options)
+
+        assert response.status_code == 422
+        assert (await table.game()).turn_phase == TurnPhase.DISCUSSION
+
+
+# идеи для рассказа
+
+
+async def test_a_short_rest_gives_ideas_to_the_two_heroes_longest_out_of_focus_only(
+    camp, json_requests
+):
+    shape = focus(alice=0, boris=4, vera=2)
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, shape=shape) as table:
+        await start_rest(table, "short")
+        await table.settle()
+
+        game = await table.game()
+        assert game.rest_ideas == {"boris": [IDEA_OF["boris"]], "vera": [IDEA_OF["vera"]]}
+        sent = table.broadcaster.of_type("rest_idea")
+        assert sorted((p["text"], who) for p, who in sent) == sorted(
+            [
+                (IDEA_OF["boris"], table.user_id("boris")),
+                (IDEA_OF["vera"], table.user_id("vera")),
+            ]
+        )
+        assert all(set(p) == {"type", "text"} for p, _who in sent)
+        assert (await rest_of(table, "boris"))["my_ideas"] == [IDEA_OF["boris"]]
+        assert (await rest_of(table, "vera"))["my_ideas"] == [IDEA_OF["vera"]]
+        assert (await rest_of(table, "alice"))["my_ideas"] == []  # не адресат и чужого не видит
+        # Идеи живут только в своих кадрах и снимках: ни в ленте, ни в других кадрах.
+        others = [p for _g, p, _w in table.broadcaster.sent if p["type"] != "rest_idea"]
+        everything = json.dumps(others, ensure_ascii=False) + json.dumps(
+            await table.feed_of("alice"), ensure_ascii=False
+        )
+        assert not any(text in everything for text in IDEA_OF.values())
+        [request] = of_purpose(json_requests)
+        assert request.cheap is True
+
+
+async def test_on_a_tie_the_heroes_out_of_focus_go_in_the_order_of_the_party(camp):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, shape=focus()) as table:
+        await start_rest(table, "short")
+        await table.settle()
+
+        assert set((await table.game()).rest_ideas) == {"alice", "boris"}
+
+
+async def test_a_long_rest_gives_an_idea_to_every_living_hero_with_a_player(camp):
+    def vera_is_dead(state: GameState) -> None:
+        vera = state.party["vera"]
+        vera.hp = 0
+        vera.death_saves.failures = 3
+
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, shape=vera_is_dead) as table:
+        await start_rest(table, "long")
+        await table.settle()
+
+        game = await table.game()
+        assert game.rest_ideas == {"alice": [IDEA_OF["alice"]], "boris": [IDEA_OF["boris"]]}
+        audiences = {who for _p, who in table.broadcaster.of_type("rest_idea")}
+        assert audiences == {table.user_id("alice"), table.user_id("boris")}
+
+
+async def test_ideas_for_strangers_and_heroes_who_are_not_addressed_are_dropped(camp):
+    answer = {
+        "ideas": [
+            {"character_id": "ghost", "text": "Чужая идея."},
+            {"character_id": "$pc1", "text": "Идея не адресату."},
+            {"character_id": "$pc2", "text": "Идея Бориса."},
+            {"character_id": "$pc2", "text": "Лишняя вторая идея Бориса."},
+        ]
+    }
+    async with camp(
+        in_camp=False,
+        scenario=[morning_turn()],
+        json_answers={IDEAS_PURPOSE: answer},
+        shape=focus(alice=0, boris=3, vera=1),
+    ) as table:
+        await start_rest(table, "short")
+        await table.settle()
+
+        assert (await table.game()).rest_ideas == {"boris": ["Идея Бориса."]}
+        assert [(p["text"], who) for p, who in table.broadcaster.of_type("rest_idea")] == [
+            ("Идея Бориса.", table.user_id("boris"))
+        ]
+
+
+async def test_the_request_of_ideas_carries_no_secret_of_the_heroes_or_the_adventure(
+    camp, json_requests, adventure
+):
+    def with_secrets(state: GameState) -> None:
+        state.pc_hooks = {
+            "boris": PcHook(
+                character_id="boris", personal_goal="Найти пропавшего брата", secret="ТАЙНА-БОРИСА"
+            ),
+            "vera": PcHook(character_id="vera", secret="ТАЙНА-ВЕРЫ"),
+        }
+        state.chronicle = Chronicle(summary="ЛЕТОПИСЬ-МАСТЕРА", entries=["ЗАПИСЬ-ЛЕТОПИСИ"])
+        state.journal = (
+            JournalEntry(
+                id="npc:fabian@vera",
+                ref="npc:fabian",
+                section="people",
+                title="Фабиан",
+                text="ЛИЧНАЯ-ЗАПИСЬ-ВЕРЫ",
+                audience="vera",
+                turn=1,
+            ),
+        )
+
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, shape=with_secrets) as table:
+        await start_rest(table, "long")
+        await table.settle()
+
+        [request] = of_purpose(json_requests)
+        sent = request.system + "\n" + request.prompt
+        secrets = [
+            "ТАЙНА-БОРИСА",
+            "ТАЙНА-ВЕРЫ",
+            "ЛЕТОПИСЬ-МАСТЕРА",
+            "ЗАПИСЬ-ЛЕТОПИСИ",
+            "ЛИЧНАЯ-ЗАПИСЬ-ВЕРЫ",
+            *hidden_texts(adventure.model_dump(mode="json")),
+        ]
+        assert [secret for secret in secrets if secret in sent] == []
+        # Публичное о героях в запросе есть: имена, открытая цель зацепки, режим мата игры.
+        assert all(name in request.prompt for name, _cls, _sp in HEROES.values())
+        assert "Найти пропавшего брата" in request.prompt
+        assert "Мат: разрешён" in request.system
+
+
+async def test_the_request_of_ideas_has_the_recent_public_stories_but_no_private_message(
+    camp, json_requests
+):
+    scenario = [round_turn("Ворота кладбища скрипят на ветру."), morning_turn()]
+    async with camp(
+        in_camp=False,
+        scenario=scenario,
+        json_answers={IDEAS_PURPOSE: {"ideas": []}},
+    ) as table:
+        await play_a_round(table)
+        async with table.db() as session:
+            session.add(
+                Message(
+                    game_id=table.game_id,
+                    audience=table.user_id("boris"),
+                    kind=MessageKind.PRIVATE,
+                    text="ЛИЧНОЕ-СООБЩЕНИЕ-БОРИСУ",
+                )
+            )
+            await session.commit()
+
+        await start_rest(table, "short")
+        await table.settle()
+
+        [request] = of_purpose(json_requests)
+        assert "Ворота кладбища скрипят на ветру." in request.prompt
+        assert "ЛИЧНОЕ-СООБЩЕНИЕ-БОРИСУ" not in request.prompt
+        assert (await table.game()).rest_ideas is None  # пустой ответ: идей нет, привал идёт
+        assert (await table.game()).turn_phase == TurnPhase.CAMP
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        {},
+        {IDEAS_PURPOSE: {"ideas": [{"character_id": "$pc2", "text": "x", "mood": "грусть"}]}},
+        {IDEAS_PURPOSE: {"ideas": [{"character_id": "$pc2", "text": "о" * 301}]}},
+    ],
+    ids=["нет ответа", "лишнее поле", "слишком длинная идея"],
+)
+async def test_a_failed_request_of_ideas_leaves_the_rest_going_without_ideas(camp, caplog, answers):
+    async with camp(
+        in_camp=False, scenario=[morning_turn()], json_answers=answers, shape=focus(boris=5)
+    ) as table:
+        with caplog.at_level("WARNING", logger="dnd_server.dm.rest_ideas"):
+            response = await start_rest(table, "short")
+            await table.settle()
+
+        assert response.status_code == 200
+        game = await table.game()
+        deadline = T0 + timedelta(seconds=SHORT_REST_SECONDS)
+        assert (game.turn_phase, game.deadline_at, game.rest_ideas) == (
+            TurnPhase.CAMP,
+            deadline,
+            None,
+        )
+        assert table.scheduler.pending() == {table.game_id: deadline}
+        assert table.broadcaster.of_type("rest_idea") == []
+        assert (await rest_of(table, "boris"))["my_ideas"] == []
+        [warning] = [r for r in caplog.records if r.name == "dnd_server.dm.rest_ideas"]
+        assert warning.levelname == "WARNING"
+        assert table.game_id in warning.getMessage()
+        assert "о" * 50 not in caplog.text and "грусть" not in caplog.text
+
+
+async def test_an_unexpected_error_or_a_timeout_of_the_ideas_leaves_the_rest_going(
+    camp, monkeypatch, caplog
+):
+    gate = asyncio.Event()
+
+    async def hanging(self: FakeProvider, req: JsonRequest, schema: Any) -> Any:
+        await gate.wait()
+        raise AssertionError("не дождались")
+
+    monkeypatch.setattr(FakeProvider, "complete_json", hanging)
+    monkeypatch.setattr(rest_ideas, "IDEAS_TIMEOUT_S", 0.01)
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        with caplog.at_level("WARNING", logger="dnd_server.dm.rest_ideas"):
+            await start_rest(table, "short")
+            await table.settle()
+        assert (await table.game()).turn_phase == TurnPhase.CAMP
+        assert "тайм-аут" in caplog.text
+
+        async def broken(self: FakeProvider, req: JsonRequest, schema: Any) -> Any:
+            raise RuntimeError("сломался")
+
+        monkeypatch.setattr(FakeProvider, "complete_json", broken)
+        await table.host("rest-end")
+        await table.settle()
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="dnd_server.dm.rest_ideas"):
+            assert (await start_rest(table, "long")).status_code == 200
+            await table.settle()
+        assert (await table.game()).turn_phase == TurnPhase.CAMP
+        assert "RuntimeError" in caplog.text and "сломался" not in caplog.text
+
+
+async def test_ideas_that_come_after_the_rest_has_ended_are_dropped(camp, monkeypatch):
+    gate = asyncio.Event()
+    real = FakeProvider.complete_json
+
+    async def late(self: FakeProvider, req: JsonRequest, schema: Any) -> Any:
+        if req.purpose == IDEAS_PURPOSE:
+            await gate.wait()
+        return await real(self, req, schema)
+
+    monkeypatch.setattr(FakeProvider, "complete_json", late)
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        await start_rest(table, "short")
+        assert (await table.host("rest-end")).status_code == 200
+
+        gate.set()
+        await table.settle()
+
+        game = await table.game()
+        assert (game.turn_phase, game.rest_ideas) == (TurnPhase.DISCUSSION, None)
+        assert table.broadcaster.of_type("rest_idea") == []
+
+
+async def test_the_master_who_starts_a_camp_also_gets_the_ideas_after_the_rest_started_frame(
+    camp, json_requests
+):
+    async with camp(
+        in_camp=False,
+        scenario=[start_camp_turn()],
+        json_answers={
+            IDEAS_PURPOSE: yaml.safe_load(REST_SCENARIO.read_text("utf-8"))["json"][IDEAS_PURPOSE]
+        },
+    ) as table:
+        await start_the_camp(table)
+        await table.settle()
+
+        [(started, audience)] = table.broadcaster.of_type("rest_started")
+        deadline = T0 + timedelta(seconds=CAMP_SECONDS)
+        assert (started["kind"], started["deadline_at"], audience) == (
+            "long",
+            deadline.isoformat(),
+            "all",
+        )
+        assert (await table.state()).scene.rest == "long"
+        types = frame_types(table)
+        assert types.index("phase") < types.index("rest_started") < types.index("rest_idea")
+        assert {who for _p, who in table.broadcaster.of_type("rest_idea")} == {
+            table.user_id(key) for key in HEROES
+        }
+        assert [req.purpose for req in json_requests] == [IDEAS_PURPOSE]
+
+
+# кость хитов
+
+
+async def test_a_hero_spends_a_hit_die_rolled_by_the_server_and_everybody_sees_the_card(camp):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, rng=ScriptedRng([6])) as table:
+        await start_rest(table, "short")
+        before = (await table.state()).party["alice"]
+        expected, _ = spend_hit_die(before, table.srd, ScriptedRng([6]))
+        sent_before = len(table.broadcaster.sent)
+
+        response = await spend_die(table, "alice")
+
+        assert response.status_code == 200, response.text
+        assert response.json() == {
+            "hit_dice": before.hit_dice - 1,
+            "hp": expected.hp,
+            "hp_max": expected.hp_max,
+        }
+        assert expected.hp > before.hp
+        state = await table.state()
+        assert state.version == 3
+        assert (state.party["alice"].hp, state.party["alice"].hit_dice) == (
+            expected.hp,
+            before.hit_dice - 1,
+        )
+        [card] = await table.messages(MessageKind.ROLL)
+        assert (card.audience, card.data["label"], card.data["actor_id"]) == (
+            "all",
+            "Кость хитов",
+            "alice",
+        )
+        assert card.data["rolls"] == [6] and card.data["expr"].startswith("1d10")
+        frames = table.broadcaster.sent[sent_before:]
+        kinds = [(p["type"], who) for _g, p, who in frames]
+        assert ("feed_item", "all") in kinds and ("party", "all") in kinds
+        assert ("character", table.user_id("alice")) in kinds
+        assert ("character", table.user_id("boris")) not in kinds
+        [roll_item] = [p["item"] for _g, p, _w in frames if p["type"] == "feed_item"]
+        assert (roll_item["kind"], roll_item["data"]["label"]) == ("roll", "Кость хитов")
+        for key in HEROES:
+            assert [
+                i["data"]["label"] for i in await table.feed_of(key) if i["kind"] == "roll"
+            ] == ["Кость хитов"]
+        await table.settle()
+
+
+async def test_hit_dice_follow_the_seed_of_the_server_and_never_a_number_from_the_client(camp):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, rng=SeededRng(7)) as table:
+        await start_rest(table, "short")
+        hero = (await table.state()).party["boris"]
+        hero.hp = 1
+        dice = SeededRng(7)
+        first, _ = spend_hit_die(hero, table.srd, dice)
+        second, _ = spend_hit_die(first, table.srd, dice)
+        async with table.db() as session:  # Борис ранен, чтобы лечение было видно
+            row = await session.get(GameStateSnapshot, (table.game_id, 2))
+            data = dict(row.data)
+            data["party"] = {**data["party"], "boris": {**data["party"]["boris"], "hp": 1}}
+            row.data = data
+            await session.commit()
+
+        answers = [
+            (await table.call("boris", "POST", "/rest/hit-dice", json={"total": 20})).json()
+            for _ in range(2)
+        ]
+
+        assert [answer["hp"] for answer in answers] == [first.hp, second.hp]
+        assert [answer["hit_dice"] for answer in answers] == [hero.hit_dice - 1, hero.hit_dice - 2]
+        await table.settle()
+
+
+@pytest.mark.parametrize(
+    ("setup", "detail"),
+    [
+        ("discussion", "коротком привале"),
+        ("long", "коротком привале"),
+        ("no_dice", "Костей хитов не осталось"),
+        ("dead", "Погибший"),
+        ("no_hero", "нет героя"),
+    ],
+    ids=["вне привала", "долгий привал", "без костей", "погибший", "без героя"],
+)
+async def test_a_hit_die_is_409_outside_a_short_rest_without_dice_or_hero(camp, db, setup, detail):
+    def shape(state: GameState) -> None:
+        if setup == "no_dice":
+            state.party["vera"].hit_dice = 0
+        if setup == "dead":
+            state.party["vera"].hp = 0
+            state.party["vera"].death_saves.failures = 3
+
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, shape=shape) as table:
+        if setup != "discussion":
+            await start_rest(table, "long" if setup == "long" else "short")
+        if setup == "no_hero":
+            async with db() as session:
+                player = await session.get(GamePlayer, (table.game_id, table.user_id("vera")))
+                player.character_id = None
+                await session.commit()
+        version = (await table.game()).state_version
+
+        response = await spend_die(table, "vera")
+
+        assert response.status_code == 409, response.text
+        assert detail in response.json()["detail"]
+        assert (await table.game()).state_version == version
+        assert await table.messages(MessageKind.ROLL) == []
+        await table.settle()
+
+
+async def test_a_hit_die_needs_a_seat_in_the_game(camp, db):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        await start_rest(table, "short")
+        async with db() as session:
+            stranger = User(dev_login="dev-9", name="Чужой")
+            session.add(stranger)
+            await session.commit()
+        headers = {"Authorization": f"Bearer {SessionSigner(SESSION_SECRET).issue(stranger.id)}"}
+        url = f"/api/games/{table.game_id}/rest/hit-dice"
+
+        assert (await table.http.post(url, headers=headers)).status_code == 404
+        assert (await table.http.post(url)).status_code == 401
+        await table.settle()
+
+
+async def test_a_hit_die_and_the_end_of_the_rest_at_once_stay_consistent(camp):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, rng=ScriptedRng([6])) as table:
+        await start_rest(table, "short")
+        await table.settle()
+
+        die, end = await asyncio.gather(spend_die(table, "alice"), table.host("rest-end"))
+        await table.settle()
+
+        assert end.status_code == 200
+        assert die.status_code in (200, 409), die.text
+        game = await table.game()
+        assert game.turn_phase == TurnPhase.DISCUSSION  # ход «конец привала» удался
+        [log] = await table.logs()
+        assert log.error is None
+        hero = (await table.state()).party["alice"]
+        if die.status_code == 200:
+            assert hero.hp == die.json()["hp"]  # кость вошла в состояние, с которого шёл мастер
+        else:
+            assert hero.hp == 1 and "коротком привале" in die.json()["detail"]
+
+
+# конец привала
+
+
+async def test_the_end_of_a_short_rest_restores_short_rest_features_and_keeps_the_time(camp):
+    def fighter_tired(state: GameState) -> None:
+        state.party["alice"].resources = {"second_wind": 0, "action_surge": 0}
+
+    async with camp(
+        in_camp=False, scenario_file=REST_SCENARIO, shape=fighter_tired, rng=ScriptedRng([6])
+    ) as table:
+        await start_rest(table, "short")
+        healed = (await spend_die(table, "alice")).json()["hp"]
+        await table.settle()
+
+        response = await table.host("rest-end")
+        await table.settle()
+
+        assert response.status_code == 200, response.text
+        game = await table.game()
+        assert (game.turn_phase, game.deadline_at, game.rest_ideas) == (
+            TurnPhase.DISCUSSION,
+            None,
+            None,
+        )
+        state = await table.state()
+        assert state.scene == Scene(type=SceneType.EXPLORATION, started_turn=1)
+        assert state.time == GameTime(day=2, part="evening")  # час отдыха время не двигает
+        assert state.short_rests_since_long == 2
+        alice = state.party["alice"]
+        assert alice.hp == healed  # лечили только кости хитов
+        assert alice.resources["second_wind"] == 1 and alice.resources["action_surge"] >= 1
+        assert state.party["vera"].spell_slots == {
+            level: 0 for level in state.party["vera"].spell_slots_max
+        }  # ячейки возвращает только долгий отдых
+        context = await table.camp_end_context()
+        assert "короткий рассказ: что изменилось за час отдыха" in context
+        stories = [m.text for m in await table.messages(MessageKind.NARRATION)]
+        assert stories == [END_OF_THE_SHORT_REST]
+        assert "Короткий отдых: отряд перевёл дух." in [
+            m.text for m in await table.messages(MessageKind.SYSTEM)
+        ]
+        [(ended, audience)] = table.broadcaster.of_type("rest_ended")
+        assert (ended, audience) == ({"type": "rest_ended", "kind": "short"}, "all")
+        # Нового привала мастер не начал: `rest_started` был один — в начале этого привала.
+        assert len(table.broadcaster.of_type("rest_started")) == 1
+        assert await rest_of(table, "boris") is None
+
+
+async def test_the_end_of_a_long_rest_by_the_countdown_is_the_morning_of_dnd1(camp):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        await start_rest(table, "long")
+        await table.settle()
+        assert (await table.game()).rest_ideas  # долгий привал: идеи всем
+
+        await table.scheduler.advance(CAMP_SECONDS)
+        await table.settle()
+
+        game = await table.game()
+        assert (game.turn_phase, game.rest_ideas) == (TurnPhase.DISCUSSION, None)
+        state = await table.state()
+        assert state.time == GameTime(day=3, part="morning")
+        assert state.short_rests_since_long == 0
+        assert state.party["alice"].hp == state.party["alice"].hp_max
+        context = await table.camp_end_context()
+        assert "длинный отдых" in context and "час отдыха" not in context
+        [(ended, _who)] = table.broadcaster.of_type("rest_ended")
+        assert ended["kind"] == "long"
+        types = frame_types(table)
+        last_feed = max(number for number, kind in enumerate(types) if kind == "feed_item")
+        assert types.index("rest_ended") > last_feed  # кадр конца — после записей хода
+
+
+async def test_a_master_camp_of_dnd1_without_a_kind_ends_as_a_long_rest_with_its_frame(camp):
+    async with camp() as table:  # сцена `camp` без вида: так её записал DND-1
+        assert (await table.state()).scene.rest is None
+        assert (await rest_of(table, "alice"))["kind"] == "long"
+
+        await table.host("camp-end")
+        await table.settle()
+
+        [(ended, _who)] = table.broadcaster.of_type("rest_ended")
+        assert ended["kind"] == "long"
+
+
+async def test_rest_extend_and_rest_end_work_like_the_camp_buttons(camp):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        await start_rest(table, "short")
+        await table.scheduler.advance(10)
+
+        extended = await table.host("rest-extend")
+
+        deadline = T0 + timedelta(seconds=SHORT_REST_SECONDS + 60)
+        assert extended.status_code == 200 and extended.json()["turn_phase"] == "camp"
+        assert (await table.game()).deadline_at == deadline
+        assert table.scheduler.pending() == {table.game_id: deadline}
+        assert (await table.host("rest-end")).status_code == 200
+        await table.settle()
+        assert (await table.game()).turn_phase == TurnPhase.DISCUSSION
+        assert (await table.host("rest-end")).status_code == 409
+        assert (await table.host("rest-extend")).status_code == 409
+
+
+async def test_lines_of_the_rest_are_in_its_snapshot_with_their_author(camp):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        await start_rest(table, "short")
+        said = (await table.line("vera", "Помолюсь за павших.")).json()
+
+        for key in HEROES:
+            rest = await rest_of(table, key)
+            assert rest["kind"] == "short"
+            assert rest["deadline_at"] == (T0 + timedelta(seconds=SHORT_REST_SECONDS)).isoformat()
+            assert rest["lines"] == [said]
+            assert said["data"] == {"actor_id": "vera", "actor": "Вера"}
+        await table.settle()
+
+
+# перезапуск и «Перегенерировать»
+
+
+async def test_a_restart_in_the_middle_of_a_short_rest_keeps_its_kind_time_left_and_ideas(
+    camp, settings, db, srd
+):
+    shape = focus(alice=0, boris=4, vera=2)
+    async with camp(
+        in_camp=False, scenario_file=REST_SCENARIO, shape=shape, rng=ScriptedRng([6])
+    ) as table:
+        await start_rest(table, "short")
+        await table.settle()
+        await table.scheduler.advance(50)
+        run_settings = table.app.state.settings
+        setup = table.setup
+
+    restarted = replace(setup, created=T0 + timedelta(seconds=50))
+    async with running_table(run_settings, db, srd, restarted, rng=ScriptedRng([5])) as again:
+        deadline = T0 + timedelta(seconds=SHORT_REST_SECONDS)
+        assert again.scheduler.pending() == {again.game_id: deadline}  # остаток 70 с, не новые 120
+        rest = await rest_of(again, "boris")
+        assert (rest["kind"], rest["deadline_at"]) == ("short", deadline.isoformat())
+        assert rest["my_ideas"] == [IDEA_OF["boris"]]
+        assert (await rest_of(again, "alice"))["my_ideas"] == []
+        assert (await spend_die(again, "alice")).status_code == 200  # короткий привал идёт
+
+        await again.scheduler.advance(70)
+        await again.settle()
+
+        state = await again.state()
+        assert (state.time, state.short_rests_since_long) == (GameTime(day=2, part="evening"), 2)
+        assert (await again.game()).turn_phase == TurnPhase.DISCUSSION
+        assert "час отдыха" in await again.camp_end_context()
+
+
+async def test_regenerate_is_409_after_the_host_started_a_rest_and_the_rest_goes_on(camp):
+    scenario = [round_turn(), morning_turn()]
+    async with camp(
+        in_camp=False, scenario=scenario, json_answers={IDEAS_PURPOSE: {"ideas": []}}
+    ) as table:
+        await play_a_round(table)
+        await start_rest(table, "short")
+        await table.settle()
+        version = (await table.game()).state_version
+
+        refused = await table.host("regenerate")
+
+        assert refused.status_code == 409
+        assert refused.json()["detail"] == REST_REFUSAL_REGENERATE
+        game = await table.game()
+        assert (game.turn_phase, game.state_version) == (TurnPhase.CAMP, version)
+        assert table.scheduler.pending() == {
+            table.game_id: T0 + timedelta(seconds=SHORT_REST_SECONDS)
+        }
+        assert [m.superseded for m in await table.messages(MessageKind.NARRATION)] == [False]
+
+
+async def test_regenerate_is_409_after_a_hit_die_too(camp):
+    scenario = [round_turn(), morning_turn()]
+    async with camp(
+        in_camp=False,
+        scenario=scenario,
+        json_answers={IDEAS_PURPOSE: {"ideas": []}},
+        rng=ScriptedRng([6]),
+    ) as table:
+        await play_a_round(table)
+        await start_rest(table, "short")
+        await spend_die(table, "alice")
+
+        refused = await table.host("regenerate")
+        await table.settle()
+
+        assert refused.status_code == 409
+        assert refused.json()["detail"] == REST_REFUSAL_REGENERATE
+        assert (await table.state()).party["alice"].hit_dice == 2
+
+
+async def test_regenerating_the_end_of_a_short_rest_keeps_the_spent_dice_and_counts_it_once(
+    camp,
+):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, rng=ScriptedRng([6])) as table:
+        await start_rest(table, "short")
+        healed = (await spend_die(table, "alice")).json()["hp"]
+        await table.host("rest-end")
+        await table.settle()
+
+        response = await table.host("regenerate")
+        await table.settle()
+
+        assert response.status_code == 200, response.text
+        state = await table.state()
+        assert state.short_rests_since_long == 2  # было 1: короткий привал засчитан один раз
+        assert (state.party["alice"].hp, state.party["alice"].hit_dice) == (healed, 2)
+        assert state.scene.type == SceneType.EXPLORATION
+        rolls = await table.messages(MessageKind.ROLL)
+        assert [(m.data["label"], m.superseded) for m in rolls] == [("Кость хитов", False)]
+        assert len(table.broadcaster.of_type("rest_ended")) == 2
+
+
+async def test_regenerate_during_a_master_camp_drops_its_ideas(camp):
+    scenario = [start_camp_turn("Первый костёр."), scenario_turn(say("Привала не будет."))]
+    ideas = {"ideas": [{"character_id": "$pc1", "text": "Идея Алисы."}]}
+    async with camp(in_camp=False, scenario=scenario, json_answers={IDEAS_PURPOSE: ideas}) as table:
+        await start_the_camp(table)
+        await table.settle()
+        assert (await table.game()).rest_ideas == {"alice": ["Идея Алисы."]}
+
+        response = await table.host("regenerate")
+        await table.settle()
+
+        assert response.status_code == 200, response.text
+        game = await table.game()
+        assert (game.turn_phase, game.rest_ideas) == (TurnPhase.DISCUSSION, None)
+
+
+# --- финальное покрытие привалов (B9.coverage) ---
+#
+# Пробелы после B9.3: идея не попадает ни в один ответ REST и ни в чужой снимок; сбой посреди
+# начала привала или кости хитов не оставляет половины; два нажатия сразу и «привал против сдачи
+# хода» решает блокировка игры; сбой идей не трогает ни состояние, ни ход; кость хитов на паузе и
+# после игры — 409; после «Перегенерировать» привала мастера адресаты получают только новые идеи, а
+# запоздавший ответ прежнего привала отбрасывается; идеи не попадают ни в состояние, ни к мастеру.
+
+
+def auth(table: Table, key: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {table.setup.seats[key].token}"}
+
+
+async def snapshot_of(table: Table, key: str) -> dict[str, Any]:
+    async with table.db() as session:
+        user = await session.get(User, table.user_id(key))
+        return await snapshot_for(session, user, table.game_id, srd=table.srd)
+
+
+async def wait_until(check: Callable[[], Awaitable[bool]]) -> None:
+    """Ждёт условия, не дожидаясь всех фоновых задач: одна из них нарочно стоит у шлагбаума."""
+    async with asyncio.timeout(TIMEOUT_S):
+        while not await check():
+            await asyncio.sleep(0.01)
+
+
+def dumped(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+@asynccontextmanager
+async def tolerant_client(table: Table) -> AsyncIterator[httpx.AsyncClient]:
+    """Клиент, который получает ответ 500, а не исключение приложения: так видно, что сбой отдан
+    клиенту ответом, а база осталась прежней."""
+    transport = httpx.ASGITransport(app=table.app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as http:
+        yield http
+
+
+# идея — только адресату: REST, снимок, состояние и мастер
+
+
+async def test_an_idea_is_in_no_rest_answer_and_only_in_the_snapshot_of_its_addressee(camp):
+    shape = focus(alice=0, boris=4, vera=2)  # адресаты короткого привала — Борис и Вера
+    async with camp(
+        in_camp=False, scenario_file=REST_SCENARIO, shape=shape, rng=ScriptedRng([6])
+    ) as table:
+        answers = [await start_rest(table, "short")]
+        await table.settle()
+        assert (await table.game()).rest_ideas == {
+            "boris": [IDEA_OF["boris"]],
+            "vera": [IDEA_OF["vera"]],
+        }
+
+        for key in HEROES:
+            answers += [
+                await table.call(key, "GET", ""),
+                await table.http.get("/api/games", headers=auth(table, key)),
+                await table.call(key, "GET", "/characters/mine"),
+                await table.line(key, f"Реплика у костра от {key}."),
+            ]
+        answers += [
+            await spend_die(table, "boris"),
+            await table.host("rest-extend"),
+            await table.host("camp-extend"),
+            await start_rest(table, "long"),  # привал уже идёт: 409 с текстом
+        ]
+
+        assert [r.status_code for r in answers].count(409) == 1
+        assert all(r.status_code in (200, 409) for r in answers), [r.text for r in answers]
+        everything = dumped([r.json() for r in answers])
+        assert [idea for idea in IDEA_OF.values() if idea in everything] == []
+        for key in HEROES:
+            snapshot = dumped(await snapshot_of(table, key))
+            own = [IDEA_OF[key]] if key in ("boris", "vera") else []
+            assert [idea for idea in IDEA_OF.values() if idea in snapshot] == own, key
+
+
+async def test_ideas_never_reach_the_game_state_the_master_or_the_log_of_its_turns(camp):
+    shape = focus(alice=0, boris=4, vera=2)
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, shape=shape) as table:
+        await start_rest(table, "short")
+        await table.settle()
+        assert (await table.game()).rest_ideas  # идеи были
+        await table.line("boris", "Расскажу о городе, из которого сбежал.")
+
+        assert (await table.host("rest-end")).status_code == 200
+        await table.settle()
+
+        async with table.db() as session:
+            rows = await session.scalars(
+                select(GameStateSnapshot).where(GameStateSnapshot.game_id == table.game_id)
+            )
+            states = [row.data for row in rows]
+        logs = [(log.request, log.trace, log.output) for log in await table.logs()]
+        messages = [(message.text, message.data) for message in await table.messages()]
+        assert len(states) == 3 and len(logs) == 1  # начало привала и его конец
+        stored = dumped([states, logs, messages])
+        assert [idea for idea in IDEA_OF.values() if idea in stored] == []
+        assert (await table.game()).rest_ideas is None
+
+
+async def test_the_request_of_ideas_has_no_private_story_secret_move_or_roll_nor_withdrawn_story(
+    camp, json_requests
+):
+    async with camp(
+        in_camp=False, scenario=[morning_turn()], json_answers={IDEAS_PURPOSE: {"ideas": []}}
+    ) as table:
+        boris = table.user_id("boris")
+        hidden = {  # текст -> (адресат, вид, снят ли)
+            "ЛИЧНЫЙ-РАССКАЗ-БОРИСУ": (boris, MessageKind.NARRATION, False),
+            "ТАЙНЫЙ-ХОД-БОРИСА": (boris, MessageKind.ACTION, False),
+            "ТАЙНЫЙ-БРОСОК-БОРИСА": (boris, MessageKind.ROLL, False),
+            "ЛИЧНОЕ-ОШИБОЧНО-ВСЕМ": ("all", MessageKind.PRIVATE, False),
+            "СНЯТЫЙ-РАССКАЗ": ("all", MessageKind.NARRATION, True),
+        }
+        async with table.db() as session:
+            session.add(
+                Message(
+                    game_id=table.game_id,
+                    audience="all",
+                    kind=MessageKind.NARRATION,
+                    text="Общий рассказ у ворот кладбища.",
+                )
+            )
+            session.add_all(
+                Message(
+                    game_id=table.game_id,
+                    audience=audience,
+                    kind=kind,
+                    text=text,
+                    data={"label": text},
+                    superseded=superseded,
+                )
+                for text, (audience, kind, superseded) in hidden.items()
+            )
+            await session.commit()
+
+        await start_rest(table, "short")
+        await table.settle()
+
+        [request] = of_purpose(json_requests)
+        sent = request.system + "\n" + request.prompt
+        assert "Общий рассказ у ворот кладбища." in request.prompt
+        assert [text for text in hidden if text in sent] == []
+
+
+def test_the_addressees_of_ideas_skip_heroes_without_a_player_and_the_dead(srd, adventure):
+    state = camp_state(srd, adventure, {"alice": "u-alice", "vera": "u-vera"})  # Борис без игрока
+    state.scene = Scene(type=SceneType.CAMP, started_turn=1, rest="short")
+    focus(alice=0, boris=9, vera=1)(state)
+
+    assert rest_ideas.idea_addressees(state) == ["vera", "alice"]
+    state.party["vera"].hp = 0
+    state.party["vera"].death_saves.failures = 3
+    assert rest_ideas.idea_addressees(state) == ["alice"]
+    state.scene.rest = "long"
+    assert rest_ideas.idea_addressees(state) == ["alice"]
+
+
+@pytest.mark.parametrize("who", ["host", "master"], ids=["кнопка хоста", "мастер"])
+async def test_the_start_of_a_rest_drops_ideas_left_from_before(camp, who):
+    stale = {"alice": ["Забытая идея прошлого привала."]}
+    scenario = [start_camp_turn()] if who == "master" else [morning_turn()]
+    async with camp(in_camp=False, scenario=scenario, game_fields={"rest_ideas": stale}) as table:
+        if who == "host":
+            assert (await start_rest(table, "long")).status_code == 200
+        else:
+            await start_the_camp(table)
+        await table.settle()  # ответа `campfire.ideas` в сценарии нет: новых идей не будет
+
+        assert (await table.game()).rest_ideas is None
+        assert (await rest_of(table, "alice"))["my_ideas"] == []
+
+
+async def test_after_regenerate_only_new_ideas_reach_their_addressees_and_a_late_one_is_dropped(
+    camp, monkeypatch
+):
+    gate = asyncio.Event()
+    asked: list[str] = []
+    real = FakeProvider.complete_json
+
+    def answer(word: str) -> rest_ideas.IdeasOut:
+        return rest_ideas.IdeasOut(
+            ideas=[
+                rest_ideas.IdeaOut(character_id=key, text=f"{word} идея для {name}.")
+                for key, (name, _class, _species) in HEROES.items()
+            ]
+        )
+
+    async def ideas(self: FakeProvider, req: JsonRequest, schema: Any) -> Any:
+        if req.purpose != IDEAS_PURPOSE:
+            return await real(self, req, schema)
+        asked.append(req.prompt)
+        if len(asked) == 1:
+            await gate.wait()  # ответ первому привалу приходит, когда его уже откатили
+            return answer("Старая")
+        return answer("Новая")
+
+    async def camp_asked_once() -> bool:
+        return (await table.game()).turn_phase == TurnPhase.CAMP and len(asked) == 1
+
+    async def new_ideas_written() -> bool:
+        return (await table.game()).rest_ideas is not None
+
+    monkeypatch.setattr(FakeProvider, "complete_json", ideas)
+    scenario = [start_camp_turn("Первый костёр."), start_camp_turn("Второй костёр.")]
+    async with camp(in_camp=False, scenario=scenario) as table:
+        for key in HEROES:
+            await table.pass_(key)
+        assert (await table.host("collect")).status_code == 200
+        await wait_until(camp_asked_once)
+
+        regenerated = await table.host("regenerate")
+        assert regenerated.status_code == 200, regenerated.text
+        await wait_until(new_ideas_written)
+        gate.set()
+        await table.settle()
+
+        new = {key: [f"Новая идея для {name}."] for key, (name, _c, _s) in HEROES.items()}
+        game = await table.game()
+        assert (game.turn_phase, game.rest_ideas) == (TurnPhase.CAMP, new)
+        sent = [(p["text"], who) for p, who in table.broadcaster.of_type("rest_idea")]
+        assert sorted(sent) == sorted((new[key][0], table.user_id(key)) for key in HEROES)
+        assert "Старая" not in dumped([payload for _game, payload, _who in table.broadcaster.sent])
+        for key in HEROES:
+            assert (await rest_of(table, key))["my_ideas"] == new[key]
+        assert len(table.broadcaster.of_type("rest_started")) == 2
+
+
+# броски только сервером
+
+
+def test_the_hit_die_and_the_rest_buttons_take_no_body_and_the_start_only_its_kind(settings):
+    api = create_app(settings).openapi()
+
+    for name in ("rest/hit-dice", "host/rest-extend", "host/rest-end"):
+        assert "requestBody" not in api["paths"][f"/api/games/{{game_id}}/{name}"]["post"], name
+    start = api["components"]["schemas"]["RestIn"]
+    assert set(start["properties"]) == {"kind"} and start["required"] == ["kind"]
+    assert start["properties"]["kind"]["enum"] == ["short", "long"]
+    assert start["additionalProperties"] is False
+
+
+async def test_a_hit_die_rolled_by_the_system_rng_of_the_server_heals_by_its_card(camp, settings):
+    assert isinstance(create_app(settings).state.rng, SystemRng)  # в игре — генератор системы
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        table.set_rng(SystemRng())
+        await start_rest(table, "short")
+        before = (await table.state()).party["alice"]
+
+        hint = {"rolls": [10], "total": 99}  # числа клиента сервер не читает
+        response = await table.call("alice", "POST", "/rest/hit-dice", json=hint)
+
+        assert response.status_code == 200, response.text
+        [card] = await table.messages(MessageKind.ROLL)
+        [rolled] = card.data["rolls"]
+        assert 1 <= rolled <= 10  # кость хитов воина — d10
+        assert card.data["total"] != 99
+        assert response.json() == {
+            "hit_dice": before.hit_dice - 1,
+            "hp": min(before.hp_max, before.hp + max(1, card.data["total"])),
+            "hp_max": before.hp_max,
+        }
+        await table.settle()
+
+
+# ход атомарен: сбой посреди записи не оставляет половины
+
+
+async def test_a_failure_inside_the_start_of_a_rest_rolls_the_whole_start_back(camp, json_requests):
+    def broken(_game: Game, _kind: str) -> int:
+        raise RuntimeError("сбой посреди начала привала")
+
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        async with tolerant_client(table) as http:
+            with pytest.MonkeyPatch.context() as patch:
+                # Срок привала считается последним: снимок, ход и фаза к этому мигу уже в сессии.
+                patch.setattr(flow_module, "rest_seconds", broken)
+                failed = await http.post(
+                    f"/api/games/{table.game_id}/host/rest",
+                    json={"kind": "short"},
+                    headers=auth(table, "alice"),
+                )
+
+        assert failed.status_code == 500
+        game = await table.game()
+        assert (game.turn_phase, game.deadline_at, game.state_version) == (
+            TurnPhase.DISCUSSION,
+            None,
+            1,
+        )
+        assert await table.snapshot_versions() == [1]
+        [turn] = await table.turns()
+        assert (turn.kind, turn.status) == (TurnKind.ROUND, TurnStatus.OPEN)
+        assert (await table.state()).scene.type == SceneType.EXPLORATION
+        assert table.scheduler.pending() == {}
+        assert table.broadcaster.sent == [] and table.notifier.sent == []
+        await table.settle()
+        assert of_purpose(json_requests) == []
+        # Блокировка игры отпущена: следующее нажатие начинает привал как обычно.
+        assert (await start_rest(table, "short")).status_code == 200
+        assert await table.snapshot_versions() == [1, 2]
+        await table.settle()
+
+
+async def test_a_failure_inside_a_hit_die_spends_nothing_and_shows_nothing(camp):
+    def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("сбой записи карточки броска")
+
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, rng=ScriptedRng([6, 6])) as table:
+        await start_rest(table, "short")
+        await table.settle()
+        before = (await table.state()).party["alice"]
+        sent_before = len(table.broadcaster.sent)
+
+        async with tolerant_client(table) as http:
+            with pytest.MonkeyPatch.context() as patch:
+                # Карточка броска собирается после броска и новой версии состояния в сессии.
+                patch.setattr(flow_module, "feed_entries", broken)
+                failed = await http.post(
+                    f"/api/games/{table.game_id}/rest/hit-dice", headers=auth(table, "alice")
+                )
+
+        assert failed.status_code == 500
+        assert await table.snapshot_versions() == [1, 2]
+        alice = (await table.state()).party["alice"]
+        assert (alice.hp, alice.hit_dice) == (before.hp, before.hit_dice)
+        assert await table.messages(MessageKind.ROLL) == []
+        assert len(table.broadcaster.sent) == sent_before
+        spent = await spend_die(table, "alice")
+        assert spent.status_code == 200, spent.text
+        assert spent.json()["hit_dice"] == before.hit_dice - 1
+        assert await table.snapshot_versions() == [1, 2, 3]
+        assert len(await table.messages(MessageKind.ROLL)) == 1
+
+
+# гонки под блокировкой игры
+
+
+async def test_two_rest_buttons_pressed_at_once_start_one_rest(camp, json_requests):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        short, long_ = await asyncio.gather(start_rest(table, "short"), start_rest(table, "long"))
+        await table.settle()
+
+        assert sorted([short.status_code, long_.status_code]) == [200, 409]
+        won, refused = ("short", long_) if short.status_code == 200 else ("long", short)
+        assert refused.json()["detail"] == "Привал уже идёт: второй начать нельзя."
+        assert await table.snapshot_versions() == [1, 2]
+        assert (await table.state()).scene.rest == won
+        assert [p["kind"] for p, _who in table.broadcaster.of_type("rest_started")] == [won]
+        seconds = SHORT_REST_SECONDS if won == "short" else CAMP_SECONDS
+        assert table.scheduler.pending() == {table.game_id: T0 + timedelta(seconds=seconds)}
+        assert len(of_purpose(json_requests)) == 1
+
+
+async def test_two_hit_dice_at_once_spend_the_last_die_only_once(camp):
+    def one_die_left(state: GameState) -> None:
+        state.party["alice"].hit_dice = 1
+
+    async with camp(
+        in_camp=False, scenario_file=REST_SCENARIO, shape=one_die_left, rng=ScriptedRng([6, 6])
+    ) as table:
+        await start_rest(table, "short")
+        await table.settle()
+
+        first, second = await asyncio.gather(spend_die(table, "alice"), spend_die(table, "alice"))
+
+        assert sorted([first.status_code, second.status_code]) == [200, 409]
+        refused = first if first.status_code == 409 else second
+        assert refused.json()["detail"] == "Костей хитов не осталось: их возвращает долгий отдых."
+        state = await table.state()
+        assert (state.version, state.party["alice"].hit_dice) == (3, 0)
+        assert len(await table.messages(MessageKind.ROLL)) == 1
+
+
+@pytest.mark.parametrize("rest_first", [True, False], ids=["привал раньше", "соперник раньше"])
+@pytest.mark.parametrize("rival", ["submit", "collect"], ids=["сдача хода", "сбор ходов"])
+async def test_a_rest_and_a_sent_move_or_the_collection_at_once_never_both_win(
+    camp, rival, rest_first
+):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        await table.call("boris", "PUT", "/action", json={"text": "Иду к воротам"})
+        other = (
+            table.call("boris", "POST", "/action/submit")
+            if rival == "submit"
+            else table.host("collect")
+        )
+        rest_call = start_rest(table, "short")
+
+        if rest_first:
+            rest, rivalled = await asyncio.gather(rest_call, other)
+        else:
+            rivalled, rest = await asyncio.gather(other, rest_call)
+        await table.settle()
+
+        assert sorted([rest.status_code, rivalled.status_code]) == [200, 409]
+        game = await table.game()
+        async with table.db() as session:
+            statuses = list(
+                await session.scalars(
+                    select(PlayerAction.status).where(PlayerAction.turn_id == game.current_turn_id)
+                )
+            )
+        if rest.status_code == 200:
+            assert game.turn_phase == TurnPhase.CAMP
+            assert ActionStatus.SUBMITTED not in statuses  # в «конце привала» сданных ходов нет
+            assert (await table.state()).scene.rest == "short"
+        else:
+            expected = (
+                SENT_MOVES_REFUSAL
+                if rival == "submit"
+                else "Начать привал можно, пока игроки обсуждают ход."
+            )
+            assert rest.json()["detail"] == expected
+            phase = TurnPhase.DISCUSSION if rival == "submit" else TurnPhase.COLLECTING
+            assert game.turn_phase == phase
+            assert (await table.state()).scene.type == SceneType.EXPLORATION
+            assert table.broadcaster.of_type("rest_started") == []
+
+
+# сбой идей не меняет ни фазу, ни срок, ни состояние
+
+
+@pytest.mark.parametrize("failure", ["отказ провайдера", "тайм-аут", "неожиданная ошибка"])
+async def test_a_failed_request_of_ideas_leaves_the_state_and_the_turn_and_the_rest_ends(
+    camp, monkeypatch, failure
+):
+    real = FakeProvider.complete_json
+
+    async def failing(self: FakeProvider, req: JsonRequest, schema: Any) -> Any:
+        if req.purpose != IDEAS_PURPOSE:
+            return await real(self, req, schema)
+        if failure == "отказ провайдера":
+            raise ProviderError("модель недоступна")
+        if failure == "тайм-аут":
+            await asyncio.Event().wait()
+        raise ValueError("ответ не разобран")
+
+    monkeypatch.setattr(FakeProvider, "complete_json", failing)
+    monkeypatch.setattr(rest_ideas, "IDEAS_TIMEOUT_S", 0.01)
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
+        await start_rest(table, "short")
+        await table.settle()
+
+        deadline = T0 + timedelta(seconds=SHORT_REST_SECONDS)
+        game = await table.game()
+        assert (game.turn_phase, game.deadline_at, game.state_version, game.rest_ideas) == (
+            TurnPhase.CAMP,
+            deadline,
+            2,
+            None,
+        )
+        assert await table.snapshot_versions() == [1, 2]
+        [turn] = await table.turns()
+        assert (turn.kind, turn.status) == (TurnKind.CAMP_END, TurnStatus.OPEN)
+        assert table.scheduler.pending() == {table.game_id: deadline}
+        assert await table.logs() == []  # мастера никто не звал
+        assert table.broadcaster.of_type("rest_idea") == []
+
+        assert (await table.host("rest-end")).status_code == 200
+        await table.settle()
+
+        assert (await table.game()).turn_phase == TurnPhase.DISCUSSION
+        assert (await table.state()).short_rests_since_long == 2
+        ended = [payload for payload, _who in table.broadcaster.of_type("rest_ended")]
+        assert ended == [{"type": "rest_ended", "kind": "short"}]
+
+
+# отказы, которых не было в B9.3
+
+
+@pytest.mark.parametrize("stop", ["pause", "finished"], ids=["пауза", "игра окончена"])
+async def test_a_hit_die_is_409_on_pause_or_after_the_game_and_spends_nothing(camp, stop):
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, rng=ScriptedRng([6])) as table:
+        await start_rest(table, "short")
+        await table.settle()
+        if stop == "pause":
+            assert (await table.host("pause")).status_code == 200
+        else:
+            await table.update_game(phase=GamePhase.FINISHED)
+        before = (await table.state()).party["alice"]
+
+        response = await spend_die(table, "alice")
+
+        assert response.status_code == 409, response.text
+        expected = "Игра на паузе" if stop == "pause" else "Игра сейчас не идёт."
+        assert expected in response.json()["detail"]
+        assert await table.snapshot_versions() == [1, 2]
+        alice = (await table.state()).party["alice"]
+        assert (alice.hp, alice.hit_dice) == (before.hp, before.hit_dice)
+        assert await table.messages(MessageKind.ROLL) == []
+
+
+# привал, начатый мастером в ходе «конец привала» (дефект B9.coverage D1 исправлен в fix-раунде 1
+# B9: R1/S2, xfail снят): конец прежнего привала и начало нового объявляются оба и по порядку
+
+
+async def test_a_camp_started_by_the_master_in_the_morning_turn_is_announced_with_rest_started(
+    camp,
+):
+    sleep_again = scenario_turn(
+        tool("start_camp", reason="Отряд снова валится с ног."),
+        tool("chronicle", entry="Отряд проснулся и снова встал на привал."),
+        say("Утро серое, и отряд снова ложится у костра."),
+    )
+    ideas = {"ideas": [{"character_id": "$pc2", "text": "Идея Бориса у второго костра."}]}
+    async with camp(scenario=[sleep_again], json_answers={IDEAS_PURPOSE: ideas}) as table:
+        assert (await table.host("camp-end")).status_code == 200
+        await table.settle()
+
+        game = await table.game()
+        assert game.turn_phase == TurnPhase.CAMP  # новый привал идёт, его идеи разосланы
+        assert table.broadcaster.of_type("rest_idea") == [
+            ({"type": "rest_idea", "text": "Идея Бориса у второго костра."}, table.user_id("boris"))
+        ]
+        types = frame_types(table)
+        assert "rest_started" in types, types
+        assert types.index("rest_ended") < types.index("rest_started") < types.index("rest_idea")
+        [(started, audience)] = table.broadcaster.of_type("rest_started")
+        assert (started["kind"], audience) == ("long", "all")
+
+
+# --- фильтр идей: личные сведения другого адресата (fix-раунд 1 B9, S1) ---
+
+# Личные сведения Бориса, которые лежат в общем запросе идей: предыстория своими словами и
+# открытая часть зацепки (цель, знакомый NPC с заметкой). Их видит только Борис.
+BORIS_BACKSTORY = "Сбежал из Серой гавани после пожара на верфи отца."
+BORIS_GOAL = "Найти пропавшего брата в столице"
+BORIS_NOTE = "задолжал ей за лодку и молчит"
+
+
+def boris_opens_up(state: GameState) -> None:
+    state.party["boris"].persona.backstory = BORIS_BACKSTORY
+    state.pc_hooks = {
+        "boris": PcHook(
+            character_id="boris",
+            personal_goal=BORIS_GOAL,
+            npc_links=[{"npc_id": "marta", "relation": "должник", "note": BORIS_NOTE}],
+        ),
+        "vera": PcHook(character_id="vera", personal_goal="Вернуть храму святыню"),
+    }
+
+
+def ideas_answer(**texts: str) -> dict[str, Any]:
+    numbers = {"alice": "$pc1", "boris": "$pc2", "vera": "$pc3"}
+    return {"ideas": [{"character_id": numbers[key], "text": text} for key, text in texts.items()]}
+
+
+@pytest.mark.parametrize(
+    "vera_idea",
+    [
+        "Спроси Бориса, правда ли он сбежал после пожара на верфи отца.",
+        "Расскажи, как ты помогаешь Борису найти пропавшего брата в столице.",
+        "Узнай у Бориса, почему он ЗАДОЛЖАЛ ЕЙ ЗА ЛОДКУ, и молчит.",
+        "Вспомни, что говорят о Марте у костра.",
+    ],
+    ids=["предыстория", "цель", "заметка связи", "знакомый NPC"],
+)
+async def test_an_idea_that_carries_the_private_details_of_another_hero_never_reaches_anyone(
+    camp, caplog, vera_idea
+):
+    own = "Расскажи спутникам, как ты сбежал после пожара на верфи отца."
+    answer = ideas_answer(alice="Расскажи о первом бое.", boris=own, vera=vera_idea)
+    async with camp(
+        in_camp=False,
+        scenario=[morning_turn()],
+        json_answers={IDEAS_PURPOSE: answer},
+        shape=boris_opens_up,
+    ) as table:
+        with caplog.at_level("WARNING", logger="dnd_server.dm.rest_ideas"):
+            await start_rest(table, "long")
+            await table.settle()
+
+        # Своя идея Бориса с его же сведениями и идея Алисы проходят, идея Веры — нет.
+        assert (await table.game()).rest_ideas == {
+            "alice": ["Расскажи о первом бое."],
+            "boris": [own],
+        }
+        sent = {who: p["text"] for p, who in table.broadcaster.of_type("rest_idea")}
+        assert sent == {
+            table.user_id("alice"): "Расскажи о первом бое.",
+            table.user_id("boris"): own,
+        }
+        assert (await rest_of(table, "vera"))["my_ideas"] == []
+        everything = json.dumps(
+            [p for _g, p, _w in table.broadcaster.sent], ensure_ascii=False
+        ) + json.dumps(await table.feed_of("vera"), ensure_ascii=False)
+        assert vera_idea not in everything
+        [warning] = [r for r in caplog.records if r.name == "dnd_server.dm.rest_ideas"]
+        assert warning.levelname == "WARNING" and table.game_id in warning.getMessage()
+        assert "1" in warning.getMessage()
+        for private in (vera_idea, own, BORIS_BACKSTORY, BORIS_GOAL, BORIS_NOTE, "Март"):
+            assert private not in caplog.text  # в журнале только число отброшенных
+
+
+async def test_ideas_without_the_private_details_of_others_all_reach_their_heroes(camp, caplog):
+    answer = ideas_answer(
+        alice="Расскажи о первом бое.",
+        boris="Расскажи, кого ты ищешь в столице.",
+        vera="Вспомни храм, которому ты служишь.",
+    )
+    async with camp(
+        in_camp=False,
+        scenario=[morning_turn()],
+        json_answers={IDEAS_PURPOSE: answer},
+        shape=boris_opens_up,
+    ) as table:
+        with caplog.at_level("WARNING", logger="dnd_server.dm.rest_ideas"):
+            await start_rest(table, "long")
+            await table.settle()
+
+        assert set((await table.game()).rest_ideas) == {"alice", "boris", "vera"}
+        assert [r for r in caplog.records if r.name == "dnd_server.dm.rest_ideas"] == []
+
+
+def guard_for(
+    srd: SrdContent, adventure: Adventure, stories: Sequence[str] = ()
+) -> rest_ideas.IdeaGuard:
+    state = camp_state(srd, adventure, {key: f"user-{key}" for key in HEROES})
+    boris_opens_up(state)
+    state.pc_hooks["vera"].npc_links = [{"npc_id": "fabian", "relation": "ученица", "note": ""}]
+    return rest_ideas.idea_guard(state, adventure, srd, list(HEROES), stories)
+
+
+def test_the_guard_finds_a_fragment_of_another_hero_in_any_case_and_punctuation(srd, adventure):
+    guard = guard_for(srd, adventure)
+
+    kept, dropped = guard.screen(
+        {
+            "vera": ["Борис — ПОСЛЕ ПОЖАРА, на верфи! Спроси его."],
+            "alice": ["Расскажи о первом бое."],
+        }
+    )
+
+    assert (kept, dropped) == ({"alice": ["Расскажи о первом бое."]}, 1)
+
+
+def test_the_guard_lets_through_what_is_shared_or_is_the_hero_own(srd, adventure):
+    story = "Мастер рассказал: Марта вспоминает пожар на верфи отца у старой пристани."
+    guard = guard_for(srd, adventure, stories=[story])
+    ideas = {
+        # Тройка из рассказа мастера и имя из него — общее, его знают все.
+        "vera": ["Спроси, что видели на верфи отца у пристани, и что Марта помнит."],
+        # Сведения самого героя — его, а знакомый NPC Веры — её собственная связь.
+        "boris": ["Расскажи, как ищешь пропавшего брата в столице."],
+        "alice": ["Расскажи, кто такой Фабиан для тебя."],
+    }
+
+    kept, dropped = guard.screen(ideas)
+
+    assert dropped == 1  # Фабиан — знакомый Веры, у Алисы его нет ни в связях, ни в рассказах
+    assert kept == {"vera": ideas["vera"], "boris": ideas["boris"]}
+
+
+def test_the_guard_catches_two_significant_words_of_a_short_private_text(srd, adventure):
+    # Короткая цель или заметка («найти брата») тройки слов не даёт: фрагмент — и пара значимых
+    # слов подряд. Пара с предлогом или союзом («ей за») фрагментом не считается.
+    guard = guard_for(srd, adventure)
+
+    kept, dropped = guard.screen(
+        {
+            "vera": ["Помоги Борису: пропавшего брата ещё можно найти."],
+            "alice": ["Скажи ей за ужином, что ты рядом."],
+        }
+    )
+
+    assert (kept, dropped) == ({"alice": ["Скажи ей за ужином, что ты рядом."]}, 1)
+
+
+def test_the_guard_ignores_names_of_heroes_and_words_of_the_cards_of_the_party(srd, adventure):
+    guard = guard_for(srd, adventure)
+
+    kept, dropped = guard.screen({"vera": ["Спроси Бориса, бывшего стражника, о его пути."]})
+
+    assert (kept, dropped) == ({"vera": ["Спроси Бориса, бывшего стражника, о его пути."]}, 0)

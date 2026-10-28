@@ -1,7 +1,13 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { createApi } from "../api/client";
 import { ApiContext } from "../api/context";
-import type { CombatView, GamePhase, TurnPhase } from "../api/types";
+import type {
+  CombatView,
+  GamePhase,
+  GameSummary,
+  RestView,
+  TurnPhase,
+} from "../api/types";
 import { holdRequests } from "../screens/character/fixtures";
 import { sessionToken } from "../store/game";
 import type { GameView } from "../store/game";
@@ -46,6 +52,9 @@ const HOST_ROUTES = Object.fromEntries(
     "hurry",
     "camp-extend",
     "camp-end",
+    "rest",
+    "rest-extend",
+    "rest-end",
   ].map((action) => [`POST /api/games/g1/host/${action}`, PHASE_REPLY]),
 );
 
@@ -55,6 +64,10 @@ interface Setup {
   combat?: CombatView | null;
   /** Срок идущего отсчёта; по умолчанию его нет. */
   deadline?: string | null;
+  /** Привал из снимка (контракт B9, §3); по умолчанию его нет. */
+  rest?: RestView | null;
+  /** Поправки к сводке игры (сроки привалов и др.). */
+  game?: Partial<GameSummary>;
   user?: string;
   routes?: Record<string, FakeReply | ((call: RecordedCall) => FakeReply)>;
   hold?: string;
@@ -65,11 +78,17 @@ function viewFor({
   phase = "playing",
   combat = null,
   deadline = null,
+  rest = null,
+  game = {},
 }: Setup): GameView {
-  return gameView({
+  const base = gameView();
+  return {
+    ...base,
+    game: { ...base.game, ...game },
     phase: phaseOf(turnPhase, { phase, deadline_at: deadline }),
     combat,
-  });
+    rest,
+  };
 }
 
 // Срок привала: на привале сервер всегда ставит отсчёт.
@@ -100,15 +119,17 @@ function renderPanel(setup: Setup = {}) {
 const buttons = () =>
   screen.queryAllByRole("button").map((node) => node.textContent);
 const button = (name: string) => screen.getByRole("button", { name });
-const noButton = (name: string) =>
+const noButton = (name: string | RegExp) =>
   expect(screen.queryByRole("button", { name })).toBeNull();
 
 describe("кнопки по фазам", () => {
-  test("обсуждение: «Собрать ходы», «Пауза», «Перегенерировать ответ мастера»", () => {
+  test("обсуждение: «Собрать ходы», два привала, «Пауза», «Перегенерировать ответ мастера»", () => {
     renderPanel({ turnPhase: "discussion" });
 
     expect(buttons()).toEqual([
       "Собрать ходы",
+      "Короткий привал (2 мин)",
+      "Долгий привал (5 мин)",
       "Пауза",
       "Перегенерировать ответ мастера",
     ]);
@@ -224,11 +245,11 @@ describe("кнопки шлют свои запросы", () => {
       "Поторопить",
       "hurry",
     ],
-    [{ turnPhase: "camp", deadline: CAMP_DEADLINE }, "+1 мин", "camp-extend"],
+    [{ turnPhase: "camp", deadline: CAMP_DEADLINE }, "+1 мин", "rest-extend"],
     [
       { turnPhase: "camp", deadline: CAMP_DEADLINE },
       "Закончить привал",
-      "camp-end",
+      "rest-end",
     ],
   ] as const)("%j: «%s» → host/%s", async (setup, label, action) => {
     const { server } = renderPanel(setup);
@@ -558,7 +579,7 @@ describe("кнопки привала", () => {
     renderPanel(
       camping({
         routes: {
-          "POST /api/games/g1/host/camp-end": {
+          "POST /api/games/g1/host/rest-end": {
             status: 409,
             json: { detail: "Привал не идёт." },
           },
@@ -575,7 +596,7 @@ describe("кнопки привала", () => {
 
   test("пока запрос идёт, обе кнопки недоступны и второй запрос не уходит", async () => {
     const { server, release } = renderPanel(
-      camping({ hold: "/host/camp-extend" }),
+      camping({ hold: "/host/rest-extend" }),
     );
 
     fireEvent.click(button("+1 мин"));
@@ -586,6 +607,282 @@ describe("кнопки привала", () => {
     release();
     await vi.waitFor(() => expect(button("+1 мин")).toBeEnabled());
     expect(server.calls).toHaveLength(1);
+  });
+});
+
+describe("на привале любого вида (контракт B9, §4)", () => {
+  const rest = (kind: RestView["kind"]): RestView => ({
+    kind,
+    deadline_at: CAMP_DEADLINE,
+    my_ideas: [],
+    lines: [],
+  });
+
+  test.each(["short", "long"] as const)(
+    "привал %s: «+1 мин» и «Закончить привал» шлют host/rest-extend и host/rest-end",
+    async (kind) => {
+      const { server } = renderPanel({
+        turnPhase: "camp",
+        deadline: CAMP_DEADLINE,
+        rest: rest(kind),
+      });
+
+      fireEvent.click(button("+1 мин"));
+      await vi.waitFor(() => expect(button("Закончить привал")).toBeEnabled());
+      fireEvent.click(button("Закончить привал"));
+
+      await vi.waitFor(() =>
+        expect(
+          server.calls.map((call) => `${call.method} ${call.path}`),
+        ).toEqual([
+          "POST /api/games/g1/host/rest-extend",
+          "POST /api/games/g1/host/rest-end",
+        ]),
+      );
+    },
+  );
+
+  test("на привале начать новый привал нельзя", () => {
+    renderPanel({
+      turnPhase: "camp",
+      deadline: CAMP_DEADLINE,
+      rest: rest("short"),
+    });
+
+    noButton(/привал \(/);
+  });
+});
+
+describe("начать привал: только хосту, только в обсуждении вне боя и паузы", () => {
+  const REST = "POST /api/games/g1/host/rest";
+  const SHORT = "Короткий привал (2 мин)";
+  const LONG = "Долгий привал (5 мин)";
+  const posted = (server: { calls: RecordedCall[] }) =>
+    server.calls.filter((call) => `${call.method} ${call.path}` === REST);
+
+  test("сроки — из настроек игры: целые минуты минутами, иначе секундами", () => {
+    renderPanel({ game: { short_rest_seconds: 90, camp_seconds: 600 } });
+
+    expect(button("Короткий привал (90 сек)")).toBeEnabled();
+    expect(button("Долгий привал (10 мин)")).toBeEnabled();
+  });
+
+  test.each([
+    "collecting",
+    "resolving",
+    "dm_failed",
+    "combat_wait",
+    "camp",
+  ] as const)("фаза хода %s — кнопок привала нет", (turnPhase) => {
+    renderPanel({ turnPhase, deadline: CAMP_DEADLINE });
+
+    noButton(SHORT);
+    noButton(LONG);
+  });
+
+  test("обсуждение во время боя — кнопок привала нет", () => {
+    renderPanel({ turnPhase: "discussion", combat: combatOf("pc_lira") });
+
+    noButton(SHORT);
+    noButton(LONG);
+    expect(button("Собрать ходы")).toBeInTheDocument();
+  });
+
+  test("игра на паузе — кнопок привала нет", () => {
+    renderPanel({ turnPhase: "discussion", phase: "paused" });
+
+    expect(buttons()).toEqual(["Продолжить"]);
+  });
+
+  test.each(["lobby", "weaving", "finished"] as const)(
+    "игра в фазе %s — кнопок привала нет",
+    (phase) => {
+      renderPanel({ turnPhase: "discussion", phase });
+
+      noButton(SHORT);
+      noButton(LONG);
+    },
+  );
+
+  test("не хост кнопок привала не видит и ничего не шлёт", () => {
+    const { container, server } = renderPanel({ user: "u2" });
+
+    expect(container).toBeEmptyDOMElement();
+    expect(server.calls).toHaveLength(0);
+  });
+
+  test.each([
+    [SHORT, "short", /короткий привал/i],
+    [LONG, "long", /долгий привал/i],
+  ] as const)("«%s»: сначала вопрос, запроса ещё нет", (label, _kind, text) => {
+    const { server } = renderPanel();
+
+    fireEvent.click(button(label));
+
+    const question = screen.getByRole("group", { name: "Начать привал?" });
+    expect(question).toHaveTextContent(text);
+    expect(button("Да, начать привал")).toBeEnabled();
+    expect(server.calls).toHaveLength(0);
+  });
+
+  test.each([SHORT, LONG])(
+    "«%s»: вопрос предупреждает, что черновики раунда до мастера не дойдут",
+    (label) => {
+      renderPanel();
+
+      fireEvent.click(button(label));
+
+      // Привал по кнопке превращает открытый раунд в ход «конец привала» (контракт B9, §11 п. 6).
+      expect(
+        screen.getByRole("group", { name: "Начать привал?" }),
+      ).toHaveTextContent(
+        "Черновики ходов этого раунда до мастера не дойдут — после привала игрокам придётся написать их заново.",
+      );
+    },
+  );
+
+  test.each([
+    [SHORT, "short"],
+    [LONG, "long"],
+  ] as const)(
+    "подтверждение «%s» шлёт host/rest {kind: %s}",
+    async (label, kind) => {
+      const { server } = renderPanel();
+      fireEvent.click(button(label));
+
+      fireEvent.click(button("Да, начать привал"));
+
+      await vi.waitFor(() => expect(posted(server)).toHaveLength(1));
+      expect(posted(server)[0].body).toEqual({ kind });
+      expect(posted(server)[0].headers.get("Authorization")).toBe(
+        "Bearer tok-u1",
+      );
+      expect(server.calls).toHaveLength(1);
+      await vi.waitFor(() =>
+        expect(
+          screen.queryByRole("group", { name: "Начать привал?" }),
+        ).toBeNull(),
+      );
+    },
+  );
+
+  test("«Отмена» убирает вопрос и ничего не шлёт", () => {
+    const { server } = renderPanel();
+    fireEvent.click(button(SHORT));
+
+    fireEvent.click(button("Отмена"));
+
+    expect(screen.queryByRole("group", { name: "Начать привал?" })).toBeNull();
+    expect(button(SHORT)).toBeInTheDocument();
+    expect(server.calls).toHaveLength(0);
+  });
+
+  test("пока открыт вопрос, второй вопрос не открывается поверх: кнопки-вопросы скрыты", () => {
+    renderPanel();
+
+    fireEvent.click(button(LONG));
+
+    noButton(SHORT);
+    noButton(LONG);
+    noButton("Перегенерировать ответ мастера");
+    expect(button("Собрать ходы")).toBeEnabled();
+  });
+
+  test("отказ сервера показан его текстом", async () => {
+    const refusal = "Игроки уже отправили ходы: сначала разберите раунд.";
+    renderPanel({
+      routes: { [REST]: { status: 409, json: { detail: refusal } } },
+    });
+    fireEvent.click(button(SHORT));
+
+    fireEvent.click(button("Да, начать привал"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(refusal);
+    expect(button(SHORT)).toBeEnabled();
+  });
+
+  test("пока запрос идёт, кнопки недоступны и второй запрос не уходит", async () => {
+    const { server, release } = renderPanel({ hold: "/host/rest" });
+    fireEvent.click(button(SHORT));
+    fireEvent.click(button("Да, начать привал"));
+
+    expect(button(SHORT)).toBeDisabled();
+    expect(button(LONG)).toBeDisabled();
+    fireEvent.click(button(SHORT));
+    release();
+    await vi.waitFor(() => expect(button(SHORT)).toBeEnabled());
+    expect(posted(server)).toHaveLength(1);
+  });
+
+  test("смена фазы убирает вопрос", () => {
+    const { show } = renderPanel();
+    fireEvent.click(button(SHORT));
+
+    show({ turnPhase: "collecting" });
+
+    expect(screen.queryByRole("group", { name: "Начать привал?" })).toBeNull();
+  });
+});
+
+// Финальное покрытие B9: каждый отказ сервера (тексты B9.3, «Контракт для B9.4/B9.5») хост видит
+// дословно — клиент не подменяет их своими словами и не прячет за общим «ошибка».
+describe("привалы: отказы сервера дословно (финальное покрытие B9)", () => {
+  const REST = "POST /api/games/g1/host/rest";
+
+  test.each([
+    "Игра на паузе: хост должен нажать «Продолжить».",
+    "Игра сейчас не идёт.",
+    "Привал уже идёт: второй начать нельзя.",
+    "В бою привал невозможен: сначала закончите бой.",
+    "Начать привал можно, пока игроки обсуждают ход.",
+    "Игроки уже отправили ходы: сначала разберите раунд.",
+    "Между долгими привалами допустимо не больше 2 коротких, а прошло уже 2: нужен долгий привал.",
+  ])("host/rest → 409 «%s»", async (detail) => {
+    renderPanel({ routes: { [REST]: { status: 409, json: { detail } } } });
+    fireEvent.click(button("Долгий привал (5 мин)"));
+
+    fireEvent.click(button("Да, начать привал"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(detail);
+    // Вопрос закрыт, а кнопки привалов снова доступны: хост может выбрать другой.
+    expect(screen.queryByRole("group", { name: "Начать привал?" })).toBeNull();
+    expect(button("Короткий привал (2 мин)")).toBeEnabled();
+    expect(button("Долгий привал (5 мин)")).toBeEnabled();
+  });
+
+  test("«+1 мин» на кончившемся привале: отказ сервера дословно", async () => {
+    const detail = "Продлить можно только идущий привал.";
+    renderPanel({
+      turnPhase: "camp",
+      deadline: CAMP_DEADLINE,
+      routes: {
+        "POST /api/games/g1/host/rest-extend": {
+          status: 409,
+          json: { detail },
+        },
+      },
+    });
+
+    fireEvent.click(button("+1 мин"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(detail);
+  });
+
+  test("«Перегенерировать» после привала по кнопке: отказ сервера дословно", async () => {
+    const detail =
+      "После хода мастера игра уже изменилась: перегенерировать нельзя.";
+    renderPanel({
+      turnPhase: "camp",
+      deadline: CAMP_DEADLINE,
+      routes: {
+        "POST /api/games/g1/host/regenerate": { status: 409, json: { detail } },
+      },
+    });
+    fireEvent.click(button("Перегенерировать ответ мастера"));
+
+    fireEvent.click(button("Да, перегенерировать"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(detail);
   });
 });
 

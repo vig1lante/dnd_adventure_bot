@@ -66,6 +66,7 @@ GAME_FIELDS = {
     "collect_seconds",
     "hurry_seconds",
     "camp_seconds",
+    "short_rest_seconds",
     "profanity",
     "players",
 }
@@ -716,6 +717,21 @@ async def test_host_sets_the_countdowns_at_creation(lobby):
     assert (stored.collect_seconds, stored.hurry_seconds, stored.camp_seconds) == (45, 20, 600)
 
 
+async def test_the_short_rest_comes_from_the_environment_or_from_the_host(lobby):
+    # Короткий привал (блок B9): без поля — `SHORT_REST_SECONDS`, с полем — выбор хоста.
+    host = await add_host(lobby)
+
+    by_default = await new_game(lobby, host)
+    chosen = await new_game(lobby, host, short_rest_seconds=90)
+
+    assert by_default["short_rest_seconds"] == lobby.settings.short_rest_seconds
+    assert chosen["short_rest_seconds"] == 90
+    assert (await stored_game(lobby.db, by_default["id"])).short_rest_seconds == (
+        lobby.settings.short_rest_seconds
+    )
+    assert (await stored_game(lobby.db, chosen["id"])).short_rest_seconds == 90
+
+
 async def test_one_countdown_may_be_set_while_the_others_stay_default(lobby):
     host = await add_host(lobby)
 
@@ -729,6 +745,7 @@ COUNTDOWN_LIMITS = [
     ("collect_seconds", 30, 600),
     ("hurry_seconds", 15, 300),
     ("camp_seconds", 30, 900),
+    ("short_rest_seconds", 30, 600),
 ]
 
 
@@ -756,11 +773,12 @@ async def test_countdown_outside_the_limits_is_422(lobby, name, low, high, offse
     assert await count_games(lobby.db) == 0
 
 
+@pytest.mark.parametrize("name", ["collect_seconds", "short_rest_seconds"])
 @pytest.mark.parametrize("value", [0, -5, 2.5, "120", "много", None, True])
-async def test_countdown_must_be_a_whole_number(lobby, value):
+async def test_countdown_must_be_a_whole_number(lobby, name, value):
     host = await add_host(lobby)
 
-    response = await create_game(lobby, host, collect_seconds=value)
+    response = await create_game(lobby, host, **{name: value})
 
     # `None` значит «значение из env», остальное — ошибка.
     assert response.status_code == (201 if value is None else 422)

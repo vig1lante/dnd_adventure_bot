@@ -19,10 +19,12 @@
    Образец текущей версии нынешний код читает и пишет без изменений (точный круг «прочитать и
    записать»). Старый образец читается без потерь: ни одно его поле не потеряно и не изменено
    (`lost_fields`, как у копий приключений), а поля, которых в старой схеме не было, приходят со
-   значениями по умолчанию — ровно те, что перечислены в `ADDED_FIELDS` для его версии. Так
-   версия 2 (DND-2, блок B8) добавила дневник отряда `journal` и номер раунда игроков
-   `party_round`: снимок версии 1 читается с пустым дневником и раундом 0, а стартовый дневник
-   такой игре открывает сервер (снимок игрока — в памяти, ход мастера — со своим коммитом).
+   значениями по умолчанию — ровно те, что перечислены в `ADDED_FIELDS` для его версии (путь
+   поля на любой глубине, `added_fields`). Так версия 2 (DND-2, блок B8) добавила дневник отряда
+   `journal` и номер раунда игроков `party_round`: снимок версии 1 читается с пустым дневником и
+   раундом 0, а стартовый дневник такой игре открывает сервер (снимок игрока — в памяти, ход
+   мастера — со своим коммитом). Версия 3 (DND-2, блок B9) добавила вложенное поле вида привала
+   `scene.rest`: у старых снимков оно `null`, и сцена `camp` без вида — долгий привал DND-1.
 3. Копия приключения хранится по поколениям формата: `golden/adventure_v<N>.json` — дамп
    `model_dump(mode="json")` приключения `demo-crypt` тем кодом, который писал копии формата N.
    `adventure_v1.json` — копия DND-1 (без `format_version`), `adventure_v2.json` — формат v2
@@ -57,7 +59,7 @@ from dnd_engine.character import Character
 from dnd_engine.content import load_srd
 from dnd_engine.journal import open_journal
 from dnd_engine.rng import SeededRng
-from dnd_engine.state import GameState
+from dnd_engine.state import GameState, Scene
 from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.db.models import (
@@ -95,6 +97,7 @@ SAVED_GAME_TESTS = {
     "0003": "test_a_game_saved_before_hero_choices_keeps_its_heroes_after_upgrade_head",
     "0004": "test_a_game_saved_before_the_profanity_flag_allows_profanity_after_upgrade_head",
     "0005": "test_a_game_saved_before_the_authoring_tables_is_read_after_upgrade_head",
+    "0006": "test_a_game_saved_before_the_short_rest_columns_is_read_after_upgrade_head",
 }
 
 
@@ -201,9 +204,13 @@ def test_every_snapshot_schema_version_has_its_golden_file_and_old_ones_stay():
     assert list(golden_files()) == list(range(1, GAME_STATE_SCHEMA_VERSION + 1))
 
 
-# Версия схемы старого снимка -> поля, которые нынешний код добавляет к нему, и их значения по
-# умолчанию (как их пишет снимок). Новая версия схемы дописывает сюда свои поля.
-ADDED_FIELDS: dict[int, dict[str, Any]] = {1: {"journal": [], "party_round": 0}}
+# Версия схемы старого снимка -> поля, которые нынешний код добавляет к нему (путь на любой
+# глубине, как у `lost_fields`), и их значения по умолчанию (как их пишет снимок). Новая версия
+# схемы дописывает свои поля во все прежние версии.
+ADDED_FIELDS: dict[int, dict[str, Any]] = {
+    1: {"/journal": [], "/party_round": 0, "/scene/rest": None},
+    2: {"/scene/rest": None},
+}
 
 
 def assert_read_whole(golden: dict[str, Any], state: GameState) -> None:
@@ -218,8 +225,7 @@ def assert_read_whole(golden: dict[str, Any], state: GameState) -> None:
         assert dumped == golden["state"]
         return
     assert lost_fields(golden["state"], dumped) == []
-    added = {key: value for key, value in dumped.items() if key not in golden["state"]}
-    assert added == ADDED_FIELDS[golden["schema_version"]]
+    assert added_fields(golden["state"], dumped) == ADDED_FIELDS[golden["schema_version"]]
 
 
 @pytest.mark.parametrize("version", golden_files())
@@ -251,14 +257,54 @@ def test_the_sample_of_the_current_schema_has_every_field_the_server_writes_now(
 
 
 def test_a_snapshot_of_the_first_schema_gets_exactly_the_new_fields_with_their_defaults():
-    # R8: к снимку версии 1 нынешний код добавляет только дневник (пустой) и раунд игроков (0).
+    # R8: к снимку версии 1 нынешний код добавляет дневник (пустой), раунд игроков (0) и вид
+    # привала у сцены (`null`, блок B9).
     golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
 
     dumped = GameState.model_validate(golden["state"]).model_dump(mode="json")
 
     assert set(dumped) - set(golden["state"]) == {"journal", "party_round"}
     assert (dumped["journal"], dumped["party_round"]) == ([], 0)
-    assert ADDED_FIELDS[1] == {"journal": [], "party_round": 0}
+    assert set(dumped["scene"]) - set(golden["state"]["scene"]) == {"rest"}
+    assert dumped["scene"]["rest"] is None
+    assert ADDED_FIELDS[1] == {"/journal": [], "/party_round": 0, "/scene/rest": None}
+
+
+def test_every_older_schema_gets_the_kind_of_rest_of_the_scene_as_null():
+    # Блок B9: вид привала вложен в сцену. Старый снимок читается с `scene.rest = null`; у сцены
+    # `camp` это долгий привал DND-1, у остальных сцен вида нет.
+    for version, path in golden_files().items():
+        if version == GAME_STATE_SCHEMA_VERSION:
+            continue
+        golden = json.loads(path.read_text(encoding="utf-8"))
+        assert "rest" not in golden["state"]["scene"], version
+
+        state = GameState.model_validate(golden["state"])
+
+        assert state.scene.rest is None, version
+        assert ADDED_FIELDS[version]["/scene/rest"] is None
+
+
+def test_the_sample_of_the_current_schema_writes_the_kind_of_rest_of_the_scene():
+    # Образец версии 3 записан кодом версии 3: вид привала у сцены лежит в снимке явно.
+    golden = json.loads(golden_files()[GAME_STATE_SCHEMA_VERSION].read_text(encoding="utf-8"))
+
+    assert GAME_STATE_SCHEMA_VERSION == 3
+    assert set(golden["state"]["scene"]) == set(Scene.model_fields)
+    assert "rest" in golden["state"]["scene"]
+
+
+def test_the_search_for_added_fields_goes_into_nested_objects_and_lists():
+    old = {"a": 1, "scene": {"type": "camp"}, "items": [{"id": "x"}], "gone": {"k": 1}}
+    new = {
+        "a": 1,
+        "b": [],
+        "scene": {"type": "camp", "rest": None},
+        "items": [{"id": "x", "count": 0}],
+        "gone": {"k": 1},
+    }
+
+    assert added_fields(old, new) == {"/b": [], "/scene/rest": None, "/items/0/count": 0}
 
 
 def test_every_stored_adventure_copy_format_has_its_golden_file_and_old_ones_stay():
@@ -291,6 +337,25 @@ def test_an_adventure_copy_of_the_current_format_is_read_whole_by_the_current_co
     # (в модели `extra="forbid"`, но переименованное поле с умолчанием исчезло бы молча) и не
     # добавлено новое.
     assert adventure.model_dump(mode="json") == golden
+
+
+def added_fields(old: Any, new: Any, path: str = "") -> dict[str, Any]:
+    """Поля новой копии, которых в старой не было, на любой глубине: путь -> значение. Обход тот
+    же, что у `lost_fields`: словари по общим ключам, списки одной длины по номерам."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        found: dict[str, Any] = {}
+        for key, value in new.items():
+            if key not in old:
+                found[f"{path}/{key}"] = value
+            else:
+                found |= added_fields(old[key], value, f"{path}/{key}")
+        return found
+    if isinstance(old, list) and isinstance(new, list) and len(old) == len(new):
+        found = {}
+        for number, (was, now) in enumerate(zip(old, new, strict=True)):
+            found |= added_fields(was, now, f"{path}/{number}")
+        return found
+    return {}
 
 
 def lost_fields(old: Any, new: Any, path: str = "") -> list[str]:
@@ -606,7 +671,9 @@ async def test_an_old_game_without_a_journal_shows_the_starting_one_and_saves_it
     assert {"intro", "location:village"} <= {entry.ref for entry in starting}
     assert before["journal"] == [entry.model_dump(mode="json") for entry in starting]
     assert "journal" not in old.data  # снимок игрока ничего не записал
-    assert new.schema_version == GAME_STATE_SCHEMA_VERSION == 2
+    # Ход пишет снимок текущей схемы (с B9 — версии 3, с видом привала у сцены).
+    assert new.schema_version == GAME_STATE_SCHEMA_VERSION == 3
+    assert new.data["scene"]["rest"] is None
     assert new.to_state().journal == starting
     assert after["journal"] == before["journal"]
 
@@ -834,3 +901,140 @@ async def test_a_game_saved_before_the_authoring_tables_is_read_after_upgrade_he
     finally:
         await app.state.engine.dispose()
         await engine.dispose()
+
+
+async def test_a_game_saved_before_the_short_rest_columns_is_read_after_upgrade_head(
+    settings, migrate
+):
+    # Ревизия 0006 (DND-2 B9, привалы) завела срок короткого привала и личные идеи привала: игра
+    # на ревизии 0005 со снимком схемы 2 читается теми же моделями, короткий привал у неё длится
+    # 120 с, идей нет, а вид привала у сцены — `null`.
+    golden = json.loads(golden_files()[2].read_text(encoding="utf-8"))
+    adventure = json.loads(golden_adventures()[2].read_text(encoding="utf-8"))
+    await migrate("upgrade", "0005")
+    ids = insert_saved_game(
+        sqlite_file(settings.database_url), golden, adventure, pending_roll=False
+    )
+    await migrate("upgrade", "head")
+
+    engine = make_engine(settings.database_url)
+    db = make_sessionmaker(engine)
+    app = create_app(settings)
+    try:
+        async with db() as session:
+            game = await session.get(Game, ids["game_id"])
+            snapshot = await session.get(GameStateSnapshot, (ids["game_id"], game.state_version))
+            alice = await session.get(User, ids["Алиса"])
+            view = await snapshot_for(session, alice, ids["game_id"], srd=load_srd())
+        assert (game.short_rest_seconds, game.rest_ideas) == (120, None)
+        state = snapshot.to_state()
+        assert_read_whole(golden, state)
+        assert state.scene.rest is None
+        assert view["game"]["short_rest_seconds"] == 120
+        assert view["rest"] is None  # игра собирает ходы: привала нет
+        token = SessionSigner.from_settings(settings).issue(ids["Алиса"])
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as http:
+            response = await http.get(
+                f"/api/games/{ids['game_id']}", headers={"Authorization": f"Bearer {token}"}
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["short_rest_seconds"] == 120
+    finally:
+        await app.state.engine.dispose()
+        await engine.dispose()
+
+
+class Frames:
+    """Рассылка, которая запоминает кадры: какие события ушли после хода."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[dict[str, Any], str]] = []
+
+    async def send(self, game_id: str, payload: dict[str, Any], audience: str = "all") -> None:
+        self.sent.append((payload, audience))
+
+
+async def test_a_game_saved_at_a_dnd1_camp_before_the_short_rest_columns_ends_it_as_a_long_rest(
+    settings, migrate, tmp_path
+):
+    # Игра DND-1 посреди привала мастера на ревизии 0005: сцена `camp` без вида (снимок схемы 2),
+    # фаза `camp` со сроком, открыт ход «конец привала». После `upgrade head` это долгий привал:
+    # снимок показывает вид `long` и прежний срок, кость хитов и второй привал — 409, а конец
+    # привала — длинный отдых и утро следующего дня, как в DND-1, с кадром `rest_ended {long}`.
+    golden = copy.deepcopy(json.loads(golden_files()[2].read_text(encoding="utf-8")))
+    golden["state"]["scene"] = {"type": "camp", "started_turn": 3, "inspiration_granted": []}
+    golden["state"]["combat"] = None
+    wounded = [
+        hero["id"] for hero in golden["state"]["party"].values() if hero["hp"] < hero["hp_max"]
+    ]
+    assert wounded  # после боя есть кого лечить длинным отдыхом
+    adventure = json.loads(golden_adventures()[2].read_text(encoding="utf-8"))
+    await migrate("upgrade", "0005")
+    path = sqlite_file(settings.database_url)
+    ids = insert_saved_game(path, golden, adventure, pending_roll=False)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "UPDATE games SET turn_phase = 'camp', deadline_at = ?", ("2026-10-01 12:05:00.000000",)
+        )
+        connection.execute("UPDATE turns SET kind = 'camp_end'")
+        connection.commit()
+    await migrate("upgrade", "head")
+
+    steps = [
+        {"tool": "chronicle", "args": {"entry": "Отряд проснулся после привала."}},
+        {"text": "Утро, костёр догорел."},
+    ]
+    scenario = tmp_path / "morning.yaml"
+    scenario.write_text(yaml.safe_dump({"turns": [{"steps": steps}]}, allow_unicode=True), "utf-8")
+    run_settings = settings.model_copy(update={"fake_llm_scenario": scenario})
+    game_id = ids["game_id"]
+    engine = make_engine(settings.database_url)
+    db = make_sessionmaker(engine)
+    app = create_app(run_settings)
+    frames = Frames()
+    deps = Deps(
+        sessionmaker=db,
+        locks=GameLocks(),
+        broadcaster=frames,
+        settings=run_settings,
+        turn_tokens=None,
+        srd=load_srd(),
+        rng=SeededRng(7),
+    )
+    try:
+        async with db() as session:
+            alice = await session.get(User, ids["Алиса"])
+            view = await snapshot_for(session, alice, game_id, srd=load_srd())
+        token = SessionSigner.from_settings(settings).issue(ids["Алиса"])  # Алиса — хост
+        headers = {"Authorization": f"Bearer {token}"}
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as http:
+            hit_die = await http.post(f"/api/games/{game_id}/rest/hit-dice", headers=headers)
+            second = await http.post(
+                f"/api/games/{game_id}/host/rest", json={"kind": "short"}, headers=headers
+            )
+        outcome = await run_dm_turn(game_id, mode=TurnKind.CAMP_END, deps=deps)
+        async with db() as session:
+            game = await session.get(Game, game_id)
+            after = (await session.get(GameStateSnapshot, (game_id, game.state_version))).to_state()
+            (log,) = await session.scalars(select(DmTurnLog))
+    finally:
+        await app.state.engine.dispose()
+        await engine.dispose()
+
+    assert view["rest"]["kind"] == "long"
+    assert view["rest"]["deadline_at"] == view["phase"]["deadline_at"] is not None
+    assert view["rest"]["my_ideas"] == []
+    assert hit_die.status_code == 409
+    assert hit_die.json()["detail"] == "Кости хитов тратят только на коротком привале."
+    assert second.status_code == 409
+    assert second.json()["detail"] == "Привал уже идёт: второй начать нельзя."
+    assert outcome.status == TurnStatus.DONE, log.error
+    assert (after.time.day, after.time.part) == (3, "morning")
+    assert after.scene.type.value == "exploration" and after.scene.rest is None
+    assert all(after.party[hero_id].hp == after.party[hero_id].hp_max for hero_id in wounded)
+    assert game.rest_ideas is None and game.short_rest_seconds == 120
+    assert [payload for payload, _who in frames.sent if payload["type"] == "rest_ended"] == [
+        {"type": "rest_ended", "kind": "long"}
+    ]

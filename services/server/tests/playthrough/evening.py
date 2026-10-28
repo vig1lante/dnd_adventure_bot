@@ -311,6 +311,14 @@ def evening_scenario(repeat_turn: int | None = None) -> dict[str, Any]:
         "json": {
             "weaving": {"hooks": hooks},
             "chronicle": {"summary": SUMMARY},
+            # Идеи для рассказа у костра (блок B9): привал мастера после хода 8 просит их фоновым
+            # вызовом; без ответа сценария вечер писал бы в журнал предупреждение о сбое идей.
+            "campfire.ideas": {
+                "ideas": [
+                    {"character_id": f"$pc{number}", "text": f"Расскажи о себе у костра, {name}."}
+                    for number, (_key, name) in enumerate(CAST, start=1)
+                ]
+            },
         },
     }
     if repeat_turn is not None:
@@ -978,6 +986,9 @@ ROUTE_BODIES: dict[tuple[str, str], Any] = {
     ("POST", "/api/games/{game_id}/action/submit"): None,
     ("POST", "/api/games/{game_id}/action/pass"): None,
     ("POST", "/api/games/{game_id}/camp/line"): {"text": "Подкину дров."},
+    # Привалы по кнопке хоста (блок B9): начало привала хостом и кость хитов героя.
+    ("POST", "/api/games/{game_id}/host/rest"): {"kind": "short"},
+    ("POST", "/api/games/{game_id}/rest/hit-dice"): None,
     ("POST", "/api/games/{game_id}/leave"): None,
     ("POST", "/api/games/{game_id}/players/{user_id}/kick"): None,
     **{
@@ -993,6 +1004,8 @@ ROUTE_BODIES: dict[tuple[str, str], Any] = {
             "hurry",
             "camp-extend",
             "camp-end",
+            "rest-extend",
+            "rest-end",
         )
     },
 }

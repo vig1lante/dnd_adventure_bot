@@ -1,4 +1,4 @@
-import type { GameSummary, PlayerStatus, TurnPhase } from "../api/types";
+import type { PlayerStatus, TurnPhase } from "../api/types";
 import type { GameView, LiveConnection } from "../store/game";
 import { Avatar, Badge, Icon, Panel } from "../ui";
 import type { BadgeProps } from "../ui";
@@ -38,11 +38,17 @@ const COUNTDOWNS: Partial<
   camp: { label: "До конца привала", seconds: "camp_seconds" },
 };
 
-function totalSecondsOf(
-  turnPhase: TurnPhase | null,
-  game: GameSummary,
-): number | undefined {
-  const countdown = turnPhase === null ? undefined : COUNTDOWNS[turnPhase];
+/**
+ * Полный срок отсчёта фазы, с. У привала он зависит от вида: короткий тает от своего срока, а
+ * долгий и привал, вид которого ещё не пришёл (старые игры, кадр в пути), — от `camp_seconds`.
+ */
+function totalSecondsOf(view: GameView): number | undefined {
+  const { phase, game, rest } = view;
+  if (phase.turn_phase === "camp" && rest?.kind === "short") {
+    return game.short_rest_seconds;
+  }
+  const countdown =
+    phase.turn_phase === null ? undefined : COUNTDOWNS[phase.turn_phase];
   return countdown === undefined ? undefined : game[countdown.seconds];
 }
 
@@ -82,7 +88,7 @@ export function StatusBar({ view, clockOffsetMs, connection }: StatusBarProps) {
         <Countdown
           phase={phase}
           clockOffsetMs={clockOffsetMs}
-          totalSeconds={totalSecondsOf(phase.turn_phase, game)}
+          totalSeconds={totalSecondsOf(view)}
           label={countdown?.label}
         />
         {connectionLost(connection) && <ReconnectingNote />}

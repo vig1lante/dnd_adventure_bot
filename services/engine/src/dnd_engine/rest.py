@@ -6,6 +6,10 @@
 хиты. Кости хитов на коротком отдыхе бросаются только через переданный `Rng`. Максимум
 использований ресурса берётся из таблицы класса в данных SRD.
 
+Короткий отдых собран из двух шагов: `spend_hit_die` (одна кость хитов) и `finish_short_rest`
+(особенности «до короткого отдыха»). Мастер проводит его целиком (`short_rest`), а на коротком
+привале по кнопке хоста игроки тратят кости по одной, и шаги идут порознь (DND-2, B9).
+
 Здесь же — окончание эффектов с последствиями (`end_buffs`: «Подмога» возвращает максимум HP)
 и Магическое восстановление волшебника (`arcane_recovery`): их вызывают и отдых, и бой.
 """
@@ -23,8 +27,9 @@ from dnd_engine.content import ClassDef, SrdContent
 from dnd_engine.dice import RollResult, roll
 from dnd_engine.rng import Rng
 
-# Нижняя граница лечения одной костью хитов. План DND-1 задаёт 0; в SRD 5.2.1 стоит минимум 1 HP.
-MIN_HEAL_PER_DIE: Final = 0
+# Нижняя граница лечения одной костью хитов: SRD 5.2.1 и план DND-2 (в DND-1 был 0).
+MIN_HEAL_PER_DIE: Final = 1
+HIT_DIE_REASON: Final = "Короткий отдых: кость хитов"
 
 # Ресурсы класса, которые возвращает короткий отдых (SRD 5.2.1). Остальные ресурсы класса
 # (Метка охотника, Магическое восстановление) возвращает только длинный отдых.
@@ -42,6 +47,10 @@ RESOURCEFUL_TRAIT = "resourceful"  # Находчивость человека: 
 # Неутомимость орка: раз за длинный отдых остаться с 1 HP. В `resources` значение 1 или отсутствие
 # записи — не использована, 0 — использована (запись появляется, когда бой тратит эту способность).
 RELENTLESS_ENDURANCE_TRAIT = "relentless_endurance"
+
+
+class RestError(ValueError):
+    """Отказ правил привала или отдыха; текст объясняет причину игроку (сервер отвечает 409)."""
 
 
 class RestOutcome(BaseModel):
@@ -106,38 +115,67 @@ def end_buffs(c: Character, ended: Callable[[ActiveBuff], bool]) -> list[ActiveB
     return gone
 
 
+def spend_hit_die(c: Character, content: SrdContent, rng: Rng) -> tuple[Character, RollResult]:
+    """Одна кость хитов: `1d<кость класса> + Тел` через `rng`, лечение не меньше 1 HP.
+
+    HP не поднимаются выше максимума (под «Подмогой» он выше обычного), кость списывается и
+    тогда, когда лечить уже некого. Лежавший на 0 HP приходит в себя. Без костей или у мёртвого —
+    `RestError`, кость не бросается. Возвращает копию персонажа и бросок."""
+    if is_dead(c):
+        raise RestError("Погибший герой не может тратить кости хитов.")
+    if c.hit_dice < 1:
+        raise RestError("Костей хитов не осталось: их возвращает долгий отдых.")
+    hit_die = content.classes[c.class_id].hit_die
+    constitution = ability_mod(c, Ability.CON)
+    rolled = roll(f"1d{hit_die}{constitution:+d}", rng=rng, reason=HIT_DIE_REASON)
+    gained = max(0, min(max(MIN_HEAL_PER_DIE, rolled.total), c.hp_max - c.hp))
+
+    rested = c.model_copy(deep=True)
+    rested.hp = c.hp + gained
+    if c.hp == 0 and gained > 0:
+        regain_consciousness(rested)
+    rested.hit_dice = c.hit_dice - 1
+    return rested, rolled
+
+
+def finish_short_rest(c: Character, content: SrdContent) -> tuple[Character, RestOutcome]:
+    """Конец короткого отдыха: возвращаются только особенности «до короткого отдыха».
+
+    HP и кости хитов не меняются (кости тратит `spend_hit_die`), в итоге нет бросков.
+    Мёртвый ничего не получает."""
+    if is_dead(c):
+        return _no_rest(c)
+    resources, restored = _recharge(c, content.classes[c.class_id], _after_short_rest)
+    rested = c.model_copy(deep=True)
+    rested.resources = resources
+    outcome = RestOutcome(
+        character_id=c.id, hp_gained=0, hit_dice_spent=0, rolls=[], restored=restored
+    )
+    return rested, outcome
+
+
 def short_rest(
     c: Character, *, spend_hit_dice: int, rng: Rng, content: SrdContent
 ) -> tuple[Character, RestOutcome]:
-    """Короткий отдых: потраченные кости хитов лечат `1dX + Тел`, часть ресурсов возвращается."""
+    """Короткий отдых целиком: `spend_hit_dice` костей хитов по одной, затем конец отдыха."""
     if not 0 <= spend_hit_dice <= c.hit_dice:
         raise ValueError(
             f"нельзя потратить {spend_hit_dice} костей хитов: у персонажа их {c.hit_dice}"
         )
     if is_dead(c):
         return _no_rest(c)
-    cls = content.classes[c.class_id]
-    constitution = ability_mod(c, Ability.CON)
-    rolls = [
-        roll(f"1d{cls.hit_die}{constitution:+d}", rng=rng, reason="Короткий отдых: кость хитов")
-        for _ in range(spend_hit_dice)
-    ]
-    healed = sum(max(MIN_HEAL_PER_DIE, r.total) for r in rolls)
-    hp_gained = max(0, min(healed, c.hp_max - c.hp))
-    resources, restored = _recharge(c, cls, _after_short_rest)
-
-    rested = c.model_copy(deep=True)
-    rested.hp = c.hp + hp_gained
-    if c.hp == 0 and hp_gained > 0:
-        regain_consciousness(rested)
-    rested.hit_dice = c.hit_dice - spend_hit_dice
-    rested.resources = resources
+    rested = c
+    rolls: list[RollResult] = []
+    for _ in range(spend_hit_dice):
+        rested, rolled = spend_hit_die(rested, content, rng)
+        rolls.append(rolled)
+    rested, finished = finish_short_rest(rested, content)
     outcome = RestOutcome(
         character_id=c.id,
-        hp_gained=hp_gained,
+        hp_gained=rested.hp - c.hp,
         hit_dice_spent=spend_hit_dice,
         rolls=rolls,
-        restored=restored,
+        restored=finished.restored,
     )
     return rested, outcome
 

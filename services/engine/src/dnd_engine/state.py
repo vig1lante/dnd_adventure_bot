@@ -28,6 +28,9 @@ class Scene(BaseModel):
     type: SceneType = SceneType.EXPLORATION
     started_turn: int = 0
     inspiration_granted: list[str] = []  # кому уже дали вдохновение в этой сцене
+    # Вид привала у сцены `camp`: короткий или долгий. `None` у `camp` — долгий (так записаны
+    # привалы DND-1); у других сцен вида нет.
+    rest: Literal["short", "long"] | None = None
 
 
 class WorldState(BaseModel):

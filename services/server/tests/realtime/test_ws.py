@@ -19,17 +19,27 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
+import yaml
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from dnd_engine.journal import open_journal, write
+from dnd_engine.state import Scene, SceneType
 from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.config import Settings
-from dnd_server.db.models import DmTurnLog, Game, GameStateSnapshot, MessageKind, User
+from dnd_server.db.models import (
+    DmTurnLog,
+    Game,
+    GameStateSnapshot,
+    MessageKind,
+    PlayerAction,
+    TurnPhase,
+    User,
+)
 from dnd_server.realtime import ws as ws_module
 from dnd_server.realtime.hub import Hub
 from dnd_server.realtime.views import (
@@ -40,6 +50,7 @@ from dnd_server.realtime.views import (
     phase_event,
     state_events,
 )
+from dnd_server.turns.timers import ManualScheduler
 
 SECRET_MARK = "ТАЙНА-"  # метка из conftest.py: то, что не видит никто
 PONG = {"type": "pong"}
@@ -530,3 +541,68 @@ async def test_a_player_kicked_from_the_lobby_is_closed_and_cannot_come_back_to_
     assert closed.value.rcvd.code == 1013  # «переподключитесь»: вход уже закрыт
     assert connections_left == 1  # остался только хост
     assert await close_code(server.url(lobby_table.game_id, boris.token)) == 4403
+
+
+# --- привал: идея для рассказа только своему игроку (блок B9 DND-2) ---
+
+
+async def test_an_idea_of_a_rest_reaches_only_its_player_over_the_socket_and_after_a_reconnect(
+    server, table, db, tmp_path
+):
+    # Весь путь на настоящем приложении: хост начинает долгий привал (идеи всем живым героям),
+    # фоновая задача идей пишет их и рассылает через хаб, а сокет каждого игрока получает только
+    # свою идею — и кадром, и в снимке после переподключения.
+    explored = table.state.model_copy(
+        update={"combat": None, "scene": Scene(type=SceneType.EXPLORATION, started_turn=3)}
+    )
+    async with db() as session:
+        game = await session.get(Game, table.game_id)
+        row = await session.get(GameStateSnapshot, (table.game_id, game.state_version))
+        row.data = explored.model_dump(mode="json")
+        game.turn_phase, game.deadline_at = TurnPhase.DISCUSSION, None
+        await session.execute(
+            delete(PlayerAction).where(PlayerAction.turn_id == game.current_turn_id)
+        )
+        await session.commit()
+    keys = list(table.seats)  # порядок входа: $pc1…$pc3
+    ideas = {key: f"Идея у костра только для {table.seats[key].name}." for key in keys}
+    answer = [{"character_id": f"$pc{n}", "text": ideas[key]} for n, key in enumerate(keys, 1)]
+    scenario = tmp_path / "rest.yaml"
+    scenario.write_text(
+        yaml.safe_dump(
+            {
+                "turns": [{"repeat": True, "steps": [{"text": "Угли тлеют."}]}],
+                "json": {"campfire.ideas": {"ideas": answer}},
+            },
+            allow_unicode=True,
+        ),
+        "utf-8",
+    )
+    server.app.state.settings = server.app.state.settings.model_copy(
+        update={"fake_llm_scenario": scenario}
+    )
+    server.app.state.scheduler = ManualScheduler()  # отсчёт привала не ждёт настоящего времени
+
+    async with watching(server, table, *keys) as sockets:
+        async with server.http() as http:
+            started = await http.post(
+                f"/api/games/{table.game_id}/host/rest",
+                json={"kind": "long"},
+                headers={"Authorization": f"Bearer {table.alice.token}"},
+            )
+        assert started.status_code == 200, started.text
+        await asyncio.wait_for(server.app.state.turn_tasks.join(), TIMEOUT_S)
+        frames = {key: await drain(ws) for key, ws in sockets.items()}
+
+    for key in keys:
+        types = [frame["type"] for frame in frames[key]]
+        assert types.index("rest_started") < types.index("rest_idea"), key
+        assert [f["text"] for f in frames[key] if f["type"] == "rest_idea"] == [ideas[key]]
+        seen = json.dumps(frames[key], ensure_ascii=False)
+        assert [text for text in ideas.values() if text in seen] == [ideas[key]]
+        async with connect(server.url(table.game_id, table.seats[key].token)) as ws:
+            snapshot = await recv(ws)
+        assert snapshot["rest"]["kind"] == "long"
+        assert snapshot["rest"]["my_ideas"] == [ideas[key]]
+        whole = json.dumps(snapshot, ensure_ascii=False)
+        assert [text for text in ideas.values() if text in whole] == [ideas[key]]

@@ -13,11 +13,13 @@ from dnd_server.db.models import GamePhase, TurnPhase
 # Пределы длительностей отсчётов в секундах, которые хост задаёт при создании игры. Нижняя граница —
 # чтобы шестеро в одной комнате успели прочитать рассказ и набрать ход, а отсчёт не обнулил его по
 # случайной опечатке; верхняя — чтобы забытый отсчёт не подвесил игру: хост в любой момент
-# закрывает сбор вручную. Значения по умолчанию из env (120, 60 и 300) лежат внутри. Целое строгое:
-# «120» и 120.0 — не секунды, а ошибка клиента.
+# закрывает сбор вручную. Значения по умолчанию из env (120, 60, 300 и 120) лежат внутри. Целое
+# строгое: «120» и 120.0 — не секунды, а ошибка клиента. `CampSeconds` — долгий привал (и привал,
+# который начал мастер), `ShortRestSeconds` — короткий привал по кнопке хоста (блок B9).
 CollectSeconds = Annotated[StrictInt, Field(ge=30, le=600)]
 HurrySeconds = Annotated[StrictInt, Field(ge=15, le=300)]
 CampSeconds = Annotated[StrictInt, Field(ge=30, le=900)]
+ShortRestSeconds = Annotated[StrictInt, Field(ge=30, le=600)]
 
 
 class CreateGameIn(BaseModel):
@@ -31,6 +33,7 @@ class CreateGameIn(BaseModel):
     collect_seconds: CollectSeconds | None = None
     hurry_seconds: HurrySeconds | None = None
     camp_seconds: CampSeconds | None = None
+    short_rest_seconds: ShortRestSeconds | None = None
     # «Мат и грубая речь» (решение Р1): по умолчанию включён. Строгий: «false» и 0 — ошибка клиента.
     profanity: StrictBool = True
 
@@ -70,5 +73,6 @@ class GameOut(BaseModel):
     collect_seconds: int
     hurry_seconds: int
     camp_seconds: int
+    short_rest_seconds: int
     profanity: bool  # флажок мата игры: его видят мастер, служебные роли и лобби
     players: list[PlayerOut]

@@ -38,8 +38,10 @@ from dnd_engine.events import (
 )
 from dnd_engine.modules import MODULES, build_ruleset
 from dnd_engine.modules.base import RuleSet
+from dnd_engine.modules.campfire import begin_rest
+from dnd_engine.rest import RestError
 from dnd_engine.rng import ScriptedRng, SeededRng
-from dnd_engine.state import GameState, RulesRef, SceneType
+from dnd_engine.state import GameState, RulesRef, Scene, SceneType
 from dnd_engine.tools import build_registry
 from dnd_engine.tools.combat import COMBAT_TOOLS, MAX_MONSTERS
 from dnd_engine.tools.narrative import NARRATIVE_TOOLS, ConditionId, DamageType
@@ -1760,6 +1762,7 @@ def test_start_camp_sets_the_camp_scene_outside_battle(run, make_ctx):
 
     assert outcome.error is None and outcome.result["scene"] == "camp"
     assert ctx.state.scene.type == SceneType.CAMP
+    assert ctx.state.scene.rest == "long"  # привал мастера — всегда долгий
     assert ctx.state.scene.inspiration_granted == []
     assert ctx.events == [SceneEvent(scene=SceneType.CAMP)]
     assert (ctx.state.time.day, ctx.state.party[HERO].hp) == (1, 30)  # отдых — в конце привала
@@ -1776,6 +1779,48 @@ def test_a_camp_cannot_be_started_twice(run, make_ctx):
     run(ctx, "start_camp", reason="т")
 
     refused(run, ctx, "start_camp", "уже идёт", reason="т")
+
+
+def test_start_camp_is_not_stopped_by_the_limit_of_short_rests(run, make_ctx, make_state):
+    # Предел коротких отдыхов «Специй BG3» снимает как раз долгий отдых привала.
+    ctx = make_ctx(make_state(short_rests_since_long=2))
+
+    assert run(ctx, "start_camp", reason="Отряд устал").error is None
+    assert ctx.state.scene.rest == "long"
+
+
+def test_start_camp_during_a_short_rest_is_refused(run, make_ctx):
+    ctx = make_ctx()
+    ctx.state.scene = Scene(type=SceneType.CAMP, rest="short")
+
+    refused(run, ctx, "start_camp", "уже идёт", reason="т")
+
+
+def refusal_of_begin_rest(ctx: ToolContext) -> str:
+    """Текст отказа `begin_rest` для долгого привала в том же состоянии, что видит инструмент."""
+    with pytest.raises(RestError) as refusal:
+        begin_rest(ctx.state, "long", ctx.rules, content=ctx.content, adventure=ctx.adventure)
+    return str(refusal.value)
+
+
+@pytest.mark.parametrize("kind", [None, "short", "long"], ids=["dnd1", "short", "long"])
+def test_start_camp_during_any_camp_gives_the_model_the_refusal_of_begin_rest(run, make_ctx, kind):
+    # `start_camp` идёт через `begin_rest`: модель видит тот же текст, что игроки в ответе 409.
+    ctx = make_ctx()
+    ctx.state.scene = Scene(type=SceneType.CAMP, rest=kind)
+    expected = refusal_of_begin_rest(ctx)
+
+    outcome = refused(run, ctx, "start_camp", "уже идёт", reason="т")
+
+    assert outcome.error == expected
+
+
+def test_start_camp_in_battle_gives_the_model_the_refusal_of_begin_rest(run, started):
+    expected = refusal_of_begin_rest(started)
+
+    outcome = refused(run, started, "start_camp", "бою", reason="Передохнём")
+
+    assert outcome.error == expected
 
 
 def test_start_camp_needs_a_reason_and_forbids_extra_fields(run, make_ctx):

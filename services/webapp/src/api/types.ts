@@ -60,7 +60,10 @@ export interface GameSummary {
   model: string | null;
   collect_seconds: number;
   hurry_seconds: number;
+  /** Срок долгого привала (и привала DND-1), с. */
   camp_seconds: number;
+  /** Срок короткого привала, с (контракт B9, §3: `GameOut.short_rest_seconds`). */
+  short_rest_seconds: number;
   /** Флажок «Мат и грубая речь»: его видят мастер и служебные роли нейронки. */
   profanity: boolean;
   players: PlayerSummary[];
@@ -86,6 +89,7 @@ export interface CreateGameBody {
   collect_seconds?: number;
   hurry_seconds?: number;
   camp_seconds?: number;
+  short_rest_seconds?: number;
   /** Без поля сервер включает мат (по умолчанию `true`). */
   profanity?: boolean;
 }
@@ -546,7 +550,20 @@ export type HostAction =
   | "regenerate"
   | "hurry"
   | "camp-extend"
-  | "camp-end";
+  | "camp-end"
+  // Те же «+1 мин» и «Закончить» для привала любого вида (контракт B9, §1 п. 3).
+  | "rest-extend"
+  | "rest-end";
+
+/** Вид привала: короткий (час, кости хитов) или долгий (до утра). */
+export type RestKind = "short" | "long";
+
+/** Ответ на «Потратить кость хитов»: остаток костей и хиты героя считает сервер. */
+export interface HitDieResult {
+  hit_dice: number;
+  hp: number;
+  hp_max: number;
+}
 
 // --- снимок и события сокета ---
 
@@ -703,6 +720,22 @@ export interface Snapshot {
   feed: FeedItem[];
   /** Дневник глазами игрока, в порядке появления записей. */
   journal: JournalEntry[];
+  /** Идущий привал; вне фазы хода `camp` — `null`. */
+  rest: RestView | null;
+}
+
+/**
+ * Привал глазами игрока (дополнение к контракту B9, §3). Есть только в фазе хода `camp`, иначе
+ * `null`. Тайн в нём нет: идеи — только героя смотрящего.
+ */
+export interface RestView {
+  kind: RestKind;
+  /** Срок привала; на паузе `null`, остаток — в `phase.remaining_seconds`. */
+  deadline_at: string | null;
+  /** Идеи «расскажи о себе» для своего героя; их видит только адресат. */
+  my_ideas: string[];
+  /** Реплики у костра этого привала — записи ленты `camp_line`. */
+  lines: FeedItem[];
 }
 
 /** Запись ленты снята («Перегенерировать»): клиент убирает её по `id`. */
@@ -724,6 +757,12 @@ export type WsEvent =
   | { type: "journal_entry"; entry: JournalEntry }
   /** Дневник целиком (откат хода, восстановление): заменяет прежний. */
   | { type: "journal"; entries: JournalEntry[] }
+  /** Начался привал (всем): вид и срок. Идеи и реплики приходят своими кадрами. */
+  | { type: "rest_started"; kind: RestKind; deadline_at: string | null }
+  /** Идея для рассказа — только игроку героя-адресата. */
+  | { type: "rest_idea"; text: string }
+  /** Привал кончился (всем), мастер рассказал его итог. */
+  | { type: "rest_ended"; kind: RestKind }
   | { type: "error"; detail: string }
   | { type: "pong" };
 

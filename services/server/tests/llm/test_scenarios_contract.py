@@ -21,6 +21,7 @@ from dnd_server.authoring.draft import AuthoringDraft, DraftSettings
 from dnd_server.authoring.pipeline import generate
 from dnd_server.authoring.steps import STEPS
 from dnd_server.characters.flavor import BackstoryOut, PersonaOut
+from dnd_server.dm.rest_ideas import IdeasOut
 from dnd_server.dm.weaving import WeavingOut
 from dnd_server.llm.base import JsonRequest, ProviderError, TurnRequest
 from dnd_server.llm.fake import (
@@ -50,6 +51,8 @@ MANUAL_RUN_PLAYERS: dict[str, tuple[int, ...]] = {
     "weaving.yaml": (3,),
     # Сквозной тест Playwright (B8.7): шестеро игроков, зацепка у каждого.
     "e2e_full.yaml": (6,),
+    # Сквозной тест Playwright «Привалы» (B9.4): трое игроков, зацепка у каждого.
+    "e2e_rests.yaml": (3,),
 }
 
 SCHEMA_BY_STEP: dict[str, type[BaseModel]] = {
@@ -260,8 +263,10 @@ async def test_e2e_hooks_have_goals_that_do_not_contain_one_another():
         assert [other for other in goals if goal in other] == [goal]
 
 
-async def test_e2e_scenario_describes_quick_heroes_and_their_backstories():
-    scenario = load_scenario(E2E_SCENARIO)
+@pytest.mark.parametrize("name", ["e2e_full.yaml", "e2e_rests.yaml"])
+async def test_e2e_scenario_describes_quick_heroes_and_their_backstories(name):
+    # Оба сквозных теста создают героев кнопкой «Быстрый герой».
+    scenario = load_scenario(SCENARIOS_DIR / name)
     provider = FakeProvider(scenario)
 
     persona = await provider.complete_json(
@@ -395,3 +400,89 @@ async def test_two_providers_from_one_scenario_have_independent_json_queues():
     assert given == [1, 2, 1]
     with pytest.raises(ProviderError, match="сценарий исчерпан"):
         await first.complete_json(request, Number)
+
+
+# --- привалы (блок B9 DND-2) ---
+
+
+@pytest.mark.parametrize(
+    "path",
+    [path for path in SCENARIO_FILES if "campfire.ideas" in load_scenario(path).json_answers],
+    ids=lambda path: path.name,
+)
+async def test_every_answer_of_the_campfire_host_passes_the_schema_of_the_ideas(path):
+    scenario = load_scenario(path)
+    provider = FakeProvider(scenario, pc_ids=PC_IDS)
+
+    for _answer in answers_of(scenario, "campfire.ideas"):
+        out = await provider.complete_json(
+            JsonRequest(system="", prompt="", purpose="campfire.ideas", cheap=True), IdeasOut
+        )
+        assert out.ideas
+        assert {idea.character_id for idea in out.ideas} <= set(PC_IDS)
+
+
+async def test_the_rest_scenario_has_an_idea_for_each_of_three_heroes_and_ends_any_rest():
+    scenario = load_scenario(SCENARIOS_DIR / "rest.yaml")
+    provider = FakeProvider(scenario, pc_ids=PC_IDS[:3])
+
+    out = await provider.complete_json(
+        JsonRequest(system="", prompt="", purpose="campfire.ideas", cheap=True), IdeasOut
+    )
+
+    assert [idea.character_id for idea in out.ideas] == list(PC_IDS[:3])
+    # Привал начинает хост без мастера: ход-шаблон сценария — «конец привала», без смены сцены.
+    [turn] = scenario.turns
+    assert turn.repeat and {step.tool for step in tool_steps(turn)} == {"chronicle"}
+
+
+# --- сквозной сценарий Playwright «Привалы» (B9.4) ---
+#
+# `e2e_rests.yaml` играет сервер под браузерами троих игроков (`services/webapp/e2e/rests.spec.ts`).
+# Привалы начинает хост кнопкой, без хода мастера, поэтому после открытия идут только рассказы
+# концов привалов, а идеи `campfire.ideas` — по ответу на каждый привал. Тест Playwright рассчитывает
+# на этот порядок и ищет тексты идей целиком: ниже он закреплён, чтобы правка сценария не разошлась
+# с тестом молча.
+
+REST_E2E_SCENARIO = SCENARIOS_DIR / "e2e_rests.yaml"
+REST_E2E_PC_IDS = PC_IDS[:3]
+IDEAS_REQUEST = JsonRequest(system="", prompt="", purpose="campfire.ideas", cheap=True)
+
+
+def test_the_scenarios_of_the_rests_are_in_the_folder():
+    assert {"rest.yaml", "e2e_rests.yaml"} <= {path.name for path in SCENARIO_FILES}
+
+
+def test_e2e_rest_scenario_opens_with_a_blow_to_the_first_hero_and_then_only_ends_rests():
+    opening, short_end, long_end, template = load_scenario(REST_E2E_SCENARIO).turns
+
+    # Открытие: урон только первому герою — ему есть что лечить костью хитов, и он в фокусе
+    # рассказа, поэтому идеи короткого привала достаются героям 2 и 3.
+    assert {step.tool for step in tool_steps(opening)} == {"damage", "chronicle"}
+    assert [s.args["character_id"] for s in tool_steps(opening) if s.tool == "damage"] == ["$pc1"]
+    # Концы привалов и шаблон: отдых делает сервер, привал начинает хост — мастер только
+    # рассказывает (ни `start_camp`, ни `end_scene`).
+    for turn in (short_end, long_end, template):
+        assert {step.tool for step in tool_steps(turn)} <= {"chronicle"}
+    assert (short_end.repeat, long_end.repeat, template.repeat) == (False, False, True)
+    for turn in (opening, short_end, long_end, template):
+        assert isinstance(turn.steps[-1], TextStep) and turn.steps[-1].text.strip()
+
+
+async def test_e2e_rest_scenario_answers_two_rests_with_an_idea_for_each_of_three_heroes():
+    scenario = load_scenario(REST_E2E_SCENARIO)
+    provider = FakeProvider(scenario, pc_ids=REST_E2E_PC_IDS)
+
+    answers = [await provider.complete_json(IDEAS_REQUEST, IdeasOut) for _ in range(2)]
+
+    # Короткий привал, затем долгий: в каждом ответе идея каждому из троих по порядку.
+    assert len(answers_of(scenario, "campfire.ideas")) == 2
+    for out in answers:
+        assert [idea.character_id for idea in out.ideas] == list(REST_E2E_PC_IDS)
+    texts = [idea.text for out in answers for idea in out.ideas]
+    # Тест Playwright ищет каждую идею целиком: ни одна не входит в другую, кавычек внутри нет.
+    for text in texts:
+        assert [other for other in texts if text in other] == [text]
+        assert not set('"«»') & set(text), text
+    with pytest.raises(ProviderError, match="сценарий исчерпан"):
+        await provider.complete_json(IDEAS_REQUEST, IdeasOut)  # третьего привала тест не начинает

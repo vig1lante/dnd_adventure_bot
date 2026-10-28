@@ -1,5 +1,5 @@
 import { render, screen, within } from "@testing-library/react";
-import type { GamePhase, TurnPhase } from "../api/types";
+import type { GamePhase, GameSummary, RestView, TurnPhase } from "../api/types";
 import type { LiveConnection } from "../store/game";
 import { SERVER_TIME, gameView, phaseOf } from "./fixtures";
 import { StatusBar } from "./StatusBar";
@@ -16,6 +16,10 @@ function renderBar(
     remaining?: number | null;
     statuses?: Record<string, "writing" | "ready" | "pass">;
     connection?: LiveConnection;
+    /** Привал из снимка (контракт B9, §3); по умолчанию его нет. */
+    rest?: RestView | null;
+    /** Поправки к сводке игры (сроки отсчётов). */
+    summary?: Partial<GameSummary>;
   } = {},
 ) {
   const { game = "playing", phase = game, deadline = null } = options;
@@ -26,8 +30,14 @@ function renderBar(
       remaining_seconds: options.remaining ?? null,
     }),
     ...(options.statuses === undefined ? {} : { statuses: options.statuses }),
+    rest: options.rest ?? null,
   });
-  view.game = { ...view.game, phase: game, turn_phase: turnPhase };
+  view.game = {
+    ...view.game,
+    ...options.summary,
+    phase: game,
+    turn_phase: turnPhase,
+  };
   return render(
     <StatusBar
       view={view}
@@ -163,6 +173,69 @@ describe("отсчёт в строке статуса", () => {
     );
     const wax = container.querySelector(".ui-countdown__wax > span");
     expect((wax as HTMLElement).style.width).toBe("25%"); // 75 из 300
+  });
+
+  describe("привал: воск от срока его вида (контракт B9, §9 п. 5)", () => {
+    const rest = (kind: RestView["kind"]): RestView => ({
+      kind,
+      deadline_at: null,
+      my_ideas: [],
+      lines: [],
+    });
+    const waxOf = (container: HTMLElement) =>
+      (container.querySelector(".ui-countdown__wax > span") as HTMLElement)
+        .style.width;
+
+    test("короткий: от short_rest_seconds", () => {
+      const { container } = renderBar("camp", {
+        deadline: at(60),
+        rest: rest("short"),
+      });
+
+      expect(screen.getByRole("timer")).toHaveAccessibleName(
+        "До конца привала 1:00",
+      );
+      expect(waxOf(container)).toBe("50%"); // 60 из 120
+    });
+
+    test("короткий только начался: свеча полная, а не от срока долгого", () => {
+      const { container } = renderBar("camp", {
+        deadline: at(90),
+        rest: rest("short"),
+        summary: { short_rest_seconds: 90, camp_seconds: 300 },
+      });
+
+      expect(waxOf(container)).toBe("100%");
+    });
+
+    test("долгий: от camp_seconds", () => {
+      const { container } = renderBar("camp", {
+        deadline: at(150),
+        rest: rest("long"),
+      });
+
+      expect(waxOf(container)).toBe("50%"); // 150 из 300
+    });
+
+    test("вид ещё не пришёл (rest: null) — как долгий, от camp_seconds", () => {
+      const { container } = renderBar("camp", {
+        deadline: at(150),
+        rest: null,
+      });
+
+      expect(waxOf(container)).toBe("50%");
+    });
+
+    test("пауза короткого привала: остаток стоит, воск от short_rest_seconds", () => {
+      const { container } = renderBar("camp", {
+        game: "paused",
+        remaining: 30,
+        rest: rest("short"),
+      });
+
+      expect(screen.getByRole("timer")).toHaveTextContent("0:30");
+      expect(waxOf(container)).toBe("25%"); // 30 из 120
+    });
   });
 
   test("обсуждение без срока: отсчёта нет", () => {

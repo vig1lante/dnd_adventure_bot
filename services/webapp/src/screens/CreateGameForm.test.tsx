@@ -824,6 +824,7 @@ describe("длительности отсчётов", () => {
     expect(posted(server)[0].body).not.toHaveProperty("collect_seconds");
     expect(posted(server)[0].body).not.toHaveProperty("hurry_seconds");
     expect(posted(server)[0].body).not.toHaveProperty("camp_seconds");
+    expect(posted(server)[0].body).not.toHaveProperty("short_rest_seconds");
   });
 
   test("заданные в границах сервера уходят целыми числами", async () => {
@@ -832,6 +833,7 @@ describe("длительности отсчётов", () => {
     typeInto("Сбор ходов, сек.", "45");
     typeInto("«Поторопить», сек.", "20");
     typeInto("Привал, сек.", "600");
+    typeInto("Короткий привал, сек.", "90");
     submit();
 
     await vi.waitFor(() => expect(posted(server)).toHaveLength(1));
@@ -840,6 +842,7 @@ describe("длительности отсчётов", () => {
       collect_seconds: 45,
       hurry_seconds: 20,
       camp_seconds: 600,
+      short_rest_seconds: 90,
     });
   });
 
@@ -850,6 +853,9 @@ describe("длительности отсчётов", () => {
     ["«Поторопить», сек.", "301"],
     ["Привал, сек.", "29"],
     ["Привал, сек.", "901"],
+    ["Короткий привал, сек.", "29"],
+    ["Короткий привал, сек.", "601"],
+    ["Короткий привал, сек.", "1.5"],
     ["Сбор ходов, сек.", "1.5"],
     ["Сбор ходов, сек.", "abc"],
     ["Сбор ходов, сек.", "-60"],
@@ -875,6 +881,8 @@ describe("длительности отсчётов", () => {
     ["«Поторопить», сек.", "300", "hurry_seconds", 300],
     ["Привал, сек.", "30", "camp_seconds", 30],
     ["Привал, сек.", "900", "camp_seconds", 900],
+    ["Короткий привал, сек.", "30", "short_rest_seconds", 30],
+    ["Короткий привал, сек.", "600", "short_rest_seconds", 600],
   ] as const)(
     "%s = %s — граница допустима",
     async (label, value, field, expected) => {
@@ -887,6 +895,16 @@ describe("длительности отсчётов", () => {
       expect(posted(server)[0].body).toMatchObject({ [field]: expected });
     },
   );
+
+  test("поле короткого привала с подсказкой о границах сервера", async () => {
+    await loadedForm();
+
+    expect(
+      screen.getByLabelText("Короткий привал, сек."),
+    ).toHaveAccessibleDescription(
+      "От 30 до 600. Пусто — как задано на сервере.",
+    );
+  });
 
   test("исправленное значение снимает ошибку", async () => {
     await loadedForm();

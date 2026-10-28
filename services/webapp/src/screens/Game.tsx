@@ -10,6 +10,7 @@ import { CharacterSheet } from "../components/CharacterSheet";
 import { Feed } from "../components/Feed";
 import { HostPanel } from "../components/HostPanel";
 import { PartyList } from "../components/PartyList";
+import { restLabel } from "../components/phases";
 import { ReconnectingNote, StatusBar } from "../components/StatusBar";
 import { followGame, gameStage, useGame } from "../store/game";
 import type { GameView, LiveConnection } from "../store/game";
@@ -64,7 +65,7 @@ function SideLink({ view, open }: SideLinkProps) {
   const { combat, character } = view;
   if (combat === null) {
     return (
-      <Card title="Привал" icon="candle">
+      <Card title={restLabel(view.rest?.kind ?? null)} icon="candle">
         <p className="game-goto__text">
           Герои отдыхают у костра: реплики, тема мастера и отсчёт.
         </p>

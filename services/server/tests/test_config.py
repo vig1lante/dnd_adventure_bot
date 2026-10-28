@@ -46,6 +46,7 @@ ALL_FIELDS_ENV = {
     "COLLECT_SECONDS": "11",
     "HURRY_SECONDS": "22",
     "CAMP_SECONDS": "33",
+    "SHORT_REST_SECONDS": "44",
 }
 
 # Модель подписки для `claude_code_cli` (DND-2, спека §11, Р9).
@@ -167,6 +168,7 @@ def test_every_field_is_read_from_its_uppercase_env_variable(monkeypatch):
         "collect_seconds": 11,
         "hurry_seconds": 22,
         "camp_seconds": 33,
+        "short_rest_seconds": 44,
     }
     # Тест должен менять каждое поле: иначе непрочитанная переменная осталась бы незамеченной.
     assert {key.lower() for key in ALL_FIELDS_ENV} == set(Settings.model_fields)
@@ -355,7 +357,9 @@ def test_app_env_accepts_only_dev_and_prod(monkeypatch):
     assert [item["loc"] for item in error.value.errors()] == [("app_env",)]
 
 
-@pytest.mark.parametrize("name", ["collect_seconds", "hurry_seconds", "camp_seconds"])
+@pytest.mark.parametrize(
+    "name", ["collect_seconds", "hurry_seconds", "camp_seconds", "short_rest_seconds"]
+)
 @pytest.mark.parametrize("value", ["0", "-5", "abc"])
 def test_seconds_must_be_positive_integers(monkeypatch, name, value):
     monkeypatch.setenv(name.upper(), value)
@@ -366,10 +370,19 @@ def test_seconds_must_be_positive_integers(monkeypatch, name, value):
     assert [item["loc"] for item in error.value.errors()] == [(name,)]
 
 
-@pytest.mark.parametrize("name", ["collect_seconds", "hurry_seconds", "camp_seconds"])
+@pytest.mark.parametrize(
+    "name", ["collect_seconds", "hurry_seconds", "camp_seconds", "short_rest_seconds"]
+)
 def test_seconds_reject_non_positive_init_value(name):
     with pytest.raises(ValidationError):
         Settings(**{name: 0})
+
+
+def test_the_short_rest_lasts_two_minutes_and_the_long_one_five_by_default():
+    # Короткий привал по кнопке хоста (DND-2, блок B9): свой срок, долгий берёт срок привала DND-1.
+    settings = Settings()
+
+    assert (settings.short_rest_seconds, settings.camp_seconds) == (120, 300)
 
 
 def test_get_settings_is_cached():

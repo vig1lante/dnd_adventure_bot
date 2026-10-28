@@ -36,6 +36,7 @@ from dnd_engine.state import GameState, PcHook, SceneType
 from dnd_engine.tools.lore import GetLocationArgs, get_location, item_holder, relations_of
 from dnd_engine.tools.registry import ToolContext
 from dnd_server.db.models import TurnKind
+from dnd_server.dm.camp_flow import RestKind
 from dnd_server.dm.spotlight import spotlight_hints
 from dnd_server.dm.text import json_line, one_line, printable_line
 from dnd_server.prompts import load, profanity_line
@@ -86,6 +87,13 @@ _TASKS = {
         "из блока «реплики у костра» и расскажи, как отряд просыпается и собирается в путь."
     ),
 }
+# Конец короткого привала (блок B9): прошёл час, время игры не сдвигается, кости хитов игроки
+# потратили сами, а особенности «до короткого отдыха» движок уже вернул.
+_SHORT_CAMP_END_TASK = (
+    "Конец короткого привала. Прошёл час: движок вернул особенности «до короткого отдыха», кости "
+    "хитов игроки потратили сами, время игры не сдвигай. Ответь на реплики героев из блока "
+    "«реплики у костра» и дай короткий рассказ: что изменилось за час отдыха."
+)
 _FINISH = (
     "Закончи ход записью в летопись (chronicle), затем напиши рассказ для всех игроков: "
     "тайное — только личными сообщениями."
@@ -238,12 +246,14 @@ def turn_context(
     pacing: Pacing,
     acting: Sequence[str] | None,
     profanity: bool,
+    rest: RestKind | None = None,
 ) -> str:
     """Динамический контекст хода мастера; `state` не меняется.
 
     `actions` — ходы раунда (в режиме `camp_end` — реплики героев у костра, в `opening` их нет),
     `recent` — последние ходы от старых к новым, `acting` — id бойцов, за которых мастер ходит в
-    боевом вызове, `profanity` — флажок мата игры (строка раздела «Стиль»). Контекст начинается с
+    боевом вызове, `profanity` — флажок мата игры (строка раздела «Стиль»), `rest` — вид привала,
+    который кончается в ходе `camp_end` (в `state` уже сцена после отдыха). Контекст начинается с
     собственного заголовка: провайдер `claude_code_cli` передаёт его одним аргументом
     `-p <контекст>`, и начало с «-» приняли бы за флаг."""
     place = _location_view(state, adventure, srd)
@@ -259,9 +269,16 @@ def turn_context(
         _spotlight_section(state),
         _recent_section(state, recent),
         _actions_section(state, mode, actions),
-        f"## Задача\n{_TASKS[mode]} {_FINISH}",
+        f"## Задача\n{_task(mode, rest)} {_FINISH}",
     ]
     return "\n\n".join(section for section in sections if section) + "\n"
+
+
+def _task(mode: TurnMode, rest: RestKind | None) -> str:
+    """Задача хода: у конца короткого привала своя, у остальных — по режиму."""
+    if mode == TurnMode.CAMP_END and rest == "short":
+        return _SHORT_CAMP_END_TASK
+    return _TASKS[mode]
 
 
 _CHRONICLE_GUIDE = (

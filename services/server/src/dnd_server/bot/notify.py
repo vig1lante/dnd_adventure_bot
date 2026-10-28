@@ -35,8 +35,14 @@ def hurry_text(seconds_left: int) -> str:
     return f"Хост торопит: на ход в бою осталось {max(seconds_left, 0)} с"
 
 
-def camp_text(seconds_left: int) -> str:
-    return f"Привал у костра — осталось {max(seconds_left, 0)} с: оставьте реплику своего героя"
+def camp_text(seconds_left: int, *, short: bool = False) -> str:
+    """Зов к костру; на коротком привале (блок B9) ещё и напоминание о костях хитов."""
+    left = max(seconds_left, 0)
+    if short:
+        return (
+            f"Короткий привал — осталось {left} с: потратьте кости хитов и оставьте реплику героя"
+        )
+    return f"Привал у костра — осталось {left} с: оставьте реплику своего героя"
 
 
 def game_continues_text() -> str:

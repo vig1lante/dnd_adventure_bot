@@ -8,6 +8,7 @@
 
 import ast
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,7 @@ from dnd_engine.checks import (
 from dnd_engine.content import SrdContent, load_srd
 from dnd_engine.creation import quick_character, random_character, random_point_buy
 from dnd_engine.dice import Advantage
-from dnd_engine.rest import long_rest, short_rest
+from dnd_engine.rest import finish_short_rest, long_rest, short_rest, spend_hit_die
 from dnd_engine.rng import Rng, ScriptedRng, SeededRng
 
 STR, DEX, CON, INT, WIS, CHA = Ability
@@ -774,6 +775,27 @@ def test_short_rest_rolls_exactly_one_die_per_spent_hit_die(srd, spent):
     short_rest(hero, spend_hit_dice=spent, rng=rng, content=srd)
 
     assert rng.calls == spent
+
+
+def test_a_hit_die_rolls_exactly_one_die_of_the_class_and_leaves_its_input_untouched(srd):
+    # Кость хитов на коротком привале сервер бросает своим `SystemRng` через `spend_hit_die`:
+    # одно обращение к переданному генератору на кость, и только кость класса героя.
+    for seed in range(1, 80):
+        hero = random_character(SeededRng(seed), srd, taken_classes=set(), character_id="p")
+        hero = hero.model_copy(update={"hp": 1, "hit_dice": 2}, deep=True)
+        before = hero.model_copy(deep=True)
+        rng = CountingRng(SeededRng(seed))
+
+        rested, rolled = spend_hit_die(hero, srd, rng)
+        spent = rested.model_copy(deep=True)
+        finish_short_rest(rested, srd)  # конец отдыха кубов не бросает и вход не меняет
+
+        hit_die = srd.classes[hero.class_id].hit_die
+        assert rng.calls == 1, f"seed {seed}"
+        assert re.fullmatch(rf"1d{hit_die}[+-]\d+", rolled.expr), f"seed {seed}: {rolled.expr}"
+        assert 2 <= rested.hp <= hero.hp_max, f"seed {seed}"
+        assert hero == before, f"seed {seed}"
+        assert rested == spent, f"seed {seed}"
 
 
 def test_random_point_buy_spends_exactly_four_rng_values():

@@ -39,6 +39,11 @@ id персонажей; в id игрока их переводит `audience_to
 отката хода. Игра, записанная до дневника, получает стартовый дневник при чтении для снимка — в
 памяти, в базу его запишет следующий ход мастера.
 
+Привал (блок B9 DND-2) в снимке — блок `rest` (`rest_view`): вид, срок, личные идеи «расскажи о
+себе» только героя смотрящего (из `games.rest_ideas`) и реплики у костра этого привала (записи ленты
+`camp_line` открытого хода «конец привала»). Вне фазы `camp` блока нет. Кадры привала —
+`rest_started` и `rest_ended` всем, `rest_idea` с текстом одной идеи — только игроку её героя.
+
 Русские названия состояний и эффектов берутся из данных SRD движка (состояния, заклинания, умения
 классов) и из таблицы названий боевых меток движка (`MARK_NAMES_RU`, например «Помощь» для
 `helped`), а не из копии на сервере. Для id, которых нет и там, клиент получает сам id.
@@ -101,8 +106,10 @@ from dnd_server.db.models import (
     MessageKind,
     PlayerAction,
     PlayerCharacter,
+    TurnPhase,
     User,
 )
+from dnd_server.dm.camp_flow import RestKind, rest_kind
 from dnd_server.games.service import get_game
 
 logger = logging.getLogger(__name__)
@@ -176,6 +183,12 @@ def _effects(
 # --- блоки снимка (они же содержимое событий) ---
 
 
+def _running_deadline(game: Game) -> str | None:
+    """Срок идущего отсчёта; на паузе срока нет (остаток — в `phase.remaining_seconds`)."""
+    running = game.phase != GamePhase.PAUSED and game.deadline_at is not None
+    return iso_utc(game.deadline_at) if running and game.deadline_at is not None else None
+
+
 def phase_view(game: Game, state: GameState | None) -> dict[str, Any]:
     """Фаза игры, фаза хода, отсчёт и сцена. До старта игры состояния нет, и сцены тоже.
 
@@ -186,11 +199,10 @@ def phase_view(game: Game, state: GameState | None) -> dict[str, Any]:
     if state is not None:
         scene = {"type": state.scene.type.value, "day": state.time.day, "part": state.time.part}
     remaining = game.paused_remaining()
-    running = game.phase != GamePhase.PAUSED and game.deadline_at is not None
     return {
         "phase": game.phase.value,
         "turn_phase": game.turn_phase.value if game.turn_phase is not None else None,
-        "deadline_at": iso_utc(game.deadline_at) if running else None,
+        "deadline_at": _running_deadline(game),
         "remaining_seconds": None if remaining is None else math.ceil(remaining.total_seconds()),
         "scene": scene,
     }
@@ -443,6 +455,19 @@ def journal_view(state: GameState, user_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def rest_view(
+    game: Game, state: GameState, my_ideas: list[str], lines: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Идущий привал глазами игрока: вид (`null` у сцены — долгий привал DND-1), срок (на паузе
+    `null`), свои идеи и реплики у костра этого привала (записи ленты `camp_line`)."""
+    return {
+        "kind": rest_kind(state),
+        "deadline_at": _running_deadline(game),
+        "my_ideas": my_ideas,
+        "lines": lines,
+    }
+
+
 def feed_item(message: Message) -> dict[str, Any]:
     """Сообщение ленты. Адресата клиент не получает, только признак «личное»; `data` кладёт тот,
     кто пишет сообщение, и в нём только то, что видит адресат этой строки."""
@@ -470,6 +495,25 @@ def player_status_event(user_id: str, status: ActionStatus) -> dict[str, Any]:
 def feed_item_event(message: Message) -> dict[str, Any]:
     """Событие ленты. Адресат рассылки — `message.audience`: вызывающий отдаёт его хабу как есть."""
     return {"type": "feed_item", "item": feed_item(message)}
+
+
+def rest_started_event(game: Game, state: GameState) -> dict[str, Any]:
+    """Начался привал (всем): вид и срок. Идеи и реплики приходят своими кадрами."""
+    return {
+        "type": "rest_started",
+        "kind": rest_kind(state),
+        "deadline_at": _running_deadline(game),
+    }
+
+
+def rest_idea_event(text: str) -> dict[str, Any]:
+    """Идея для рассказа: адресат рассылки — игрок героя этой идеи, и больше никто."""
+    return {"type": "rest_idea", "text": text}
+
+
+def rest_ended_event(kind: RestKind) -> dict[str, Any]:
+    """Привал кончился (всем), мастер рассказал его итог."""
+    return {"type": "rest_ended", "kind": kind}
 
 
 def feed_withdrawn_event(message_id: int) -> dict[str, Any]:
@@ -900,6 +944,29 @@ async def _feed(session: AsyncSession, game_id: str, user: User) -> list[dict[st
     return [feed_item(message) for message in reversed(list(rows))]
 
 
+async def _rest_of(
+    session: AsyncSession, game: Game, state: GameState | None, user: User
+) -> dict[str, Any] | None:
+    """Блок привала снимка: только в фазе `camp`. Идеи — героя смотрящего, реплики — открытого
+    хода «конец привала» по порядку (отдельным запросом: лента снимка ограничена `FEED_LIMIT`)."""
+    if state is None or game.turn_phase != TurnPhase.CAMP:
+        return None
+    player = await session.get(GamePlayer, (game.id, user.id))
+    hero_id = None if player is None else player.character_id
+    ideas = (game.rest_ideas or {}).get(hero_id, []) if hero_id else []
+    rows = await session.scalars(
+        select(Message)
+        .where(
+            Message.game_id == game.id,
+            Message.turn_id == game.current_turn_id,
+            Message.kind == MessageKind.CAMP_LINE,
+            Message.superseded.is_(False),
+        )
+        .order_by(Message.id)
+    )
+    return rest_view(game, state, list(ideas), [feed_item(message) for message in rows])
+
+
 def _combat_of(
     adventure: Adventure, state: GameState | None, srd: SrdContent
 ) -> dict[str, Any] | None:
@@ -960,4 +1027,5 @@ async def snapshot_for(
         "combat": _combat_of(adventure, state, srd),
         "feed": await _feed(session, game_id, user),
         "journal": journal_view(state, user.id) if state is not None else [],
+        "rest": await _rest_of(session, game, state, user),
     }

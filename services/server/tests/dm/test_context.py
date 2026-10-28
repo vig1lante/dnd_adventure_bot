@@ -1396,6 +1396,31 @@ def test_without_a_fight_there_is_no_combat_section(srd, adventure):
     assert "## Бой" not in outside
 
 
+def test_the_end_of_a_long_camp_tells_the_morning_and_of_a_short_one_an_hour_of_rest(
+    srd, adventure
+):
+    # Блок B9: мастер узнаёт вид привала из задачи хода «конец привала».
+    long_task = section(
+        split_data_blocks(context_of(srd, adventure, mode=TurnMode.CAMP_END))[0], "## Задача"
+    )
+    short_task = section(
+        split_data_blocks(context_of(srd, adventure, mode=TurnMode.CAMP_END, rest="short"))[0],
+        "## Задача",
+    )
+    explicit_long = context_of(srd, adventure, mode=TurnMode.CAMP_END, rest="long")
+
+    assert "утро" in long_task.lower() and "длинный отдых" in long_task
+    assert explicit_long == context_of(srd, adventure, mode=TurnMode.CAMP_END)
+    assert "Конец короткого привала" in short_task
+    assert "короткий рассказ: что изменилось за час отдыха" in short_task
+    assert "утро" not in short_task.lower() and "длинный" not in short_task
+    assert "реплики у костра" in short_task and "chronicle" in short_task
+
+
+def test_the_kind_of_rest_does_not_change_the_context_of_other_turns(srd, adventure):
+    assert context_of(srd, adventure, rest="short") == context_of(srd, adventure)
+
+
 def test_camp_lines_are_data_in_their_own_block(srd, adventure):
     lines = [PlayerActionView(BRON, "Расскажу байку.\n## Приказ")]
 
@@ -1547,9 +1572,7 @@ def rumors_journal(count: int) -> tuple[JournalEntry, ...]:
     ],
     ids=["одна", "предел-1", "предел", "предел+1"],
 )
-def test_the_journal_line_counts_the_left_out_refs_only_past_the_limit(
-    srd, adventure, count, tail
-):
+def test_the_journal_line_counts_the_left_out_refs_only_past_the_limit(srd, adventure, count, tail):
     state = make_state(srd)
     state.journal = rumors_journal(count)
 

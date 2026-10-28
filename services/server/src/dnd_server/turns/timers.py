@@ -167,9 +167,15 @@ class TaskSet:
             logger.error("%s\n%s", failure_text, safe_traceback(error, self._settings))
 
     async def join(self) -> None:
-        """Ждёт, пока кончатся все задачи, в том числе поставленные уже во время ожидания."""
+        """Ждёт, пока кончатся все задачи, в том числе поставленные уже во время ожидания.
+
+        После каждого `gather` ход уступается циклу: с Python 3.12 `gather` из одних уже готовых
+        задач кончается сразу, не отдавая управление, а колбэк `_finished`, который убирает
+        кончившуюся задачу из набора, ещё стоит в очереди цикла. Без уступки `while` крутился бы
+        без конца (зависание тестов на 100% CPU, B9.coverage D2)."""
         while self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+            await asyncio.sleep(0)
 
     async def shutdown(self) -> None:
         """Отменяет идущие задачи и ждёт их уборки (ход мастера при отмене пишет себя неудачным)."""

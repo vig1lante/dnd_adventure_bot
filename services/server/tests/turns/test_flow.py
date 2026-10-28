@@ -359,6 +359,59 @@ async def test_the_task_set_keeps_tasks_until_they_end_and_join_waits_for_them()
     assert len(tasks) == 0
 
 
+# Гонка `join` (дополнение контракта B9 §10 п. 5, зависание полного прогона на 100% CPU): задача
+# уже кончилась, а её колбэк `_finished`, который убирает её из набора, ещё стоит в очереди цикла.
+# С Python 3.12 `gather` из одних готовых задач завершается сразу, не отдавая управление циклу,
+# поэтому `while self._tasks` в `join` крутился без единого переключения: колбэк не выполнялся
+# никогда, и `wait_for` вокруг `join` тоже не срабатывал. Чтобы тест не завис сам, счётчик
+# прерывает `join` после `JOIN_GATHER_LIMIT` вызовов `gather` (исправному хватает одного-двух).
+# Дефект B9.coverage D2 исправлен в fix-раунде 1 B9 (R2/S3): xfail снят.
+JOIN_GATHER_LIMIT = 100
+
+
+async def test_join_returns_when_a_task_has_just_ended_and_its_callback_is_still_queued():
+    real_gather = asyncio.gather
+    calls = 0
+
+    def counting_gather(*awaitables: Any, **options: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls > JOIN_GATHER_LIMIT:
+            raise RuntimeError("join крутится, не отдавая управление циклу")
+        return real_gather(*awaitables, **options)
+
+    async def quick() -> None:
+        return None
+
+    tasks = TaskSet()
+    tasks.spawn(quick())
+    await asyncio.sleep(0)  # задача кончилась, а её колбэк стоит в очереди цикла после нас
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(asyncio, "gather", counting_gather)
+        await asyncio.wait_for(tasks.join(), 1)
+
+    assert len(tasks) == 0
+
+
+async def test_join_also_waits_for_a_task_spawned_by_a_task_that_has_just_ended():
+    # Общий случай: задача, кончаясь, ставит следующую (ход мастера → идеи, сжатие летописи);
+    # `join` ждёт и её, а не только набор на момент вызова.
+    done: list[str] = []
+    tasks = TaskSet()
+
+    async def second() -> None:
+        done.append("вторая")
+
+    async def first() -> None:
+        tasks.spawn(second())
+        done.append("первая")
+
+    tasks.spawn(first())
+    await asyncio.wait_for(tasks.join(), 1)
+
+    assert done == ["первая", "вторая"] and len(tasks) == 0
+
+
 async def test_the_task_set_logs_an_unexpected_failure_but_not_a_refusal_of_the_game(caplog):
     tasks = TaskSet()
 

@@ -11,6 +11,7 @@ import type {
   DevLogin,
   FeedItem,
   GameSummary,
+  HitDieResult,
   HostAction,
   LoginResult,
   MyCharacter,
@@ -19,6 +20,7 @@ import type {
   ProvidersList,
   RandomAbilities,
   RandomPreview,
+  RestKind,
   User,
 } from "./types";
 
@@ -264,10 +266,15 @@ export function createApi(
       post<PlayerAction>(`${gamePath(gameId)}/action/pass`),
     sendCampLine: (gameId: string, text: string) =>
       post<FeedItem>(`${gamePath(gameId)}/camp/line`, { text }),
+    // Кость бросает сервер; ответ — остаток костей и хиты героя после лечения.
+    spendHitDie: (gameId: string) =>
+      post<HitDieResult>(`${gamePath(gameId)}/rest/hit-dice`),
 
     // --- кнопки хоста: ответ — фаза игры, как в снимке ---
     hostAction: (gameId: string, action: HostAction) =>
       post<PhaseView>(`${gamePath(gameId)}/host/${action}`),
+    startRest: (gameId: string, kind: RestKind) =>
+      post<PhaseView>(`${gamePath(gameId)}/host/rest`, { kind }),
 
     // --- конструктор приключений (только создателям игр) ---
     ...authoringApi(request),

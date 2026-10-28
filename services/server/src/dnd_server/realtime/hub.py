@@ -25,8 +25,9 @@ from dnd_server.dm.text import safe_traceback
 
 logger = logging.getLogger(__name__)
 
-# Типы событий плана B6.5 и дневника отряда (блок B8 DND-2). `snapshot` и `pong` сюда не входят:
-# их отправляет только WS-эндпоинт своему соединению, а рассылать их через хаб незачем.
+# Типы событий плана B6.5, дневника отряда (блок B8 DND-2) и привалов (блок B9 DND-2). `snapshot` и
+# `pong` сюда не входят: их отправляет только WS-эндпоинт своему соединению, а рассылать их через
+# хаб незачем.
 EVENT_TYPES = frozenset(
     {
         "phase",
@@ -38,6 +39,9 @@ EVENT_TYPES = frozenset(
         "lobby",
         "journal_entry",
         "journal",
+        "rest_started",
+        "rest_idea",
+        "rest_ended",
         "error",
     }
 )

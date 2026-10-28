@@ -618,6 +618,11 @@ def test_notification_texts():
     assert hurry_text(-1) == "Хост торопит: на ход в бою осталось 0 с"
     assert camp_text(300) == "Привал у костра — осталось 300 с: оставьте реплику своего героя"
     assert camp_text(-5) == "Привал у костра — осталось 0 с: оставьте реплику своего героя"
+    assert camp_text(300, short=False) == camp_text(300)  # долгий привал говорит как в DND-1
+    assert camp_text(120, short=True) == (
+        "Короткий привал — осталось 120 с: потратьте кости хитов и оставьте реплику героя"
+    )
+    assert camp_text(-1, short=True).startswith("Короткий привал — осталось 0 с")
     assert game_continues_text() == "Игра продолжается"
     assert game_started_text() == "Игра началась: мастер рассказал первую сцену"
 

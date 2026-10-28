@@ -25,6 +25,12 @@ const DURATIONS = [
   { key: "collect_seconds", label: "Сбор ходов, сек.", min: 30, max: 600 },
   { key: "hurry_seconds", label: "«Поторопить», сек.", min: 15, max: 300 },
   { key: "camp_seconds", label: "Привал, сек.", min: 30, max: 900 },
+  {
+    key: "short_rest_seconds",
+    label: "Короткий привал, сек.",
+    min: 30,
+    max: 600,
+  },
 ] as const;
 
 type DurationKey = (typeof DURATIONS)[number]["key"];
@@ -34,6 +40,7 @@ const NO_DURATIONS: Durations = {
   collect_seconds: "",
   hurry_seconds: "",
   camp_seconds: "",
+  short_rest_seconds: "",
 };
 
 function durationError(text: string, min: number, max: number): string | null {

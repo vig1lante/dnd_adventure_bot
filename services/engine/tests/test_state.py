@@ -244,6 +244,7 @@ def test_new_state_has_neutral_defaults(make_character):
     state = make_state(make_character())
 
     assert state.scene == Scene(type=SceneType.EXPLORATION, started_turn=0, inspiration_granted=[])
+    assert state.scene.rest is None  # вид привала есть только у сцены `camp`
     assert state.world == WorldState()
     assert state.time == GameTime(day=1, part="morning")
     assert state.combat is None
@@ -335,12 +336,67 @@ def test_defaults_are_not_shared_between_states(make_character):
         (GameTime, {"part": "noon"}),
         (RulesRef, {"base": "srd-5.1"}),
         (Scene, {"type": "battle"}),
+        (Scene, {"type": "camp", "rest": "medium"}),
     ],
-    ids=["time-of-day", "rules-base", "scene-type"],
+    ids=["time-of-day", "rules-base", "scene-type", "rest-kind"],
 )
 def test_values_outside_the_vocabulary_are_rejected(model, fields):
     with pytest.raises(ValidationError):
         model(**fields)
+
+
+@pytest.mark.parametrize("kind", ["short", "long"])
+def test_the_kind_of_a_camp_survives_a_json_round_trip(make_character, kind):
+    state = make_state(
+        make_character(), scene=Scene(type=SceneType.CAMP, started_turn=4, rest=kind)
+    )
+
+    restored = GameState.model_validate_json(state.model_dump_json())
+
+    assert restored.scene == state.scene
+    assert json.loads(state.model_dump_json())["scene"]["rest"] == kind
+
+
+def test_a_camp_saved_before_the_kind_of_rest_is_read_without_a_kind(make_character):
+    # Снимок DND-1: у сцены `camp` поля `rest` нет; такой привал движок считает долгим
+    # (дополнение B9 §1 п. 2), а чтение не теряет и не меняет ни одного прежнего поля.
+    camp = make_state(make_character(), scene=Scene(type=SceneType.CAMP, started_turn=4))
+    saved = json.loads(camp.model_dump_json())
+    del saved["scene"]["rest"]
+
+    restored = GameState.model_validate_json(json.dumps(saved, ensure_ascii=False))
+
+    assert restored.scene.rest is None
+    dumped = json.loads(restored.model_dump_json())
+    assert dumped == saved | {"scene": saved["scene"] | {"rest": None}}
+
+
+@pytest.mark.parametrize(
+    ("scene_type", "kind"),
+    [
+        (SceneType.EXPLORATION, None),
+        (SceneType.CAMP, None),
+        (SceneType.CAMP, "short"),
+        (SceneType.CAMP, "long"),
+    ],
+    ids=["no-camp", "camp-without-a-kind", "short", "long"],
+)
+def test_the_kind_of_rest_is_always_in_the_stored_dict_and_reads_back(
+    make_character, scene_type, kind
+):
+    # Сервер хранит состояние как `model_dump(mode="json")`: ключ `rest` есть всегда, `null`
+    # тоже, и словарь читается обратно в то же состояние.
+    state = make_state(make_character(), scene=Scene(type=scene_type, started_turn=2, rest=kind))
+
+    stored = state.model_dump(mode="json")
+
+    assert stored["scene"] == {
+        "type": scene_type.value,
+        "started_turn": 2,
+        "inspiration_granted": [],
+        "rest": kind,
+    }
+    assert GameState.model_validate(stored) == state
 
 
 def test_scene_types_serialize_as_their_text_values():

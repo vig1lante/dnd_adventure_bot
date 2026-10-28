@@ -93,7 +93,8 @@ class Settings(BaseSettings):
 
     collect_seconds: int = Field(default=120, gt=0)
     hurry_seconds: int = Field(default=60, gt=0)
-    camp_seconds: int = Field(default=300, gt=0)
+    camp_seconds: int = Field(default=300, gt=0)  # долгий привал (и привал мастера DND-1)
+    short_rest_seconds: int = Field(default=120, gt=0)  # короткий привал по кнопке хоста (B9)
 
     # Пустая строка — «не задано» в любом источнике (аргумент, окружение, `.env`): в
     # `.env.example` необязательные значения стоят пустыми (`TELEGRAM_BOT_TOKEN=`), а

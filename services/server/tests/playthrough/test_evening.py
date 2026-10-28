@@ -376,7 +376,10 @@ class Story:
         # Двадцать записей летописи сжаты в сводку фоновым вызовом после утра.
         assert (state.chronicle.summary, state.chronicle.entries) == (SUMMARY, [])
         assert state.version == 11 and (await server.game()).state_version == 11
-        assert self.calls.turns == 9 and self.calls.json == ["weaving", "chronicle"]
+        # Вызовы модели — по `purpose` (дополнение контракта B9 §1 п. 13): идеи привала мастера —
+        # отдельный дешёвый вызов, ход мастера он не добавляет.
+        assert self.calls.turns == 9
+        assert self.calls.json == ["weaving", "campfire.ideas", "chronicle"]
 
 
 async def test_a_whole_evening_goes_from_the_start_button_to_the_morning_after_the_camp(

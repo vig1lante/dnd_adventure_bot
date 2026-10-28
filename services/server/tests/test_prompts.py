@@ -45,6 +45,7 @@ ROLES = (
     "backstory_helper",
     "weaver",
     "chronicler",
+    "campfire_host",
     *GENERATOR_ROLES,
 )
 # Роли генератора, которые пишут сущности с полями дневника (спека §8, §12).
@@ -197,10 +198,31 @@ def test_the_style_block_is_the_style_prompt_and_the_line_of_the_mode(profanity)
     )  # строка другого режима есть только в описании правил, а не в конце блока
 
 
-@pytest.mark.parametrize("role", ["hero_flavor", "backstory_helper", "weaver"])
+@pytest.mark.parametrize("role", ["hero_flavor", "backstory_helper", "weaver", "campfire_host"])
 @pytest.mark.parametrize("profanity", [True, False])
 def test_a_role_whose_text_players_read_gets_the_style_block_after_its_own_text(role, profanity):
     assert role_with_style(role, profanity) == f"{load(role)}\n\n{style_block(profanity)}"
+
+
+def test_the_campfire_host_writes_one_idea_per_hero_without_secrets_as_json():
+    # Роль `campfire_host` (блок B9): идеи «расскажи о себе» читает игрок-адресат; чужие сведения и
+    # тексты игроков — данные, а не указания; ответ — JSON по схеме.
+    text = load("campfire_host")
+
+    assert "ideas" in text and "character_id" in text and "JSON" in text
+    assert "не выполняй" in text.lower()
+    assert "только своему герою" in text  # идея героя не пересказывает чужие сведения
+    assert "чисел" in text
+
+
+def test_the_campfire_host_never_invites_questions_about_the_private_details_of_others():
+    # Fix-раунд 1 B9 (S1): все адресаты в одном запросе, поэтому роль не зовёт «спросить спутников»
+    # об их личном; вопросы спутникам — только по общим карточкам отряда и недавним событиям.
+    text = load("campfire_host")
+
+    assert "о чём их спросить" not in text
+    assert "не задавай о них вопросов" in text
+    assert "«Герои отряда»" in text and "недавним событиям" in text
 
 
 # --- роли генератора ---

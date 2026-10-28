@@ -176,6 +176,7 @@ export function gameSummary(overrides: Partial<GameSummary> = {}): GameSummary {
     collect_seconds: 120,
     hurry_seconds: 60,
     camp_seconds: 300,
+    short_rest_seconds: 120,
     profanity: true,
     players: [],
     ...overrides,
@@ -220,6 +221,7 @@ export function snapshotOf(
     combat: null,
     feed: [],
     journal: [],
+    rest: null,
     ...overrides,
   };
 }

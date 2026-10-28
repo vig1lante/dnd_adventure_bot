@@ -9,11 +9,14 @@ import pytest
 from pydantic import ValidationError
 
 from dnd_engine.abilities import Ability, Skill
-from dnd_engine.character import Character, DeathSaves
+from dnd_engine.character import ActiveBuff, ActiveCondition, Character, DeathSaves
 from dnd_engine.checks import CheckKind, CheckResult, ability_check, saving_throw
 from dnd_engine.content import SrdContent, load_srd
+from dnd_engine.combat.engine import end_scene
+from dnd_engine.combat.model import Combat, Zone
+from dnd_engine.conditions import ZERO_HP_SOURCE
 from dnd_engine.dice import Advantage
-from dnd_engine.events import RestEvent
+from dnd_engine.events import RestEvent, SceneEvent
 from dnd_engine.modules import MODULES, build_ruleset
 from dnd_engine.modules.base import (
     HELP_REVIVES,
@@ -24,7 +27,9 @@ from dnd_engine.modules.base import (
     RuleRegistry,
     RuleSet,
 )
-from dnd_engine.rng import ScriptedRng
+from dnd_engine.modules.campfire import CAMP_FRAGMENT, begin_rest
+from dnd_engine.rest import AID_BUFF, RestError, RestOutcome, spend_hit_die
+from dnd_engine.rng import ScriptedRng, SeededRng
 from dnd_engine.state import GameState, GameTime, RulesRef, Scene, SceneType
 
 DEX = Ability.DEX
@@ -435,3 +440,349 @@ def test_the_end_of_any_other_scene_changes_nothing(srd, camp_party, scene):
     assert after == state
     assert after is not state
     assert events == []
+
+
+# =============================================================================================
+# campfire: начало привала любого вида и конец короткого привала (DND-2, B9)
+# =============================================================================================
+
+
+def begin(state: GameState, kind: str, srd: SrdContent, adventure, *module_ids: str):
+    rules = ruleset_of(*(module_ids or ("campfire",)))
+    return begin_rest(state, kind, rules, content=srd, adventure=adventure)
+
+
+def battle() -> Combat:
+    return Combat(encounter_id=None, zones=[Zone(id="here", name="здесь")], links=[], combatants={})
+
+
+@pytest.mark.parametrize("kind", ["short", "long"])
+def test_begin_rest_starts_a_camp_scene_of_the_chosen_kind(srd, demo_adventure, camp_party, kind):
+    state = camp_state(*camp_party[:2], scene=SceneType.SOCIAL)
+    state.turn = 7
+    state.scene.inspiration_granted = ["pc-1"]
+    before = state.model_copy(deep=True)
+
+    camped, events = begin(state, kind, srd, demo_adventure)
+
+    assert camped.scene == Scene(type=SceneType.CAMP, started_turn=7, rest=kind)
+    assert events == [SceneEvent(scene=SceneType.CAMP)]
+    # Отдых и время — в конце привала, а не в начале.
+    assert (camped.party, camped.time, camped.short_rests_since_long) == (
+        state.party,
+        state.time,
+        2,
+    )
+    assert state == before
+
+
+@pytest.mark.parametrize("kind", ["short", "long"])
+def test_a_rest_cannot_begin_in_battle(srd, demo_adventure, camp_party, kind):
+    state = camp_state(*camp_party[:2], scene=SceneType.COMBAT)
+    state.combat = battle()
+
+    with pytest.raises(RestError, match="В бою привал невозможен"):
+        begin(state, kind, srd, demo_adventure)
+
+
+@pytest.mark.parametrize("current", [None, "short", "long"], ids=["dnd1", "short", "long"])
+@pytest.mark.parametrize("kind", ["short", "long"])
+def test_a_second_rest_cannot_begin_while_a_camp_goes_on(
+    srd, demo_adventure, camp_party, kind, current
+):
+    state = camp_state(*camp_party[:2])
+    state.scene.rest = current
+
+    with pytest.raises(RestError, match="Привал уже идёт"):
+        begin(state, kind, srd, demo_adventure)
+
+
+def test_a_short_rest_does_not_begin_when_the_limit_of_short_rests_is_reached(
+    srd, demo_adventure, camp_party
+):
+    state = camp_state(*camp_party[:2], scene=SceneType.EXPLORATION)  # уже два коротких отдыха
+
+    with pytest.raises(RestError, match="не больше 2 коротких"):
+        begin(state, "short", srd, demo_adventure, "bg3_flavor", "campfire")
+
+
+def test_the_limit_of_short_rests_does_not_stop_a_long_rest(srd, demo_adventure, camp_party):
+    state = camp_state(*camp_party[:2], scene=SceneType.EXPLORATION)
+
+    camped, _ = begin(state, "long", srd, demo_adventure, "bg3_flavor", "campfire")
+
+    assert camped.scene.rest == "long"  # долгий отдых и снимает предел
+
+
+@pytest.mark.parametrize(
+    ("module_ids", "done"),
+    [(("bg3_flavor", "campfire"), 1), (("campfire",), 5)],
+    ids=["below-the-limit", "no-limit"],
+)
+def test_a_short_rest_begins_below_the_limit_or_without_one(
+    srd, demo_adventure, camp_party, module_ids, done
+):
+    state = camp_state(*camp_party[:2], scene=SceneType.EXPLORATION)
+    state.short_rests_since_long = done
+
+    camped, _ = begin(state, "short", srd, demo_adventure, *module_ids)
+
+    assert camped.scene.rest == "short"
+
+
+def test_the_end_of_a_short_rest_restores_short_rest_features_and_counts_the_rest(
+    srd, make_character
+):
+    fighter = make_character(id="pc-1", hp=4, hit_dice=1, resources={"second_wind": 0})
+    wizard = make_character(
+        id="pc-2", class_id="wizard", spell_slots_max={1: 2}, spell_slots={1: 0}
+    )
+    state = camp_state(fighter, wizard)
+    state.scene.rest = "short"
+
+    after, events = end_of_scene(state, srd, "campfire")
+
+    # Кости хитов тратят игроки во время привала: конец отдыха их не бросает.
+    assert (after.party["pc-1"].hp, after.party["pc-1"].hit_dice) == (4, 1)
+    assert after.party["pc-1"].resources == {"second_wind": 1}
+    assert after.party["pc-2"].spell_slots == {1: 0}  # ячейки возвращает только долгий отдых
+    assert after.time == GameTime(day=2, part="night")  # короткий привал время не двигает
+    assert after.short_rests_since_long == 3
+    nothing = {"hp_gained": 0, "hit_dice_spent": 0, "rolls": []}
+    assert events == [
+        RestEvent(
+            rest="short",
+            outcomes=[
+                RestOutcome(character_id="pc-1", restored=["second_wind"], **nothing),
+                RestOutcome(character_id="pc-2", restored=[], **nothing),
+            ],
+        )
+    ]
+
+
+def test_the_end_of_a_short_rest_gives_a_dead_character_nothing(srd, camp_party):
+    state = camp_state(*camp_party)
+    state.scene.rest = "short"
+    snapshot = state.model_copy(deep=True)
+
+    after, events = end_of_scene(state, srd, "campfire")
+
+    assert after.party["pc-3"] == state.party["pc-3"]
+    empty = events[0].outcomes[2]
+    assert (empty.hp_gained, empty.hit_dice_spent, empty.rolls, empty.restored) == (0, 0, [], [])
+    assert state == snapshot
+
+
+@pytest.mark.parametrize(
+    "saved_scene",
+    [
+        {"type": "camp", "started_turn": 3, "inspiration_granted": []},
+        {"type": "camp", "started_turn": 3, "inspiration_granted": [], "rest": "long"},
+    ],
+    ids=["dnd1-camp-without-a-kind", "long"],
+)
+def test_a_camp_without_a_kind_or_a_long_one_ends_with_a_long_rest(srd, camp_party, saved_scene):
+    # Сцена `camp` из снимка DND-1 поля `rest` не знает: такой привал был только долгим.
+    state = camp_state(*camp_party[:2])
+    state.scene = Scene.model_validate(saved_scene)
+
+    after, events = end_of_scene(state, srd, "campfire")
+
+    assert after.party["pc-1"].hp == 20
+    assert after.time == GameTime(day=3, part="morning")
+    assert after.short_rests_since_long == 0
+    assert [event.rest for event in events] == ["long"]
+
+
+def test_a_short_rest_from_its_beginning_to_its_end_through_end_scene(
+    srd, demo_adventure, make_character
+):
+    hero = make_character(id="pc-1", hp=4, resources={"second_wind": 0})
+    state = camp_state(hero, scene=SceneType.EXPLORATION)
+    state.short_rests_since_long = 0
+    rules = ruleset_of("bg3_flavor", "campfire")
+
+    camped, _ = begin_rest(state, "short", rules, content=srd, adventure=demo_adventure)
+    camped.party["pc-1"], _ = spend_hit_die(camped.party["pc-1"], srd, SeededRng(1))
+    healed = camped.party["pc-1"].hp
+    after, events = end_scene(
+        camped, SceneType.EXPLORATION, rules, content=srd, adventure=demo_adventure
+    )
+
+    assert [type(event) for event in events] == [RestEvent, SceneEvent]
+    assert events[0].rest == "short"
+    assert (after.party["pc-1"].hp, after.party["pc-1"].hit_dice) == (healed, 2)
+    assert after.party["pc-1"].resources == {"second_wind": 1}
+    assert (after.time, after.short_rests_since_long) == (state.time, 1)
+    assert after.scene == Scene(type=SceneType.EXPLORATION, started_turn=state.turn)
+
+
+def test_two_short_rests_reach_the_limit_and_a_long_rest_lifts_it(
+    srd, demo_adventure, make_character
+):
+    state = camp_state(make_character(), scene=SceneType.EXPLORATION)
+    state.short_rests_since_long = 0
+    rules = ruleset_of("bg3_flavor", "campfire")
+
+    def rest_through(state: GameState, kind: str) -> GameState:
+        camped, _ = begin_rest(state, kind, rules, content=srd, adventure=demo_adventure)
+        after, _ = end_scene(
+            camped, SceneType.EXPLORATION, rules, content=srd, adventure=demo_adventure
+        )
+        return after
+
+    state = rest_through(rest_through(state, "short"), "short")
+    assert state.short_rests_since_long == 2
+    with pytest.raises(RestError, match="коротких"):
+        begin_rest(state, "short", rules, content=srd, adventure=demo_adventure)
+
+    state = rest_through(state, "long")
+
+    assert state.short_rests_since_long == 0
+    assert rest_through(state, "short").short_rests_since_long == 1
+
+
+def test_the_camp_prompt_describes_both_the_short_and_the_long_rest():
+    assert "Долгий привал" in CAMP_FRAGMENT and "Короткий привал" in CAMP_FRAGMENT
+    assert "кости хитов" in CAMP_FRAGMENT  # на коротком их тратят игроки
+    assert "start_camp" in CAMP_FRAGMENT
+
+
+# --- финальное покрытие B9: предел из правил, порядок отказов, конец привала любого вида ---
+
+
+def with_short_rest_limit(limit: int) -> RuleSet:
+    """«Привал у костра» с пределом коротких отдыхов `limit`, какого нет ни у одного модуля."""
+    return ruleset_of("campfire").model_copy(update={"flags": {MAX_SHORT_RESTS_PER_LONG: limit}})
+
+
+@pytest.mark.parametrize(("limit", "done"), [(1, 1), (0, 0), (3, 4)])
+def test_begin_rest_refuses_a_short_rest_by_the_limit_of_the_rules_it_is_given(
+    srd, demo_adventure, camp_party, limit, done
+):
+    # Модули в состоянии — только «Привал у костра» без предела: предел берётся из `rules`.
+    state = camp_state(*camp_party[:2], scene=SceneType.EXPLORATION)
+    state.short_rests_since_long = done
+
+    with pytest.raises(RestError) as refusal:
+        begin_rest(
+            state, "short", with_short_rest_limit(limit), content=srd, adventure=demo_adventure
+        )
+
+    assert str(refusal.value) == (
+        f"Между долгими привалами допустимо не больше {limit} коротких, а прошло уже {done}: "
+        "нужен долгий привал."
+    )
+
+
+@pytest.mark.parametrize(("limit", "done"), [(1, 0), (3, 2)])
+def test_begin_rest_allows_a_short_rest_below_the_limit_of_the_rules_it_is_given(
+    srd, demo_adventure, camp_party, limit, done
+):
+    state = camp_state(*camp_party[:2], scene=SceneType.EXPLORATION)
+    state.short_rests_since_long = done
+
+    camped, _ = begin_rest(
+        state, "short", with_short_rest_limit(limit), content=srd, adventure=demo_adventure
+    )
+
+    assert camped.scene.rest == "short"
+    assert camped.short_rests_since_long == done  # счётчик растёт в конце привала, не в начале
+
+
+@pytest.mark.parametrize(
+    ("scene", "in_battle", "refusal"),
+    [
+        (SceneType.COMBAT, True, "В бою привал невозможен"),
+        (SceneType.CAMP, False, "Привал уже идёт"),
+        (SceneType.EXPLORATION, False, "не больше 2 коротких"),
+    ],
+    ids=["battle", "camp", "limit"],
+)
+def test_the_first_broken_rule_names_the_refusal_and_the_state_stays_as_it_was(
+    srd, demo_adventure, camp_party, scene, in_battle, refusal
+):
+    # Предел коротких «Специй BG3» исчерпан во всех трёх случаях (уже два коротких отдыха), но
+    # объяснение — по первому нарушенному правилу: бой, затем идущий привал, затем предел.
+    state = camp_state(*camp_party[:2], scene=scene)
+    if in_battle:
+        state.combat = battle()
+    before = state.model_copy(deep=True)
+
+    with pytest.raises(RestError, match=refusal):
+        begin(state, "short", srd, demo_adventure, "bg3_flavor", "campfire")
+
+    assert state == before
+
+
+@pytest.mark.parametrize(
+    ("part", "done"), [("morning", 0), ("day", 1), ("evening", 4), ("night", 2)]
+)
+def test_the_end_of_a_short_rest_keeps_the_time_of_day_and_adds_one_short_rest(
+    srd, make_character, part, done
+):
+    # Предел коротких проверяет только начало привала: конец считает и сверх него (4 -> 5).
+    state = camp_state(make_character())
+    state.scene.rest = "short"
+    state.time = GameTime(day=4, part=part)
+    state.short_rests_since_long = done
+
+    after, _ = end_of_scene(state, srd, "campfire")
+
+    assert after.time == GameTime(day=4, part=part)
+    assert after.short_rests_since_long == done + 1
+
+
+def test_the_end_of_a_short_rest_neither_heals_nor_wakes_nor_ends_effects(srd, make_character):
+    # Длинный отдых поднял бы лежащего, вернул бы кости хитов и снял бы «Подмогу»; короткий — нет.
+    fallen = make_character(
+        id="pc-1",
+        hp=0,
+        hit_dice=0,
+        conditions=[ActiveCondition(id="unconscious", source=ZERO_HP_SOURCE)],
+        death_saves=DeathSaves(successes=1, failures=2),
+    )
+    aided = make_character(
+        id="pc-2",
+        hp_max=25,
+        hp=12,
+        temp_hp=3,
+        buffs=[ActiveBuff(id=AID_BUFF, rounds_left=4800, source_id="pc-1", data={"hp": 5})],
+    )
+    state = camp_state(fallen, aided)
+    state.scene.rest = "short"
+
+    after, events = end_of_scene(state, srd, "campfire")
+
+    assert after.party == state.party
+    assert [(o.hp_gained, o.restored) for o in events[0].outcomes] == [(0, []), (0, [])]
+
+
+@pytest.mark.parametrize(
+    ("kind", "rest"),
+    [(None, "long"), ("long", "long"), ("short", "short")],
+    ids=["dnd1-camp", "long", "short"],
+)
+@pytest.mark.parametrize(
+    "next_type", [SceneType.EXPLORATION, SceneType.SOCIAL], ids=lambda s: s.value
+)
+def test_end_scene_after_a_camp_rests_by_its_kind_and_the_next_scene_has_no_kind(
+    srd, demo_adventure, camp_party, kind, rest, next_type
+):
+    state = camp_state(*camp_party[:2])
+    state.scene.rest = kind
+    state.turn = 9
+
+    after, events = end_scene(
+        state,
+        next_type,
+        ruleset_of("bg3_flavor", "campfire"),
+        content=srd,
+        adventure=demo_adventure,
+    )
+
+    assert [type(event) for event in events] == [RestEvent, SceneEvent]
+    assert (events[0].rest, events[1].scene) == (rest, next_type)
+    assert after.scene == Scene(type=next_type, started_turn=9)
+    assert after.scene.rest is None
+    assert all(type(e).model_validate_json(e.model_dump_json()) == e for e in events)

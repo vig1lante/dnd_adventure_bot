@@ -1,9 +1,14 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { createApi } from "../api/client";
 import { ApiContext } from "../api/context";
-import type { FeedItem } from "../api/types";
+import type { FeedItem, RestView } from "../api/types";
 import { CONNECTION_LOST_NOTE } from "../components/access";
-import { feedEntry, gameView, phaseOf } from "../components/fixtures";
+import {
+  feedEntry,
+  gameView,
+  phaseOf,
+  sheetHero,
+} from "../components/fixtures";
 import { holdRequests } from "./character/fixtures";
 import { NO_LIVE, sessionToken, useGame } from "../store/game";
 import type { GameView, LiveConnection } from "../store/game";
@@ -523,5 +528,446 @@ describe("движение", () => {
 
     expect(document.querySelector("[class*='ui-anim-']")).toBeNull();
     expect(lines()).toHaveLength(3);
+  });
+});
+
+// --- привалы по кнопке хоста (дополнение к контракту B9, §4) ---
+
+const HIT_DIE = "POST /api/games/g1/rest/hit-dice";
+const DEADLINE = "2026-10-20T12:05:00+00:00";
+
+/** Привал по контракту сервера (§3): вид, срок, свои идеи и реплики этого привала. */
+const restOf = (
+  kind: RestView["kind"],
+  overrides: Partial<RestView> = {},
+): RestView => ({
+  kind,
+  deadline_at: DEADLINE,
+  my_ideas: [],
+  lines: [],
+  ...overrides,
+});
+
+const hitDieButton = () =>
+  screen.getByRole("button", { name: /Потратить кость хитов/ });
+
+describe("заголовок по виду привала", () => {
+  test.each([
+    ["short", "Короткий привал", /кости хитов/],
+    ["long", "Долгий привал", /утром/i],
+  ] as const)("%s: «%s» и что даёт этот привал", (kind, title, note) => {
+    renderCamp({ view: { rest: restOf(kind) } });
+
+    const heading = screen.getByRole("heading", { name: title });
+    const card = heading.closest("section");
+    expect(card).not.toBeNull();
+    expect(card).toHaveTextContent(note);
+  });
+
+  test("вид привала ещё не пришёл — экран DND-1: тема, реплики, поле", () => {
+    renderCamp({ view: { rest: null } });
+
+    expect(
+      screen.queryByRole("heading", { name: /Короткий привал|Долгий привал/ }),
+    ).toBeNull();
+    expect(field()).toBeEnabled();
+  });
+
+  test("реплики этого привала берутся из привала сервера, а не из ленты", () => {
+    renderCamp({
+      feed: [narration(1, "Лагерь.")],
+      view: {
+        rest: restOf("long", { lines: [spoken(5, "Подкину дров.", BORIN)] }),
+      },
+    });
+
+    expect(lines().map((line) => line.textContent)).toEqual([
+      "Борин: «Подкину дров.»",
+    ]);
+  });
+
+  test("новая реплика из события появляется и на привале сервера", () => {
+    renderCamp({
+      view: {
+        phase: phaseOf("camp", { deadline_at: DEADLINE }),
+        rest: restOf("short", { lines: [spoken(5, "Подкину дров.", BORIN)] }),
+      },
+    });
+
+    serve(spoken(7, "Кто здесь?", BORIN));
+
+    expect(lines()).toHaveLength(2);
+  });
+});
+
+describe("«Потратить кость хитов» на коротком привале", () => {
+  interface HitDieSetup {
+    hitDice?: number;
+    failures?: number;
+    reply?: FakeReply;
+    hold?: boolean;
+  }
+
+  function renderShortRest({
+    hitDice = 2,
+    failures = 0,
+    reply = { json: { hit_dice: hitDice - 1, hp: 10, hp_max: 10 } },
+    hold = false,
+  }: HitDieSetup = {}) {
+    return renderCamp({
+      view: {
+        rest: restOf("short"),
+        character: sheetHero({
+          hp: 4,
+          hp_max: 10,
+          hit_dice: hitDice,
+          hit_dice_max: 2,
+          death_saves: { successes: 0, failures, stable: false },
+        }),
+      },
+      routes: { [HIT_DIE]: reply },
+      hold: hold ? "/rest/hit-dice" : undefined,
+    });
+  }
+
+  test("кнопка с остатком костей и хитами героя", () => {
+    renderShortRest({ hitDice: 2 });
+
+    expect(hitDieButton()).toHaveAccessibleName(
+      "Потратить кость хитов (осталось 2)",
+    );
+    expect(hitDieButton()).toBeEnabled();
+    expect(screen.getByText("Хиты: 4 из 10.")).toBeInTheDocument();
+  });
+
+  test("нажатие шлёт запрос без тела; ответ сервера — новый остаток и хиты", async () => {
+    const { server } = renderShortRest({
+      hitDice: 2,
+      reply: { json: { hit_dice: 1, hp: 9, hp_max: 10 } },
+    });
+
+    fireEvent.click(hitDieButton());
+
+    await vi.waitFor(() =>
+      expect(hitDieButton()).toHaveAccessibleName(
+        "Потратить кость хитов (осталось 1)",
+      ),
+    );
+    expect(screen.getByText("Хиты: 9 из 10.")).toBeInTheDocument();
+    expect(server.calls).toHaveLength(1);
+    expect(`${server.calls[0].method} ${server.calls[0].path}`).toBe(HIT_DIE);
+    expect(server.calls[0].body).toBeUndefined();
+    expect(server.calls[0].headers.get("Authorization")).toBe("Bearer tok-u1");
+    expect(hitDieButton()).toBeEnabled();
+  });
+
+  test("последняя кость потрачена — кнопка выключена с пояснением", async () => {
+    renderShortRest({
+      hitDice: 1,
+      reply: { json: { hit_dice: 0, hp: 8, hp_max: 10 } },
+    });
+
+    fireEvent.click(hitDieButton());
+
+    // Во время запроса кнопка тоже выключена: ждём именно ответа сервера.
+    await vi.waitFor(() =>
+      expect(hitDieButton()).toHaveAccessibleName(
+        "Потратить кость хитов (осталось 0)",
+      ),
+    );
+    expect(hitDieButton()).toBeDisabled();
+    expect(hitDieButton()).toHaveAccessibleDescription(
+      /Костей хитов не осталось/,
+    );
+  });
+
+  test("костей нет с самого начала — кнопка выключена, запроса нет", () => {
+    const { server } = renderShortRest({ hitDice: 0 });
+
+    fireEvent.click(hitDieButton());
+
+    expect(hitDieButton()).toBeDisabled();
+    expect(server.calls).toHaveLength(0);
+  });
+
+  test("мёртвый герой кость не тратит: кнопка выключена с пояснением", () => {
+    const { server } = renderShortRest({ hitDice: 2, failures: 3 });
+
+    fireEvent.click(hitDieButton());
+
+    expect(hitDieButton()).toBeDisabled();
+    expect(hitDieButton()).toHaveAccessibleDescription(/погиб/);
+    expect(server.calls).toHaveLength(0);
+  });
+
+  test("два провала спасбросков — герой ещё жив, кость потратить можно", () => {
+    renderShortRest({ hitDice: 2, failures: 2 });
+
+    expect(hitDieButton()).toBeEnabled();
+  });
+
+  test("пока запрос идёт, кнопка выключена и второй запрос не уходит", async () => {
+    const { server, release } = renderShortRest({ hold: true });
+
+    fireEvent.click(hitDieButton());
+    fireEvent.click(hitDieButton());
+
+    expect(hitDieButton()).toBeDisabled();
+    release();
+    await vi.waitFor(() =>
+      expect(hitDieButton()).toHaveAccessibleName(
+        "Потратить кость хитов (осталось 1)",
+      ),
+    );
+    expect(server.calls).toHaveLength(1);
+  });
+
+  test("отказ сервера показан его текстом, остаток прежний", async () => {
+    const detail = "Сейчас не короткий привал: кости хитов не тратятся.";
+    renderShortRest({ reply: { status: 409, json: { detail } } });
+
+    fireEvent.click(hitDieButton());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(detail);
+    expect(hitDieButton()).toHaveAccessibleName(
+      "Потратить кость хитов (осталось 2)",
+    );
+    expect(hitDieButton()).toBeEnabled();
+  });
+
+  test("остаток следует за листом героя от сервера (событие character)", () => {
+    renderShortRest({ hitDice: 2 });
+
+    act(() =>
+      useGame.getState().receive({
+        type: "character",
+        character: sheetHero({ hit_dice: 0, hp: 10, hp_max: 10 }),
+      }),
+    );
+
+    expect(hitDieButton()).toHaveAccessibleName(
+      "Потратить кость хитов (осталось 0)",
+    );
+    expect(hitDieButton()).toBeDisabled();
+  });
+
+  test("на долгом привале кнопки нет", () => {
+    renderCamp({ view: { rest: restOf("long") } });
+
+    expect(screen.queryByRole("button", { name: /кость хитов/ })).toBeNull();
+  });
+
+  test("у игрока нет героя — кнопки нет", () => {
+    renderCamp({ view: { rest: restOf("short"), character: null } });
+
+    expect(screen.queryByRole("button", { name: /кость хитов/ })).toBeNull();
+  });
+});
+
+describe("«Идея для рассказа»: только своя", () => {
+  const IDEA = "Расскажи, почему ты боишься воды.";
+
+  test("своя идея из привала сервера видна в карточке «Только тебе»", () => {
+    renderCamp({ view: { rest: restOf("long", { my_ideas: [IDEA] }) } });
+
+    const card = screen
+      .getByRole("heading", { name: "Идея для рассказа" })
+      .closest("section");
+    expect(card).not.toBeNull();
+    expect(
+      within(card as HTMLElement).getByRole("note", { name: "Только тебе" }),
+    ).toHaveTextContent(IDEA);
+  });
+
+  test("идей нет — карточки нет", () => {
+    renderCamp({ view: { rest: restOf("long") } });
+
+    expect(
+      screen.queryByRole("heading", { name: "Идея для рассказа" }),
+    ).toBeNull();
+  });
+
+  test("идея из кадра rest_idea появляется у адресата, повтор кадра не плодит дубль", () => {
+    renderCamp({
+      view: {
+        phase: phaseOf("camp", { deadline_at: DEADLINE }),
+        rest: restOf("short"),
+      },
+    });
+
+    act(() => useGame.getState().receive({ type: "rest_idea", text: IDEA }));
+    act(() => useGame.getState().receive({ type: "rest_idea", text: IDEA }));
+
+    expect(screen.getAllByText(IDEA)).toHaveLength(1);
+  });
+
+  test("идея — не реплика: в реплики у костра и в ленту она не попадает", () => {
+    renderCamp({
+      view: {
+        rest: restOf("long", {
+          my_ideas: [IDEA],
+          lines: [spoken(5, "Подкину дров.", BORIN)],
+        }),
+      },
+    });
+
+    const spokenList = screen.getByRole("list", { name: "Реплики у костра" });
+    expect(within(spokenList).queryByText(IDEA)).toBeNull();
+    expect(
+      useGame.getState().live.view?.feed.some((item) => item.text === IDEA),
+    ).toBe(false);
+  });
+
+  test("идея выводится только как текст", () => {
+    const { container } = renderCamp({
+      view: {
+        rest: restOf("long", {
+          my_ideas: ["<img src=x onerror=alert(1)>Идея"],
+        }),
+      },
+    });
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText(/<img src=x/)).toBeInTheDocument();
+  });
+});
+
+// --- финальное покрытие B9: отказы сервера, числа сервера как есть, свои реплики и идеи ---
+
+describe("кость хитов: сервер решает и считает (финальное покрытие B9)", () => {
+  /** Короткий привал Лиры: 4 из 10 хитов, кости хитов есть; ответ сервера — `reply`. */
+  function renderHitDie(reply: FakeReply, view: Partial<GameView> = {}) {
+    return renderCamp({
+      view: {
+        rest: restOf("short"),
+        character: sheetHero({
+          hp: 4,
+          hp_max: 10,
+          hit_dice: 3,
+          hit_dice_max: 3,
+        }),
+        ...view,
+      },
+      routes: { [HIT_DIE]: reply },
+    });
+  }
+
+  // Тексты 409 сервера (B9.3, «Контракт для B9.4/B9.5»), включая общие паузу и «игра не идёт».
+  test.each([
+    "Кости хитов тратят только на коротком привале.",
+    "У вас нет героя в этой игре.",
+    "Погибший герой не может тратить кости хитов.",
+    "Костей хитов не осталось: их возвращает долгий отдых.",
+    "Игра на паузе: хост должен нажать «Продолжить».",
+    "Игра сейчас не идёт.",
+  ])("409 «%s» показан дословно, остаток и хиты прежние", async (detail) => {
+    renderHitDie({ status: 409, json: { detail } });
+
+    fireEvent.click(hitDieButton());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(detail);
+    expect(hitDieButton()).toHaveAccessibleName(
+      "Потратить кость хитов (осталось 3)",
+    );
+    expect(screen.getByText("Хиты: 4 из 10.")).toBeInTheDocument();
+    expect(hitDieButton()).toBeEnabled();
+  });
+
+  test("клиент не досчитывает: остаток и хиты — ровно числа из ответа сервера", async () => {
+    // Числа нарочно не следуют из «минус одна кость»: экран не должен их поправлять.
+    renderHitDie({ json: { hit_dice: 1, hp: 10, hp_max: 12 } });
+
+    fireEvent.click(hitDieButton());
+
+    await vi.waitFor(() =>
+      expect(hitDieButton()).toHaveAccessibleName(
+        "Потратить кость хитов (осталось 1)",
+      ),
+    );
+    expect(screen.getByText("Хиты: 10 из 12.")).toBeInTheDocument();
+    expect(useGame.getState().live.view?.character).toMatchObject({
+      hit_dice: 1,
+      hp: 10,
+      hp_max: 12,
+    });
+  });
+
+  test("на паузе кнопка не выключена (контракт §4 выключает её только при 0 костей, гибели и запросе): отказ даёт сервер", async () => {
+    const detail = "Игра на паузе: хост должен нажать «Продолжить».";
+    const { server } = renderHitDie(
+      { status: 409, json: { detail } },
+      {
+        phase: phaseOf("camp", {
+          phase: "paused",
+          deadline_at: null,
+          remaining_seconds: 60,
+        }),
+      },
+    );
+
+    expect(hitDieButton()).toBeEnabled();
+    fireEvent.click(hitDieButton());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(detail);
+    expect(server.calls).toHaveLength(1);
+  });
+});
+
+describe("реплики и идеи привала сервера (финальное покрытие B9)", () => {
+  test("«Ваших реплик» считает реплики своего героя из привала сервера, а не из ленты", () => {
+    // В ленте после рассказа одна реплика Лиры, а в привале сервера — две её и одна Борина.
+    renderCamp({
+      view: {
+        rest: restOf("short", {
+          lines: [
+            spoken(10, "Перевяжу руку."),
+            spoken(11, "Подкину дров.", BORIN),
+            spoken(12, "Ещё немного отдохнём."),
+          ],
+        }),
+      },
+    });
+
+    expect(screen.getByText(/Ваших реплик: 2 из 10/)).toBeInTheDocument();
+    expect(lines()).toHaveLength(3);
+  });
+
+  test("десять своих реплик в привале сервера закрывают поле", () => {
+    renderCamp({
+      view: {
+        rest: restOf("long", {
+          lines: Array.from({ length: 10 }, (_, index) =>
+            spoken(20 + index, `Реплика ${index + 1}.`),
+          ),
+        }),
+      },
+    });
+
+    expect(field()).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Вы сказали у костра достаточно: подождите утра.",
+    );
+  });
+
+  test("две разные идеи — обе в одной карточке «Только тебе», в порядке прихода", () => {
+    renderCamp({
+      view: {
+        phase: phaseOf("camp", { deadline_at: DEADLINE }),
+        rest: restOf("long", { my_ideas: ["Вспомни дом."] }),
+      },
+    });
+
+    act(() =>
+      useGame
+        .getState()
+        .receive({ type: "rest_idea", text: "Расскажи о наставнике." }),
+    );
+
+    const note = screen.getByRole("note", { name: "Только тебе" });
+    // Обе идеи в одной записке, прежняя — первой.
+    expect(note).toHaveTextContent(/Вспомни дом\..*Расскажи о наставнике\./);
+    expect(
+      screen.getAllByRole("heading", { name: "Идея для рассказа" }),
+    ).toHaveLength(1);
   });
 });

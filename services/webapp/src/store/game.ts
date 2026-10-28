@@ -3,9 +3,11 @@ import type {
   FeedItem,
   FeedWithdrawal,
   GamePhase,
+  HitDieResult,
   JournalEntry,
   PhaseView,
   PlayerAction,
+  RestView,
   Snapshot,
   TurnPhase,
   User,
@@ -78,6 +80,49 @@ function withJournalEntry(
   return journal.map((item) => (item.id === entry.id ? entry : item));
 }
 
+/** Начался привал: вид и срок — из кадра; идеи и реплики остаются, если это тот же привал. */
+function restStarted(
+  rest: RestView | null,
+  kind: RestView["kind"],
+  deadline_at: string | null,
+): RestView {
+  return rest === null
+    ? { kind, deadline_at, my_ideas: [], lines: [] }
+    : { ...rest, kind, deadline_at };
+}
+
+/** Идея для рассказа пришла кадром: без привала ей некуда лечь, повтор не добавляется. */
+function withIdea(rest: RestView | null, text: string): RestView | null {
+  if (rest === null || rest.my_ideas.includes(text)) return rest;
+  return { ...rest, my_ideas: [...rest.my_ideas, text] };
+}
+
+/** Реплики привала следуют за лентой: новая реплика у костра добавляется, снятая запись уходит. */
+function withRestLine(
+  rest: RestView | null,
+  item: FeedItem | FeedWithdrawal,
+): RestView | null {
+  if (rest === null) return rest;
+  if ("superseded" in item) {
+    return rest.lines.some((line) => line.id === item.id)
+      ? { ...rest, lines: rest.lines.filter((line) => line.id !== item.id) }
+      : rest;
+  }
+  const known = rest.lines.some((line) => line.id === item.id);
+  if (item.kind !== "camp_line" || known) return rest;
+  return { ...rest, lines: [...rest.lines, item] };
+}
+
+/**
+ * Новая фаза и привал. Привал живёт, пока фаза хода — `camp` (так его отдаёт и снимок сервера):
+ * откат «Перегенерировать» или сбой мастера кончают привал без кадра `rest_ended`, и его идеи
+ * не должны перейти в следующий привал.
+ */
+function withPhase(view: GameView, phase: PhaseView): GameView {
+  const rest = phase.turn_phase === "camp" ? view.rest : null;
+  return { ...view, phase, rest };
+}
+
 // Фазы, в которые игра приходит после «Мастер думает», когда разбор удался. «Мастер не
 // справился» ход не заканчивает: ходы игроков сохранены и после «Повторить» разбираются снова.
 const AFTER_RESOLVING: ReadonlySet<TurnPhase | null> = new Set([
@@ -96,14 +141,18 @@ function startsNewTurn(before: PhaseView, after: PhaseView): boolean {
 function updateView(view: GameView, event: WsEvent): GameView {
   switch (event.type) {
     case "phase":
-      return { ...view, phase: event.phase };
+      return withPhase(view, event.phase);
     case "player_status":
       return {
         ...view,
         statuses: { ...view.statuses, [event.user_id]: event.status },
       };
     case "feed_item":
-      return { ...view, feed: withFeedItem(view.feed, event.item) };
+      return {
+        ...view,
+        feed: withFeedItem(view.feed, event.item),
+        rest: withRestLine(view.rest, event.item),
+      };
     case "party":
       return { ...view, party: event.party };
     case "combat":
@@ -116,6 +165,17 @@ function updateView(view: GameView, event: WsEvent): GameView {
       return { ...view, journal: withJournalEntry(view.journal, event.entry) };
     case "journal":
       return { ...view, journal: event.entries };
+    case "rest_started":
+      return {
+        ...view,
+        rest: restStarted(view.rest, event.kind, event.deadline_at),
+      };
+    case "rest_idea": {
+      const rest = withIdea(view.rest, event.text);
+      return rest === view.rest ? view : { ...view, rest };
+    }
+    case "rest_ended":
+      return view.rest === null ? view : { ...view, rest: null };
     default:
       return view; // pong и события, которых клиент не знает
   }
@@ -144,6 +204,8 @@ export function applyEvent(
         combat: event.combat,
         feed: event.feed,
         journal: event.journal,
+        // Сервер до блока привалов поля не присылает: без него экран привала упал бы.
+        rest: event.rest ?? null,
       },
       clockOffsetMs: Date.parse(event.server_time) - receivedAt,
       error: null,
@@ -157,7 +219,7 @@ export function applyEvent(
     // Сервер событием «ход обновлён» не шлёт: прежний ход игрока к новому не относится.
     return {
       ...state,
-      view: { ...state.view, phase: event.phase, action: null },
+      view: { ...withPhase(state.view, event.phase), action: null },
       turn: state.turn + 1,
     };
   }
@@ -172,6 +234,20 @@ export function applyEvent(
 export function applyAction(state: LiveState, action: PlayerAction): LiveState {
   if (state.view === null) return state;
   return { ...state, view: { ...state.view, action } };
+}
+
+/**
+ * Кладёт в лист героя остаток костей хитов и хиты из ответа сервера на «Потратить кость хитов»:
+ * кнопка показывает новый остаток сразу, не дожидаясь события `character`.
+ */
+export function applyHitDie(state: LiveState, result: HitDieResult): LiveState {
+  const character = state.view?.character ?? null;
+  if (state.view === null || character === null) return state;
+  const { hit_dice, hp, hp_max } = result;
+  return {
+    ...state,
+    view: { ...state.view, character: { ...character, hit_dice, hp, hp_max } },
+  };
 }
 
 /** Игра ещё в лобби, идёт вплетение героев или игра пошла (в том числе пауза и конец). */
@@ -241,6 +317,8 @@ interface GameStore {
   receive: (event: WsEvent) => void;
   /** Кладёт в `live` ход игрока из ответа REST (черновик, «Готов», «Пас»). */
   setAction: (action: PlayerAction) => void;
+  /** Кладёт в лист героя ответ REST на «Потратить кость хитов». */
+  setHitDie: (result: HitDieResult) => void;
   signOut: () => void;
 }
 
@@ -271,6 +349,8 @@ export const useGame = create<GameStore>()((set, get) => ({
   receive: (event) => set((state) => ({ live: applyEvent(state.live, event) })),
   setAction: (action) =>
     set((state) => ({ live: applyAction(state.live, action) })),
+  setHitDie: (result) =>
+    set((state) => ({ live: applyHitDie(state.live, result) })),
   signOut: () =>
     set({
       session: null,

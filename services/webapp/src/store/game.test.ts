@@ -7,6 +7,7 @@ import type {
   PartyMember,
   PhaseView,
   PlayerAction,
+  RestView,
   Snapshot,
   WsEvent,
 } from "../api/types";
@@ -16,6 +17,7 @@ import {
   NO_LIVE,
   applyAction,
   applyEvent,
+  applyHitDie,
   followGame,
   gameStage,
   leavingGame,
@@ -44,6 +46,7 @@ function gameSummary(overrides: Partial<GameSummary> = {}): GameSummary {
     collect_seconds: 120,
     hurry_seconds: 60,
     camp_seconds: 300,
+    short_rest_seconds: 120,
     profanity: true,
     players: [
       {
@@ -165,6 +168,22 @@ function entry(
   };
 }
 
+/** Привал по контракту B9 (§3): короткий, срок через 2 минуты, без идей и реплик. */
+function restView(overrides: Partial<RestView> = {}): RestView {
+  return {
+    kind: "short",
+    deadline_at: "2026-10-20T12:02:00+00:00",
+    my_ideas: [],
+    lines: [],
+    ...overrides,
+  };
+}
+
+/** Реплика у костра, как её присылает сервер. */
+function campLine(id: number, text = `реплика ${id}`): FeedItem {
+  return { ...feedItem(id, text), kind: "camp_line" };
+}
+
 function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
   return {
     type: "snapshot",
@@ -179,6 +198,7 @@ function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     combat: null,
     feed: [feedItem(1), feedItem(2)],
     journal: [entry("intro"), entry("location:village")],
+    rest: null,
     ...overrides,
   };
 }
@@ -238,7 +258,23 @@ describe("applyEvent: снимок", () => {
       combat: null,
       feed: [feedItem(1)],
       journal: [entry("intro")],
+      rest: null,
     });
+  });
+
+  test("привал из снимка кладётся как есть, его нет — `null`", () => {
+    const rest = restView({ my_ideas: ["Расскажи о сестре."] });
+
+    expect(viewOf(started({ rest })).rest).toEqual(rest);
+    expect(viewOf(started({ rest: null })).rest).toBeNull();
+  });
+
+  test("снимок без блока привала (сервер до B9.3) — привала нет, а не `undefined`", () => {
+    const legacy = { ...snapshot(), rest: undefined } as unknown as Snapshot;
+
+    const state = applyEvent(NO_LIVE, legacy, SERVER_MS);
+
+    expect(viewOf(state).rest).toBeNull();
   });
 
   test("в состояние не попадают служебные поля кадра", () => {
@@ -674,6 +710,9 @@ describe("applyEvent: ошибки и лишнее", () => {
       { type: "combat", combat: combatView() },
       { type: "character", character: hero() },
       { type: "lobby", game: gameSummary() },
+      { type: "rest_started", kind: "short", deadline_at: null },
+      { type: "rest_idea", text: "Расскажи о сестре." },
+      { type: "rest_ended", kind: "short" },
     ];
 
     for (const event of events) {
@@ -701,7 +740,12 @@ describe("applyEvent: ошибки и лишнее", () => {
       }
       return value;
     };
-    const frozen = deepFreeze(started());
+    const frozen = deepFreeze(
+      started({
+        phase: phaseView({ turn_phase: "camp" }),
+        rest: restView({ my_ideas: ["Идея."], lines: [campLine(3)] }),
+      }),
+    );
     const events: WsEvent[] = [
       { type: "phase", phase: phaseView({ deadline_at: null }) },
       { type: "player_status", user_id: "u1", status: "pass" },
@@ -711,6 +755,10 @@ describe("applyEvent: ошибки и лишнее", () => {
       { type: "combat", combat: combatView() },
       { type: "character", character: hero({ hp: 1 }) },
       { type: "lobby", game: gameSummary({ code: "ZZZ999" }) },
+      { type: "rest_started", kind: "long", deadline_at: null },
+      { type: "rest_idea", text: "Новая идея." },
+      { type: "rest_ended", kind: "short" },
+      { type: "feed_item", item: campLine(5) },
       { type: "error", detail: "Сбой." },
       snapshot(),
     ];
@@ -1271,6 +1319,359 @@ describe("applyEvent: новый ход начинается без хода и�
     );
 
     expect(before).toEqual(frozen);
+  });
+});
+
+describe("applyEvent: привал (контракт B9, §3–§4)", () => {
+  const CAMP = phaseView({ turn_phase: "camp" });
+  /** Игра на привале: фаза хода `camp` и привал из снимка. */
+  const camping = (rest: Partial<RestView> = {}) =>
+    started({ phase: CAMP, rest: restView(rest) });
+  const apply = (state: LiveState, ...events: WsEvent[]) =>
+    events.reduce(
+      (current, event) => applyEvent(current, event, SERVER_MS),
+      state,
+    );
+  const restOf = (state: LiveState) => viewOf(state).rest;
+
+  test("rest_started без привала: вид и срок, идей и реплик ещё нет", () => {
+    const state = after({
+      type: "rest_started",
+      kind: "short",
+      deadline_at: "2026-10-20T12:02:00+00:00",
+    });
+
+    expect(restOf(state)).toEqual({
+      kind: "short",
+      deadline_at: "2026-10-20T12:02:00+00:00",
+      my_ideas: [],
+      lines: [],
+    });
+  });
+
+  test("rest_started после снимка того же привала: вид и срок новые, идеи и реплики остаются", () => {
+    const state = apply(
+      camping({ kind: "short", my_ideas: ["Идея."], lines: [campLine(3)] }),
+      { type: "rest_started", kind: "long", deadline_at: null },
+    );
+
+    expect(restOf(state)).toEqual({
+      kind: "long",
+      deadline_at: null,
+      my_ideas: ["Идея."],
+      lines: [campLine(3)],
+    });
+  });
+
+  test("rest_idea добавляет идею в конец, повтор не плодит дубль", () => {
+    const state = apply(
+      camping({ my_ideas: ["Первая."] }),
+      { type: "rest_idea", text: "Вторая." },
+      { type: "rest_idea", text: "Вторая." },
+      { type: "rest_idea", text: "Первая." },
+    );
+
+    expect(restOf(state)?.my_ideas).toEqual(["Первая.", "Вторая."]);
+  });
+
+  test("rest_idea без привала некуда положить: состояние то же", () => {
+    const before = started();
+
+    const state = apply(before, { type: "rest_idea", text: "Поздно." });
+
+    expect(state).toEqual(before);
+  });
+
+  test("rest_ended снимает привал вместе с идеями", () => {
+    const state = apply(camping({ my_ideas: ["Идея."] }), {
+      type: "rest_ended",
+      kind: "short",
+    });
+
+    expect(restOf(state)).toBeNull();
+  });
+
+  test("идея привала не попадает ни в ленту, ни в реплики", () => {
+    const before = camping();
+
+    const state = apply(before, { type: "rest_idea", text: "Тайная идея." });
+
+    expect(viewOf(state).feed).toEqual(viewOf(before).feed);
+    expect(restOf(state)?.lines).toEqual([]);
+  });
+
+  test("реплика у костра из ленты попадает и в реплики привала, повтор — нет", () => {
+    const state = apply(
+      camping({ lines: [campLine(3)] }),
+      { type: "feed_item", item: campLine(4) },
+      { type: "feed_item", item: campLine(4) },
+      { type: "feed_item", item: feedItem(5) },
+    );
+
+    expect(restOf(state)?.lines.map((line) => line.id)).toEqual([3, 4]);
+    expect(viewOf(state).feed.map((item) => item.id)).toEqual([1, 2, 4, 5]);
+  });
+
+  test("снятая запись ленты уходит и из реплик привала", () => {
+    const state = apply(camping({ lines: [campLine(3), campLine(4)] }), {
+      type: "feed_item",
+      item: { id: 3, superseded: true },
+    });
+
+    expect(restOf(state)?.lines.map((line) => line.id)).toEqual([4]);
+  });
+
+  test("реплика вне привала в привал не превращается", () => {
+    const state = after({ type: "feed_item", item: campLine(3) });
+
+    expect(restOf(state)).toBeNull();
+  });
+
+  test.each([
+    [
+      "пауза",
+      phaseView({ turn_phase: "camp", phase: "paused", deadline_at: null }),
+    ],
+    [
+      "«+1 мин»",
+      phaseView({
+        turn_phase: "camp",
+        deadline_at: "2026-10-20T12:03:00+00:00",
+      }),
+    ],
+  ])("фаза остаётся привалом (%s) — привал на месте", (_name, phase) => {
+    const state = apply(camping({ my_ideas: ["Идея."] }), {
+      type: "phase",
+      phase,
+    });
+
+    expect(restOf(state)?.my_ideas).toEqual(["Идея."]);
+  });
+
+  test.each(["resolving", "discussion", "dm_failed", null] as const)(
+    "фаза хода ушла с привала (%s) — привала нет, как в снимке сервера",
+    (turnPhase) => {
+      const state = apply(
+        camping({ my_ideas: ["Идея."] }),
+        phaseEvent(turnPhase),
+      );
+
+      expect(restOf(state)).toBeNull();
+    },
+  );
+
+  test("«Перегенерировать» с привала и новый привал: идеи прежнего не переходят в новый", () => {
+    const state = apply(
+      camping({ my_ideas: ["Старая идея."], lines: [campLine(3)] }),
+      phaseEvent("resolving"),
+      phaseEvent("camp"),
+      { type: "rest_started", kind: "long", deadline_at: null },
+    );
+
+    expect(restOf(state)).toEqual({
+      kind: "long",
+      deadline_at: null,
+      my_ideas: [],
+      lines: [],
+    });
+  });
+
+  test("кадр rest_started раньше фазы привала: привал не теряется", () => {
+    const state = apply(
+      started({ phase: phaseView({ turn_phase: "discussion" }) }),
+      { type: "rest_started", kind: "short", deadline_at: null },
+      phaseEvent("camp"),
+    );
+
+    expect(restOf(state)?.kind).toBe("short");
+  });
+
+  test("в хранилище: кадры привала доходят до игры на экране", () => {
+    useGame.getState().receive(snapshot({ phase: CAMP }));
+
+    useGame
+      .getState()
+      .receive({ type: "rest_started", kind: "short", deadline_at: null });
+    useGame.getState().receive({ type: "rest_idea", text: "Идея." });
+
+    expect(viewOf(useGame.getState().live).rest?.my_ideas).toEqual(["Идея."]);
+  });
+});
+
+// Финальное покрытие B9: кадры идут в том порядке, в каком их шлёт сервер (B9.3, «Контракт для
+// B9.4/B9.5»): начало кнопкой — `phase`, затем `rest_started`; начало ходом мастера — записи
+// ленты, `phase` нового хода, затем `rest_started`; конец — `phase` «Мастер думает», записи
+// ленты, `phase` обсуждения и последним `rest_ended`.
+describe("applyEvent: привал в порядке кадров сервера (финальное покрытие B9)", () => {
+  const DEADLINE = "2026-10-20T12:02:00+00:00";
+  const EXTENDED = "2026-10-20T12:03:00+00:00";
+  const campPhase = (deadline_at: string | null = DEADLINE): WsEvent => ({
+    type: "phase",
+    phase: phaseView({ turn_phase: "camp", deadline_at }),
+  });
+  const run = (state: LiveState, ...events: WsEvent[]) =>
+    events.reduce(
+      (current, event) => applyEvent(current, event, SERVER_MS),
+      state,
+    );
+  const restOf = (state: LiveState) => viewOf(state).rest;
+  /** Карточка «Кость хитов»: запись ленты вида `roll`, не реплика у костра. */
+  const hitDieCard: FeedItem = {
+    ...feedItem(6, "Лира. Кость хитов: 5"),
+    kind: "roll",
+    data: { label: "Кость хитов", total: 5 },
+  };
+
+  test("короткий привал по кнопке хоста от начала до конца", () => {
+    const discussion = started({
+      phase: phaseView({ turn_phase: "discussion", deadline_at: null }),
+    });
+
+    // Начало: сервер шлёт фазу привала, затем вид и срок.
+    const begun = run(discussion, campPhase(), {
+      type: "rest_started",
+      kind: "short",
+      deadline_at: DEADLINE,
+    });
+    expect(restOf(begun)).toEqual({
+      kind: "short",
+      deadline_at: DEADLINE,
+      my_ideas: [],
+      lines: [],
+    });
+
+    // Во время привала: идея адресату, реплика, карточка кости хитов, лист героя и «+1 мин».
+    const during = run(
+      begun,
+      { type: "rest_idea", text: "Расскажи о сестре." },
+      { type: "feed_item", item: campLine(5, "Подкину дров.") },
+      { type: "feed_item", item: hitDieCard },
+      { type: "character", character: hero({ hit_dice: 0, hp: 10 }) },
+      campPhase(EXTENDED),
+    );
+    expect(restOf(during)).toMatchObject({
+      kind: "short",
+      my_ideas: ["Расскажи о сестре."],
+    });
+    // Карточка броска уходит в ленту, но репликой у костра не становится.
+    expect(restOf(during)?.lines.map((line) => line.id)).toEqual([5]);
+    expect(viewOf(during).feed.map((item) => item.id)).toEqual([1, 2, 5, 6]);
+    expect(viewOf(during).phase.deadline_at).toBe(EXTENDED);
+
+    // Конец: «Мастер думает» уже снимает привал — вкладка «Привал» не держит идей.
+    const resolving = run(during, phaseEvent("resolving"));
+    expect(restOf(resolving)).toBeNull();
+
+    const ended = run(
+      resolving,
+      { type: "feed_item", item: feedItem(7, "Прошёл час.") },
+      phaseEvent("discussion"),
+      { type: "rest_ended", kind: "short" },
+    );
+    expect(restOf(ended)).toBeNull();
+    expect(viewOf(ended).phase.turn_phase).toBe("discussion");
+    expect(viewOf(ended).feed.at(-1)?.text).toBe("Прошёл час.");
+  });
+
+  test("привал хода мастера (start_camp): фаза нового хода, затем rest_started — вид долгий, ход игрока сброшен", () => {
+    const thinking = started({
+      phase: phaseView({ turn_phase: "resolving", deadline_at: null }),
+      action: draftAction({ status: "submitted" }),
+    });
+
+    const state = run(
+      thinking,
+      { type: "feed_item", item: feedItem(3, "Вы разбиваете лагерь.") },
+      campPhase(),
+      { type: "rest_started", kind: "long", deadline_at: DEADLINE },
+      { type: "rest_idea", text: "Вспомни дом." },
+    );
+
+    expect(restOf(state)).toEqual({
+      kind: "long",
+      deadline_at: DEADLINE,
+      my_ideas: ["Вспомни дом."],
+      lines: [],
+    });
+    expect(viewOf(state).action).toBeNull();
+    expect(state.turn).toBe(1);
+  });
+
+  test("rest_started, пришедший пока мастер думает, переживает фазу нового хода", () => {
+    const state = run(
+      started({
+        phase: phaseView({ turn_phase: "resolving", deadline_at: null }),
+      }),
+      { type: "rest_started", kind: "long", deadline_at: DEADLINE },
+      campPhase(),
+    );
+
+    expect(restOf(state)?.kind).toBe("long");
+    expect(state.turn).toBe(1);
+  });
+
+  test("rest_ended без привала ничего не меняет", () => {
+    const before = started();
+
+    const state = run(before, { type: "rest_ended", kind: "long" });
+
+    expect(state).toEqual(before);
+  });
+
+  test("снимок после обрыва заменяет привал целиком: идеи прежнего снимка не смешиваются с новыми", () => {
+    const camping = started({
+      phase: phaseView({ turn_phase: "camp" }),
+      rest: restView({ my_ideas: ["Старая идея."], lines: [campLine(3)] }),
+    });
+    const fresh = restView({
+      kind: "long",
+      my_ideas: ["Новая идея."],
+      lines: [campLine(4)],
+    });
+
+    const reconnected = run(
+      camping,
+      snapshot({ phase: phaseView({ turn_phase: "camp" }), rest: fresh }),
+    );
+    // Пока сокет молчал, привал кончился: снимок без привала снимает его.
+    const missedEnd = run(
+      camping,
+      snapshot({ phase: phaseView({ turn_phase: "discussion" }), rest: null }),
+    );
+
+    expect(restOf(reconnected)).toEqual(fresh);
+    expect(restOf(missedEnd)).toBeNull();
+  });
+});
+
+describe("applyHitDie: ответ сервера на «Потратить кость хитов»", () => {
+  const RESULT = { hit_dice: 1, hp: 9, hp_max: 12 };
+
+  test("кладёт в лист героя остаток костей и хиты сервера, остальное не трогает", () => {
+    const before = started({ character: hero({ hit_dice: 2, hp: 4 }) });
+
+    const state = applyHitDie(before, RESULT);
+
+    expect(viewOf(state).character).toEqual({
+      ...hero({ hit_dice: 2, hp: 4 }),
+      ...RESULT,
+    });
+    expect(viewOf(state).party).toEqual(viewOf(before).party);
+  });
+
+  test("героя нет или снимка нет — применять не к чему", () => {
+    const heroless = started({ character: null });
+
+    expect(applyHitDie(heroless, RESULT)).toBe(heroless);
+    expect(applyHitDie(NO_LIVE, RESULT)).toBe(NO_LIVE);
+  });
+
+  test("в хранилище: setHitDie обновляет лист на экране", () => {
+    useGame.getState().receive(snapshot());
+
+    useGame.getState().setHitDie(RESULT);
+
+    expect(viewOf(useGame.getState().live).character).toMatchObject(RESULT);
   });
 });
 

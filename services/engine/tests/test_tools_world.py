@@ -994,6 +994,25 @@ def test_short_rest_spends_hit_dice_heals_and_counts_the_rest(
     assert outcome.result["characters"][0]["hp_gained"] == 13
 
 
+def test_short_rest_heals_at_least_one_hit_point_per_die_even_with_a_poor_constitution(
+    run, make_ctx, make_state, make_character
+):
+    # Телосложение 6 (−2): на костях 1 и 2 итоги −1 и 0, но каждая кость лечит не меньше 1 HP
+    # (дополнение B9 §1 п. 5: SRD 5.2.1 и план DND-2; в DND-1 минимум был 0).
+    state = make_state(wounded(make_character, scores={Ability.CON: 6}))
+    ctx = make_ctx(state, rng=ScriptedRng([1, 2]))
+
+    outcome = run(ctx, "short_rest", spend={"pc-1": 2})
+
+    assert outcome.error is None
+    assert (state.party["pc-1"].hp, state.party["pc-1"].hit_dice) == (7, 1)
+    [event] = events_of(ctx, RestEvent)
+    assert [roll.total for roll in event.outcomes[0].rolls] == [-1, 0]  # броски записаны честно
+    assert event.outcomes[0].hp_gained == 2
+    reported = outcome.result["characters"][0]
+    assert (reported["hp_gained"], reported["hp"]) == (2, 7)
+
+
 def test_short_rest_without_spending_still_restores_class_resources(
     run, make_ctx, make_state, make_character
 ):

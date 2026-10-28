@@ -18,8 +18,13 @@ from dnd_engine.state import GameState
 from dnd_server.db.base import Base
 
 # Версия JSON-схемы снимка `GameState`. Растёт, когда формат снимка меняется несовместимо; сервер
-# отказывается читать снимок с версией новее своей, чтобы откат кода не терял поля молча.
-GAME_STATE_SCHEMA_VERSION = 2
+# отказывается читать снимок с версией новее своей, чтобы откат кода не терял поля молча. Версия 2 —
+# дневник отряда (DND-2, B8), версия 3 — вид привала у сцены `scene.rest` (DND-2, B9).
+GAME_STATE_SCHEMA_VERSION = 3
+
+# Срок короткого привала у игр, записанных до него (миграция 0006), — как `SHORT_REST_SECONDS` по
+# умолчанию.
+SHORT_REST_DEFAULT_SECONDS = 120
 
 # Адресат сообщения «всем»; личные сообщения адресованы id пользователя.
 AUDIENCE_ALL = "all"
@@ -159,6 +164,14 @@ class Game(Base):
     # Флажок «Мат и грубая речь» (миграция 0004, решение Р1): мастер и служебные роли получают его
     # строкой «Мат: разрешён/запрещён». По умолчанию включён, и у старых игр тоже.
     profanity: Mapped[bool] = mapped_column(default=True, server_default=true())
+    # Срок короткого привала по кнопке хоста (миграция 0006, DND-2 B9); долгий идёт `camp_seconds`.
+    short_rest_seconds: Mapped[int] = mapped_column(
+        default=SHORT_REST_DEFAULT_SECONDS, server_default=text(str(SHORT_REST_DEFAULT_SECONDS))
+    )
+    # Личные идеи «расскажи о себе» идущего привала (миграция 0006): `{id героя: [текст, …]}`.
+    # Пусто вне привала: колонку очищают начало и конец привала и «Перегенерировать». В ленту и в
+    # `GameState` идеи не попадают, каждая уходит только игроку своего героя.
+    rest_ideas: Mapped[dict[str, Any] | None]
 
     started_at: Mapped[datetime | None]
     active_seconds: Mapped[int] = mapped_column(default=0)  # время игры без пауз, для темпа

@@ -73,9 +73,12 @@ from dnd_server.db.models import (
     GamePhase,
     GamePlayer,
     GameStateSnapshot,
+    Message,
     MessageKind,
     PlayerAction,
     PlayerCharacter,
+    Turn,
+    TurnKind,
     TurnPhase,
     UnsupportedSnapshotVersion,
     User,
@@ -104,6 +107,9 @@ from dnd_server.realtime.views import (
     party_event,
     phase_event,
     player_status_event,
+    rest_ended_event,
+    rest_idea_event,
+    rest_started_event,
     snapshot_for,
     state_events,
 )
@@ -949,7 +955,149 @@ async def test_snapshot_has_only_the_keys_of_the_contract(db, srd, table):
         "combat",
         "feed",
         "journal",
+        "rest",
     }
+
+
+# --- привал: блок `rest` снимка и кадры (DND-2, блок B9) ---
+
+TABLE_DEADLINE = datetime(2030, 5, 1, 12, 30, tzinfo=UTC)  # срок игры стола из `conftest.py`
+
+
+async def camp_at(
+    db: async_sessionmaker[AsyncSession],
+    table,
+    *,
+    rest: str | None,
+    ideas: dict[str, list[str]] | None = None,
+    phase: GamePhase = GamePhase.PLAYING,
+) -> None:
+    """Игра стола — на привале: сцена `camp` вида `rest` в текущем снимке, фаза хода `camp`."""
+    camped = table.state.model_copy(
+        update={"combat": None, "scene": Scene(type=SceneType.CAMP, started_turn=2, rest=rest)}
+    )
+    async with db() as session:
+        game = await session.get(Game, table.game_id)
+        row = await session.get(GameStateSnapshot, (table.game_id, game.state_version))
+        row.data = camped.model_dump(mode="json")
+        game.turn_phase = TurnPhase.CAMP
+        game.rest_ideas = ideas
+        if phase == GamePhase.PAUSED:
+            game.phase, game.clock_at = GamePhase.PAUSED, datetime(2030, 5, 1, 12, 0, tzinfo=UTC)
+        await session.commit()
+
+
+async def add_line(
+    db: async_sessionmaker[AsyncSession],
+    table,
+    text: str,
+    *,
+    turn_id: str | None = None,
+    kind: MessageKind = MessageKind.CAMP_LINE,
+    superseded: bool = False,
+) -> int:
+    async with db() as session:
+        game = await session.get(Game, table.game_id)
+        hero = table.seats["boris"].character
+        message = Message(
+            game_id=table.game_id,
+            turn_id=turn_id or game.current_turn_id,
+            audience="all",
+            kind=kind,
+            text=text,
+            data={"actor_id": hero.id, "actor": hero.name},
+            superseded=superseded,
+        )
+        session.add(message)
+        await session.commit()
+        return message.id
+
+
+async def test_there_is_no_rest_in_the_snapshot_outside_the_camp(db, srd, table):
+    snapshot = await snapshot_of(db, srd, table, "alice")
+
+    assert snapshot["rest"] is None
+
+
+async def test_a_short_rest_shows_its_kind_deadline_own_ideas_and_the_lines_of_this_camp(
+    db, srd, table
+):
+    boris, vera = table.seats["boris"].character.id, table.seats["vera"].character.id
+    ideas = {boris: ["Расскажи, откуда шрам."], vera: ["Вспомни храм детства."]}
+    await camp_at(db, table, rest="short", ideas=ideas)
+    said = await add_line(db, table, "Я помню этот лес.")
+    await add_line(db, table, "Старая реплика.", superseded=True)
+    await add_line(db, table, "Рассказ мастера.", kind=MessageKind.NARRATION)
+
+    for key, own in (("boris", ideas[boris]), ("vera", ideas[vera]), ("alice", [])):
+        rest = (await snapshot_of(db, srd, table, key))["rest"]
+
+        assert set(rest) == {"kind", "deadline_at", "my_ideas", "lines"}
+        assert (rest["kind"], rest["deadline_at"]) == ("short", TABLE_DEADLINE.isoformat())
+        assert rest["my_ideas"] == own  # чужая идея не видна никому, кроме адресата
+        [line] = rest["lines"]
+        assert (line["id"], line["kind"], line["text"]) == (said, "camp_line", "Я помню этот лес.")
+        assert line["data"] == {"actor_id": boris, "actor": table.seats["boris"].character.name}
+
+
+async def test_the_lines_of_an_earlier_camp_are_not_lines_of_this_one(db, srd, table):
+    await camp_at(db, table, rest="long")
+    async with db() as session:
+        game = await session.get(Game, table.game_id)
+        earlier = Turn(game_id=table.game_id, number=1, kind=TurnKind.CAMP_END)
+        session.add(earlier)
+        await session.commit()
+    await add_line(db, table, "Реплика прошлого привала.", turn_id=earlier.id)
+
+    rest = (await snapshot_of(db, srd, table, "boris"))["rest"]
+
+    assert rest["lines"] == []
+
+
+async def test_a_camp_without_a_kind_is_the_long_camp_of_dnd1(db, srd, table):
+    await camp_at(db, table, rest=None)
+
+    rest = (await snapshot_of(db, srd, table, "alice"))["rest"]
+
+    assert (rest["kind"], rest["my_ideas"], rest["lines"]) == ("long", [], [])
+
+
+async def test_a_paused_rest_has_no_deadline_and_the_phase_keeps_the_remaining_seconds(
+    db, srd, table
+):
+    await camp_at(db, table, rest="short", phase=GamePhase.PAUSED)
+
+    snapshot = await snapshot_of(db, srd, table, "alice")
+
+    assert snapshot["rest"]["deadline_at"] is None
+    assert snapshot["phase"]["remaining_seconds"] == 30 * 60
+
+
+def test_the_rest_frames_carry_only_their_fields():
+    game = Game(phase=GamePhase.PLAYING, turn_phase=TurnPhase.CAMP, deadline_at=TABLE_DEADLINE)
+    state_short = GameState.model_validate(
+        {
+            "game_id": "g",
+            "adventure_id": "a",
+            "rules": {},
+            "party": {},
+            "location_id": "x",
+            "scene": {"type": "camp", "rest": "short"},
+        }
+    )
+    state_old = state_short.model_copy(update={"scene": Scene(type=SceneType.CAMP)})
+
+    assert rest_started_event(game, state_short) == {
+        "type": "rest_started",
+        "kind": "short",
+        "deadline_at": TABLE_DEADLINE.isoformat(),
+    }
+    assert rest_started_event(game, state_old)["kind"] == "long"
+    paused = Game(phase=GamePhase.PAUSED, turn_phase=TurnPhase.CAMP, deadline_at=TABLE_DEADLINE)
+    assert rest_started_event(paused, state_short)["deadline_at"] is None
+    assert rest_idea_event("Расскажи о себе.") == {"type": "rest_idea", "text": "Расскажи о себе."}
+    assert rest_ended_event("short") == {"type": "rest_ended", "kind": "short"}
+    assert {"rest_started", "rest_idea", "rest_ended"} <= EVENT_TYPES
 
 
 # --- адресат события движка ---

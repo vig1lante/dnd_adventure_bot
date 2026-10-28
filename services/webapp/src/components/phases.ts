@@ -1,4 +1,4 @@
-import type { PhaseView, TurnPhase } from "../api/types";
+import type { PhaseView, RestKind, TurnPhase } from "../api/types";
 
 const TURN_LABELS: Record<TurnPhase, string> = {
   discussion: "Обсуждение",
@@ -32,4 +32,17 @@ export function phaseLabel(phase: PhaseView): string {
         ? "Игра идёт"
         : TURN_LABELS[phase.turn_phase];
   }
+}
+
+const REST_LABELS: Record<RestKind, string> = {
+  short: "Короткий привал",
+  long: "Долгий привал",
+};
+
+/**
+ * Название привала по виду. `null` — вид ещё не пришёл (кадр `rest_started` в пути): тогда
+ * просто «Привал», как у фазы хода.
+ */
+export function restLabel(kind: RestKind | null): string {
+  return kind === null ? TURN_LABELS.camp : REST_LABELS[kind];
 }

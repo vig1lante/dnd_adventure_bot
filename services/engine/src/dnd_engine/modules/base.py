@@ -26,9 +26,9 @@ from dnd_engine.state import GameState
 POTION_BONUS_ACTION = "potion_bonus_action"  # зелье тратит бонусное действие, а не действие
 SHOVE_BONUS_ACTION = "shove_bonus_action"  # толчок тратит бонусное действие
 HELP_REVIVES = "help_revives"  # «Помощь» упавшему союзнику поднимает его с 1 HP
-# Сколько коротких отдыхов допустимо между длинными. Проверяет инструмент мастера `short_rest`
-# (B4.6) по `GameState.short_rests_since_long`: функции короткого отдыха на уровне состояния
-# в движке нет, а `rest.short_rest` работает с одним персонажем и счётчика не знает.
+# Сколько коротких отдыхов допустимо между длинными. Предел по `GameState.short_rests_since_long`
+# проверяют инструмент мастера `short_rest` (B4.6) и начало короткого привала по кнопке хоста
+# (`campfire.begin_rest`); функции `rest` работают с одним персонажем и счётчика не знают.
 MAX_SHORT_RESTS_PER_LONG = "max_short_rests_per_long"
 
 TriggerEvent = Literal["on_scene_start", "on_scene_end", "on_long_rest", "on_time_advance"]

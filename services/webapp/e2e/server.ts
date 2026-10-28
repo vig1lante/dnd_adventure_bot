@@ -8,21 +8,32 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { test as base } from "@playwright/test";
 
 // Фикстура сервера игры для сквозного теста (план B8.7): настоящий `dnd-server` с `FakeProvider`
-// по сценарию `e2e_full.yaml`, временной базой SQLite и пустыми ключами. Запускается так же, как
-// у разработчика: `uv run dnd-server --port <порт>` из корня репозитория. Порт выбирает
+// по сценарию (по умолчанию `e2e_full.yaml`), временной базой SQLite и пустыми ключами. Запускается
+// так же, как у разработчика: `uv run dnd-server --port <порт>` из корня репозитория. Порт выбирает
 // `playwright.config.ts` (от него зависит прокси Vite) и передаёт через окружение.
+//
+// Свой сценарий спецификация выбирает параметром фикстуры: `test.use({ scenario: "…yaml" })`.
+// Параметр живёт в рабочем процессе, поэтому Playwright запускает такую спецификацию в отдельном
+// рабочем процессе: со своим сервером на том же порту и своей чистой базой (прежний сервер к
+// этому времени остановлен и порт свободен — рабочий процесс один, см. `playwright.config.ts`).
 
 /** Корень репозитория: `services/webapp/e2e` → три уровня вверх. */
 export const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
-const SCENARIO = "services/server/tests/scenarios/e2e_full.yaml";
+/** Папка сценариев `FakeProvider` от корня репозитория. */
+export const SCENARIOS_DIR = "services/server/tests/scenarios";
+/** Сценарий по умолчанию: вечер «6 игроков» и остальные спецификации. */
+export const DEFAULT_SCENARIO = "e2e_full.yaml";
 const HOST = "127.0.0.1";
 // Файл базы во временной папке стенда; SQLite кладёт рядом свои файлы с тем же началом имени.
 const DB_FILE = "e2e.sqlite3";
 
 // Отсчёты короткие, чтобы вечер уложился в минуты. Привалу хватает времени сказать реплику.
+// Короткий привал чуть длиннее: на нём ещё тратят кость хитов (`rests.spec.ts`), а закончить
+// его раньше хост может кнопкой.
 const COLLECT_SECONDS = "5";
 const HURRY_SECONDS = "15";
 const CAMP_SECONDS = "15";
+const SHORT_REST_SECONDS = "20";
 
 // Тестовый секрет сессий: не боевой и не из `.env`. Токены при перезапуске остаются верными.
 const SESSION_SECRET = "e2e-playwright-session-secret-0123456789abcdef";
@@ -95,14 +106,18 @@ function serverPort(): number {
  * Ещё обнулены токен и имя бота (бот Telegram выключен) и задана своя временная база. Остальное
  * (PATH, HOME) наследуется, чтобы `uv` нашёл Python и кэш. Тест в `one-process.spec.ts` сверяет
  * эту функцию со списком переменных `.env.example`.
- * `dataDir` — временная папка стенда: в ней база и путь к несуществующему `claude`.
+ * `dataDir` — временная папка стенда: в ней база и путь к несуществующему `claude`;
+ * `scenario` — файл сценария `FakeProvider` в `SCENARIOS_DIR`.
  */
-export function serverEnv(dataDir: string): NodeJS.ProcessEnv {
+export function serverEnv(
+  dataDir: string,
+  scenario = DEFAULT_SCENARIO,
+): NodeJS.ProcessEnv {
   return {
     ...process.env,
     APP_ENV: "dev",
     LLM_PROVIDER: "fake",
-    FAKE_LLM_SCENARIO: SCENARIO,
+    FAKE_LLM_SCENARIO: path.posix.join(SCENARIOS_DIR, scenario),
     DATABASE_URL: `sqlite+aiosqlite:///${path.join(dataDir, DB_FILE)}`,
     CONTENT_DIR: "content/adventures",
     SESSION_SECRET,
@@ -124,6 +139,7 @@ export function serverEnv(dataDir: string): NodeJS.ProcessEnv {
     COLLECT_SECONDS,
     HURRY_SECONDS,
     CAMP_SECONDS,
+    SHORT_REST_SECONDS,
     PYTHONUNBUFFERED: "1",
   };
 }
@@ -316,20 +332,31 @@ async function runSecondCopy(
   }
 }
 
-export const test = base.extend<object, { server: DndServer }>({
+/** Лог сервера в папке артефактов: у другого сценария свой файл, чтобы его не затёр следующий. */
+function serverLogName(scenario: string): string {
+  return scenario === DEFAULT_SCENARIO
+    ? "server.log"
+    : `server-${path.parse(scenario).name}.log`;
+}
+
+interface WorkerFixtures {
+  /** Файл сценария `FakeProvider` в `SCENARIOS_DIR`; спецификация меняет его `test.use`. */
+  scenario: string;
+  server: DndServer;
+}
+
+export const test = base.extend<object, WorkerFixtures>({
+  scenario: [DEFAULT_SCENARIO, { scope: "worker", option: true }],
   server: [
-    // Фикстура рабочего процесса не использует другие фикстуры.
-    // eslint-disable-next-line no-empty-pattern
-    async ({}, provide) => {
+    async ({ scenario }, provide) => {
       const port = serverPort();
       const dir = artifactsDir();
       fs.mkdirSync(dir, { recursive: true });
       // База во временной папке системы, не в репозитории и не в `data/`.
       const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "dnd-e2e-db-"));
-      const env = serverEnv(dataDir);
-      const log = fs.createWriteStream(path.join(dir, "server.log"), {
-        flags: "w",
-      });
+      const env = serverEnv(dataDir, scenario);
+      const logFile = path.join(dir, serverLogName(scenario));
+      const log = fs.createWriteStream(logFile, { flags: "w" });
       let running: Running | undefined;
 
       const start = async () => {

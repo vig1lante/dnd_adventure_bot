@@ -8,13 +8,18 @@ from dnd_engine.rest import (
     AID_BUFF,
     BREATH_WEAPON_TRAIT,
     RELENTLESS_ENDURANCE_TRAIT,
+    SHORT_REST_ALL_USES,
+    SHORT_REST_ONE_USE,
+    RestError,
     RestOutcome,
     arcane_recovery,
     end_buffs,
+    finish_short_rest,
     long_rest,
     short_rest,
+    spend_hit_die,
 )
-from dnd_engine.rng import ScriptedRng
+from dnd_engine.rng import ScriptedRng, SeededRng
 
 CON = Ability.CON
 
@@ -68,14 +73,15 @@ def test_short_rest_never_heals_above_the_maximum_but_still_spends_the_die(make_
     assert (rested.hit_dice, outcome.hit_dice_spent) == (2, 1)
 
 
-def test_short_rest_die_with_negative_total_heals_nothing(make_character, srd):
-    # Телосложение 6 даёт −2: единица на кости — итог −1, лечение не уходит ниже нуля.
+def test_short_rest_die_with_negative_total_still_heals_one_hit_point(make_character, srd):
+    # Телосложение 6 даёт −2: единица на кости — итог −1, но кость хитов лечит не меньше 1 HP
+    # (SRD 5.2.1 и план DND-2; прежде минимум был 0).
     c = make_character(scores={CON: 6}, hp_max=20, hp=10)
 
     rested, outcome = short_rest(c, spend_hit_dice=1, rng=ScriptedRng([1]), content=srd)
 
     assert outcome.rolls[0].total == -1  # бросок записан честно
-    assert (rested.hp, outcome.hp_gained) == (10, 0)
+    assert (rested.hp, outcome.hp_gained) == (11, 1)
     assert rested.hit_dice == 2
 
 
@@ -779,3 +785,361 @@ def test_arcane_recovery_of_a_dead_wizard_changes_nothing(make_character, srd):
 
     assert recovered == c
     assert outcome.restored == []
+
+
+# --- короткий привал по кнопке: кость хитов по одной и конец отдыха (DND-2, B9) ---
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_spending_a_hit_die_heals_by_the_class_die_plus_constitution(make_character, srd, seed):
+    c = make_character(class_id="fighter", scores={CON: 14}, hp_max=30, hp=5, hit_dice=3)
+    face = SeededRng(seed).randint(1, 10)  # тот же seed — та же грань к10 воина
+
+    rested, rolled = spend_hit_die(c, srd, SeededRng(seed))
+
+    assert (rolled.expr, rolled.rolls, rolled.total) == ("1d10+2", [face], face + 2)
+    assert rolled.reason == "Короткий отдых: кость хитов"
+    assert rested.hp == 5 + face + 2
+    assert rested.hit_dice == 2
+
+
+def test_spending_a_hit_die_rolls_the_hit_die_of_the_class(make_character, srd):
+    wizard = make_character(class_id="wizard", hp_max=20, hp=1)
+
+    _, rolled = spend_hit_die(wizard, srd, SeededRng(3))
+
+    assert rolled.expr == "1d6+0"
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_spending_a_hit_die_never_heals_above_the_maximum_but_still_spends_it(
+    make_character, srd, seed
+):
+    c = make_character(hp_max=20, hp=19, hit_dice=2)
+
+    rested, _ = spend_hit_die(c, srd, SeededRng(seed))
+
+    assert (rested.hp, rested.hit_dice) == (20, 1)
+
+
+def test_spending_a_hit_die_heals_up_to_the_maximum_raised_by_aid(make_character, srd):
+    c = aided(make_character, hp=24)  # «Подмога» подняла максимум с 20 до 25
+
+    rested, _ = spend_hit_die(c, srd, SeededRng(1))
+
+    assert (rested.hp, rested.hp_max) == (25, 25)
+    assert [b.id for b in rested.buffs] == [AID_BUFF]
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_a_hit_die_heals_at_least_one_hit_point_even_with_a_terrible_constitution(
+    make_character, srd, seed
+):
+    # Телосложение 1 даёт −5, а кость волшебника — к6: итог броска не больше 1 при любом seed.
+    c = make_character(class_id="wizard", scores={CON: 1}, hp_max=20, hp=10)
+
+    rested, rolled = spend_hit_die(c, srd, SeededRng(seed))
+
+    assert rolled.total <= 1  # бросок записан честно, даже отрицательный
+    assert rested.hp == 11
+
+
+def test_a_hit_die_wakes_up_a_character_at_zero_hit_points(make_character, srd):
+    c = knocked_out(make_character, hp_max=20, hit_dice=2)
+
+    rested, _ = spend_hit_die(c, srd, SeededRng(2))
+
+    assert rested.hp >= 1
+    assert rested.conditions == []
+    assert rested.death_saves == DeathSaves()
+
+
+def test_without_hit_dice_spending_one_is_a_rest_error_and_rolls_nothing(make_character, srd):
+    c = make_character(hp=5, hit_dice=0)
+    rng = ScriptedRng([5])
+
+    with pytest.raises(RestError, match="Костей хитов не осталось"):
+        spend_hit_die(c, srd, rng)
+
+    assert rng.randint(1, 10) == 5  # кость не брошена
+
+
+def test_a_dead_character_cannot_spend_a_hit_die(make_character, srd):
+    c = dead(make_character, hp_max=20, hit_dice=3)
+    rng = ScriptedRng([5])
+
+    with pytest.raises(RestError, match="Погибший"):
+        spend_hit_die(c, srd, rng)
+
+    assert rng.randint(1, 10) == 5
+
+
+def test_a_rest_error_is_a_value_error():
+    # Прежние обработчики ловят `ValueError`: отказ правил привала не должен пройти мимо них.
+    assert issubclass(RestError, ValueError)
+
+
+def test_spending_a_hit_die_leaves_the_original_untouched(make_character, srd):
+    c = make_character(hp_max=20, hp=5, resources={"second_wind": 0})
+    before = c.model_copy(deep=True)
+
+    rested, _ = spend_hit_die(c, srd, SeededRng(4))
+
+    assert c == before
+    assert rested is not c
+    assert rested.resources == {"second_wind": 0}  # особенности возвращает конец отдыха
+
+
+def test_the_end_of_a_short_rest_restores_short_rest_features_only(make_character, srd):
+    c = make_character(
+        class_id="fighter", hp_max=20, hp=5, resources={"second_wind": 0, "action_surge": 0}
+    )
+
+    rested, outcome = finish_short_rest(c, srd)
+
+    assert rested.resources == {"second_wind": 1, "action_surge": 1}
+    assert (rested.hp, rested.hit_dice) == (5, 3)
+    assert outcome == RestOutcome(
+        character_id="pc-1",
+        hp_gained=0,
+        hit_dice_spent=0,
+        rolls=[],
+        restored=["second_wind", "action_surge"],
+    )
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"class_id": "wizard", "spell_slots_max": {1: 2}, "spell_slots": {1: 0}},
+        {"class_id": "wizard", "resources": {"arcane_recovery": 0}},
+        {"class_id": "barbarian", "resources": {"rage": 1}},
+        {"species": "orc", "resources": {RELENTLESS_ENDURANCE_TRAIT: 0}},
+        {"species": "dragonborn", "resources": {BREATH_WEAPON_TRAIT: 0}},
+        {"buffs": [ActiveBuff(id=AID_BUFF, rounds_left=4800, source_id="pc-2", data={"hp": 5})]},
+    ],
+    ids=["slots", "arcane-recovery", "rage", "relentless", "breath", "aid"],
+)
+def test_the_end_of_a_short_rest_is_the_short_rest_without_hit_dice(make_character, srd, fields):
+    c = make_character(hp=7, **fields)
+
+    assert finish_short_rest(c, srd) == short_rest(
+        c, spend_hit_dice=0, rng=ScriptedRng([]), content=srd
+    )
+
+
+def test_the_end_of_a_short_rest_gives_a_dead_character_nothing(make_character, srd):
+    c = dead(make_character, hp_max=20, resources={"second_wind": 0})
+
+    rested, outcome = finish_short_rest(c, srd)
+
+    assert rested == c and rested is not c
+    assert outcome == RestOutcome(
+        character_id="pc-1", hp_gained=0, hit_dice_spent=0, rolls=[], restored=[]
+    )
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_short_rest_is_hit_dice_one_by_one_and_then_the_end_of_the_rest(make_character, srd, seed):
+    c = make_character(scores={CON: 12}, hp_max=30, hp=3, resources={"second_wind": 0})
+    rng = SeededRng(seed)
+    once, first = spend_hit_die(c, srd, rng)
+    twice, second = spend_hit_die(once, srd, rng)
+    expected, end = finish_short_rest(twice, srd)
+
+    rested, outcome = short_rest(c, spend_hit_dice=2, rng=SeededRng(seed), content=srd)
+
+    assert rested == expected
+    assert outcome == RestOutcome(
+        character_id="pc-1",
+        hp_gained=expected.hp - c.hp,
+        hit_dice_spent=2,
+        rolls=[first, second],
+        restored=end.restored,
+    )
+
+
+# --- финальное покрытие B9: границы кости хитов и конца короткого отдыха ---
+
+
+@pytest.mark.parametrize(
+    ("class_id", "hit_die"),
+    [
+        ("barbarian", 12),
+        ("fighter", 10),
+        ("ranger", 10),
+        ("rogue", 8),
+        ("cleric", 8),
+        ("wizard", 6),
+    ],
+)
+def test_a_hit_die_of_every_class_is_exactly_the_die_of_that_class(
+    make_character, srd, class_id, hit_die
+):
+    c = make_character(class_id=class_id, hp_max=40, hp=1)
+
+    rested, rolled = spend_hit_die(c, srd, ScriptedRng([hit_die]))
+
+    assert (rolled.expr, rolled.total) == (f"1d{hit_die}+0", hit_die)
+    assert (rested.hp, rested.hit_dice) == (1 + hit_die, 2)
+    # Высшая грань кости принята, а грань на единицу выше `ScriptedRng` отверг: кость ровно та.
+    with pytest.raises(ValueError, match="вне диапазона"):
+        spend_hit_die(c, srd, ScriptedRng([hit_die + 1]))
+
+
+@pytest.mark.parametrize(
+    ("con", "face", "expr", "total", "healed"),
+    [
+        (8, 5, "1d10-1", 4, 4),  # итог положительный — лечит ровно итог
+        (6, 4, "1d10-2", 2, 2),
+        (6, 3, "1d10-2", 1, 1),  # итог 1 — сама граница
+        (6, 2, "1d10-2", 0, 1),  # итог 0 — лечит 1, а не 0
+        (1, 1, "1d10-5", -4, 1),  # итог отрицательный — всё равно 1
+    ],
+)
+def test_a_hit_die_with_a_negative_constitution_heals_its_total_but_never_less_than_one(
+    make_character, srd, con, face, expr, total, healed
+):
+    c = make_character(scores={CON: con}, hp_max=30, hp=10)
+
+    rested, rolled = spend_hit_die(c, srd, ScriptedRng([face]))
+
+    assert (rolled.expr, rolled.total) == (expr, total)  # бросок записан честно
+    assert rested.hp == 10 + healed
+
+
+def test_even_the_worst_hit_die_wakes_up_a_character_at_zero_hit_points(make_character, srd):
+    # Минимум 1 HP за кость значит, что любая кость поднимает лежащего на 0 HP.
+    c = knocked_out(make_character, scores={CON: 6}, hp_max=20, hit_dice=2)
+
+    rested, rolled = spend_hit_die(c, srd, ScriptedRng([1]))
+
+    assert rolled.total == -1
+    assert (rested.hp, rested.hit_dice) == (1, 1)
+    assert rested.conditions == []
+    assert rested.death_saves == DeathSaves()
+
+
+@pytest.mark.parametrize("with_aid", [False, True], ids=["normal-maximum", "aid-maximum"])
+def test_a_hit_die_at_full_health_heals_nothing_but_is_still_rolled_and_spent(
+    make_character, srd, with_aid
+):
+    c = aided(make_character) if with_aid else make_character(hp_max=20, hp=20)
+    rng = ScriptedRng([7, 3])
+
+    rested, rolled = spend_hit_die(c, srd, rng)
+
+    assert rolled.total == 7
+    assert (rested.hp, rested.hp_max, rested.hit_dice) == (c.hp, c.hp_max, 2)
+    assert rng.randint(1, 10) == 3  # брошена ровно одна кость
+
+
+def test_a_dead_character_without_hit_dice_hears_about_death_first(make_character, srd):
+    c = dead(make_character, hit_dice=0)
+
+    with pytest.raises(RestError, match="Погибший"):
+        spend_hit_die(c, srd, ScriptedRng([]))
+
+
+def test_hit_dice_are_spent_one_by_one_until_none_are_left(make_character, srd):
+    c = make_character(hp_max=40, hp=1, hit_dice=2)
+    rng = ScriptedRng([3, 4, 5])
+
+    once, _ = spend_hit_die(c, srd, rng)
+    twice, _ = spend_hit_die(once, srd, rng)
+
+    assert (once.hp, once.hit_dice) == (4, 1)
+    assert (twice.hp, twice.hit_dice) == (8, 0)
+    with pytest.raises(RestError, match="Костей хитов не осталось"):
+        spend_hit_die(twice, srd, rng)
+    assert rng.randint(1, 10) == 5  # третья кость не брошена
+
+
+def test_a_hit_die_changes_only_hit_points_and_hit_dice(make_character, srd):
+    c = make_character(
+        class_id="wizard",
+        hp_max=20,
+        hp=5,
+        temp_hp=4,
+        spell_slots_max={1: 4},
+        spell_slots={1: 1},
+        resources={"arcane_recovery": 0},
+        concentration="bless",
+        conditions=[ActiveCondition(id="poisoned", rounds_left=3)],
+        buffs=[bless_buff()],
+        inspiration=True,
+    )
+
+    rested, _ = spend_hit_die(c, srd, ScriptedRng([4]))
+
+    # Кость лечит настоящие хиты: временные, ячейки, ресурсы, эффекты и состояния прежние.
+    assert rested == c.model_copy(update={"hp": 9, "hit_dice": 2})
+
+
+# Все ресурсы «до короткого отдыха» и два ресурса только длинного отдыха. Таблица с тремя
+# использованиями на 3-м уровне показывает, возвращается одно использование или все.
+SHORT_REST_RESOURCE_CASES = [
+    ("fighter", "second_wind", 1),  # одно использование
+    ("barbarian", "rage", 1),
+    ("cleric", "channel_divinity", 1),
+    ("fighter", "action_surge", 3),  # все использования
+    ("ranger", "hunters_mark", 0),  # только длинный отдых
+    ("wizard", "arcane_recovery", 0),
+]
+
+
+def test_the_resource_cases_name_every_short_rest_resource():
+    # Новый ресурс «до короткого отдыха» должен попасть в таблицу проверок конца отдыха.
+    named = {resource for _, resource, restored_to in SHORT_REST_RESOURCE_CASES if restored_to}
+    assert named == SHORT_REST_ONE_USE | SHORT_REST_ALL_USES
+
+
+@pytest.mark.parametrize(("class_id", "resource", "restored_to"), SHORT_REST_RESOURCE_CASES)
+def test_the_end_of_a_short_rest_restores_each_resource_by_its_own_rule(
+    make_character, srd, class_id, resource, restored_to
+):
+    content = with_resource_table(srd, class_id, resource, {3: 3})
+    c = make_character(class_id=class_id, resources={resource: 0})
+
+    rested, outcome = finish_short_rest(c, content)
+
+    assert rested.resources == {resource: restored_to}
+    assert outcome.restored == ([resource] if restored_to else [])
+
+
+def test_the_end_of_a_short_rest_neither_heals_nor_wakes_nor_returns_hit_dice(make_character, srd):
+    # Лежащего на 0 HP конец короткого отдыха не поднимает: поднимает только кость хитов.
+    c = knocked_out(
+        make_character,
+        hp_max=25,
+        hit_dice=0,
+        temp_hp=3,
+        resources={"second_wind": 0},
+        buffs=[aid_buff(5)],
+    )
+
+    rested, _ = finish_short_rest(c, srd)
+
+    assert rested == c.model_copy(update={"resources": {"second_wind": 1}})
+
+
+def test_short_rest_applies_the_minimum_to_each_die_and_not_to_their_sum(make_character, srd):
+    c = make_character(scores={CON: 6}, hp_max=30, hp=10)
+
+    rested, outcome = short_rest(c, spend_hit_dice=2, rng=ScriptedRng([1, 5]), content=srd)
+
+    assert [r.total for r in outcome.rolls] == [-1, 3]
+    assert (rested.hp, outcome.hp_gained) == (14, 4)  # 1 + 3, а не −1 + 3 = 2
+
+
+def test_short_rest_counts_only_the_hit_points_really_gained_when_the_dice_overflow(
+    make_character, srd
+):
+    c = make_character(scores={CON: 6}, hp_max=20, hp=15)
+
+    rested, outcome = short_rest(c, spend_hit_dice=3, rng=ScriptedRng([8, 1, 1]), content=srd)
+
+    # Первая кость упирается в максимум (5 из 6), остальные «лечат 1», но лечить уже некого.
+    assert [r.total for r in outcome.rolls] == [6, -1, -1]
+    assert (rested.hp, outcome.hp_gained) == (20, 5)
+    assert (rested.hit_dice, outcome.hit_dice_spent) == (0, 3)

@@ -10,7 +10,8 @@
 - каждому вызову клиента отвечает маршрут сервера с тем же методом, включая кнопки хоста
   из типа `HostAction` и сокет игры;
 - виды кадров сокета и поля каждого кадра у сервера и в типе `WsEvent` клиента совпадают;
-- поля ответов REST у моделей сервера и у интерфейсов клиента с теми же именами совпадают.
+- поля ответов REST у моделей сервера и у интерфейсов клиента с теми же именами совпадают;
+- блок `rest` снимка (словарь `rest_view`, блок B9) и интерфейс `RestView`, виды привала.
 """
 
 import importlib
@@ -22,9 +23,14 @@ import pytest
 from pydantic import BaseModel
 
 from dnd_engine.journal import SECTIONS, Section
+from dnd_engine.state import GameState
 from dnd_server.app import create_app
 from dnd_server.config import Settings
+from dnd_server.db.models import Game, GamePhase, TurnPhase
+from dnd_server.dm.camp_flow import RestKind
 from dnd_server.realtime.hub import EVENT_TYPES
+from dnd_server.realtime.views import rest_view
+from dnd_server.turns.api import RestIn
 
 # tests/flows/test_client_routes.py -> flows -> tests -> server -> services
 SERVICES = Path(__file__).resolve().parents[3]
@@ -95,8 +101,12 @@ def test_the_parser_finds_the_whole_api_of_the_client():
     assert ("POST", "/api/games/{}/host/camp-end") in calls
     assert ("POST", "/api/games/{}/characters/random-abilities") in calls
     assert ("GET", "/api/games/{}/characters/mine") in calls
+    # Привалы (блок B9 DND-2): начало привала хостом, кость хитов и кнопки привала любого вида.
+    assert ("POST", "/api/games/{}/host/rest") in calls
+    assert ("POST", "/api/games/{}/rest/hit-dice") in calls
+    assert ("POST", "/api/games/{}/host/rest-end") in calls
     assert len(calls) >= 30, f"клиент разобран не целиком: {len(calls)} вызовов"
-    assert len(host_actions()) == 10
+    assert len(host_actions()) == 12
 
 
 def missing_routes(served: dict[str, set[str]]) -> list[str]:
@@ -304,6 +314,8 @@ RESPONSES = [
     # Запись дневника отряда (блок B8 DND-2): уходит в снимке и кадрах `journal_entry`/`journal`
     # как есть (`model_dump`), без добавленных и снятых полей.
     ("dnd_engine.journal.JournalEntry", "JournalEntry", set(), set()),
+    # Ответ на «Потратить кость хитов» (блок B9 DND-2): остаток костей и хиты героя.
+    ("dnd_server.turns.api.HitDieOut", "HitDieResult", set(), set()),
 ]
 
 
@@ -438,3 +450,40 @@ def test_every_frame_the_server_builds_passes_the_contract_of_the_hub():
 
     assert {"journal_entry", "journal"} <= built
     assert built <= EVENT_TYPES, f"кадры вне контракта хаба: {sorted(built - EVENT_TYPES)}"
+
+
+# --- привалы: блок `rest` снимка, кадры и виды привала (финальное покрытие блока B9 DND-2) ---
+
+
+def test_the_rest_of_the_snapshot_has_the_same_fields_on_the_server_and_in_the_client():
+    # Блок `rest` сервер собирает словарем (`rest_view`), а не моделью: общая сверка ответов REST
+    # его не видит. Поэтому его ключи берутся у настоящего вызова и сверяются с `RestView`.
+    state = GameState.model_validate(
+        {
+            "game_id": "g",
+            "adventure_id": "a",
+            "rules": {},
+            "party": {},
+            "location_id": "x",
+            "scene": {"type": "camp", "rest": "short"},
+        }
+    )
+    game = Game(phase=GamePhase.PLAYING, turn_phase=TurnPhase.CAMP, deadline_at=None)
+
+    assert set(rest_view(game, state, [], [])) == interface_fields("RestView")
+
+
+def test_the_kinds_of_rest_and_its_frames_are_the_same_on_both_sides():
+    # Вид привала — в теле «начать привал», в блоке `rest` и в кадрах; кадры привала и поле `rest`
+    # снимка есть у обеих сторон (общая сверка прошла бы, потеряй их обе стороны вместе).
+    kinds = set(get_args(RestKind))
+    server, client = server_events(), client_events()
+
+    assert (
+        client_union("RestKind") == kinds == set(get_args(RestIn.model_fields["kind"].annotation))
+    )
+    for events in (server, client):
+        assert events["rest_started"] == {"kind", "deadline_at"}
+        assert events["rest_idea"] == {"text"}
+        assert events["rest_ended"] == {"kind"}
+        assert "rest" in events["snapshot"]

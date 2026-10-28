@@ -809,19 +809,26 @@ function combatSnapshot(
   });
 }
 
-/** Привал в снимке: тема мастера и две реплики у костра. */
+/** Привал в снимке: тема мастера и реплика у костра; сервер описывает привал блоком `rest` (B9, §3). */
 function campSnapshot(overrides: Partial<Snapshot> = {}) {
+  const line = feedEntry(2, {
+    kind: "camp_line",
+    text: "Подкину дров.",
+    data: { actor_id: "pc_boris", actor: "Борин" },
+  });
   const feed: FeedItem[] = [
     feedEntry(1, { kind: "narration", text: "Вы разбиваете лагерь у реки." }),
-    feedEntry(2, {
-      kind: "camp_line",
-      text: "Подкину дров.",
-      data: { actor_id: "pc_boris", actor: "Борин" },
-    }),
+    line,
   ];
   return snapshotWith({
     phase: phaseOf("camp", { deadline_at: CAMP_DEADLINE }),
     feed,
+    rest: {
+      kind: "long",
+      deadline_at: CAMP_DEADLINE,
+      my_ideas: [],
+      lines: [line],
+    },
     ...overrides,
   });
 }
@@ -1612,8 +1619,8 @@ describe("вкладка «Привал»", () => {
       as: "u1",
       snapshot: campSnapshot(),
       routes: {
-        "POST /api/games/g1/host/camp-extend": PHASE_REPLY,
-        "POST /api/games/g1/host/camp-end": PHASE_REPLY,
+        "POST /api/games/g1/host/rest-extend": PHASE_REPLY,
+        "POST /api/games/g1/host/rest-end": PHASE_REPLY,
       },
     });
 
@@ -1621,7 +1628,7 @@ describe("вкладка «Привал»", () => {
     await vi.waitFor(() =>
       expect(
         server.calls.some(
-          (call) => call.path === "/api/games/g1/host/camp-extend",
+          (call) => call.path === "/api/games/g1/host/rest-extend",
         ),
       ).toBe(true),
     );
@@ -1631,7 +1638,7 @@ describe("вкладка «Привал»", () => {
     await vi.waitFor(() =>
       expect(
         server.calls.some(
-          (call) => call.path === "/api/games/g1/host/camp-end",
+          (call) => call.path === "/api/games/g1/host/rest-end",
         ),
       ).toBe(true),
     );
@@ -1644,6 +1651,127 @@ describe("вкладка «Привал»", () => {
     noButton("Закончить привал");
     fireEvent.click(tab("Привал"));
     expect(screen.getByLabelText("Сказать у костра")).toBeEnabled();
+  });
+
+  test.each([
+    ["short", "Короткий привал"],
+    ["long", "Долгий привал"],
+    [null, "Привал"],
+  ] as const)(
+    "подсказка на «Рассказе» подписана по виду привала (%s): «%s»",
+    async (kind, title) => {
+      await openGame({
+        snapshot: campSnapshot({
+          rest:
+            kind === null
+              ? null
+              : {
+                  kind,
+                  deadline_at: CAMP_DEADLINE,
+                  my_ideas: [],
+                  lines: [],
+                },
+        }),
+      });
+
+      const story = within(panel("Рассказ"));
+      expect(story.getByRole("heading", { name: title })).toBeInTheDocument();
+      expect(story.getByRole("button", { name: "К костру" })).toBeEnabled();
+    },
+  );
+
+  test("идея для рассказа приходит кадром и видна на вкладке «Привал», а не в ленте", async () => {
+    const { ws } = await openGame({ snapshot: campSnapshot() });
+    fireEvent.click(tab("Привал"));
+
+    await serve(ws.last(), {
+      type: "rest_idea",
+      text: "Расскажи, кто научил тебя разводить огонь.",
+    });
+
+    expect(
+      within(panel("Привал")).getByText(
+        "Расскажи, кто научил тебя разводить огонь.",
+      ),
+    ).toBeVisible();
+    // Одна карточка у адресата: в ленту «Рассказа» идея не попадает.
+    expect(screen.getAllByText(/кто научил тебя/)).toHaveLength(1);
+  });
+
+  // Финальное покрытие B9: кадры сокета в порядке сервера (B9.3) проводят экран через короткий
+  // привал по кнопке и следующий за ним долгий привал хода мастера.
+  test("кадры привалов в порядке сервера: короткий по кнопке, затем долгий хода мастера", async () => {
+    const IDEA = "Расскажи, кто научил тебя разводить огонь.";
+    const { ws } = await openGame();
+    const socket = ws.last();
+    const restCard = (title: string) =>
+      within(panel("Привал")).getByRole("heading", { name: title });
+
+    // Начало кнопкой хоста: фаза привала, затем вид и срок.
+    await serve(socket, {
+      type: "phase",
+      phase: phaseOf("camp", { deadline_at: CAMP_DEADLINE }),
+    });
+    await serve(socket, {
+      type: "rest_started",
+      kind: "short",
+      deadline_at: CAMP_DEADLINE,
+    });
+    await serve(socket, { type: "rest_idea", text: IDEA });
+
+    expect(
+      within(panel("Рассказ")).getByRole("heading", {
+        name: "Короткий привал",
+      }),
+    ).toBeInTheDocument();
+    noButton(/^Короткий привал \(/);
+    fireEvent.click(tab("Привал"));
+    expect(restCard("Короткий привал")).toBeInTheDocument();
+    expect(
+      within(panel("Привал")).getByRole("button", {
+        name: /^Потратить кость хитов/,
+      }),
+    ).toBeInTheDocument();
+    expect(within(panel("Привал")).getByText(IDEA)).toBeVisible();
+
+    // Конец: «Мастер думает», рассказ, обсуждение и последним rest_ended.
+    await serve(socket, { type: "phase", phase: phaseOf("resolving") });
+    expect(tabNames()).not.toContain("Привал");
+    await serve(socket, {
+      type: "feed_item",
+      item: feedEntry(10, { kind: "narration", text: "Прошёл час." }),
+    });
+    await serve(socket, { type: "phase", phase: phaseOf("discussion") });
+    await serve(socket, { type: "rest_ended", kind: "short" });
+
+    expect(tabNames()).not.toContain("Привал");
+    expect(button(/^Короткий привал \(/)).toBeEnabled();
+    expect(screen.queryByText(IDEA)).toBeNull();
+
+    // Долгий привал хода мастера (start_camp): фаза нового хода, затем rest_started.
+    await serve(socket, { type: "phase", phase: phaseOf("resolving") });
+    await serve(socket, {
+      type: "phase",
+      phase: phaseOf("camp", { deadline_at: CAMP_DEADLINE }),
+    });
+    await serve(socket, {
+      type: "rest_started",
+      kind: "long",
+      deadline_at: CAMP_DEADLINE,
+    });
+
+    fireEvent.click(tab("Привал"));
+    expect(restCard("Долгий привал")).toBeInTheDocument();
+    expect(
+      within(panel("Привал")).queryByRole("button", { name: /кость хитов/ }),
+    ).toBeNull();
+    // Идея короткого привала в новый привал не перешла.
+    expect(screen.queryByText(IDEA)).toBeNull();
+    expect(
+      within(panel("Привал")).queryByRole("heading", {
+        name: "Идея для рассказа",
+      }),
+    ).toBeNull();
   });
 
   test("на паузе привала реплика закрыта", async () => {

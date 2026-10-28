@@ -250,6 +250,7 @@ async def _game_outs(session: AsyncSession, games: Sequence[Game]) -> list[GameO
             collect_seconds=game.collect_seconds,
             hurry_seconds=game.hurry_seconds,
             camp_seconds=game.camp_seconds,
+            short_rest_seconds=game.short_rest_seconds,
             profanity=game.profanity,
             players=players_by_game[game.id],
         )
@@ -385,6 +386,7 @@ async def create_game(
         collect_seconds=body.collect_seconds or settings.collect_seconds,
         hurry_seconds=body.hurry_seconds or settings.hurry_seconds,
         camp_seconds=body.camp_seconds or settings.camp_seconds,
+        short_rest_seconds=body.short_rest_seconds or settings.short_rest_seconds,
     )
     session.add_all(
         [game, GamePlayer(game_id=game.id, user_id=host.id, is_host=True, joined_order=1)]

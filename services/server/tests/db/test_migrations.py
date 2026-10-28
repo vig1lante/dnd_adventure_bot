@@ -6,7 +6,9 @@
 владельца R9 и R10) убирает таблицу `pending_rolls` (броска характеристик больше нет) и добавляет
 персонажам колонку `choices` — выбор игрока при создании героя; 0004 (DND-2 B1.2, решение Р1)
 добавляет играм флажок мата `profanity`: обязательный, у старых игр — «разрешён»; 0005 (DND-2
-B4.1, спека §10.2) заводит таблицы конструктора: черновики, задания генерации и опубликованное.
+B4.1, спека §10.2) заводит таблицы конструктора: черновики, задания генерации и опубликованное;
+0006 (DND-2 B9, привалы) добавляет играм срок короткого привала `short_rest_seconds` (у старых игр
+120 с) и личные идеи привала `rest_ideas` (JSON, пусто, пока привала нет).
 
 Правило на будущее: каждая следующая миграция добавляет тест «игра с состоянием, сохранённая
 до миграции, читается после `upgrade`» (база на предыдущей ревизии, строки игры, `upgrade head`,
@@ -46,7 +48,7 @@ COLUMNS = {
     "games": (
         "id code adventure_id host_user_id adventure_data phase turn_phase deadline_at "
         "state_version current_turn_id provider model collect_seconds hurry_seconds camp_seconds "
-        "started_at active_seconds clock_at profanity created_at"
+        "started_at active_seconds clock_at profanity created_at short_rest_seconds rest_ideas"
     ),
     "game_players": "game_id user_id character_id is_host ready joined_order joined_at",
     "characters": "id game_id user_id data choices",
@@ -82,7 +84,9 @@ UNIQUE = {"users": ["tg_id", "dev_login"], "games": ["code"]}
 # Остальные колонки обязательны.
 NULLABLE = {
     "users": "tg_id dev_login",
-    "games": "turn_phase deadline_at current_turn_id provider model started_at clock_at",
+    "games": (
+        "turn_phase deadline_at current_turn_id provider model started_at clock_at rest_ideas"
+    ),
     "game_players": "character_id",
     "characters": "choices",
     "turns": "state_version_before state_version_after",
@@ -112,6 +116,7 @@ FOREIGN_KEYS = {
 }
 JSON_COLUMNS = {
     ("games", "adventure_data"),
+    ("games", "rest_ideas"),
     ("characters", "data"),
     ("characters", "choices"),
     ("game_states", "data"),
@@ -181,7 +186,7 @@ def test_migration_history_is_a_single_line_from_0001():
     script = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
 
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0005"]
+    assert script.get_heads() == ["0006"]
 
 
 # --- ревизия 0002: отметка часов игры ---
@@ -894,6 +899,146 @@ def test_the_fifth_revision_prints_its_steps_in_sql_mode_without_a_database(
     assert not (tmp_path / "data").exists()
 
 
+# --- ревизия 0006: срок короткого привала и личные идеи привала (DND-2 B9) ---
+
+
+async def test_the_sixth_revision_only_adds_the_short_rest_and_the_ideas_columns_to_games(
+    settings, migrate
+):
+    await migrate("upgrade", "0005")
+    before = await reflect(settings, schema_signature)
+    await migrate("upgrade", "0006")
+    after = await reflect(settings, schema_signature)
+    games = await reflect(settings, game_columns)
+
+    assert set(after) == set(before)
+    for table in before:
+        extra = set(after[table]["columns"]) - set(before[table]["columns"])
+        expected = {"short_rest_seconds", "rest_ideas"} if table == "games" else set()
+        assert extra == expected, table
+        assert {key: value for key, value in after[table].items() if key != "columns"} == {
+            key: value for key, value in before[table].items() if key != "columns"
+        }, table
+    assert games["short_rest_seconds"]["nullable"] is False
+    assert games["short_rest_seconds"]["default"] in ("120", "'120'")
+    assert games["rest_ideas"]["nullable"] is True
+    assert isinstance(games["rest_ideas"]["type"], JSON)
+
+
+async def test_games_saved_on_the_fifth_revision_get_a_two_minute_short_rest_and_no_ideas(
+    settings, migrate
+):
+    await migrate("upgrade", "0005")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+
+    await migrate("upgrade", "0006")
+
+    with closing(sqlite3.connect(path)) as connection:
+        rows = list(connection.execute("SELECT id, short_rest_seconds, rest_ideas FROM games"))
+    assert rows == [("game-1", 120, None)]
+    assert saved_lobby(path) == saved
+
+
+async def test_downgrade_to_the_fifth_revision_drops_both_columns_and_keeps_the_games(
+    settings, migrate
+):
+    await migrate("upgrade", "0005")
+    at_fifth = await reflect(settings, schema_signature)
+    await migrate("upgrade", "head")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "UPDATE games SET short_rest_seconds = 90, rest_ideas = ?", ('{"hero-1": ["Идея"]}',)
+        )
+        connection.commit()
+    saved = saved_lobby(path)
+
+    await migrate("downgrade", "0005")
+
+    assert await reflect(settings, schema_signature) == at_fifth
+    assert saved_lobby(path) == saved
+
+
+async def test_the_sixth_revision_can_be_applied_again_after_a_downgrade(settings, migrate):
+    await migrate("upgrade", "head")
+    after_first = await reflect(settings, schema_signature)
+    await migrate("downgrade", "0005")
+    await migrate("upgrade", "head")
+
+    assert await reflect(settings, schema_signature) == after_first
+
+
+async def test_the_sixth_revision_is_repeated_after_a_failure_on_its_second_column(
+    settings, migrate, monkeypatch
+):
+    # SQLite выполняет ADD COLUMN сразу и насовсем: обрыв перед второй колонкой оставляет первую.
+    await migrate("upgrade", "0005")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+    real_add_column = op.add_column
+    added: list[str] = []
+
+    def add_once(table: str, column: Any, **kwargs: Any) -> None:
+        if added:
+            raise OperationalError("ALTER TABLE", {}, Exception("database is locked"))
+        added.append(column.name)
+        real_add_column(table, column, **kwargs)
+
+    with monkeypatch.context() as broken:
+        broken.setattr(op, "add_column", add_once)
+        with pytest.raises(OperationalError):
+            await migrate("upgrade", "0006")
+    assert recorded_revision(path) == "0005"
+
+    await migrate("upgrade", "0006")
+
+    assert recorded_revision(path) == "0006"
+    assert saved_lobby(path) == saved
+    games = await reflect(settings, game_columns)
+    assert {"short_rest_seconds", "rest_ideas"} <= set(games)
+
+
+async def test_downgrade_of_the_sixth_revision_is_repeated_when_made_but_not_recorded(
+    settings, migrate
+):
+    await migrate("upgrade", "0005")
+    at_fifth = await reflect(settings, schema_signature)
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+    set_recorded_revision(path, "0006")  # откат сделан целиком, запись о нём не появилась
+
+    await migrate("downgrade", "0005")
+
+    assert recorded_revision(path) == "0005"
+    assert await reflect(settings, schema_signature) == at_fifth
+    assert saved_lobby(path) == saved
+
+
+def test_the_sixth_revision_prints_its_steps_in_sql_mode_without_a_database(
+    monkeypatch, capsys, settings, tmp_path
+):
+    monkeypatch.setenv("DATABASE_URL", settings.database_url)
+    get_settings.cache_clear()
+    printed = {}
+    for name, revisions in (("upgrade", "0005:0006"), ("downgrade", "0006:0005")):
+        getattr(command, name)(Config(str(ALEMBIC_INI)), revisions, sql=True)
+        printed[name] = capsys.readouterr().out
+
+    assert (
+        "ALTER TABLE games ADD COLUMN short_rest_seconds INTEGER DEFAULT '120' NOT NULL"
+        in printed["upgrade"]
+    )
+    assert "ALTER TABLE games ADD COLUMN rest_ideas JSON" in printed["upgrade"]
+    assert "ALTER TABLE games DROP COLUMN short_rest_seconds" in printed["downgrade"]
+    assert "ALTER TABLE games DROP COLUMN rest_ideas" in printed["downgrade"]
+    assert not (tmp_path / "data").exists()
+
+
 # --- миграция совпадает с моделями и планом ---
 
 
@@ -972,4 +1117,4 @@ def test_alembic_command_line_works_from_the_repo_root_and_the_service_folder(
         tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master")}
         [(revision,)] = connection.execute("SELECT version_num FROM alembic_version")
     assert tables >= TABLES
-    assert revision == "0005"
+    assert revision == "0006"

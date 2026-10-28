@@ -17,16 +17,20 @@
    хода и версии, фаза игры, следующий открытый ход, статусы ходов игроков и журнал попыток.
    События уходят игрокам после коммита, построителями `realtime.views`.
 
-Ход «конец привала» (`TurnKind.CAMP_END`, план B7.6) начинается с длинного отдыха: сервер проводит
-его на копии до модели (`dm.camp_flow.end_camp`), и мастер видит утро и полное здоровье. Реплики
-героев у костра лежат в ленте как `camp_line` этого хода и идут в контекст вместо ходов раунда.
+Ход «конец привала» (`TurnKind.CAMP_END`, план B7.6) начинается с отдыха вида привала: сервер
+проводит его на копии до модели (`dm.camp_flow.end_camp`), и мастер видит утро и полное здоровье
+после долгого привала или вернувшиеся особенности и прежнее время после короткого (DND-2, блок B9;
+вид называет и задача контекста). Реплики героев у костра лежат в ленте как `camp_line` этого хода и
+идут в контекст вместо ходов раунда. Коммит хода, который начал привал (`start_camp`), ставит срок
+его вида, после рассылки шлёт всем `rest_started` и запускает фоновую задачу идей для рассказа
+(`dm.rest_ideas`); коммит «конца привала» очищает идеи и после рассылки шлёт всем `rest_ended`.
 
 После коммита любого хода (`_keep_chronicle_short`) летопись, доросшая до порога, сжимается фоновой
 задачей (`dm.chronicle`, план B7.7): задача идёт в `Deps.tasks` (на сервере это `turn_tasks`, его
 останавливает остановка сервера) и ход мастера не задерживает.
 
 Внимание (`dm.spotlight`) считается по событиям, которые вызвала модель своими инструментами, а не
-по тому, что сделал сервер: длинный отдых в конце привала и передача хода в бою (спасброски от
+по тому, что сделал сервер: отдых по виду привала в его конце и передача хода в бою (спасброски от
 смерти лежащих героев) героев в фокус не ставят.
 
 Неудача не меняет состояние игры: пишется журнал, ход получает статус `failed`, игра переходит в
@@ -53,7 +57,12 @@
 «Перегенерировать» (`regenerate_last_turn`) — тот же ход с откатом в резерве: рассказ и броски
 последнего хода снимаются (`superseded`), открытый следующий ход тоже, состояние возвращается к
 версии до хода. Версии состояния растут только вперёд (следующая — наибольшая в базе плюс один):
-снимок отменённого хода остаётся в базе для разбора, а номера не повторяются.
+снимок отменённого хода остаётся в базе для разбора, а номера не повторяются. Если после хода
+состояние менялось вне хода мастера (привал по кнопке хоста, кость хитов — блок B9), откат стёр бы
+эти изменения: такой ход перегенерировать нельзя (`Conflict`). Признак — версия игры ушла от версии,
+с которой начинается открытый следующий ход (`Turn.state_version_before`); сжатие летописи двигает
+их вместе и откат не запрещает. Резерв поэтому записывает в ход версию, с которой он начат на самом
+деле: откат «конца привала» по кнопке вернётся к привалу с уже потраченными костями хитов.
 
 Броски делает только сервер: генератор приходит в `Deps.rng` (в игре `SystemRng`, в тестах
 подставляют `SeededRng`/`ScriptedRng` через конструктор), а исполнитель и инструменты берут его из
@@ -107,7 +116,7 @@ from dnd_server.db.models import (
     TurnStatus,
     utcnow,
 )
-from dnd_server.dm.camp_flow import end_camp
+from dnd_server.dm.camp_flow import end_camp, rest_kind, rest_seconds
 from dnd_server.dm.chronicle import Compressions, compress_chronicle, compression_due
 from dnd_server.dm.combat_flow import combat_acting, settle_combat
 from dnd_server.dm.context import (
@@ -121,6 +130,7 @@ from dnd_server.dm.context import (
 )
 from dnd_server.dm.executor import DmToolExecutor
 from dnd_server.dm.provider import GameProviders
+from dnd_server.dm.rest_ideas import IDEAS_TASK_FAILED, offer_rest_ideas
 from dnd_server.dm.spotlight import update_spotlight
 from dnd_server.dm.text import (
     REASON_CANCELLED,
@@ -155,6 +165,8 @@ from dnd_server.realtime.views import (
     journal_events,
     phase_event,
     player_status_event,
+    rest_ended_event,
+    rest_started_event,
     state_events,
 )
 from dnd_server.turns.timers import TaskSet
@@ -169,10 +181,12 @@ TURN_TIMEOUT_S = 180.0
 TIMEOUT_GRACE_S = 5.0
 MAX_ATTEMPTS = 2  # первая попытка и один автоповтор пустого или оборванного рассказа
 SERVER_END_TURN = "server_end_turn"  # запись журнала о передаче хода, которую делает сервер
-SERVER_END_CAMP = "server_end_camp"  # запись журнала о длинном отдыхе в конце привала
+SERVER_END_CAMP = "server_end_camp"  # запись журнала об отдыхе по виду привала в его конце
 
 # Из каких фаз допустима «Перегенерировать»: игроки обсуждают следующий ход, сбор ещё не начался.
 REGENERATE_FROM = (TurnPhase.DISCUSSION, TurnPhase.COMBAT_WAIT, TurnPhase.CAMP)
+# Отказ «Перегенерировать», когда после хода игра менялась вне хода мастера (блок B9).
+CHANGED_SINCE_TURN = "После хода мастера игра уже изменилась: перегенерировать нельзя."
 # Сообщения, которые создаёт сам ход мастера. Ходы игроков (`action`) и реплики у костра
 # (`camp_line`) — его входные данные, и при перегенерации они остаются.
 OUTPUT_KINDS = (
@@ -497,8 +511,10 @@ async def _reserve(
         plan.rewound, plan.withdrawn = regenerate, withdrawn
         turn.status = TurnStatus.RESOLVING
         turn.state_version_after = None
-        if turn.state_version_before is None:
-            turn.state_version_before = game.state_version
+        # Ход начинается с той версии, что в игре сейчас. Обычно она совпадает с записанной при
+        # открытии хода, а после изменений вне хода мастера (привал по кнопке, кость хитов) — новее:
+        # откат этого хода должен вернуться к ней, а не к версии до привала.
+        turn.state_version_before = game.state_version
         game.turn_phase = TurnPhase.RESOLVING
         game.deadline_at = None
         await session.commit()
@@ -559,6 +575,10 @@ async def _rewind(
     )
     if not next_is_untouched:
         raise Conflict("Следующий ход уже начат: перегенерировать нельзя.")
+    started_at = following.state_version_before
+    if started_at is not None and game.state_version != started_at:
+        # Привал по кнопке хоста или кость хитов: откат стёр бы их вместе с ходом.
+        raise Conflict(CHANGED_SINCE_TURN)
     version_before = last.state_version_before
     previous = (
         None
@@ -587,6 +607,7 @@ async def _rewind(
     following.status = TurnStatus.SUPERSEDED
     game.state_version = version_before
     game.current_turn_id = last.id
+    game.rest_ideas = None  # откат из привала снимает и его идеи для рассказа
     return last, last.kind, acting, withdrawn
 
 
@@ -769,8 +790,8 @@ class _Attempt:
     result: TurnResult | None = None
     trace: list[ToolCallTrace] = field(default_factory=list)
     context: ToolContext | None = None
-    # События, которые вызвала сама модель: без того, что сервер сделал до неё (длинный отдых) и
-    # после неё (передача хода). По ним считается внимание к героям.
+    # События, которые вызвала сама модель: без того, что сервер сделал до неё (отдых по виду
+    # привала) и после неё (передача хода). По ним считается внимание к героям.
     story_events: list[Event] = field(default_factory=list)
     duration_ms: int = 0
     # Модель, которую провайдер назвал сразу после вызова этой попытки (для журнала): у
@@ -795,7 +816,8 @@ class _Prepared:
     brief: str
     context: str
     # Состояние, с которого мастер начинает ход, и события, что сервер сделал до него. Обычно это
-    # состояние резерва без событий; в ходе «конец привала» — утро после длинного отдыха.
+    # состояние резерва без событий; в ходе «конец привала» — состояние после отдыха по виду
+    # привала (утро после долгого, прежнее время после короткого).
     base: GameState
     base_events: tuple[Event, ...] = ()
 
@@ -803,9 +825,12 @@ class _Prepared:
 def _prepare(deps: Deps, plan: _Plan) -> _Prepared:
     ruleset = build_ruleset(plan.state.rules)
     base, base_events = plan.state, []
+    rest = None
     if plan.mode == TurnKind.CAMP_END:
-        # Длинный отдых проводит сервер до модели (план B7.6): мастер рассказывает утро уже после
-        # него, а копия состояния, на которой он идёт, и контекст берутся из одного места.
+        rest = rest_kind(plan.state)
+        # Отдых по виду привала проводит сервер до модели (план B7.6, блок B9): мастер рассказывает
+        # итог уже после него, а копия состояния, на которой он идёт, и контекст берутся из одного
+        # места.
         base, base_events = end_camp(
             plan.state, plan.turn_number, ruleset, content=deps.srd, adventure=plan.adventure
         )
@@ -824,6 +849,7 @@ def _prepare(deps: Deps, plan: _Plan) -> _Prepared:
             pacing=plan.pacing,
             acting=plan.acting,
             profanity=plan.profanity,
+            rest=rest,
         ),
         base=base,
         base_events=tuple(base_events),
@@ -920,7 +946,7 @@ async def _attempt(
     attempt.model = getattr(provider, "model", None)
     attempt.trace = list(executor.trace)
     if attempt.ok and prepared.base_events:
-        # Длинный отдых сделал сервер, не модель: в журнале он стоит отдельной записью.
+        # Отдых по виду привала сделал сервер, не модель: в журнале он стоит отдельной записью.
         lines = json.dumps({"events": event_lines(prepared.base_events)}, ensure_ascii=False)
         attempt.trace.insert(0, make_trace_call(SERVER_END_CAMP, {}, lines, False))
     if attempt.ok and settled:
@@ -1017,14 +1043,24 @@ async def _commit_success(deps: Deps, plan: _Plan, attempts: list[_Attempt]) -> 
         if game.phase == GamePhase.WEAVING:  # открытие игры; пауза хоста остаётся паузой
             game.phase = GamePhase.PLAYING
         game.turn_phase = next_phase
-        game.deadline_at = _countdown(deps, game, next_phase)
+        game.deadline_at = _countdown(deps, game, next_phase, work)
         game.state_version = work.version
         game.current_turn_id = following.id
+        if plan.mode == TurnKind.CAMP_END or next_phase == TurnPhase.CAMP:
+            game.rest_ideas = None  # идеи живут один привал: его конец и новое начало их снимают
         await _finish_actions(session, plan.turn_id)
         session.add_all(_log_rows(deps, plan, attempts))
         await session.commit()
         with announcing(deps, plan.game_id, plan.turn_id):
             await _announce_commit(deps, game, plan, work, messages)
+            await _announce_rest(deps, game, plan, work)
+    if next_phase == TurnPhase.CAMP:
+        # Мастер начал привал (`start_camp`): идеи для рассказа идут фоновой задачей после
+        # `rest_started` и ход не задерживают.
+        deps.tasks.spawn(
+            offer_rest_ideas(plan.game_id, following.id, deps=deps),
+            failure_text=IDEAS_TASK_FAILED,
+        )
     _keep_chronicle_short(deps, plan, work)
     return TurnOutcome(plan.turn_id, TurnStatus.DONE, work.version, len(attempts))
 
@@ -1049,13 +1085,14 @@ def _keep_chronicle_short(deps: Deps, plan: _Plan, state: GameState) -> None:
     )
 
 
-def _countdown(deps: Deps, game: Game, phase: TurnPhase) -> datetime | None:
-    """Срок новой фазы игры. Привал идёт `games.camp_seconds` от «сейчас» по часам приложения и
-    ставится в той же транзакции, что и фаза: клиенты не видят привала без срока. У остальных фаз
-    своего таймера нет: сбор ходов и «Поторопить» запускает хост."""
+def _countdown(deps: Deps, game: Game, phase: TurnPhase, state: GameState) -> datetime | None:
+    """Срок новой фазы игры. Привал идёт срок своего вида (`camp_flow.rest_seconds`: мастер
+    начинает долгий привал, `games.camp_seconds`) от «сейчас» по часам приложения и ставится в той
+    же транзакции, что и фаза: клиенты не видят привала без срока. У остальных фаз своего таймера
+    нет: сбор ходов и «Поторопить» запускает хост."""
     if phase != TurnPhase.CAMP:
         return None
-    return deps.clock() + timedelta(seconds=game.camp_seconds)
+    return deps.clock() + timedelta(seconds=rest_seconds(game, rest_kind(state)))
 
 
 def _message(plan: _Plan, entry: FeedEntry) -> Message:
@@ -1102,6 +1139,19 @@ async def _announce_commit(
     for user_id in plan.user_ids:
         status = player_status_event(user_id, ActionStatus.DRAFT)
         await send_to_game(deps.broadcaster, game.id, status)
+
+
+async def _announce_rest(deps: Deps, game: Game, plan: _Plan, work: GameState) -> None:
+    """Кадры привала после рассылки хода, всем: прежний привал кончился (вид того привала, что был
+    в начале хода) и новый начался (вид и срок, раньше любой его идеи).
+
+    Ход «конец привала» может и кончить привал, и начать новый (мастер снова вызвал `start_camp`):
+    тогда уходят оба кадра, и именно в таком порядке — клиент на `rest_ended` снимает прежний
+    привал, а на `rest_started` заводит новый."""
+    if plan.mode == TurnKind.CAMP_END:
+        await send_to_game(deps.broadcaster, game.id, rest_ended_event(rest_kind(plan.state)))
+    if game.turn_phase == TurnPhase.CAMP:
+        await send_to_game(deps.broadcaster, game.id, rest_started_event(game, work))
 
 
 def _log_rows(deps: Deps, plan: _Plan, attempts: list[_Attempt]) -> list[DmTurnLog]:

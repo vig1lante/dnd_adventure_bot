@@ -45,6 +45,7 @@ const lobbyGame = {
   collect_seconds: 120,
   hurry_seconds: 60,
   camp_seconds: 300,
+  short_rest_seconds: 120,
   players: [],
 };
 
