@@ -1,7 +1,10 @@
-"""Инструменты мира: переход, находки, предметы, флаги, отношение NPC, время и короткий отдых.
+"""Инструменты мира: переход, находки, предметы, флаги, отношение NPC, время, короткий отдых и
+дневник отряда.
 
-План B4.6, спека §5.7 и §8.3. Каждый инструмент меняет рабочую копию состояния `ctx.state` и
-добавляет события в `ctx.events`; результат — короткий словарь для модели.
+План B4.6, спека §5.7 и §8.3; дневник — спека DND-2 §12 и дополнение контракта B8 §4. Каждый
+инструмент меняет рабочую копию состояния `ctx.state` и добавляет события в `ctx.events`;
+результат — короткий словарь для модели. Переход, найденная улика и полученный героем предмет
+пишутся в дневник сами (`journal`), остальное мастер записывает через `journal_add`.
 
 Правило обработчиков (см. `registry`): сначала проверка всего, что пришло от модели, и только
 потом первое изменение состояния или бросок. Поэтому `ToolError` ничего не оставляет за собой, а
@@ -10,12 +13,13 @@
 решает мастер, а инструмент следит за законностью и записывает итог в состояние.
 """
 
+import unicodedata
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal, get_args
 
-from pydantic import Field, StringConstraints
+from pydantic import AfterValidator, BeforeValidator, Field, StringConstraints
 
-from dnd_engine import rest
+from dnd_engine import journal, rest
 from dnd_engine.adventure.schema import Adventure, Clue, Exit, Feature, Location, RevealRef
 from dnd_engine.adventure.validator import ENGINE_FLAG_PREFIXES
 from dnd_engine.character import Character
@@ -27,10 +31,12 @@ from dnd_engine.events import (
     RestEvent,
     RevealEvent,
 )
+from dnd_engine.journal import MAX_NOTE_CHARS, JournalError
 from dnd_engine.modules.base import MAX_SHORT_RESTS_PER_LONG
 from dnd_engine.state import GameState, GameTime
 from dnd_engine.tools.lore import (
     MAX_ID_CHARS,
+    MAX_REF_CHARS,
     closed_place_with_item,
     exit_status,
     is_locked,
@@ -134,6 +140,7 @@ def move_party(ctx: ToolContext, args: MovePartyArgs) -> dict[str, Any]:
             visited.append(place)
     state.location_id = destination.id
     ctx.events.append(MoveEvent(location_id=destination.id))
+    journal.visit(state, ctx.adventure, destination.id)
     return {
         "location_id": destination.id,
         "name": destination.name,
@@ -153,6 +160,15 @@ class RevealArgs(ToolArgs):
             'Что найдено: "feature:<id>" — интересное место, "exit:<id>" — скрытый выход, '
             '"clue:<id>" — улика. Всё это должно быть в текущей локации (улика — у NPC здесь '
             "или в предмете отряда)."
+        ),
+    )
+    for_hero: str | None = Field(
+        default=None,
+        max_length=MAX_ID_CHARS,
+        description=(
+            "id героя, чья это находка: если его ход тайный, найденные улики в дневнике увидит "
+            "только он, если открытый — весь отряд. В раунде с тайным ходом обязательно для "
+            "каждой находки с уликой"
         ),
     )
 
@@ -226,6 +242,37 @@ def _clue_to_reveal(ctx: ToolContext, here: Location, clue_id: str) -> None:
         )
 
 
+def _clues_to_find(ctx: ToolContext, ref: str, effects: tuple[RevealRef, ...]) -> list[str]:
+    """id улик, которые отметит находка `ref`: она сама или улики её `reveals`, ещё не найденные
+    и известные приключению, — в том порядке, в каком их отметит `reveal`."""
+    clues = _clues_of(ctx.adventure)
+    refs = dict.fromkeys([ref, *(f"clue:{e.id}" for e in effects if e.kind == "clue")])
+    return [
+        clue_ref.partition(":")[2]
+        for clue_ref in refs
+        if clue_ref.startswith("clue:")
+        and clue_ref not in ctx.state.world.revealed
+        and clue_ref.partition(":")[2] in clues
+    ]
+
+
+def _finder_audience(ctx: ToolContext, for_hero: str | None) -> str:
+    """Кому видна запись найденной улики (дополнение §10, поправка §12).
+
+    Герой находки назван — видит он один, если его ход тайный, иначе весь отряд. Не назван: вне
+    тайного раунда — весь отряд; в раунде с тайным ходом — `ToolError`. `secret_actors` — тайные
+    авторы всего раунда, а не этого вызова: чья находка, знает только мастер, а дневник — её
+    единственный видимый след, поэтому ни открыть тайную, ни отдать тайному открытую нельзя."""
+    if for_hero is not None:
+        return ctx.audience_of([for_hero])
+    if ctx.secret_actors & set(ctx.state.party):
+        raise ToolError(
+            "В раунде есть тайный ход: назовите в for_hero героя находки; находка открытого "
+            "героя останется общей, тайного — только его."
+        )
+    return journal.ALL
+
+
 def _mark_revealed(ctx: ToolContext, ref: str) -> bool:
     """Отмечает находку и пишет событие; уже найденная второй раз не отмечается."""
     if ref in ctx.state.world.revealed:
@@ -252,6 +299,9 @@ def _apply_effect(ctx: ToolContext, effect: RevealRef, result: dict[str, Any]) -
 
 
 def reveal(ctx: ToolContext, args: RevealArgs) -> dict[str, Any]:
+    for_hero = None
+    if args.for_hero is not None:
+        for_hero = find_or_error(ctx.state.party, "героя отряда", args.for_hero).id
     if args.ref in ctx.state.world.revealed:
         return {"ref": args.ref, "new": False}  # уже найдено, повтор ничего не меняет
     kind, _, target = args.ref.partition(":")
@@ -263,19 +313,21 @@ def reveal(ctx: ToolContext, args: RevealArgs) -> dict[str, Any]:
         _hidden_exit_to_reveal(here, target)
     else:
         _clue_to_reveal(ctx, here, target)
+    found = _clues_to_find(ctx, args.ref, effects)
+    # Адресат записи решается до первого изменения: отказ ничего не оставляет за собой.
+    audience = _finder_audience(ctx, for_hero) if found else journal.ALL
 
     _mark_revealed(ctx, args.ref)
     result: dict[str, Any] = {"ref": args.ref, "new": True, "revealed": [args.ref]}
     for effect in effects:
         _apply_effect(ctx, effect, result)
-    clues = _clues_of(ctx.adventure)
-    clue_ids = [ref.partition(":")[2] for ref in result["revealed"] if ref.startswith("clue:")]
-    if texts := [
-        {"id": clue_id, "description": clues[clue_id].description}
-        for clue_id in clue_ids
-        if clue_id in clues
-    ]:
-        result["clues"] = texts
+    for clue_id in found:
+        journal.record(ctx.state, ctx.adventure, f"clue:{clue_id}", audience=audience)
+    if found:
+        clues = _clues_of(ctx.adventure)
+        result["clues"] = [
+            {"id": clue_id, "description": clues[clue_id].description} for clue_id in found
+        ]
     return result
 
 
@@ -321,6 +373,9 @@ def give_item(ctx: ToolContext, args: GiveItemArgs) -> dict[str, Any]:
         raise _item_inside_error(ctx, item.id, place)
     state.world.item_holders[item.id] = new_holder
     ctx.events.append(ItemEvent(item_id=item.id, holder_from=holder, holder_to=new_holder))
+    # Адресат записи — как у строки ленты о передаче: тайный герой из участников видит её один.
+    heroes = [h.partition(":")[2] for h in (holder, new_holder) if h.startswith("character:")]
+    journal.record(state, adventure, f"item:{item.id}", audience=ctx.audience_of(heroes))
     return {"item": item.name, "from": holder, "to": new_holder}
 
 
@@ -478,6 +533,82 @@ def short_rest_party(ctx: ToolContext, args: ShortRestArgs) -> dict[str, Any]:
     }
 
 
+# --- journal_add ---
+
+
+_SOFT_HYPHEN = "\u00ad"
+
+
+def _plain_spaces(note: Any) -> Any:
+    # Обычная типографика — не ошибка модели: неразрывные и широкие пробелы (категория Zs)
+    # становятся обычным пробелом, мягкий перенос убирается. Длина считается уже после этого.
+    if not isinstance(note, str):
+        return note
+    return "".join(
+        " " if unicodedata.category(char) == "Zs" else char for char in note if char != _SOFT_HYPHEN
+    )
+
+
+def _printable_note(note: str) -> str:
+    # Слова мастера уходят игрокам: управляющие знаки, знаки нулевой ширины и разворота строки
+    # (escape, U+200B, U+202E, U+2066–2069) исказили бы экран или спрятали текст.
+    if not all(char.isprintable() or char == "\n" for char in note):
+        raise ValueError("только печатаемый текст и переносы строк")
+    return note
+
+
+# Порядок важен: сначала типографика (`_plain_spaces`), потом обрезка и длина, потом печатаемость.
+JournalNote = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_NOTE_CHARS),
+    BeforeValidator(_plain_spaces),
+    AfterValidator(_printable_note),
+]
+
+
+class JournalAddArgs(ToolArgs):
+    ref: str = Field(
+        max_length=MAX_REF_CHARS,
+        description=(
+            "о чём запись: deity:<id>, faction:<id>, npc:<id>, region:<id>, rumor:<номер слуха "
+            "в мире с 1>, world (история мира, только с note); можно и location:<id>, "
+            "item:<id> и clue:<id> — только найденная улика"
+        ),
+    )
+    note: JournalNote | None = Field(
+        default=None,
+        description="что именно узнали герои, своими словами и без тайн; дописывается абзацем",
+    )
+    for_hero: str | None = Field(
+        default=None,
+        max_length=MAX_ID_CHARS,
+        description="id героя, если узнал только он (тайно); без поля запись видит весь отряд",
+    )
+
+
+def journal_add(ctx: ToolContext, args: JournalAddArgs) -> dict[str, Any]:
+    if args.ref == journal.INTRO_REF:
+        raise ToolError("Запись «Главное» дневник делает сам в начале игры: её не дополняют.")
+    revealed = ctx.state.world.revealed
+    if args.ref.startswith("clue:") and args.ref not in revealed:
+        # Улика попадает в дневник только найденной: иначе модель раскрыла бы её без поиска.
+        found = [ref for ref in revealed if ref.startswith("clue:")]
+        raise ToolError(
+            f"Улика {args.ref!r} ещё не найдена: в дневник пишут только найденные улики "
+            f"(сначала reveal). Найдены: {', '.join(found) or 'нет'}"
+        )
+    audience = journal.ALL
+    if args.for_hero is not None:
+        audience = find_or_error(ctx.state.party, "героя отряда", args.for_hero).id
+    try:
+        entry, new = journal.write(
+            ctx.state, ctx.adventure, args.ref, audience=audience, note=args.note
+        )
+    except JournalError as exc:
+        raise ToolError(str(exc)) from exc
+    return {"entry_id": entry.id, "new": new, "revision": entry.revision}
+
+
 WORLD_TOOLS = (
     ToolSpec(
         name="move_party",
@@ -496,10 +627,13 @@ WORLD_TOOLS = (
             "Отметить находку, когда отряд её нашёл: интересное место (feature:<id>), скрытый "
             "выход (exit:<id>) или улику (clue:<id>) в текущей локации. Находка раскрывает то, "
             "что с ней связано в приключении (улики, выходы, предметы, флаги). Запертое место "
-            "нельзя раскрыть без ключа. Повторный вызов ничего не меняет."
+            "нельзя раскрыть без ключа. Повторный вызов ничего не меняет. Найденные улики "
+            "пишутся в дневник отряда; в раунде с тайным ходом назовите героя находки в for_hero: "
+            "находку тайного героя увидит только он, открытого — весь отряд."
         ),
         args_model=RevealArgs,
         handler=reveal,
+        author_fields=("for_hero",),
     ),
     ToolSpec(
         name="give_item",
@@ -556,5 +690,19 @@ WORLD_TOOLS = (
         ),
         args_model=ShortRestArgs,
         handler=short_rest_party,
+    ),
+    ToolSpec(
+        name="journal_add",
+        description=(
+            "Записать в дневник отряда то, что узнали герои: о боге, фракции, человеке, крае, "
+            "слухе или истории мира. note — что именно узнали, своими словами и без тайн; "
+            "повторный вызов с note дописывает её новым абзацем, без note ничего не меняет. "
+            "for_hero — если узнал один герой (тайно): запись увидит только он; без for_hero "
+            "запись видит весь отряд. Места, улики и предметы записываются сами при переходе, "
+            "находке и передаче героям; тайной находкой можно поделиться со всем отрядом, "
+            "записав найденную улику (clue:<id>) без for_hero."
+        ),
+        args_model=JournalAddArgs,
+        handler=journal_add,
     ),
 )

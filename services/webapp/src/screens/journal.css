@@ -1,0 +1,117 @@
+/*
+ * Дневник отряда: разделы-вкладки и карточки записей. Только токены и элементы src/ui: своих
+ * цветов, шрифтов и анимаций здесь нет (это проверяет screens-style.test.ts).
+ */
+
+.journal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/*
+ * Девять разделов — сетка 3×3: на телефоне (360–430 px) все видны сразу, без прокрутки вбок,
+ * и каждый не уже области нажатия. Полоса прокрутки спрятала бы часть разделов за краем.
+ */
+.journal-sections {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-1);
+  padding: var(--space-1);
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.journal-section {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  min-width: 0;
+  min-height: var(--tap-size);
+  padding: var(--space-1);
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+}
+
+.journal-section--active {
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+}
+
+.journal-section__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Счётчик записей; пока в разделе есть «новое», он светится свечой */
+.journal-section__count {
+  min-width: 1.5em;
+  padding: 0 var(--space-1);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+}
+
+.journal-section__count--new {
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+  border-color: var(--color-accent-text);
+}
+
+/* Открытый раздел сам залит свечой: его счётчик остаётся спокойным, чтобы не слиться с фоном */
+.journal-section--active .journal-section__count {
+  color: var(--color-text);
+  background: var(--color-surface);
+  border-color: var(--color-border);
+}
+
+.journal-entries {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.journal-entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.journal-entry .ui-badge {
+  align-self: flex-start;
+}
+
+/* Название приходит из приключения: длинное слово переносится, а не раздвигает страницу */
+.journal-entry .ui-section__title {
+  overflow-wrap: anywhere;
+}
+
+/* Текст записи переносится по словам и не раздвигает карточку на узком экране */
+.journal-entry__text {
+  margin: 0;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.journal-entry__when {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}

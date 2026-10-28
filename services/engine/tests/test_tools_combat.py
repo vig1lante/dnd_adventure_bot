@@ -226,6 +226,7 @@ BASE_OTHER = {
     "change_attitude",
     "advance_time",
     "short_rest",
+    "journal_add",
     "request_check",
     "request_save",
     "contest",

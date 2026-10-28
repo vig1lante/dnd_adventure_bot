@@ -19,6 +19,7 @@ import copy
 import dataclasses
 import json
 import logging
+import re
 import shlex
 import sys
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ from dnd_engine.adventure.schema import Adventure
 from dnd_engine.character import Character
 from dnd_engine.content import SrdContent, load_srd
 from dnd_engine.creation import quick_character
+from dnd_engine.journal import open_journal
 from dnd_engine.rng import ScriptedRng, SeededRng
 from dnd_engine.state import GameState, GameTime, RulesRef, Scene, SceneType, Spotlight
 from dnd_server.app import create_app
@@ -1715,12 +1717,36 @@ async def test_the_journal_has_the_lore_around_the_party_and_the_players_get_non
     # Игроку из этого не уходит ничего: ни рассказ, ни события, ни снимок, ни API игры.
     seen = [message.text + dump(message.data) for message in await world.messages()]
     seen += [dump(payload) for payload, _ in world.broadcaster.sent]
+    journals = []
     async with world.db() as session:
         for player in world.players.values():
             user = await session.get(User, player.user_id)
-            seen.append(dump(await snapshot_for(session, user, world.game_id, srd=srd)))
+            snapshot = await snapshot_for(session, user, world.game_id, srd=srd)
+            journals.append(snapshot.pop("journal"))
+            seen.append(dump(snapshot))
     assert "Марта пожимает плечами" in " ".join(seen)
     assert LORE_MARK not in " ".join(seen)
+    # Дневник (блок B8) называет только то, что отряд знает со старта (`known_at_start`): имя бога и
+    # края и сам слух. Других меток мира в нём нет.
+    known = (
+        {
+            f"{LORE_MARK}name-{deity.id}"
+            for deity in trapped.deities.values()
+            if deity.known_at_start
+        }
+        | {
+            f"{LORE_MARK}край-{region.id}"
+            for region in trapped.world.regions
+            if region.known_at_start
+        }
+        | {
+            rumor.text
+            for rumor in trapped.world.rumors
+            if rumor.known_at_start and not rumor.public
+        }
+    )
+    for journal in journals:
+        assert set(re.findall(rf"{LORE_MARK}[\w-]+", dump(journal))) == known
 
 
 # Значение из битой копии: ни в тексте ошибки, ни в журнале сервера его быть не должно.
@@ -3407,3 +3433,494 @@ async def test_the_pacing_of_a_game_without_a_clock_is_the_saved_active_time(mon
     await world.run()
 
     assert "Темп: прошло 1 ч из" in provider.requests[0].context
+
+
+# --- дневник отряда (блок B8, дополнение контракта §5–§6) ---
+# Записи дневника пишет движок на рабочей копии хода; сервер сохраняет их коммитом хода и после него
+# шлёт `journal_entry` каждой новой или дополненной записи её адресату. Откат хода шлёт каждому
+# игроку его дневник целиком (`journal`). Состояние мира теста записано без дневника — как у игры,
+# начатой до блока B8: дневник открывает первый же ход мастера.
+
+LEARNED = "Завсегдатаи держатся Марты и не любят чужаков."
+MORE = "Они же первыми заметили, что Фабиан исчез."
+SECRET_LEARNED = "ЛИЧНОЕ-boris: Фабиан задолжал половине деревни."
+
+
+def entry_frames(world: World) -> list[tuple[str, str, int]]:
+    """Кадры `journal_entry`: (id записи, адресат, ревизия) по порядку рассылки."""
+    return [
+        (payload["entry"]["id"], who, payload["entry"]["revision"])
+        for payload, who in world.broadcaster.of_type("journal_entry")
+    ]
+
+
+async def journal_of(world: World, key: str) -> list[dict[str, Any]]:
+    """Дневник в снимке, который игрок получает при подключении."""
+    async with world.db() as session:
+        user = await session.get(User, world.players[key].user_id)
+        return (await snapshot_for(session, user, world.game_id, srd=world.deps.srd))["journal"]
+
+
+async def test_an_old_game_saves_the_starting_journal_with_the_first_master_turn(world, adventure):
+    world.use_scenario(scenario_turn(tool("chronicle", entry="з"), say("Рассказ.")))
+    await world.act("alice", "Осматриваюсь")
+    before = await world.state()
+
+    outcome = await world.run()
+
+    assert outcome.status == TurnStatus.DONE
+    assert before.journal == ()
+    saved = await world.state()
+    assert saved.journal == open_journal(before, adventure).journal
+    assert {"intro", f"location:{adventure.start_location}"} <= {e.ref for e in saved.journal}
+    # Стартовые записи игроки уже видят в снимке: событиями они не повторяются.
+    assert entry_frames(world) == []
+    assert await journal_of(world, "vera") == [
+        entry.model_dump(mode="json") for entry in saved.journal
+    ]
+
+
+async def test_an_entry_of_the_master_reaches_every_player_as_an_event_after_the_commit(world):
+    world.use_scenario(
+        scenario_turn(
+            tool("journal_add", ref="faction:regulars", note=LEARNED),
+            tool("chronicle", entry="з"),
+            say("Рассказ."),
+        )
+    )
+    await world.act("alice", "Расспрашиваю завсегдатаев")
+
+    await world.run()
+
+    state = await world.state()
+    (entry,) = [e for e in state.journal if e.ref == "faction:regulars"]
+    assert (entry.audience, entry.revision, entry.turn) == ("all", 1, 1)
+    assert LEARNED in entry.text
+    frames = world.broadcaster.of_type("journal_entry")
+    assert frames == [({"type": "journal_entry", "entry": entry.model_dump(mode="json")}, "all")]
+    index = next(
+        i for i, (p, _) in enumerate(world.broadcaster.sent) if p["type"] == "journal_entry"
+    )
+    assert world.broadcaster.versions_at_send[index] == state.version  # рассылка после коммита
+    for key in world.players:
+        assert entry.model_dump(mode="json") in await journal_of(world, key)
+
+
+async def test_a_repeated_entry_is_added_to_and_never_doubled(world):
+    world.use_scenario(
+        scenario_turn(
+            tool("journal_add", ref="faction:regulars", note=LEARNED),
+            tool("chronicle", entry="з"),
+            say("Рассказ."),
+        ),
+        scenario_turn(
+            tool("journal_add", ref="faction:regulars"),
+            tool("journal_add", ref="faction:regulars", note=MORE),
+            tool("chronicle", entry="з"),
+            say("Ещё рассказ."),
+        ),
+    )
+    await world.act("alice", "Расспрашиваю завсегдатаев")
+    await world.run()
+    world.broadcaster.sent.clear()
+    await world.act("alice", "Спрашиваю про Фабиана")
+
+    await world.run()
+
+    state = await world.state()
+    (entry,) = [e for e in state.journal if e.ref == "faction:regulars"]
+    assert entry.revision == 2 and entry.text.endswith(f"{LEARNED}\n\n{MORE}")
+    assert entry_frames(world) == [("faction:regulars@all", "all", 2)]
+    for key in world.players:
+        journal = await journal_of(world, key)
+        assert [e["ref"] for e in journal].count("faction:regulars") == 1
+
+
+async def test_a_secret_finding_of_one_hero_reaches_only_his_player(world):
+    # Тайный ход Бориса: мастер записывает, что тот узнал (`journal_add` с `for_hero`), и находку
+    # улики (`reveal` с `for_hero`). Обе записи — только Борису: в снимке и в кадрах.
+    world.use_scenario(
+        scenario_turn(
+            tool("journal_add", ref="npc:fabian", note=SECRET_LEARNED, for_hero="$pc2"),
+            tool("reveal", ref="clue:clue-marta", for_hero="$pc2"),
+            tool("chronicle", entry="з"),
+            say("Рассказ."),
+        )
+    )
+    await world.act("boris", "Тайно расспрашиваю Марту о Фабиане", secret=True)
+    await world.act("alice", "Заказываю ужин")
+
+    await world.run()
+
+    boris = world.boris
+    personal = [e for e in (await world.state()).journal if e.audience == boris.character_id]
+    assert {e.ref for e in personal} == {"npc:fabian", "clue:clue-marta"}
+    assert entry_frames(world) == [
+        (f"npc:fabian@{boris.character_id}", boris.user_id, 1),
+        (f"clue:clue-marta@{boris.character_id}", boris.user_id, 1),
+    ]
+    mine = await journal_of(world, "boris")
+    assert {e["ref"] for e in mine} >= {"npc:fabian", "clue:clue-marta"}
+    for key in ("alice", "vera"):
+        journal = await journal_of(world, key)
+        assert {e["audience"] for e in journal} == {"all"}
+        assert "clue:clue-marta" not in {e["ref"] for e in journal}
+        assert SECRET_LEARNED not in dump(journal)
+    to_others = [p for p, who in world.broadcaster.sent if who != boris.user_id]
+    assert SECRET_LEARNED not in dump(to_others) and "clue-marta" not in dump(to_others)
+
+
+async def test_the_same_finding_in_an_open_turn_is_for_the_whole_party(world):
+    world.use_scenario(
+        scenario_turn(
+            tool("reveal", ref="clue:clue-marta", for_hero="$pc2"),
+            tool("chronicle", entry="з"),
+            say("Рассказ."),
+        )
+    )
+    await world.act("boris", "Расспрашиваю Марту о Фабиане")
+
+    await world.run()
+
+    assert entry_frames(world) == [("clue:clue-marta@all", "all", 1)]
+
+
+async def test_a_finding_of_an_open_hero_in_a_round_with_a_secret_turn_stays_common(world):
+    # Дополнение §12: тайные авторы — это авторы всего раунда, а не вызова. Находка открытого героя
+    # с `for_hero` остаётся общей, даже если кто-то в этом раунде ходит тайно.
+    world.use_scenario(
+        scenario_turn(
+            tool("reveal", ref="clue:clue-marta", for_hero="$pc1"),
+            tool("chronicle", entry="з"),
+            say("Рассказ."),
+        )
+    )
+    await world.act("alice", "Расспрашиваю Марту о Фабиане")
+    await world.act("boris", "Тайно осматриваю задний двор", secret=True)
+
+    await world.run()
+
+    assert entry_frames(world) == [("clue:clue-marta@all", "all", 1)]
+
+
+async def test_a_finding_without_its_hero_in_a_round_with_a_secret_turn_is_refused_and_kept_out(
+    world,
+):
+    # Без `for_hero` движок отказывает до изменений: улика не найдена и в дневник не попала, а ход
+    # мастера всё равно удался (ошибка инструмента — ответ модели, а не сбой хода).
+    world.use_scenario(
+        scenario_turn(
+            tool("reveal", ref="clue:clue-marta"),
+            tool("chronicle", entry="з"),
+            say("Рассказ."),
+        )
+    )
+    await world.act("boris", "Тайно расспрашиваю Марту", secret=True)
+
+    outcome = await world.run()
+
+    assert outcome.status == TurnStatus.DONE
+    state = await world.state()
+    assert "clue:clue-marta" not in state.world.revealed
+    assert "clue:clue-marta" not in {entry.ref for entry in state.journal}
+    assert entry_frames(world) == []
+    (call,) = [c for c in (await world.logs())[-1].trace if c["name"] == "reveal"]
+    assert call["is_error"] and "for_hero" in call["result"]
+
+
+async def test_a_regenerated_turn_takes_its_entry_back_from_every_player(world):
+    world.use_scenario(
+        scenario_turn(
+            tool("journal_add", ref="faction:regulars", note=LEARNED),
+            tool("journal_add", ref="npc:fabian", note=SECRET_LEARNED, for_hero="$pc2"),
+            tool("chronicle", entry="з"),
+            say("Старый рассказ."),
+        ),
+        scenario_turn(tool("chronicle", entry="з"), say("Новый рассказ.")),
+    )
+    await world.act("boris", "Тайно расспрашиваю Марту", secret=True)
+    await world.run()
+    assert len(await journal_of(world, "boris")) == len(await journal_of(world, "alice")) + 1
+    world.broadcaster.sent.clear()
+
+    outcome = await world.regenerate()
+
+    assert outcome.status == TurnStatus.DONE
+    state = await world.state()
+    assert {"faction:regulars", "npc:fabian"}.isdisjoint(e.ref for e in state.journal)
+    blocks = world.broadcaster.of_type("journal")
+    assert sorted(who for _, who in blocks) == sorted(p.user_id for p in world.players.values())
+    expected = [entry.model_dump(mode="json") for entry in state.journal]
+    assert all(payload["entries"] == expected for payload, _ in blocks)
+    assert entry_frames(world) == []  # новая попытка записей не добавила
+    for key in world.players:
+        assert await journal_of(world, key) == expected
+
+
+async def test_the_journal_block_of_the_rollback_comes_with_the_rolled_back_state(world):
+    world.use_scenario(
+        scenario_turn(
+            tool("journal_add", ref="faction:regulars", note=LEARNED),
+            tool("chronicle", entry="з"),
+            say("Старый рассказ."),
+        ),
+        scenario_turn(
+            tool("journal_add", ref="faction:regulars", note=MORE),
+            tool("chronicle", entry="з"),
+            say("Новый рассказ."),
+        ),
+    )
+    await world.run()
+    world.broadcaster.sent.clear()
+
+    await world.regenerate()
+
+    kinds = [payload["type"] for payload, _ in world.broadcaster.sent]
+    assert kinds.index("journal") < kinds.index("journal_entry")
+    for payload, _ in world.broadcaster.of_type("journal"):
+        assert "faction:regulars" not in {e["ref"] for e in payload["entries"]}
+    assert entry_frames(world) == [("faction:regulars@all", "all", 1)]
+    (entry,) = [e for e in (await world.state()).journal if e.ref == "faction:regulars"]
+    assert MORE in entry.text and LEARNED not in entry.text
+
+
+async def test_the_context_of_the_master_lists_the_journal_by_refs_without_texts(world):
+    world.use_scenario(
+        scenario_turn(
+            tool("journal_add", ref="faction:regulars", note=LEARNED),
+            tool("journal_add", ref="npc:fabian", note=SECRET_LEARNED, for_hero="$pc2"),
+            tool("chronicle", entry="з"),
+            say("Рассказ."),
+        ),
+        scenario_turn(tool("chronicle", entry="з"), say("Ещё рассказ.")),
+    )
+    await world.act("boris", "Тайно расспрашиваю Марту", secret=True)
+    await world.run()
+    await world.act("alice", "Идём дальше")
+
+    await world.run()
+
+    context = (await world.logs())[-1].request["context"]
+    (line,) = [line for line in context.splitlines() if line.startswith("Дневник отряда:")]
+    assert "faction:regulars" in line
+    assert f"npc:fabian (лично {world.boris.character_id})" in line
+    assert LEARNED not in context and SECRET_LEARNED not in context
+    assert world.adventure.journal_intro.split()[0] not in line
+
+
+# --- дневник: сбой хода, автоповтор и «Повторить» (финальное покрытие блока B8) ---
+# Попытка хода пишет дневник на своей рабочей копии. Неудачная попытка копию выбрасывает: в базе
+# дневник прежний и кадров дневника нет, а следующая попытка начинает с чистой копии — запись не
+# накапливается от попытки к попытке.
+
+
+async def test_failed_attempts_leave_the_journal_alone_and_the_repeat_writes_the_entry_once(
+    world, adventure
+):
+    # Две попытки без рассказа (автоповтор), каждая успела вызвать `journal_add`; затем «Повторить».
+    def silent() -> dict[str, Any]:
+        return scenario_turn(
+            tool("journal_add", ref="faction:regulars", note=LEARNED), tool("chronicle", entry="з")
+        )
+
+    world.use_scenario(
+        silent(),
+        silent(),
+        scenario_turn(
+            tool("journal_add", ref="faction:regulars", note=LEARNED),
+            tool("chronicle", entry="з"),
+            say("Рассказ."),
+        ),
+    )
+    await world.act("alice", "Расспрашиваю завсегдатаев")
+    before = await world.state()
+
+    failed = await world.run()
+
+    assert (failed.status, failed.attempts) == (TurnStatus.FAILED, 2)
+    assert await world.snapshot_versions() == [1]
+    assert (await world.state()).journal == before.journal == ()  # старая игра: дневника нет
+    sent = {payload["type"] for payload, _ in world.broadcaster.sent}
+    assert not sent & {"journal_entry", "journal"}
+    for key in world.players:  # снимок по-прежнему открывает стартовый дневник только в памяти
+        assert "faction:regulars" not in {e["ref"] for e in await journal_of(world, key)}
+
+    repeated = await world.run()
+
+    assert repeated.status == TurnStatus.DONE
+    state = await world.state()
+    (entry,) = [e for e in state.journal if e.ref == "faction:regulars"]
+    assert (entry.revision, entry.text.count(LEARNED)) == (1, 1)
+    assert entry_frames(world) == [("faction:regulars@all", "all", 1)]
+    starting = open_journal(before, adventure).journal
+    assert state.journal == (*starting, entry)  # стартовый дневник сохранён тем же коммитом
+
+
+async def test_an_exception_after_a_personal_entry_leaves_no_trace_of_it_for_the_players(
+    monkeypatch, world
+):
+    # Модель записала тайное знание Бориса и упала: ход не удался, запись выброшена вместе с
+    # копией, и ни в кадрах, ни в снимке её нет ни у кого, даже у самого Бориса.
+    boris = world.boris.character_id
+    call = ("journal_add", {"ref": "npc:fabian", "note": SECRET_LEARNED, "for_hero": boris})
+    use_provider(monkeypatch, StubProvider(ProviderError("упал адаптер"), calls=(call,)))
+    await world.act("boris", "Тайно расспрашиваю Марту", secret=True)
+
+    outcome = await world.run()
+
+    await failed_turn_leaves_the_game_as_it_was(world, outcome)
+    (log,) = await world.logs()
+    # Вызов был и удался: запись успела лечь в рабочую копию хода.
+    assert [(c["name"], c["is_error"]) for c in log.trace] == [("journal_add", False)]
+    assert (await world.state()).journal == ()
+    assert SECRET_LEARNED not in dump(world.broadcaster.sent)
+    for key in world.players:
+        assert SECRET_LEARNED not in dump(await journal_of(world, key))
+        assert SECRET_LEARNED not in dump(await world.feed_of(key))
+
+
+async def test_the_first_turn_of_an_old_game_shows_the_master_its_starting_journal(
+    world, adventure
+):
+    # Старой игре дневник открывает резерв хода: мастер уже в первом ходе видит, что записано со
+    # старта, и не станет записывать это заново.
+    world.use_scenario(scenario_turn(tool("chronicle", entry="з"), say("Рассказ.")))
+    await world.act("alice", "Осматриваюсь")
+    before = await world.state()
+
+    await world.run()
+
+    context = (await world.logs())[-1].request["context"]
+    (line,) = [line for line in context.splitlines() if line.startswith("Дневник отряда:")]
+    refs = [entry.ref for entry in open_journal(before, adventure).journal]
+    assert before.journal == () and refs
+    assert line == f"Дневник отряда: {', '.join(refs)}."
+
+
+# --- номер раунда игроков (дополнение контракта B8 §11, п. 5–6) ---
+# «Узнали в раунде N» в дневнике — номер раунда игроков (`GameState.party_round`), а не номер хода
+# мастера. Его поднимает только ход вида «раунд игроков», считая от базового состояния хода:
+# «Перегенерировать» и «Повторить» дают тот же номер. Открытие, ходы боя и конец привала номер не
+# меняют.
+
+
+async def set_party_round(world: World, number: int) -> None:
+    """Текущее состояние игры теста — в раунде игроков `number`."""
+    async with world.db() as session:
+        game = await session.get(Game, world.game_id)
+        row = await session.get(GameStateSnapshot, (world.game_id, game.state_version))
+        state = row.to_state()
+        state.party_round = number
+        row.data = GameStateSnapshot.from_state(state).data
+        await session.commit()
+
+
+def quiet_round(text: str) -> dict[str, Any]:
+    return scenario_turn(tool("chronicle", entry="з"), say(text))
+
+
+async def test_a_round_of_the_players_counts_its_number_from_the_base_state(world):
+    world.use_scenario(quiet_round("Первый."), quiet_round("Второй."), quiet_round("Заново."))
+
+    await world.run()
+    first = await world.state()
+    await world.run()
+    second = await world.state()
+    await world.regenerate()
+
+    assert (first.party_round, second.party_round) == (1, 2)
+    assert (await world.state()).party_round == 2  # перегенерация считает от той же базы
+
+
+async def test_a_retried_round_gets_the_same_number(monkeypatch, world):
+    use_provider(monkeypatch, StubProvider(ProviderError("сеть упала"), narration("Рассказ.")))
+
+    failed = await world.run()
+    kept = await world.state()
+    retried = await world.run()  # «Повторить»
+
+    assert failed.status == TurnStatus.FAILED and kept.party_round == 0
+    assert retried.status == TurnStatus.DONE
+    assert (await world.state()).party_round == 1
+
+
+async def test_an_entry_of_a_round_gets_the_number_of_that_round(world):
+    await set_party_round(world, 4)
+    world.use_scenario(
+        scenario_turn(
+            tool("journal_add", ref="faction:regulars", note=LEARNED),
+            tool("chronicle", entry="з"),
+            say("Рассказ."),
+        )
+    )
+
+    await world.run()
+
+    (entry,) = [e for e in (await world.state()).journal if e.ref == "faction:regulars"]
+    assert entry.turn == 5
+
+
+async def test_a_combat_turn_keeps_the_number_of_the_round(monkeypatch, world):
+    use_provider(monkeypatch, StubProvider())
+    await set_party_round(world, 4)
+
+    await world.run(TurnKind.COMBAT, acting=[world.alice.character_id])
+
+    assert (await world.state()).party_round == 4
+
+
+async def test_the_camp_end_keeps_the_number_of_the_round(monkeypatch, world):
+    use_provider(monkeypatch, StubProvider(narration("Утро.")))
+    await make_camp(world)
+    await set_party_round(world, 4)
+
+    await world.run(TurnKind.CAMP_END)
+
+    assert (await world.state()).party_round == 4
+
+
+async def test_the_opening_keeps_the_round_of_the_start(opening_world):
+    opening_world.use_scenario(quiet_round("Вы в деревне."))
+
+    await opening_world.run(TurnKind.OPENING)
+
+    assert (await opening_world.state()).party_round == 0
+
+
+# --- дневник после открытия игры (дополнение контракта B8 §11, п. 7) ---
+
+
+async def test_after_the_opening_every_player_gets_the_whole_journal(opening_world):
+    # Сокеты, открытые ещё в лобби, получили снимок без дневника: блок `journal` их догоняет.
+    world = opening_world
+    world.use_scenario(quiet_round("Вы в деревне."))
+
+    await world.run(TurnKind.OPENING)
+
+    state = await world.state()
+    expected = [entry.model_dump(mode="json") for entry in state.journal]
+    blocks = world.broadcaster.of_type("journal")
+    assert expected
+    assert sorted(who for _, who in blocks) == sorted(p.user_id for p in world.players.values())
+    assert all(payload["entries"] == expected for payload, _ in blocks)
+    assert world.broadcaster.of_type("journal_entry") == []
+    sent = [payload["type"] for payload, _ in world.broadcaster.sent]
+    assert sent.index("journal") > sent.index("character") and sent[-1] == "player_status"
+
+
+async def test_a_personal_entry_of_the_opening_reaches_only_its_player_in_the_block(opening_world):
+    world = opening_world
+    world.use_scenario(
+        scenario_turn(
+            tool("journal_add", ref="npc:fabian", note=SECRET_LEARNED, for_hero="$pc2"),
+            tool("chronicle", entry="з"),
+            say("Вы в деревне."),
+        )
+    )
+
+    await world.run(TurnKind.OPENING)
+
+    blocks = {who: payload["entries"] for payload, who in world.broadcaster.of_type("journal")}
+    assert SECRET_LEARNED in dump(blocks[world.boris.user_id])
+    for key in ("alice", "vera"):
+        assert SECRET_LEARNED not in dump(blocks[world.players[key].user_id])

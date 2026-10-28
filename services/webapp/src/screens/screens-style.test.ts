@@ -6,6 +6,7 @@ const STYLE_FILES = [
   "../screens/screens.css",
   "../screens/character/character.css",
   "../screens/authoring/authoring.css",
+  "../screens/journal.css",
 ] as const;
 
 const withoutComments = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, "");

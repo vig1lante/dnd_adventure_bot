@@ -2,7 +2,9 @@
 
 `GameState` — одна pydantic-модель, которая целиком сериализуется в JSON и читается обратно.
 Движок меняет только копию состояния и возвращает её вместе со списком событий; версию
-(`version`) повышает сервер при коммите хода.
+(`version`) повышает сервер при коммите хода. Новые поля получают значения по умолчанию: снимки,
+записанные прежним кодом, должны читаться (дневник `journal` и номер раунда игроков
+`party_round` появились в DND-2, блок B8).
 """
 
 from enum import StrEnum
@@ -12,6 +14,7 @@ from pydantic import BaseModel
 
 from dnd_engine.character import Character
 from dnd_engine.combat.model import Combat
+from dnd_engine.journal import JournalEntry
 
 
 class SceneType(StrEnum):
@@ -81,5 +84,10 @@ class GameState(BaseModel):
     spotlight: dict[str, Spotlight] = {}
     pc_hooks: dict[str, PcHook] = {}
     short_rests_since_long: int = 0
+    journal: tuple[JournalEntry, ...] = ()  # дневник отряда в порядке появления записей
+    # Номер текущего раунда игроков: 0 — начало игры и открытие; растёт с каждым разбором ходов
+    # игроков (ставит сервер), а в бою и на привале не меняется. В отличие от `turn` (номер хода
+    # мастера, в том числе каждого хода бойца) им помечены записи дневника.
+    party_round: int = 0
     turn: int = 0
     version: int = 0

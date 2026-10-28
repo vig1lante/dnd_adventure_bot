@@ -25,10 +25,21 @@ from dnd_server.dm.text import safe_traceback
 
 logger = logging.getLogger(__name__)
 
-# Типы событий плана B6.5. `snapshot` и `pong` сюда не входят: их отправляет только WS-эндпоинт
-# своему соединению, а рассылать их через хаб незачем.
+# Типы событий плана B6.5 и дневника отряда (блок B8 DND-2). `snapshot` и `pong` сюда не входят:
+# их отправляет только WS-эндпоинт своему соединению, а рассылать их через хаб незачем.
 EVENT_TYPES = frozenset(
-    {"phase", "player_status", "feed_item", "party", "combat", "character", "lobby", "error"}
+    {
+        "phase",
+        "player_status",
+        "feed_item",
+        "party",
+        "combat",
+        "character",
+        "lobby",
+        "journal_entry",
+        "journal",
+        "error",
+    }
 )
 # Сколько сообщений ждёт отправки у одного соединения. Игра шлёт единицы событий за ход, поэтому
 # переполнение означает, что клиент давно не читает.

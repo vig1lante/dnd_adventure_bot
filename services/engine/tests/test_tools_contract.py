@@ -555,6 +555,7 @@ def test_every_tool_that_rolls_dice_is_in_the_secret_rolls_table(tool_registry):
         "change_attitude",
         "advance_time",
         "short_rest",
+        "journal_add",
         "private_message",
         "chronicle",
         "apply_effect",

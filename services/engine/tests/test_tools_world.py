@@ -28,6 +28,13 @@ from dnd_engine.events import (
     RevealEvent,
     RollEvent,
 )
+from dnd_engine.journal import (
+    MAX_NOTE_CHARS,
+    MAX_TEXT_CHARS,
+    JournalEntry,
+    open_journal,
+    visible_entries,
+)
 from dnd_engine.modules import build_ruleset
 from dnd_engine.rng import ScriptedRng
 from dnd_engine.state import GameState, GameTime, RulesRef
@@ -157,6 +164,7 @@ def test_toolset_has_every_world_and_check_tool():
         "change_attitude",
         "advance_time",
         "short_rest",
+        "journal_add",
         "request_check",
         "request_save",
         "contest",
@@ -1642,6 +1650,694 @@ def test_contest_rejects_bad_participants_before_anything_is_rolled_or_spent(
     assert ctx.events == []
 
 
+# --- дневник: переход, находка, предмет и journal_add (дополнение контракта B8 §4) ---
+
+
+def journal_of(state: GameState) -> dict[str, JournalEntry]:
+    return {entry.id: entry for entry in state.journal}
+
+
+def test_coming_to_a_place_writes_it_in_the_journal_with_the_turn_of_the_visit(
+    run, make_ctx, make_state, demo_adventure
+):
+    state = open_journal(make_state(location_id="cemetery", party_round=4), demo_adventure)
+    state.world.revealed.append("exit:to-crypt")
+    ctx = make_ctx(state)
+
+    assert run(ctx, "move_party", location_id="crypt").error is None
+
+    crypt = journal_of(state)["location:crypt@all"]
+    assert (crypt.section, crypt.audience, crypt.turn, crypt.visited_turn) == (
+        "places",
+        "all",
+        4,
+        4,
+    )
+    assert crypt.text == demo_adventure.locations["crypt"].public
+    assert demo_adventure.locations["crypt"].dm_notes not in crypt.text
+
+
+def test_the_first_visit_of_a_place_known_at_start_marks_it_again_and_a_return_does_not(
+    run, make_ctx, make_state, demo_adventure
+):
+    state = open_journal(make_state(party_round=2), demo_adventure)
+    size = len(state.journal)
+    ctx = make_ctx(state)
+
+    run(ctx, "move_party", location_id="cemetery")
+    state.party_round = 3
+    run(ctx, "move_party", location_id="village")
+    run(ctx, "move_party", location_id="cemetery")
+
+    cemetery = journal_of(state)["location:cemetery@all"]
+    village = journal_of(state)["location:village@all"]
+    assert (cemetery.turn, cemetery.visited_turn, cemetery.revision) == (0, 2, 2)
+    assert (village.visited_turn, village.revision) == (0, 1)  # отряд начал игру в деревне
+    assert len(state.journal) == size  # места известны со старта: новых записей нет
+
+
+def test_a_found_clue_is_written_in_the_journal_once(run, make_ctx, make_state, demo_adventure):
+    ctx = make_ctx(make_state(location_id="cemetery", party_round=5))
+    tracks = next(c for c in demo_adventure.revelations["kidnapper"].clues if c.id == "clue-tracks")
+
+    run(ctx, "reveal", ref="feature:tracks")  # следы раскрывают улику и скрытый выход
+    run(ctx, "reveal", ref="feature:tracks")
+    run(ctx, "reveal", ref="clue:clue-tracks")
+
+    [clue] = ctx.state.journal
+    assert (clue.id, clue.section, clue.text, clue.turn) == (
+        "clue:clue-tracks@all",
+        "clues",
+        tracks.description,
+        5,
+    )
+    assert demo_adventure.revelations["kidnapper"].statement not in clue.text
+
+
+def test_a_clue_found_in_a_secret_turn_with_for_hero_is_written_only_for_that_hero(
+    run, make_ctx, make_state
+):
+    # Тайный ход: мастер называет героя находки, и запись улики видит только он (дополнение §10).
+    ctx = make_ctx(make_state(location_id="cemetery"), secret_actors={"pc-2"})
+
+    outcome = run(ctx, "reveal", ref="feature:tracks", for_hero="pc-2")
+
+    assert outcome.error is None
+    [clue] = ctx.state.journal
+    assert (clue.id, clue.audience) == ("clue:clue-tracks@pc-2", "pc-2")
+    assert visible_entries(ctx.state.journal, "pc-1") == ()
+    assert ctx.state.world.revealed == ["feature:tracks", "clue:clue-tracks", "exit:to-crypt"]
+
+
+def test_a_clue_found_in_a_secret_turn_by_an_open_hero_is_common(run, make_ctx, make_state):
+    ctx = make_ctx(make_state(location_id="cemetery"), secret_actors={"pc-1"})
+
+    run(ctx, "reveal", ref="clue:clue-diary", for_hero="pc-2")  # тайный ход у другого героя
+
+    assert [entry.id for entry in ctx.state.journal] == ["clue:clue-diary@all"]
+
+
+def test_a_clue_found_in_an_open_turn_without_for_hero_is_common(run, make_ctx, make_state):
+    ctx = make_ctx(make_state(location_id="cemetery"))
+
+    run(ctx, "reveal", ref="clue:clue-diary")
+
+    assert [entry.id for entry in ctx.state.journal] == ["clue:clue-diary@all"]
+
+
+@pytest.mark.parametrize(
+    "secret", [{"pc-2"}, {"pc-1", "pc-2"}], ids=["один тайный", "несколько тайных"]
+)
+@pytest.mark.parametrize("ref", ["feature:tracks", "clue:clue-diary"])
+def test_a_find_in_a_round_with_a_secret_turn_needs_the_hero_of_the_find_before_anything_changes(
+    run, make_ctx, make_state, secret, ref
+):
+    # `secret_actors` — тайные авторы всего раунда, а не этого вызова: чья находка, движок не
+    # знает, и общую находку открытого героя нельзя молча отдать тайному (дополнение §12).
+    state = make_state(location_id="cemetery")
+    ctx = make_ctx(state, secret_actors=secret)
+    before = state.model_dump()
+
+    outcome = run(ctx, "reveal", ref=ref)
+
+    assert outcome.result is None
+    assert "тайный ход" in outcome.error and "for_hero" in outcome.error
+    assert state.model_dump() == before  # ни находки, ни выхода, ни записи в дневнике
+    assert (state.world.revealed, state.journal, ctx.events) == ([], (), [])
+
+
+def test_a_find_of_a_secret_hero_named_in_a_secret_round_is_personal(run, make_ctx, make_state):
+    ctx = make_ctx(make_state(location_id="cemetery"), secret_actors={"pc-2"})
+
+    outcome = run(ctx, "reveal", ref="feature:tracks", for_hero="pc-2")
+
+    assert outcome.error is None
+    assert [entry.id for entry in ctx.state.journal] == ["clue:clue-tracks@pc-2"]
+    assert visible_entries(ctx.state.journal, "pc-1") == ()
+
+
+def test_a_find_of_an_open_hero_named_in_a_secret_round_stays_common(run, make_ctx, make_state):
+    # Частый случай: Вера ходит тайно, а Борис открыто обыскивает место.
+    ctx = make_ctx(make_state(location_id="cemetery"), secret_actors={"pc-2"})
+
+    outcome = run(ctx, "reveal", ref="feature:tracks", for_hero="pc-1")
+
+    assert outcome.error is None
+    assert [entry.id for entry in ctx.state.journal] == ["clue:clue-tracks@all"]
+    assert visible_entries(ctx.state.journal, "pc-1") == ctx.state.journal
+
+
+def test_a_secret_actor_outside_the_party_does_not_make_the_round_secret(run, make_ctx, make_state):
+    # Тайный раунд — это тайный ход героя отряда; посторонний id в `secret_actors` его не делает.
+    ctx = make_ctx(make_state(location_id="cemetery"), secret_actors={"ghost"})
+
+    outcome = run(ctx, "reveal", ref="clue:clue-diary")
+
+    assert outcome.error is None
+    assert [entry.id for entry in ctx.state.journal] == ["clue:clue-diary@all"]
+
+
+def test_a_find_without_clues_needs_no_hero_even_in_a_secret_turn_of_several(
+    run, make_ctx, make_state
+):
+    # Скрытый выход в дневник не пишется: героя находки называть незачем.
+    ctx = make_ctx(make_state(location_id="cemetery"), secret_actors={"pc-1", "pc-2"})
+    ctx.state.world.revealed.append("clue:clue-tracks")
+
+    exit_ = run(ctx, "reveal", ref="exit:to-crypt")
+    tracks = run(ctx, "reveal", ref="feature:tracks")  # улика следов уже найдена раньше
+
+    assert exit_.error is None and tracks.error is None
+    assert ctx.state.journal == ()
+
+
+def test_the_hero_of_a_reveal_is_its_author(tools):
+    spec = next(spec for spec in tools.specs() if spec.name == "reveal")
+
+    assert spec.author_fields == ("for_hero",)
+
+
+@pytest.mark.parametrize("hero", ["ghost", "marta", "all"])
+def test_reveal_refuses_a_hero_outside_the_party_before_anything_changes(
+    run, make_ctx, make_state, hero
+):
+    state = make_state(location_id="cemetery")
+    state.world.revealed.append("clue:clue-marta")
+    ctx = make_ctx(state, secret_actors={"pc-1"})
+    before = state.model_dump()
+
+    new = run(ctx, "reveal", ref="feature:tracks", for_hero=hero)
+    repeated = run(ctx, "reveal", ref="clue:clue-marta", for_hero=hero)  # даже уже найденное
+
+    assert new.result is None and "pc-1" in new.error
+    assert repeated.result is None and "pc-1" in repeated.error
+    assert state.model_dump() == before
+    assert ctx.events == []
+
+
+def test_a_clue_revealed_directly_is_written_and_a_bare_exit_writes_nothing(
+    run, make_ctx, make_state
+):
+    ctx = make_ctx(make_state(location_id="cemetery"))
+
+    run(ctx, "reveal", ref="exit:to-crypt")
+    assert ctx.state.journal == ()
+
+    run(ctx, "reveal", ref="clue:clue-diary")
+    assert [entry.id for entry in ctx.state.journal] == ["clue:clue-diary@all"]
+
+
+def test_a_hero_who_gets_an_item_writes_it_in_the_journal_and_taking_it_away_does_not(
+    run, make_ctx, make_state, demo_adventure
+):
+    key = demo_adventure.items["chest-key"]
+    ctx = make_ctx(make_state(party_round=1))
+
+    run(ctx, "give_item", item_id="chest-key", character_id="pc-1")
+    run(ctx, "take_item", item_id="chest-key", character_id="pc-1", to="location")
+
+    [entry] = ctx.state.journal
+    assert (entry.id, entry.section, entry.title, entry.text, entry.turn) == (
+        "item:chest-key@all",
+        "items",
+        key.name,
+        key.public,
+        1,
+    )
+    assert key.description not in entry.text
+
+
+def test_an_item_the_party_already_knows_about_is_not_written_twice(run, make_ctx, make_state):
+    ctx = make_ctx(make_state())
+
+    run(ctx, "give_item", item_id="chest-key", character_id="pc-1")
+    run(ctx, "give_item", item_id="chest-key", character_id="pc-2")
+
+    [entry] = ctx.state.journal
+    assert entry.revision == 1
+
+
+def test_an_item_got_in_a_secret_turn_is_written_only_for_that_hero(run, make_ctx, make_state):
+    ctx = make_ctx(make_state(), secret_actors={"pc-2"})
+
+    run(ctx, "give_item", item_id="chest-key", character_id="pc-2")
+
+    [entry] = ctx.state.journal
+    assert (entry.id, entry.audience) == ("item:chest-key@pc-2", "pc-2")
+    assert visible_entries(ctx.state.journal, "pc-1") == ()
+    assert visible_entries(ctx.state.journal, "pc-2") == (entry,)
+
+
+def test_an_item_passed_by_a_secret_hero_goes_to_that_hero_like_the_feed_line(
+    run, make_ctx, make_state
+):
+    # Строка ленты о передаче предмета уходит тайному герою из участников; запись — так же.
+    state = make_state()
+    state.world.item_holders["chest-key"] = "character:pc-1"
+    ctx = make_ctx(state, secret_actors={"pc-1"})
+
+    run(ctx, "give_item", item_id="chest-key", character_id="pc-2")
+
+    [entry] = state.journal
+    assert entry.audience == "pc-1"
+
+
+def test_journal_add_writes_what_the_heroes_learned_and_answers_with_the_entry(
+    run, make_ctx, make_state, demo_adventure
+):
+    ctx = make_ctx(make_state(party_round=3))
+
+    outcome = run(ctx, "journal_add", ref="npc:fabian", note="Задолжал Марте сорок золотых.")
+
+    assert outcome.error is None
+    assert outcome.result == {"entry_id": "npc:fabian@all", "new": True, "revision": 1}
+    [entry] = ctx.state.journal
+    assert (entry.section, entry.title, entry.turn) == ("people", "Фабиан", 3)
+    assert entry.text == f"{demo_adventure.npcs['fabian'].public}\n\nЗадолжал Марте сорок золотых."
+    assert demo_adventure.npcs["fabian"].secret not in entry.text
+    assert ctx.events == []  # отдельного события нет: сервер сравнивает дневник до и после хода
+
+
+def test_journal_add_repeated_extends_with_a_note_and_without_it_changes_nothing(
+    run, make_ctx, make_state
+):
+    ctx = make_ctx(make_state())
+
+    first = run(ctx, "journal_add", ref="deity:veyla")
+    same = run(ctx, "journal_add", ref="deity:veyla")
+    more = run(ctx, "journal_add", ref="deity:veyla", note="Её символ — очаг.\nЕй молятся хозяйки.")
+
+    assert first.result == {"entry_id": "deity:veyla@all", "new": True, "revision": 1}
+    assert same.result == {"entry_id": "deity:veyla@all", "new": False, "revision": 1}
+    assert more.result == {"entry_id": "deity:veyla@all", "new": False, "revision": 2}
+    [entry] = ctx.state.journal
+    assert entry.text.endswith("\n\nЕё символ — очаг.\nЕй молятся хозяйки.")
+
+
+def test_journal_add_for_one_hero_is_a_personal_entry_next_to_the_common_one(
+    run, make_ctx, make_state
+):
+    ctx = make_ctx(make_state())
+
+    run(ctx, "journal_add", ref="faction:pale-candle")
+    personal = run(
+        ctx, "journal_add", ref="faction:pale-candle", note="Их письмо у Фабиана.", for_hero="pc-2"
+    )
+
+    assert personal.result == {"entry_id": "faction:pale-candle@pc-2", "new": True, "revision": 1}
+    common, mine = ctx.state.journal
+    assert (common.audience, mine.audience) == ("all", "pc-2")
+    assert visible_entries(ctx.state.journal, "pc-1") == (common,)
+
+
+def test_journal_add_has_no_author_and_a_secret_turn_does_not_change_its_addressee(
+    run, tools, make_ctx, make_state
+):
+    # Адресат записи мастера — только for_hero: автор вызова закрыл бы её тайному герою молча.
+    ctx = make_ctx(make_state(), secret_actors={"pc-1"})
+
+    outcome = run(ctx, "journal_add", ref="rumor:2")
+
+    assert outcome.result["entry_id"] == "rumor:2@all"
+    assert next(s for s in tools.specs() if s.name == "journal_add").author_fields == ()
+
+
+def test_journal_add_writes_the_history_of_the_world_and_any_kind_of_the_contract(
+    run, make_ctx, make_state
+):
+    ctx = make_ctx(make_state())
+    ctx.state.world.revealed.append("clue:clue-marta")  # улику пишут в дневник только найденной
+    refs = [
+        "world",
+        "region:barrow-hill",
+        "rumor:3",
+        "location:crypt",
+        "clue:clue-marta",
+        "item:healing-potion",
+    ]
+
+    outcomes = [run(ctx, "journal_add", ref=ref, note="Узнали.") for ref in refs]
+
+    assert [outcome.error for outcome in outcomes] == [None] * len(refs)
+    assert [entry.section for entry in ctx.state.journal] == [
+        "world",
+        "world",
+        "rumors",
+        "places",
+        "clues",
+        "items",
+    ]
+    assert ctx.state.journal[0].text == "Узнали."
+    assert ctx.state.journal[3].visited_turn is None  # о месте узнали, но отряд там не был
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        pytest.param({"ref": "npc:ghost"}, "npc:marta", id="unknown-npc"),
+        pytest.param({"ref": "rumor:9"}, "rumor:3", id="unknown-rumor"),
+        pytest.param({"ref": "god:ossmar"}, "deity:<id>", id="unknown-kind"),
+        pytest.param({"ref": "intro"}, "Главное", id="intro"),
+        pytest.param({"ref": "world"}, "note", id="world-without-note"),
+        pytest.param({"ref": "npc:fabian", "for_hero": "ghost"}, "pc-1", id="unknown-hero"),
+        pytest.param({"ref": "npc:fabian", "for_hero": "marta"}, "pc-2", id="npc-is-no-hero"),
+        pytest.param({"ref": "npc:fabian", "for_hero": "all"}, "pc-1", id="all-is-no-hero"),
+        pytest.param({"ref": "npc:fabian", "note": "я" * (MAX_NOTE_CHARS + 1)}, "note", id="long"),
+        pytest.param({"ref": "npc:fabian", "note": "   "}, "note", id="blank-note"),
+        pytest.param({"ref": "npc:fabian", "note": "красное\x1b[31m"}, "note", id="escape"),
+        pytest.param({"ref": "npc:fabian", "note": "тайно\u202eнавыворот"}, "note", id="bidi"),
+        pytest.param({"ref": "npc:fabian", "note": "а\tб"}, "note", id="tab"),
+        pytest.param({"ref": "x" * 81}, "ref", id="long-ref"),
+        pytest.param({"ref": "rumor:0"}, "rumor:1", id="rumor-zero"),
+        pytest.param({"ref": "intro", "note": "т", "for_hero": "pc-1"}, "Главное", id="intro-note"),
+        pytest.param({"ref": "npc:fabian", "for_hero": ""}, "pc-1", id="empty-hero"),
+        pytest.param({"ref": "npc:fabian", "for_hero": "PC-1"}, "pc-1", id="hero-case"),
+        pytest.param({"ref": "npc:fabian", "for_hero": "x" * 65}, "for_hero", id="long-hero"),
+        pytest.param({"ref": "npc:fabian", "note": "а\rб"}, "note", id="carriage-return"),
+        pytest.param({"ref": "npc:fabian", "note": "скрытое\u200bслово"}, "note", id="zero-width"),
+    ],
+)
+def test_journal_add_refuses_wrong_calls_without_changing_the_journal(
+    run, make_ctx, make_state, args, expected
+):
+    state = make_state()
+    ctx = make_ctx(state)
+    run(ctx, "journal_add", ref="npc:fabian")
+    before = state.model_dump()
+
+    outcome = run(ctx, "journal_add", **args)
+
+    assert outcome.result is None and expected in outcome.error
+    assert state.model_dump() == before
+    assert ctx.events == []
+
+
+def test_journal_add_refuses_a_note_beyond_the_limit_of_the_entry(run, make_ctx, make_state):
+    ctx = make_ctx(make_state())
+
+    outcomes = [run(ctx, "journal_add", ref="world", note="я" * MAX_NOTE_CHARS) for _ in range(4)]
+
+    assert [outcome.error is None for outcome in outcomes] == [True, True, True, False]
+    assert str(MAX_TEXT_CHARS) in outcomes[-1].error
+    [entry] = ctx.state.journal
+    assert (len(entry.text), entry.revision) == (3 * MAX_NOTE_CHARS + 4, 3)
+
+
+# --- дневник: финальное покрытие блока (дополнение контракта B8 §3, §4, §10) ---
+
+
+def test_a_move_of_the_party_is_written_for_everyone_even_in_a_secret_turn(
+    run, make_ctx, make_state
+):
+    # Отряд ходит вместе: у перехода нет автора, и запись о месте общая (дополнение §4).
+    ctx = make_ctx(make_state(), secret_actors={"pc-1"})
+
+    run(ctx, "move_party", location_id="cemetery")
+
+    [entry] = ctx.state.journal
+    assert (entry.id, entry.audience, entry.visited_turn) == ("location:cemetery@all", "all", 0)
+
+
+def test_with_several_secret_heroes_a_clue_goes_only_to_the_hero_of_the_find(
+    run, make_ctx, make_state
+):
+    # Автор находки один — `for_hero`; правило «первый тайный по id» тут ни при чём.
+    ctx = make_ctx(make_state(location_id="cemetery"), secret_actors={"pc-1", "pc-2"})
+
+    outcome = run(ctx, "reveal", ref="feature:tracks", for_hero="pc-2")
+
+    assert outcome.error is None
+    [clue] = ctx.state.journal
+    assert (clue.id, clue.audience) == ("clue:clue-tracks@pc-2", "pc-2")
+    assert visible_entries(ctx.state.journal, "pc-1") == ()
+
+
+def test_a_secret_find_stays_personal_and_the_master_shares_it_with_journal_add(
+    run, make_ctx, make_state
+):
+    state = make_state(location_id="cemetery")
+    run(make_ctx(state, secret_actors={"pc-2"}), "reveal", ref="clue:clue-diary", for_hero="pc-2")
+    open_turn = make_ctx(state)  # следующий ход — открытый
+
+    again = run(open_turn, "reveal", ref="clue:clue-diary", for_hero="pc-1")
+
+    assert again.result == {"ref": "clue:clue-diary", "new": False}
+    assert [entry.id for entry in state.journal] == ["clue:clue-diary@pc-2"]  # всем не открылась
+
+    shared = run(open_turn, "journal_add", ref="clue:clue-diary")
+
+    assert shared.result == {"entry_id": "clue:clue-diary@all", "new": True, "revision": 1}
+    personal, common = state.journal
+    assert (personal.audience, common.audience, common.text) == ("pc-2", "all", personal.text)
+
+
+@pytest.mark.parametrize(("holder", "receiver"), [("pc-2", "pc-1"), ("pc-1", "pc-2")])
+def test_an_item_passed_between_two_secret_heroes_goes_to_the_first_of_them_by_id(
+    run, make_ctx, make_state, holder, receiver
+):
+    # Адресат записи один (`ToolContext.audience_of`, как у строки ленты): закрыто, а не всем.
+    state = make_state()
+    state.world.item_holders["chest-key"] = f"character:{holder}"
+    ctx = make_ctx(state, secret_actors={"pc-1", "pc-2"})
+
+    run(ctx, "give_item", item_id="chest-key", character_id=receiver)
+
+    [entry] = state.journal
+    assert (entry.id, entry.audience) == ("item:chest-key@pc-1", "pc-1")
+
+
+def test_an_item_got_by_an_open_hero_during_the_secret_turn_of_another_is_common(
+    run, make_ctx, make_state
+):
+    ctx = make_ctx(make_state(), secret_actors={"pc-2"})
+
+    run(ctx, "give_item", item_id="chest-key", character_id="pc-1")
+
+    assert [entry.id for entry in ctx.state.journal] == ["item:chest-key@all"]
+
+
+def test_an_item_known_at_start_got_in_a_secret_turn_adds_a_personal_entry_beside_the_common(
+    run, make_ctx, make_state, demo_adventure
+):
+    adventure = variant(
+        demo_adventure, lambda data: data["items"]["chest-key"].update(known_at_start=True)
+    )
+    state = open_journal(make_state(), adventure)
+    common = journal_of(state)["item:chest-key@all"]
+    ctx = make_ctx(state, adventure=adventure, secret_actors={"pc-2"})
+
+    run(ctx, "give_item", item_id="chest-key", character_id="pc-2")
+
+    assert journal_of(state)["item:chest-key@all"] == common  # общая запись не тронута
+    assert journal_of(state)["item:chest-key@pc-2"].audience == "pc-2"
+    assert common in visible_entries(state.journal, "pc-1")
+    assert "item:chest-key@pc-2" not in {e.id for e in visible_entries(state.journal, "pc-1")}
+
+
+@pytest.mark.parametrize(
+    ("ref", "section"),
+    [
+        ("location:crypt", "places"),
+        ("npc:marta", "people"),
+        ("deity:ossmar", "gods"),
+        ("faction:regulars", "factions"),
+        ("region:barrow-hill", "world"),
+        ("rumor:2", "rumors"),
+        ("clue:clue-tracks", "clues"),
+        ("item:healing-potion", "items"),
+    ],
+)
+def test_journal_add_without_a_note_writes_the_public_entry_of_any_kind(
+    run, make_ctx, make_state, ref, section
+):
+    state = make_state(party_round=6)
+    state.world.revealed.append("clue:clue-tracks")  # улику пишут в дневник только найденной
+    ctx = make_ctx(state)
+
+    outcome = run(ctx, "journal_add", ref=ref)
+
+    assert outcome.result == {"entry_id": f"{ref}@all", "new": True, "revision": 1}
+    [entry] = ctx.state.journal
+    assert (entry.section, entry.audience, entry.turn, entry.visited_turn) == (
+        section,
+        "all",
+        6,
+        None,
+    )
+    assert entry.title and entry.text
+
+
+def test_journal_add_writes_the_history_of_the_world_for_one_hero(run, make_ctx, make_state):
+    ctx = make_ctx(make_state())
+
+    outcome = run(
+        ctx, "journal_add", ref="world", note="Графы Мортены правили краем.", for_hero="pc-1"
+    )
+
+    assert outcome.result == {"entry_id": "world@pc-1", "new": True, "revision": 1}
+    assert visible_entries(ctx.state.journal, "pc-2") == ()
+
+
+def test_journal_add_trims_the_note_and_counts_its_length_after_the_trim(run, make_ctx, make_state):
+    ctx = make_ctx(make_state())
+
+    outcome = run(ctx, "journal_add", ref="world", note="  " + "я" * MAX_NOTE_CHARS + "\n ")
+
+    assert outcome.error is None
+    [entry] = ctx.state.journal
+    assert entry.text == "я" * MAX_NOTE_CHARS
+
+
+def test_journal_add_extends_a_place_the_party_has_been_to_and_keeps_the_visit(
+    run, make_ctx, make_state, demo_adventure
+):
+    state = open_journal(make_state(party_round=3), demo_adventure)
+    village = journal_of(state)["location:village@all"]
+    ctx = make_ctx(state)
+
+    outcome = run(ctx, "journal_add", ref="location:village", note="Трактир закрыт до утра.")
+
+    assert outcome.result == {"entry_id": "location:village@all", "new": False, "revision": 2}
+    entry = journal_of(state)["location:village@all"]
+    assert (entry.turn, entry.visited_turn) == (0, 0)
+    assert entry.text == f"{village.text}\n\nТрактир закрыт до утра."
+
+
+# Регрессия B8.coverage D1 (исправлена в B8.1.fix1, дополнение §11 п. 1): улика с пустым
+# описанием, предмет и место без названия и `public` проходят схему, валидатор и формы
+# конструктора. Авто-запись дневника о них раньше бросала ошибку уже после изменения рабочей копии,
+# и ход мастера падал целиком. Теперь находка, передача и переход работают, как до B8, а записи о
+# сущности без текста нет; мастер может записать её сам — только с note.
+
+
+def without_text(data: dict[str, Any]) -> None:
+    data["revelations"]["kidnapper"]["clues"][2]["description"] = ""  # clue-tracks
+    data["items"]["chest-key"].update(name="", public="")
+
+
+def test_a_clue_without_a_description_is_still_found(run, make_ctx, make_state, demo_adventure):
+    adventure = variant(demo_adventure, without_text)
+    ctx = make_ctx(make_state(location_id="cemetery"), adventure=adventure)
+
+    outcome = run(ctx, "reveal", ref="feature:tracks")
+
+    assert outcome.error is None
+    assert "clue:clue-tracks" in ctx.state.world.revealed
+    assert ctx.state.journal == ()  # о находке без текста дневнику сказать нечего
+
+
+def test_an_item_without_a_name_and_public_text_is_still_given(
+    run, make_ctx, make_state, demo_adventure
+):
+    adventure = variant(demo_adventure, without_text)
+    ctx = make_ctx(make_state(), adventure=adventure)
+
+    outcome = run(ctx, "give_item", item_id="chest-key", character_id="pc-2")
+
+    assert outcome.error is None
+    assert ctx.state.world.item_holders["chest-key"] == "character:pc-2"
+    assert ctx.state.journal == ()
+
+
+def test_a_place_without_a_name_and_public_text_is_still_reached(
+    run, make_ctx, make_state, demo_adventure
+):
+    adventure = variant(
+        demo_adventure, lambda data: data["locations"]["cemetery"].update(name="", public="")
+    )
+    ctx = make_ctx(make_state(), adventure=adventure)
+
+    outcome = run(ctx, "move_party", location_id="cemetery")
+
+    assert outcome.error is None and ctx.state.location_id == "cemetery"
+    assert ctx.state.journal == ()
+
+
+def test_the_master_cannot_write_an_entity_without_text_without_a_note(
+    run, make_ctx, make_state, demo_adventure
+):
+    # Строгая запись `journal_add`: отказ до изменений, с note — можно (дополнение §11 п. 1).
+    adventure = variant(demo_adventure, without_text)
+    state = make_state(location_id="cemetery")
+    state.world.revealed.append("clue:clue-tracks")
+    ctx = make_ctx(state, adventure=adventure)
+
+    bare = run(ctx, "journal_add", ref="item:chest-key")
+    noted = run(ctx, "journal_add", ref="item:chest-key", note="Маленький ключ.")
+
+    assert bare.result is None and "note" in bare.error
+    assert noted.result == {"entry_id": "item:chest-key@all", "new": True, "revision": 1}
+    assert [entry.text for entry in state.journal] == ["Маленький ключ."]
+
+
+# --- journal_add: только найденная улика (S4) и печатаемость note (R4), дополнение §11 ---
+
+
+def test_journal_add_writes_a_clue_only_after_it_is_found(run, make_ctx, make_state):
+    state = make_state(location_id="cemetery")
+    ctx = make_ctx(state)
+    before = state.model_dump()
+
+    early = run(ctx, "journal_add", ref="clue:clue-diary")
+    unknown = run(ctx, "journal_add", ref="clue:ghost")
+    assert state.model_dump() == before
+    run(ctx, "reveal", ref="clue:clue-tracks")
+    later = run(ctx, "journal_add", ref="clue:clue-diary", note="Нашли и дневник.")
+    run(ctx, "reveal", ref="clue:clue-diary")
+    shared = run(ctx, "journal_add", ref="clue:clue-diary", for_hero="pc-1")
+
+    assert early.result is None and "не найдена" in early.error
+    assert unknown.result is None and "clue:clue-tracks" not in unknown.error  # найденных нет
+    assert later.result is None and "clue:clue-tracks" in later.error  # подсказка: найденные
+    assert shared.result == {"entry_id": "clue:clue-diary@pc-1", "new": True, "revision": 1}
+    assert ctx.events and all(event.kind == "reveal" for event in ctx.events)
+
+
+@pytest.mark.parametrize(
+    ("note", "written"),
+    [
+        pytest.param("Сорок\u00a0золотых.", "Сорок золотых.", id="nbsp"),
+        pytest.param("10\u202fшагов", "10 шагов", id="narrow-nbsp"),
+        pytest.param("пере\u00adнос", "перенос", id="soft-hyphen"),
+        pytest.param("\u2003Отступ и\u3000пробел", "Отступ и пробел", id="wide-spaces"),
+    ],
+)
+def test_journal_add_turns_typographic_spaces_into_plain_ones(
+    run, make_ctx, make_state, note, written
+):
+    ctx = make_ctx(make_state())
+
+    outcome = run(ctx, "journal_add", ref="world", note=note)
+
+    assert outcome.error is None, outcome.error
+    [entry] = ctx.state.journal
+    assert entry.text == written
+
+
+@pytest.mark.parametrize(
+    "char",
+    ["\u200b", "\u200d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069", "\u2028", "\x07"],
+)
+def test_journal_add_still_refuses_invisible_and_reversing_characters(
+    run, make_ctx, make_state, char
+):
+    ctx = make_ctx(make_state())
+
+    outcome = run(ctx, "journal_add", ref="world", note=f"тайно{char}навыворот")
+
+    assert outcome.result is None and "note" in outcome.error
+    assert ctx.state.journal == ()
+
+
+def test_the_limit_of_a_note_counts_after_the_soft_hyphens_are_removed(run, make_ctx, make_state):
+    ctx = make_ctx(make_state())
+
+    outcome = run(ctx, "journal_add", ref="world", note="я\u00ad" * MAX_NOTE_CHARS)
+
+    assert outcome.error is None, outcome.error
+    assert ctx.state.journal[0].text == "я" * MAX_NOTE_CHARS
+
+
 # --- любая ошибка модели ничего не меняет ---
 
 FAILING_CALLS = [
@@ -1666,6 +2362,10 @@ FAILING_CALLS = [
     ("request_save", {"character_id": "pc-1", "ability": "wis", "dc": 14, "reason": "т"}),
     ("contest", contest_args(b_id="ghost")),
     ("contest", contest_args(b_id="marta")),
+    ("journal_add", {"ref": "npc:ghost"}),
+    ("journal_add", {"ref": "world"}),
+    ("journal_add", {"ref": "npc:marta", "for_hero": "ghost"}),
+    ("journal_add", {"ref": "clue:clue-marta"}),  # улика ещё не найдена
 ]
 
 

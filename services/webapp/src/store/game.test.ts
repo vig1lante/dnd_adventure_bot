@@ -3,6 +3,7 @@ import type {
   CombatView,
   FeedItem,
   GameSummary,
+  JournalEntry,
   PartyMember,
   PhaseView,
   PlayerAction,
@@ -144,6 +145,26 @@ function combatView(round = 1): CombatView {
   };
 }
 
+/** Запись дневника по контракту B8 (§2): общая, с начала игры, первой ревизии. */
+function entry(
+  ref: string,
+  overrides: Partial<Omit<JournalEntry, "id" | "ref">> = {},
+): JournalEntry {
+  const audience = overrides.audience ?? "all";
+  return {
+    id: `${ref}@${audience}`,
+    ref,
+    section: ref === "intro" ? "main" : "places",
+    title: ref,
+    text: `О ${ref}.`,
+    audience,
+    turn: 0,
+    revision: 1,
+    visited_turn: null,
+    ...overrides,
+  };
+}
+
 function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
   return {
     type: "snapshot",
@@ -157,6 +178,7 @@ function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     party: [member("c1")],
     combat: null,
     feed: [feedItem(1), feedItem(2)],
+    journal: [entry("intro"), entry("location:village")],
     ...overrides,
   };
 }
@@ -191,6 +213,7 @@ describe("applyEvent: снимок", () => {
         party: [member("old-hero")],
         combat: combatView(3),
         statuses: { gone: "pass" },
+        journal: [entry("location:old")],
       }),
       SERVER_MS,
     );
@@ -200,6 +223,7 @@ describe("applyEvent: снимок", () => {
       party: [member("c1")],
       combat: null,
       statuses: { u1: "ready" },
+      journal: [entry("intro")],
     });
     const state = applyEvent(old, fresh, SERVER_MS);
 
@@ -213,6 +237,7 @@ describe("applyEvent: снимок", () => {
       party: fresh.party,
       combat: null,
       feed: [feedItem(1)],
+      journal: [entry("intro")],
     });
   });
 
@@ -299,6 +324,163 @@ describe("applyEvent: лента", () => {
     );
 
     expect(state).toEqual(before);
+  });
+});
+
+describe("applyEvent: дневник", () => {
+  const ids = (state: LiveState) =>
+    viewOf(state).journal.map((item) => item.id);
+
+  test("дневник берётся из снимка как есть, в порядке появления", () => {
+    expect(ids(started())).toEqual(["intro@all", "location:village@all"]);
+  });
+
+  test("journal_entry с новым id добавляет запись в конец", () => {
+    const state = after({
+      type: "journal_entry",
+      entry: entry("location:cemetery", { turn: 2, visited_turn: 2 }),
+    });
+
+    expect(ids(state)).toEqual([
+      "intro@all",
+      "location:village@all",
+      "location:cemetery@all",
+    ]);
+    expect(viewOf(state).journal[2]).toMatchObject({
+      turn: 2,
+      visited_turn: 2,
+    });
+  });
+
+  test("journal_entry с тем же id заменяет запись на месте: дополнение не плодит дубль", () => {
+    const state = after({
+      type: "journal_entry",
+      entry: entry("intro", { text: "О intro.\n\nЕщё абзац.", revision: 2 }),
+    });
+
+    expect(ids(state)).toEqual(["intro@all", "location:village@all"]);
+    expect(viewOf(state).journal[0]).toMatchObject({
+      text: "О intro.\n\nЕщё абзац.",
+      revision: 2,
+    });
+  });
+
+  test("личная запись о той же сущности — отдельная запись рядом с общей", () => {
+    const state = after({
+      type: "journal_entry",
+      entry: entry("location:village", { audience: "pc_lira" }),
+    });
+
+    expect(ids(state)).toEqual([
+      "intro@all",
+      "location:village@all",
+      "location:village@pc_lira",
+    ]);
+  });
+
+  test("journal заменяет дневник целиком: записи отката уходят", () => {
+    const state = after(
+      { type: "journal_entry", entry: entry("location:cemetery") },
+      { type: "journal", entries: [entry("intro")] },
+    );
+
+    expect(ids(state)).toEqual(["intro@all"]);
+  });
+
+  test("события дневника не трогают остальные блоки", () => {
+    const before = viewOf(started());
+
+    const view = viewOf(
+      after(
+        { type: "journal_entry", entry: entry("location:cemetery") },
+        { type: "journal", entries: [] },
+      ),
+    );
+
+    expect({ ...view, journal: before.journal }).toEqual(before);
+    expect(view.journal).toEqual([]);
+  });
+
+  test("до снимка события дневника ничего не делают", () => {
+    const state = applyEvent(
+      NO_LIVE,
+      { type: "journal_entry", entry: entry("intro") },
+      SERVER_MS,
+    );
+
+    expect(state).toEqual(NO_LIVE);
+  });
+
+  test("дополнение записи в середине остаётся на её месте; повторные дополнения — одна запись с последней ревизией", () => {
+    const state = applyEvent(
+      started({
+        journal: [
+          entry("intro"),
+          entry("location:village"),
+          entry("location:cemetery"),
+        ],
+      }),
+      {
+        type: "journal_entry",
+        entry: entry("location:village", {
+          text: "Второй абзац.",
+          revision: 2,
+        }),
+      },
+      SERVER_MS,
+    );
+    const again = applyEvent(
+      state,
+      {
+        type: "journal_entry",
+        entry: entry("location:village", {
+          text: "Третий абзац.",
+          revision: 3,
+        }),
+      },
+      SERVER_MS,
+    );
+
+    expect(ids(again)).toEqual([
+      "intro@all",
+      "location:village@all",
+      "location:cemetery@all",
+    ]);
+    expect(viewOf(again).journal[1]).toMatchObject({
+      text: "Третий абзац.",
+      revision: 3,
+    });
+  });
+
+  test("journal_entry после блока journal ложится на новый блок", () => {
+    const state = after(
+      { type: "journal", entries: [entry("intro")] },
+      { type: "journal_entry", entry: entry("location:crypt", { turn: 4 }) },
+    );
+
+    expect(ids(state)).toEqual(["intro@all", "location:crypt@all"]);
+  });
+
+  test("события дневника не меняют прежнее состояние и не начинают новый ход", () => {
+    const before = started();
+    const journalBefore = structuredClone(viewOf(before).journal);
+
+    const added = applyEvent(
+      before,
+      { type: "journal_entry", entry: entry("location:crypt") },
+      SERVER_MS,
+    );
+    const replaced = applyEvent(
+      added,
+      { type: "journal_entry", entry: entry("intro", { revision: 2 }) },
+      SERVER_MS,
+    );
+
+    expect(viewOf(before).journal).toEqual(journalBefore);
+    expect(viewOf(added).journal).not.toBe(viewOf(before).journal);
+    expect(viewOf(replaced).journal).not.toBe(viewOf(added).journal);
+    expect(viewOf(added).journal[0].revision).toBe(1);
+    expect(replaced.turn).toBe(before.turn);
   });
 });
 
@@ -790,6 +972,44 @@ describe("followGame: игра из сокета в хранилище", () => {
     expect(viewOf(useGame.getState().live).feed.map((item) => item.id)).toEqual(
       [2, 5],
     );
+    stop();
+  });
+
+  test("обрыв: дневник из нового снимка заменяет записи, пришедшие событиями до обрыва", () => {
+    const { last } = fakeWebSocket();
+    signedIn();
+    const stop = followGame("g1");
+    last().open();
+    last().serve(snapshot({ journal: [entry("intro")] }));
+    last().serve({
+      type: "journal_entry",
+      entry: entry("location:crypt", { turn: 2 }),
+    });
+
+    last().drop(1006);
+    // Пока связи нет, дневник на экране остаётся прежним.
+    expect(
+      viewOf(useGame.getState().live).journal.map((item) => item.id),
+    ).toEqual(["intro@all", "location:crypt@all"]);
+
+    vi.advanceTimersByTime(1000);
+    last().open();
+    // За время обрыва ход откатили: склепа в дневнике сервера больше нет.
+    const fresh = [
+      entry("intro"),
+      entry("location:village", { revision: 2, visited_turn: 3 }),
+    ];
+    last().serve(snapshot({ journal: fresh }));
+    expect(viewOf(useGame.getState().live).journal).toEqual(fresh);
+
+    // Следующие события ложатся уже на дневник нового снимка.
+    last().serve({
+      type: "journal_entry",
+      entry: entry("location:cemetery", { turn: 4 }),
+    });
+    expect(
+      viewOf(useGame.getState().live).journal.map((item) => item.id),
+    ).toEqual(["intro@all", "location:village@all", "location:cemetery@all"]);
     stop();
   });
 

@@ -14,9 +14,9 @@
    выбрасываются, тексты сводятся к печатной строке и ограничиваются по длине при записи. Если у
    героя не осталось ни одной связи с NPC или местом, запрос повторяется один раз. Сбой повтора
    оставляет первый ответ; герой, которому связей так и не нашлось, играет без них. Результат (после
-   проверки ссылок) пишется одной транзакцией: `GameState` версии 1 с `pc_hooks` и личные сообщения
-   со своей зацепкой каждому игроку (адресат — игрок героя; чужие их не видят). Рассылка идёт после
-   коммита.
+   проверки ссылок) пишется одной транзакцией: `GameState` версии 1 с `pc_hooks` и стартовым
+   дневником отряда и личные сообщения со своей зацепкой каждому игроку (адресат — игрок героя;
+   чужие их не видят). Рассылка идёт после коммита.
 3. Открытие игры: `run_dm_turn(opening)` — мастер описывает стартовую локацию и собравшийся отряд;
    удавшийся ход переводит игру в `playing` и `discussion`.
 
@@ -51,6 +51,7 @@ from dnd_engine.adventure.loader import adventure_from_data
 from dnd_engine.adventure.schema import Adventure, Location, Npc
 from dnd_engine.character import Character
 from dnd_engine.content import SrdContent
+from dnd_engine.journal import open_journal
 from dnd_engine.state import GameState, PcHook, RulesRef
 from dnd_engine.tools.lore import relations_of
 from dnd_server.characters.flavor import SHORT_TEXT_MAX_CHARS
@@ -161,7 +162,8 @@ class WeavingOut(_Strict):
 
 
 def new_game_state(game_id: str, adventure: Adventure, party: Sequence[Character]) -> GameState:
-    """Состояние игры перед открытием: отряд, старт, модули правил из копии приключения.
+    """Состояние игры перед открытием: отряд, старт, модули правил из копии приключения и стартовый
+    дневник отряда (`open_journal`: «Главное», известное со старта, стартовая локация).
 
     Ключ отряда — `Character.id` (по нему мастер, инструменты и сервер находят героя). Версия 1:
     ход мастера требует состояния, а версии растут только вперёд."""
@@ -174,7 +176,7 @@ def new_game_state(game_id: str, adventure: Adventure, party: Sequence[Character
         version=1,
     )
     state.world.visited_locations = [adventure.start_location]
-    return state
+    return open_journal(state, adventure)
 
 
 # --- запрос к модели ---

@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
+from dnd_engine.journal import open_journal, write
 from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.config import Settings
@@ -34,6 +35,8 @@ from dnd_server.realtime.hub import Hub
 from dnd_server.realtime.views import (
     audience_to_user,
     feed_item_event,
+    journal_entry_events,
+    journal_events,
     phase_event,
     state_events,
 )
@@ -418,6 +421,52 @@ async def test_nothing_of_the_dm_turn_log_or_adventure_copy_is_ever_sent(server,
         frames = [await drain(ws) for ws in sockets.values()]
 
     assert SECRET_MARK not in json.dumps(frames, ensure_ascii=False)
+
+
+# --- дневник отряда: личная запись только её хозяину (блок B8) ---
+
+JOURNAL_NOTE = "ЛИЧНОЕ-boris: Марта прячет ключ под стойкой."
+
+
+async def test_a_personal_journal_entry_reaches_only_its_player_in_the_snapshot_and_the_frames(
+    server, table, db
+):
+    before = open_journal(table.state, table.adventure)
+    after = before.model_copy(deep=True, update={"version": 4})
+    write(after, table.adventure, "npc:marta", audience=table.boris.character.id, note=JOURNAL_NOTE)
+    write(after, table.adventure, "deity:ossmar", note="Оссмара чтут на кладбище.")
+    async with db() as session:
+        session.add(GameStateSnapshot.from_state(after))
+        (await session.get(Game, table.game_id)).state_version = 4
+        await session.commit()
+    users = [seat.user_id for seat in table.seats.values()]
+
+    async with (
+        connect(server.url(table.game_id, table.alice.token)) as alice_ws,
+        connect(server.url(table.game_id, table.boris.token)) as boris_ws,
+    ):
+        snapshots = {"alice": await recv(alice_ws), "boris": await recv(boris_ws)}
+        for payload, audience in journal_entry_events(before, after):
+            await server.hub.send(table.game_id, payload, audience)
+        for payload, audience in journal_events(after, users):
+            await server.hub.send(table.game_id, payload, audience)
+        frames = {"alice": await drain(alice_ws), "boris": await drain(boris_ws)}
+
+    assert JOURNAL_NOTE in json.dumps(snapshots["boris"]["journal"], ensure_ascii=False)
+    assert JOURNAL_NOTE not in json.dumps(snapshots["alice"], ensure_ascii=False)
+    assert [(f["type"], f.get("entry", {}).get("ref")) for f in frames["alice"]] == [
+        ("journal_entry", "deity:ossmar"),
+        ("journal", None),
+    ]
+    assert [(f["type"], f.get("entry", {}).get("ref")) for f in frames["boris"]] == [
+        ("journal_entry", "deity:ossmar"),
+        ("journal_entry", "npc:marta"),
+        ("journal", None),
+    ]
+    assert JOURNAL_NOTE not in json.dumps(frames["alice"], ensure_ascii=False)
+    assert JOURNAL_NOTE in json.dumps(frames["boris"][2]["entries"], ensure_ascii=False)
+    assert frames["boris"][2]["entries"] == snapshots["boris"]["journal"]
+    assert frames["alice"][1]["entries"] == snapshots["alice"]["journal"]
 
 
 # --- лобби через хаб ---

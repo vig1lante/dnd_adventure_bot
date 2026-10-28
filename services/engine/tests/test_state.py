@@ -33,6 +33,7 @@ from dnd_engine.events import (
     RollEvent,
     SceneEvent,
 )
+from dnd_engine.journal import JournalEntry
 from dnd_engine.rest import RestOutcome
 from dnd_engine.rng import ScriptedRng
 from dnd_engine.state import (
@@ -135,6 +136,38 @@ def rich_state(character) -> GameState:
             )
         },
         short_rests_since_long=1,
+        journal=(
+            JournalEntry(
+                id="intro@all",
+                ref="intro",
+                section="main",
+                title="Главное",
+                text="Найти смотрителя.",
+                audience="all",
+                turn=0,
+            ),
+            JournalEntry(
+                id="location:hall@all",
+                ref="location:hall",
+                section="places",
+                title="Зал",
+                text="Зал склепа.\n\nЗдесь пахнет воском.",
+                audience="all",
+                turn=3,
+                revision=2,
+                visited_turn=5,
+            ),
+            JournalEntry(
+                id="clue:ring@pc-1",
+                ref="clue:ring",
+                section="clues",
+                title="Кольцо с гербом",
+                text="Кольцо с гербом графа.",
+                audience="pc-1",
+                turn=9,
+            ),
+        ),
+        party_round=4,
         turn=12,
         version=7,
     )
@@ -203,6 +236,8 @@ def test_state_with_every_section_filled_survives_a_json_round_trip(make_charact
     assert restored.party["pc-1"].spell_slots == {1: 2}
     assert restored.combat is not None
     assert restored.combat.combatants["goblin_warrior-1"].conditions[0].id == "prone"
+    assert restored.journal == state.journal and isinstance(restored.journal, tuple)
+    assert restored.journal[2].audience == "pc-1"  # личная запись остаётся личной
 
 
 def test_new_state_has_neutral_defaults(make_character):
@@ -216,6 +251,66 @@ def test_new_state_has_neutral_defaults(make_character):
     assert (state.spotlight, state.pc_hooks) == ({}, {})
     assert (state.short_rests_since_long, state.turn, state.version) == (0, 0, 0)
     assert state.rules.base == "srd-5.2"
+    assert state.journal == ()
+    assert state.party_round == 0  # раунд игроков: 0 — начало игры и открытие (дополнение §11)
+
+
+def test_a_state_saved_before_the_journal_is_read_with_an_empty_journal(make_character):
+    # Снимок, записанный кодом без дневника (дополнение B8 §5): полей `journal` и `party_round`
+    # в нём нет.
+    saved = make_state(make_character()).model_dump(mode="json")
+    del saved["journal"], saved["party_round"]
+
+    restored = GameState.model_validate(saved)
+
+    assert (restored.journal, restored.party_round) == ((), 0)
+    assert restored.model_dump(mode="json") == saved | {"journal": [], "party_round": 0}
+
+
+def test_the_round_of_the_players_survives_a_json_round_trip_apart_from_the_turn(make_character):
+    state = rich_state(make_character())
+
+    restored = GameState.model_validate_json(state.model_dump_json())
+
+    assert (restored.party_round, restored.turn) == (4, 12)  # раунд игроков — не ход мастера
+
+
+def test_a_game_in_progress_saved_before_the_journal_loses_no_field_after_reading(
+    make_character,
+):
+    # Старая игра посреди боя (бой, зацепки, привалы, раунд и версия): чтение текстом JSON, как
+    # из базы, не теряет и не меняет ни одного поля, а дневник получает умолчание (дополнение §5).
+    saved = json.loads(rich_state(make_character()).model_dump_json())
+    del saved["journal"], saved["party_round"]
+
+    restored = GameState.model_validate_json(json.dumps(saved, ensure_ascii=False))
+
+    assert (restored.journal, restored.party_round) == ((), 0)
+    assert json.loads(restored.model_dump_json()) == saved | {"journal": [], "party_round": 0}
+    assert (restored.turn, restored.version, restored.combat is not None) == (12, 7, True)
+
+
+def test_the_journal_of_a_state_is_written_to_json_as_a_list_of_entries(make_character):
+    state = rich_state(make_character())
+
+    dumped = json.loads(state.model_dump_json())
+
+    assert [entry["id"] for entry in dumped["journal"]] == [
+        "intro@all",
+        "location:hall@all",
+        "clue:ring@pc-1",
+    ]
+    assert dumped["journal"][1] == {
+        "id": "location:hall@all",
+        "ref": "location:hall",
+        "section": "places",
+        "title": "Зал",
+        "text": "Зал склепа.\n\nЗдесь пахнет воском.",
+        "audience": "all",
+        "turn": 3,
+        "revision": 2,
+        "visited_turn": 5,
+    }
 
 
 def test_defaults_are_not_shared_between_states(make_character):

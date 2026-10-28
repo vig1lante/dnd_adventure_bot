@@ -39,6 +39,14 @@
 (`_record_failure`); не прошла и она — сбой в журнале сервера, а «Повторить» принимает игру без
 живого разбора (`LiveRuns`).
 
+Дневник отряда (блок B8) пишут инструменты движка на рабочей копии, и сохраняет его тот же
+коммит. Игра, записанная до дневника, получает стартовый в резерве (`open_journal`): мастер видит
+его в контексте, а коммит хода его сохраняет. После коммита каждая новая или дополненная запись
+уходит своему адресату (`journal_entry`); открытие игры и откат «Перегенерировать» шлют каждому
+игроку его дневник целиком (`journal`): так его получает сокет из лобби, а запись снятого хода
+уходит и с экрана. Номер раунда игроков (`GameState.party_round`, им помечены записи дневника)
+поднимает только ход вида «раунд игроков», от базового состояния хода.
+
 Рассылка после коммита (`announcing`) итог хода не меняет: запись уже сделана, сбой построителя
 события пишется в журнал сервера, а клиент увидит всё в снимке.
 
@@ -73,6 +81,7 @@ from dnd_engine.adventure.loader import adventure_from_data
 from dnd_engine.adventure.schema import Adventure
 from dnd_engine.content import SrdContent, load_srd
 from dnd_engine.events import Event
+from dnd_engine.journal import open_journal
 from dnd_engine.modules import build_ruleset
 from dnd_engine.modules.base import RuleSet
 from dnd_engine.rng import Rng
@@ -142,6 +151,8 @@ from dnd_server.realtime.views import (
     feed_entries,
     feed_item_event,
     feed_withdrawn_event,
+    journal_entry_events,
+    journal_events,
     phase_event,
     player_status_event,
     state_events,
@@ -590,7 +601,9 @@ async def _plan(
     row = await session.get(GameStateSnapshot, (game.id, game.state_version))
     if row is None:
         raise Conflict("У игры ещё нет состояния: мастеру нечего разбирать.")
-    state = row.to_state()
+    adventure = adventure_from_data(game.adventure_data)  # копия любого поколения формата
+    # Игра, записанная до дневника, получает стартовый: его сохранит коммит этого хода.
+    state = open_journal(row.to_state(), adventure)
     if mode == TurnKind.COMBAT and acting is None:
         # «Повторить» после падения процесса: в записи восстановления бойцов нет, их называет бой.
         acting = combat_acting(state)
@@ -602,7 +615,6 @@ async def _plan(
         )
     )
     character_of = {hero.player_id: hero.id for hero in state.party.values() if hero.player_id}
-    adventure = adventure_from_data(game.adventure_data)  # копия любого поколения формата
     return _Plan(
         game_id=game.id,
         turn_id=turn.id,
@@ -728,12 +740,16 @@ async def _recent_turns(
 
 
 async def _announce_reserve(deps: Deps, game: Game, plan: _Plan) -> None:
-    """«Мастер думает»; при перегенерации — ещё откат ленты и состояния игроков."""
+    """«Мастер думает»; при перегенерации — ещё откат ленты, состояния и дневника игроков."""
     await send_to_game(deps.broadcaster, game.id, phase_event(game, plan.state))
     for message_id, audience in plan.withdrawn:
         await send_to_game(deps.broadcaster, game.id, feed_withdrawn_event(message_id), audience)
     if plan.rewound:
-        for event, audience in state_events(plan.state, deps.srd, plan.adventure):
+        rolled_back = [
+            *state_events(plan.state, deps.srd, plan.adventure),
+            *journal_events(plan.state, plan.user_ids),
+        ]
+        for event, audience in rolled_back:
             await send_to_game(deps.broadcaster, game.id, event, audience)
 
 
@@ -848,6 +864,10 @@ async def _attempt(
     # Копия глубокая: инструменты меняют её, а неудачная попытка просто выбрасывает.
     work = prepared.base.model_copy(deep=True)
     work.turn = plan.turn_number
+    if plan.mode == TurnKind.ROUND:
+        # Номер раунда игроков (дневник: «узнали в раунде N») считается от базы хода, поэтому
+        # «Перегенерировать» и «Повторить» дают тот же номер; открытие, бой и привал его не меняют.
+        work.party_round = prepared.base.party_round + 1
     ctx = ToolContext(
         state=work,
         adventure=plan.adventure,
@@ -1065,10 +1085,18 @@ async def _finish_actions(session: AsyncSession, turn_id: str) -> None:
 async def _announce_commit(
     deps: Deps, game: Game, plan: _Plan, work: GameState, messages: list[Message]
 ) -> None:
-    """Рассылка после коммита: записи ленты, отряд, бой, листы, фаза и статусы нового хода."""
+    """Рассылка после коммита: записи ленты, отряд, бой, листы, дневник, фаза и статусы нового
+    хода. Дневник — новые и дополненные записи, а после открытия игры — каждому игроку целиком:
+    сокет, открытый ещё в лобби, получил снимок без дневника."""
     for message in messages:
         await send_to_game(deps.broadcaster, game.id, feed_item_event(message), message.audience)
-    for event, audience in state_events(work, deps.srd, plan.adventure):
+    journal = (
+        journal_events(work, plan.user_ids)
+        if plan.mode == TurnKind.OPENING
+        else journal_entry_events(plan.state, work)
+    )
+    deliveries = [*state_events(work, deps.srd, plan.adventure), *journal]
+    for event, audience in deliveries:
         await send_to_game(deps.broadcaster, game.id, event, audience)
     await send_to_game(deps.broadcaster, game.id, phase_event(game, work))
     for user_id in plan.user_ids:

@@ -195,7 +195,8 @@ def play(
                 dc=10,
                 reason="Идёт по следам волочения",
             ),
-            call("reveal", ref="feature:tracks"),
+            # В раунде с тайным ходом мастер называет героя находки (дополнение B8 §12).
+            call("reveal", ref="feature:tracks", for_hero=ALLY),
             call("private_message", character_id=ALLY, text="Следы ведут к мшистой плите."),
             call("reveal", ref="feature:chest"),
             call("give_item", item_id="healing-potion", character_id=HERO),
@@ -440,7 +441,8 @@ def test_the_events_of_the_whole_game_tell_the_same_story(play):
 
 
 def test_only_lira_secret_search_and_message_are_hidden_from_the_others(play):
-    events = play().table.events
+    table = play().table
+    events = table.events
 
     hidden = [e for e in events if isinstance(e, RollEvent) and e.audience != "all"]
     assert [(e.actor_id, e.audience, e.label) for e in hidden] == [
@@ -449,6 +451,10 @@ def test_only_lira_secret_search_and_message_are_hidden_from_the_others(play):
     public = [e for e in events if isinstance(e, RollEvent) and e.audience == "all"]
     assert len(public) > 10  # уговоры, инициатива, удары и урон видят все
     assert [e.audience for e in events if isinstance(e, PrivateMessageEvent)] == [ALLY]
+    # Улика тайного поиска записана в дневник только Лире.
+    assert [(e.ref, e.audience) for e in table.state.journal if e.section == "clues"] == [
+        ("clue:clue-tracks", ALLY)
+    ]
 
 
 def test_no_event_of_the_game_gives_away_what_only_the_master_may_know(play):

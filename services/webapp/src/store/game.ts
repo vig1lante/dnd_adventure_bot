@@ -3,6 +3,7 @@ import type {
   FeedItem,
   FeedWithdrawal,
   GamePhase,
+  JournalEntry,
   PhaseView,
   PlayerAction,
   Snapshot,
@@ -65,6 +66,18 @@ function withFeedItem(
   return [...feed, item].slice(-MAX_FEED_ITEMS);
 }
 
+/**
+ * Запись дневника пришла событием: новая встаёт в конец, а дополненная (тот же `id`) заменяет
+ * прежнюю на её месте — порядок дневника остаётся порядком появления записей.
+ */
+function withJournalEntry(
+  journal: JournalEntry[],
+  entry: JournalEntry,
+): JournalEntry[] {
+  if (!journal.some((item) => item.id === entry.id)) return [...journal, entry];
+  return journal.map((item) => (item.id === entry.id ? entry : item));
+}
+
 // Фазы, в которые игра приходит после «Мастер думает», когда разбор удался. «Мастер не
 // справился» ход не заканчивает: ходы игроков сохранены и после «Повторить» разбираются снова.
 const AFTER_RESOLVING: ReadonlySet<TurnPhase | null> = new Set([
@@ -99,6 +112,10 @@ function updateView(view: GameView, event: WsEvent): GameView {
       return { ...view, character: event.character };
     case "lobby":
       return { ...view, game: event.game };
+    case "journal_entry":
+      return { ...view, journal: withJournalEntry(view.journal, event.entry) };
+    case "journal":
+      return { ...view, journal: event.entries };
     default:
       return view; // pong и события, которых клиент не знает
   }
@@ -126,6 +143,7 @@ export function applyEvent(
         party: event.party,
         combat: event.combat,
         feed: event.feed,
+        journal: event.journal,
       },
       clockOffsetMs: Date.parse(event.server_time) - receivedAt,
       error: null,

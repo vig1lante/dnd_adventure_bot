@@ -653,6 +653,41 @@ export interface CombatView {
   zones: { id: string; name: string; combatants: string[] }[];
 }
 
+/** Раздел дневника (дополнение dispatcher к контракту B8, §1). */
+export type JournalSection =
+  | "main"
+  | "places"
+  | "people"
+  | "gods"
+  | "factions"
+  | "world"
+  | "rumors"
+  | "clues"
+  | "items";
+
+/**
+ * Запись дневника отряда (дополнение к контракту B8, §2). Сервер присылает только то, что
+ * игроку можно видеть: общие записи и личные записи его героя; тайн в тексте нет.
+ */
+export interface JournalEntry {
+  /** `<ref>@<audience>`: одна запись на сущность и адресата. */
+  id: string;
+  /** Ссылка на сущность: `intro`, `location:<id>`, `npc:<id>`, `rumor:<n>`, `world` и т.п. */
+  ref: string;
+  section: JournalSection;
+  title: string;
+  /** Дополнения идут новыми абзацами через пустую строку. */
+  text: string;
+  /** `"all"` — весь отряд, иначе id героя, которому запись адресована. */
+  audience: string;
+  /** Раунд, когда запись появилась; 0 — начало игры. */
+  turn: number;
+  /** 1 при создании, растёт с каждым дополнением и с первым приходом отряда в место. */
+  revision: number;
+  /** Только у мест: раунд, когда отряд впервые пришёл сюда; иначе `null`. */
+  visited_turn: number | null;
+}
+
 export interface Snapshot {
   type: "snapshot";
   /** Серверное время: отсчёты считаются от него, а не от часов телефона. */
@@ -666,6 +701,8 @@ export interface Snapshot {
   party: PartyMember[];
   combat: CombatView | null;
   feed: FeedItem[];
+  /** Дневник глазами игрока, в порядке появления записей. */
+  journal: JournalEntry[];
 }
 
 /** Запись ленты снята («Перегенерировать»): клиент убирает её по `id`. */
@@ -683,6 +720,10 @@ export type WsEvent =
   | { type: "combat"; combat: CombatView | null }
   | { type: "character"; character: Character }
   | { type: "lobby"; game: GameSummary }
+  /** Новая или дополненная запись дневника: заменяет запись с тем же `id` или добавляется. */
+  | { type: "journal_entry"; entry: JournalEntry }
+  /** Дневник целиком (откат хода, восстановление): заменяет прежний. */
+  | { type: "journal"; entries: JournalEntry[] }
   | { type: "error"; detail: string }
   | { type: "pong" };
 

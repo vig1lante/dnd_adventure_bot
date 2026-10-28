@@ -6,6 +6,8 @@ import type {
   DerivedSkill,
   FeedItem,
   HeroFighter,
+  JournalEntry,
+  JournalSection,
   MonsterFighter,
   PartyMember,
   PhaseView,
@@ -276,6 +278,68 @@ export function myAction(overrides: Partial<PlayerAction> = {}): PlayerAction {
     status: "draft",
     ...overrides,
   };
+}
+
+// --- дневник ---
+
+// Раздел по виду ссылки, как в таблице дополнения к контракту B8 (§1). Нужен только для удобства
+// заглушек: на экране раздел всегда берётся из записи сервера.
+const SECTION_OF_REF: Record<string, JournalSection> = {
+  intro: "main",
+  location: "places",
+  npc: "people",
+  deity: "gods",
+  faction: "factions",
+  region: "world",
+  world: "world",
+  rumor: "rumors",
+  clue: "clues",
+  item: "items",
+};
+
+/**
+ * Запись дневника по контракту B8 (§2): по умолчанию общая, известная с начала игры, первой
+ * ревизии. `id` собирается из `ref` и адресата, как у движка.
+ */
+export function journalEntry(
+  ref: string,
+  overrides: Partial<Omit<JournalEntry, "id" | "ref">> = {},
+): JournalEntry {
+  const audience = overrides.audience ?? "all";
+  return {
+    id: `${ref}@${audience}`,
+    ref,
+    section: SECTION_OF_REF[ref.split(":")[0]],
+    title: `Запись ${ref}`,
+    text: `Что известно о ${ref}.`,
+    audience,
+    turn: 0,
+    revision: 1,
+    visited_turn: null,
+    ...overrides,
+  };
+}
+
+/** Дневник в начале «Склепа»: «Главное», деревня и кладбище (известны с начала) и бог. */
+export function startJournal(): JournalEntry[] {
+  return [
+    journalEntry("intro", {
+      title: "Главное",
+      text: "Староста Мирры просит узнать, кто тревожит покой склепа.",
+    }),
+    journalEntry("location:village", {
+      title: "Деревня Мирра",
+      text: "Тихая деревня у старого тракта.",
+    }),
+    journalEntry("location:cemetery", {
+      title: "Старое кладбище",
+      text: "За деревней, у холма со склепом.",
+    }),
+    journalEntry("deity:kelemvor", {
+      title: "Келемвор",
+      text: "Бог смерти, страж покоя усопших.",
+    }),
+  ];
 }
 
 // --- игра глазами игрока ---

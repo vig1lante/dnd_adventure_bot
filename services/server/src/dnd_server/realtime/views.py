@@ -32,6 +32,13 @@ id персонажей; в id игрока их переводит `audience_to
 повторяет. Так же движок решает, может ли боец-герой действовать (`can_act` в порядке хода): это
 тот вопрос, по которому сервер ждёт ход героя, и клиент правил не повторяет.
 
+Дневник отряда (блок B8) лежит в состоянии игры: записи с адресатом `all` или id персонажа, как у
+событий движка, и текстом только из публичного (тайны приключения в него не попадают — это решает
+движок). Игроку уходят общие записи и личные записи его героя (`journal_view`) — в снимке, событием
+`journal_entry` о каждой новой или дополненной за ход записи и блоком `journal` целиком после
+отката хода. Игра, записанная до дневника, получает стартовый дневник при чтении для снимка — в
+памяти, в базу его запишет следующий ход мастера.
+
 Русские названия состояний и эффектов берутся из данных SRD движка (состояния, заклинания, умения
 классов) и из таблицы названий боевых меток движка (`MARK_NAMES_RU`, например «Помощь» для
 `helped`), а не из копии на сервере. Для id, которых нет и там, клиент получает сам id.
@@ -80,6 +87,7 @@ from dnd_engine.events import (
     RestEvent,
     RollEvent,
 )
+from dnd_engine.journal import JournalEntry, changed_entries, open_journal
 from dnd_engine.state import GameState
 from dnd_engine.tools.lore import item_holder
 from dnd_server.db.models import (
@@ -422,6 +430,19 @@ def _attacks(character: Character, srd: SrdContent) -> list[dict[str, Any]]:
     return attacks
 
 
+def journal_view(state: GameState, user_id: str) -> list[dict[str, Any]]:
+    """Дневник для игрока `user_id` в порядке записей: общие и личные записи его героя.
+
+    Кому видна запись, решает `audience_to_user`, как у ленты: чужую личную запись игрок не видит,
+    запись героя без игрока не видит никто, а при неоднозначном «все» никто не видит и общую.
+    Поля записи идут как есть: её текст движок собрал только из того, что могут знать игроки."""
+    return [
+        entry.model_dump(mode="json")
+        for entry in state.journal
+        if audience_to_user(state.party, entry.audience) in (AUDIENCE_ALL, user_id)
+    ]
+
+
 def feed_item(message: Message) -> dict[str, Any]:
     """Сообщение ленты. Адресата клиент не получает, только признак «личное»; `data` кладёт тот,
     кто пишет сообщение, и в нём только то, что видит адресат этой строки."""
@@ -490,6 +511,38 @@ def state_events(
             sheet = character_event(character, srd, adventure, state)
             deliveries.append((sheet, character.player_id))
     return deliveries
+
+
+def journal_entry_event(entry: JournalEntry) -> dict[str, Any]:
+    return {"type": "journal_entry", "entry": entry.model_dump(mode="json")}
+
+
+def journal_event(state: GameState, user_id: str) -> dict[str, Any]:
+    return {"type": "journal", "entries": journal_view(state, user_id)}
+
+
+def journal_entry_events(before: GameState, after: GameState) -> list[tuple[dict[str, Any], str]]:
+    """Записи дневника, новые или дополненные между состояниями (`changed_entries` движка): пары
+    `(событие, адресат)` для `Hub.send`, общая запись — всем, личная — только игроку её героя.
+
+    Запись, адресата которой нет среди игроков, не уходит никому; в журнал идёт только раздел, без
+    ссылки и текста: личная запись говорит о том, что герой узнал тайно."""
+    deliveries: list[tuple[dict[str, Any], str]] = []
+    for entry in changed_entries(before.journal, after.journal):
+        user_id = audience_to_user(after.party, entry.audience)
+        if user_id is None:
+            logger.warning(
+                "Запись дневника (раздел %s) не разослана: у адресата нет игрока.", entry.section
+            )
+            continue
+        deliveries.append((journal_entry_event(entry), user_id))
+    return deliveries
+
+
+def journal_events(state: GameState, user_ids: Iterable[str]) -> list[tuple[dict[str, Any], str]]:
+    """Дневник целиком каждому игроку из `user_ids` — его видимые записи, клиент заменяет ими свой
+    блок. Нужен после отката хода: запись, которой в состоянии больше нет, уходит и с экрана."""
+    return [(journal_event(state, user_id), user_id) for user_id in user_ids]
 
 
 # --- адресат события движка ---
@@ -796,10 +849,15 @@ def _item_entry(
 # --- снимок ---
 
 
-async def _current_state(session: AsyncSession, game: Game) -> GameState | None:
-    """Текущая версия состояния игры; до старта игры состояния нет. Версию читает `to_state`."""
+async def _current_state(
+    session: AsyncSession, game: Game, adventure: Adventure
+) -> GameState | None:
+    """Текущая версия состояния игры; до старта игры состояния нет. Версию читает `to_state`.
+
+    Игра, записанная до дневника, получает стартовый дневник (`open_journal`) только в памяти:
+    снимок ничего не пишет в базу, а сохранит дневник коммит следующего хода мастера."""
     row = await session.get(GameStateSnapshot, (game.id, game.state_version))
-    return None if row is None else row.to_state()
+    return None if row is None else open_journal(row.to_state(), adventure)
 
 
 async def _my_character(
@@ -861,9 +919,10 @@ async def snapshot_for(
     """
     game_out = await get_game(session, user, game_id)  # проверка участия и сводка лобби
     game = await session.get(Game, game_id)
-    # Копия приключения нужна листу (названия предметов, которые держит герой) и бою (имена NPC).
+    # Копия приключения нужна листу (названия предметов, которые держит герой), бою (имена NPC) и
+    # стартовому дневнику игры, записанной до него.
     adventure = adventure_from_data(game.adventure_data)
-    state = await _current_state(session, game)
+    state = await _current_state(session, game, adventure)
     actions = await _turn_actions(session, game)
     mine = actions.get(user.id)
     character = await _my_character(session, game_id, user, state)
@@ -900,4 +959,5 @@ async def snapshot_for(
         "party": party_view(state, srd) if state is not None else [],
         "combat": _combat_of(adventure, state, srd),
         "feed": await _feed(session, game_id, user),
+        "journal": journal_view(state, user.id) if state is not None else [],
     }

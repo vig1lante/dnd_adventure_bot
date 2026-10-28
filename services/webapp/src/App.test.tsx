@@ -520,6 +520,7 @@ describe("каркас экранов", () => {
 
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "Рассказ",
+      "Дневник",
       "Персонаж",
       "Отряд",
     ]);

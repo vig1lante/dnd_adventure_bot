@@ -16,6 +16,7 @@
 Темп: прошло 1 ч 10 мин из 1 ч 30 мин; по времени сейчас акт 3 из 3 («Склеп должника»).
 Посещённые локации: village.
 Найдено: feature:board.
+Дневник отряда: intro, location:cemetery, location:village, npc:marta, deity:ossmar, deity:veyla, region:marshland, region:barrow-hill, rumor:1, faction:regulars, npc:fabian (лично pc_0000000000000002).
 Флаги сюжета: {"met_marta": true}.
 
 ## Текущая локация

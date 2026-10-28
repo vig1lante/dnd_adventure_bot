@@ -105,6 +105,15 @@ class ToolContext:
         """Кому виден бросок актёра: тайному актёру — только ему, остальным — всем."""
         return actor_id if actor_id in self.secret_actors else PUBLIC_AUDIENCE
 
+    def audience_of(self, subjects: Iterable[str]) -> Audience:
+        """Кому видна запись о героях `subjects` (например, запись дневника о предмете, который
+        перешёл из рук в руки): тайный герой из них видит её один, иначе — все.
+
+        То же правило, что у строк ленты сервера о предметах и вдохновении: аудитория одна,
+        поэтому из нескольких тайных героев запись достаётся первому по id — закрыто, а не всем."""
+        secret = sorted(set(subjects) & self.secret_actors)
+        return secret[0] if secret else PUBLIC_AUDIENCE
+
     def mark_secret_rolls(self, authors: Iterable[str] = ()) -> None:
         """Закрывает броски действия вызова (`events[action_from:]`) по его авторам.
 

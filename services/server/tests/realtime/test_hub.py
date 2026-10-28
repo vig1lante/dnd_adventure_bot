@@ -258,6 +258,8 @@ def test_event_types_are_those_of_the_plan():
         "combat",
         "character",
         "lobby",
+        "journal_entry",
+        "journal",
         "error",
     } == EVENT_TYPES
 

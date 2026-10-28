@@ -5,7 +5,8 @@
   фрагменты включённых модулей правил;
 - `adventure_brief` — сводка приключения без заметок мастера по локациям: от них сводка менялась
   бы при любой правке, а кеш промпта держится на её стабильности;
-- `turn_context` — динамический контекст одного хода: режим мата игры, летопись, мир, локация,
+- `turn_context` — динамический контекст одного хода: режим мата игры, летопись, мир (с перечнем
+  того, что уже записано в дневник отряда), локация,
   мир приключения вокруг неё (история, боги, фракции и связи, формат v2), отряд, бой, подсказки
   внимания, прошлые ходы и ходы этого раунда.
 
@@ -29,6 +30,7 @@ from dnd_engine.character import IMPROVISED_WEAPON_ID, Character
 from dnd_engine.combat.model import Combat, Combatant
 from dnd_engine.conditions import is_dead
 from dnd_engine.content import SrdContent
+from dnd_engine.journal import ALL as JOURNAL_ALL
 from dnd_engine.modules.base import NO_RULES, RuleSet
 from dnd_engine.state import GameState, PcHook, SceneType
 from dnd_engine.tools.lore import GetLocationArgs, get_location, item_holder, relations_of
@@ -51,6 +53,9 @@ MAX_CHRONICLE_ENTRIES = 40  # записей летописи в контекс�
 # Строк богов, фракций и связей в разделе «Мир приключения»: опубликованное приключение бывает
 # любого размера, а раздел идёт в контекст каждого хода (carry_over B6.1, security B2 I3).
 MAX_LORE_LINES = 40
+# Ссылок дневника отряда в строке раздела «Мир»: дневник растёт всю игру, а строка идёт в каждый
+# ход.
+MAX_JOURNAL_REFS = 60
 INSPIRATION_MODULE = "bg3_flavor"  # модуль, по которому показываем поводы для вдохновения
 MARK_SECRET, MARK_INSPIRATION, MARK_PASS = "тайно", "вдохновение", "пас"
 
@@ -289,12 +294,30 @@ def _world_section(state: GameState, adventure: Adventure, pacing: Pacing) -> st
         _pacing_line(adventure, pacing),
         f"Посещённые локации: {', '.join(world.visited_locations) or 'нет'}.",
         f"Найдено: {', '.join(world.revealed) or 'пока ничего'}.",
+        _journal_line(state),
         f"Флаги сюжета: {json_line(world.flags) if world.flags else 'нет'}.",
     ]
     if state.scene.inspiration_granted:
         granted = ", ".join(state.scene.inspiration_granted)
         lines.append(f"Вдохновение в этой сцене уже выдавали: {granted}.")
     return "\n".join(lines)
+
+
+def _journal_line(state: GameState) -> str:
+    """Что уже записано в дневник отряда — чтобы мастер не дублировал записи `journal_add`.
+
+    Только ссылки, без названий и текстов: тексты читают игроки, а мастеру хватает ссылки на
+    сущность; личная запись помечена героем-адресатом. Последние `MAX_JOURNAL_REFS` ссылок, об
+    остальных — число в той же строке сервера."""
+    shown = state.journal[-MAX_JOURNAL_REFS:]
+    refs = [
+        entry.ref if entry.audience == JOURNAL_ALL else f"{entry.ref} (лично {entry.audience})"
+        for entry in shown
+    ]
+    line = f"Дневник отряда: {', '.join(refs) or 'пока пусто'}."
+    if left_out := len(state.journal) - len(shown):
+        line += f" Ранних записей не показано: {left_out}."
+    return line
 
 
 def _pacing_line(adventure: Adventure, pacing: Pacing) -> str:

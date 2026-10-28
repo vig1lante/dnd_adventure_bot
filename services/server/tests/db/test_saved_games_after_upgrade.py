@@ -16,6 +16,13 @@
    `golden/game_state_v<N>.json`, а прежние файлы остаются: старые снимки должны читаться всегда.
    Образец записывается один раз кодом той версии (состояние игры с отрядом, боем и зацепками и
    лист персонажа из него) и потом не перезаписывается: его смысл в том, что он старше кода.
+   Образец текущей версии нынешний код читает и пишет без изменений (точный круг «прочитать и
+   записать»). Старый образец читается без потерь: ни одно его поле не потеряно и не изменено
+   (`lost_fields`, как у копий приключений), а поля, которых в старой схеме не было, приходят со
+   значениями по умолчанию — ровно те, что перечислены в `ADDED_FIELDS` для его версии. Так
+   версия 2 (DND-2, блок B8) добавила дневник отряда `journal` и номер раунда игроков
+   `party_round`: снимок версии 1 читается с пустым дневником и раундом 0, а стартовый дневник
+   такой игре открывает сервер (снимок игрока — в памяти, ход мастера — со своим коммитом).
 3. Копия приключения хранится по поколениям формата: `golden/adventure_v<N>.json` — дамп
    `model_dump(mode="json")` приключения `demo-crypt` тем кодом, который писал копии формата N.
    `adventure_v1.json` — копия DND-1 (без `format_version`), `adventure_v2.json` — формат v2
@@ -48,6 +55,7 @@ from dnd_engine.adventure.loader import adventure_from_data, load_adventure
 from dnd_engine.adventure.schema import FORMAT_VERSION
 from dnd_engine.character import Character
 from dnd_engine.content import load_srd
+from dnd_engine.journal import open_journal
 from dnd_engine.rng import SeededRng
 from dnd_engine.state import GameState
 from dnd_server.app import create_app
@@ -193,6 +201,27 @@ def test_every_snapshot_schema_version_has_its_golden_file_and_old_ones_stay():
     assert list(golden_files()) == list(range(1, GAME_STATE_SCHEMA_VERSION + 1))
 
 
+# Версия схемы старого снимка -> поля, которые нынешний код добавляет к нему, и их значения по
+# умолчанию (как их пишет снимок). Новая версия схемы дописывает сюда свои поля.
+ADDED_FIELDS: dict[int, dict[str, Any]] = {1: {"journal": [], "party_round": 0}}
+
+
+def assert_read_whole(golden: dict[str, Any], state: GameState) -> None:
+    """Снимок образца прочитан нынешним кодом целиком (правило 2 в начале файла).
+
+    Образец текущей версии схемы — точный круг «прочитать и записать»: ни одно поле не потеряно
+    (pydantic молча отбрасывает поля, которых в модели больше нет) и не добавлено новое. Старый
+    образец — без потерь: ни одно его поле не потеряно и не изменено, а добавлены ровно новые поля
+    схемы со значениями по умолчанию (`ADDED_FIELDS`)."""
+    dumped = state.model_dump(mode="json")
+    if golden["schema_version"] == GAME_STATE_SCHEMA_VERSION:
+        assert dumped == golden["state"]
+        return
+    assert lost_fields(golden["state"], dumped) == []
+    added = {key: value for key, value in dumped.items() if key not in golden["state"]}
+    assert added == ADDED_FIELDS[golden["schema_version"]]
+
+
 @pytest.mark.parametrize("version", golden_files())
 def test_a_snapshot_of_each_schema_version_is_read_whole_by_the_current_code(version):
     golden = json.loads(golden_files()[version].read_text(encoding="utf-8"))
@@ -201,11 +230,35 @@ def test_a_snapshot_of_each_schema_version_is_read_whole_by_the_current_code(ver
     hero = Character.model_validate(golden["character"])
 
     assert golden["schema_version"] == version
-    # Круг «прочитать и записать» возвращает те же данные: ни одно поле старого снимка не потеряно
-    # (pydantic молча отбрасывает поля, которых в модели больше нет) и не добавлено новое.
-    assert state.model_dump(mode="json") == golden["state"]
+    assert_read_whole(golden, state)
     assert hero.model_dump(mode="json") == golden["character"]
     assert state.version == 3 and len(state.party) == 3 and state.combat is not None
+
+
+def test_the_sample_of_the_current_schema_has_every_field_the_server_writes_now():
+    # Образец текущей версии записан нынешним кодом: в нём все поля снимка; дневник отряда
+    # (версия 2) не пуст — в нём общие записи и личная запись одного героя, а игра идёт не в
+    # первом раунде игроков, и записи этого раунда несут его номер.
+    golden = json.loads(golden_files()[GAME_STATE_SCHEMA_VERSION].read_text(encoding="utf-8"))
+    state = GameState.model_validate(golden["state"])
+
+    assert set(golden["state"]) == set(state.model_dump(mode="json"))
+    audiences = {entry.audience for entry in state.journal}
+    assert "all" in audiences and audiences - {"all"} <= set(state.party)
+    assert len(audiences) >= 2
+    assert state.party_round >= 2
+    assert {entry.turn for entry in state.journal} == {0, state.party_round}
+
+
+def test_a_snapshot_of_the_first_schema_gets_exactly_the_new_fields_with_their_defaults():
+    # R8: к снимку версии 1 нынешний код добавляет только дневник (пустой) и раунд игроков (0).
+    golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
+
+    dumped = GameState.model_validate(golden["state"]).model_dump(mode="json")
+
+    assert set(dumped) - set(golden["state"]) == {"journal", "party_round"}
+    assert (dumped["journal"], dumped["party_round"]) == ([], 0)
+    assert ADDED_FIELDS[1] == {"journal": [], "party_round": 0}
 
 
 def test_every_stored_adventure_copy_format_has_its_golden_file_and_old_ones_stay():
@@ -403,7 +456,7 @@ async def test_a_game_saved_on_the_first_revision_is_read_after_upgrade_head(set
             # Состояние игры, листы персонажей и копия приключения разбираются в модели движка
             # без потерь: по копии мастер продолжит игру. Копия v1 лежит в базе как была и
             # читается так же, как образец (перевод в v2 — при чтении).
-            assert snapshot.to_state().model_dump(mode="json") == golden["state"]
+            assert_read_whole(golden, snapshot.to_state())
             assert game.adventure_data == adventure
             assert adventure_from_data(game.adventure_data) == adventure_from_data(adventure)
             assert {r.id for r in rows} == set(golden["state"]["party"])
@@ -425,6 +478,8 @@ async def test_a_game_saved_on_the_first_revision_is_read_after_upgrade_head(set
             view = await snapshot_for(session, alice, ids["game_id"], srd=load_srd())
         assert [m["name"] for m in view["party"]] == ["Алиса", "Борис", "Вера"]
         assert view["combat"]["round"] == 2 and view["phase"]["phase"] == "playing"
+        # Снимок версии 1 без дневника: игрок видит стартовый, а в базу снимок ничего не пишет.
+        assert view["journal"] and "journal" not in snapshot.data
         assert [item["text"] for item in view["feed"]] == [
             "Туман стелется по колено.",
             "ЛИЧНОЕ-алисе",
@@ -505,6 +560,128 @@ async def test_a_game_with_a_v1_adventure_copy_plays_a_master_round_after_upgrad
     }
 
 
+async def test_an_old_game_without_a_journal_shows_the_starting_one_and_saves_it_with_a_turn(
+    settings, migrate, tmp_path
+):
+    # Игра DND-2, начатая до блока B8: снимок схемы 1 без дневника и копия приключения v2 (с
+    # «Главным» и известным со старта). Игрок видит стартовый дневник сразу, а в базе его сохраняет
+    # ход мастера (FakeProvider) — тем же коммитом, что и весь ход.
+    golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
+    adventure = golden_adventure(FORMAT_VERSION)
+    await migrate("upgrade", "0001")
+    ids = insert_saved_game(sqlite_file(settings.database_url), golden, adventure)
+    await migrate("upgrade", "head")
+    steps = [{"tool": "chronicle", "args": {"entry": "Отряд отдышался."}}, {"text": "Тихо."}]
+    scenario = tmp_path / "round.yaml"
+    scenario.write_text(yaml.safe_dump({"turns": [{"steps": steps}]}, allow_unicode=True), "utf-8")
+    engine = make_engine(settings.database_url)
+    db = make_sessionmaker(engine)
+    deps = Deps(
+        sessionmaker=db,
+        locks=GameLocks(),
+        broadcaster=NullBroadcaster(),
+        settings=settings.model_copy(update={"fake_llm_scenario": scenario}),
+        turn_tokens=None,
+        srd=load_srd(),
+        rng=SeededRng(7),
+    )
+    starting = open_journal(
+        GameState.model_validate(golden["state"]), adventure_from_data(adventure)
+    ).journal
+    try:
+        async with db() as session:
+            alice = await session.get(User, ids["Алиса"])
+            before = await snapshot_for(session, alice, ids["game_id"], srd=deps.srd)
+        outcome = await run_dm_turn(ids["game_id"], mode=TurnKind.ROUND, deps=deps)
+        async with db() as session:
+            game = await session.get(Game, ids["game_id"])
+            old = await session.get(GameStateSnapshot, (ids["game_id"], golden["state"]["version"]))
+            new = await session.get(GameStateSnapshot, (ids["game_id"], game.state_version))
+            alice = await session.get(User, ids["Алиса"])
+            after = await snapshot_for(session, alice, ids["game_id"], srd=deps.srd)
+    finally:
+        await engine.dispose()
+
+    assert outcome.status == TurnStatus.DONE
+    assert {"intro", "location:village"} <= {entry.ref for entry in starting}
+    assert before["journal"] == [entry.model_dump(mode="json") for entry in starting]
+    assert "journal" not in old.data  # снимок игрока ничего не записал
+    assert new.schema_version == GAME_STATE_SCHEMA_VERSION == 2
+    assert new.to_state().journal == starting
+    assert after["journal"] == before["journal"]
+
+
+async def test_a_dnd1_game_opens_the_same_journal_on_every_snapshot_without_writing_it(
+    settings, migrate, tmp_path
+):
+    # Игра DND-1 (финальное покрытие блока B8): снимок схемы 1 и копия приключения v1. Известного
+    # со старта в копии v1 нет, поэтому стартовый дневник — «Главное» из перевода копии в v2 и
+    # стартовая локация. Снимки подряд открывают один и тот же дневник в памяти и ничего не пишут
+    # в базу, а ход мастера сохраняет ровно его — без дублей от прежних снимков.
+    golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
+    adventure = golden_adventure(1)
+    await migrate("upgrade", "0001")
+    ids = insert_saved_game(sqlite_file(settings.database_url), golden, adventure)
+    await migrate("upgrade", "head")
+    steps = [{"tool": "chronicle", "args": {"entry": "Отряд отдышался."}}, {"text": "Тихо."}]
+    scenario = tmp_path / "round.yaml"
+    scenario.write_text(yaml.safe_dump({"turns": [{"steps": steps}]}, allow_unicode=True), "utf-8")
+    engine = make_engine(settings.database_url)
+    db = make_sessionmaker(engine)
+    deps = Deps(
+        sessionmaker=db,
+        locks=GameLocks(),
+        broadcaster=NullBroadcaster(),
+        settings=settings.model_copy(update={"fake_llm_scenario": scenario}),
+        turn_tokens=None,
+        srd=load_srd(),
+        rng=SeededRng(7),
+    )
+    old_copy = adventure_from_data(adventure)
+    starting = open_journal(GameState.model_validate(golden["state"]), old_copy).journal
+    expected = [entry.model_dump(mode="json") for entry in starting]
+
+    async def snapshots_of_everyone() -> list[dict[str, Any]]:
+        async with db() as session:
+            return [
+                await snapshot_for(
+                    session, await session.get(User, ids[name]), ids["game_id"], srd=deps.srd
+                )
+                for name in ("Алиса", "Борис", "Вера")
+            ]
+
+    async def stored() -> list[tuple[int, bool]]:
+        async with db() as session:
+            rows = await session.scalars(
+                select(GameStateSnapshot)
+                .where(GameStateSnapshot.game_id == ids["game_id"])
+                .order_by(GameStateSnapshot.version)
+            )
+            return [(row.version, bool(row.to_state().journal)) for row in rows]
+
+    try:
+        views = [*await snapshots_of_everyone(), *await snapshots_of_everyone()]
+        rows_after_snapshots = await stored()
+        outcome = await run_dm_turn(ids["game_id"], mode=TurnKind.ROUND, deps=deps)
+        rows_after_turn = await stored()
+        async with db() as session:
+            game = await session.get(Game, ids["game_id"])
+            saved = await session.get(GameStateSnapshot, (ids["game_id"], game.state_version))
+            saved_journal = saved.to_state().journal
+        after = await snapshots_of_everyone()
+    finally:
+        await engine.dispose()
+
+    assert [entry.ref for entry in starting] == ["intro", f"location:{old_copy.start_location}"]
+    assert {entry.audience for entry in starting} == {"all"} and old_copy.journal_intro
+    assert all(view["journal"] == expected for view in views)
+    assert rows_after_snapshots == [(golden["state"]["version"], False)]  # снимки не писали
+    assert outcome.status == TurnStatus.DONE
+    assert rows_after_turn == [(golden["state"]["version"], False), (game.state_version, True)]
+    assert saved_journal == starting
+    assert all(view["journal"] == expected for view in after)
+
+
 async def test_a_game_saved_before_the_clock_column_keeps_counting_after_upgrade_head(
     settings, migrate
 ):
@@ -532,7 +709,7 @@ async def test_a_game_saved_before_the_clock_column_keeps_counting_after_upgrade
         # `clock_at = started_at`, и у игры с ненулевым остатком эти секунды посчитались бы дважды.
         # Базы B6 такой игры не содержат: `active_seconds` писал только блок B7 (в B6 он всегда 0).
         assert game.active_time(started + timedelta(seconds=90)) == 690
-        assert snapshot.to_state().model_dump(mode="json") == golden["state"]
+        assert_read_whole(golden, snapshot.to_state())
         assert view["phase"]["phase"] == "playing" and view["phase"]["remaining_seconds"] is None
     finally:
         await engine.dispose()
@@ -560,7 +737,7 @@ async def test_a_game_saved_before_hero_choices_keeps_its_heroes_after_upgrade_h
             rows = list(await session.scalars(select(PlayerCharacter)))
             alice = await session.get(User, ids["Алиса"])
             view = await snapshot_for(session, alice, ids["game_id"], srd=load_srd())
-        assert snapshot.to_state().model_dump(mode="json") == golden["state"]
+        assert_read_whole(golden, snapshot.to_state())
         assert {r.id: r.data for r in rows} == golden["state"]["party"]
         assert [r.choices for r in rows] == [None, None, None]
         assert [m["name"] for m in view["party"]] == ["Алиса", "Борис", "Вера"]
@@ -603,7 +780,7 @@ async def test_a_game_saved_before_the_profanity_flag_allows_profanity_after_upg
             alice = await session.get(User, ids["Алиса"])
             view = await snapshot_for(session, alice, ids["game_id"], srd=load_srd())
         assert game.profanity is True
-        assert snapshot.to_state().model_dump(mode="json") == golden["state"]
+        assert_read_whole(golden, snapshot.to_state())
         assert view["game"]["profanity"] is True  # снимок игрока несёт флажок
         token = SessionSigner.from_settings(settings).issue(ids["Алиса"])
         transport = httpx.ASGITransport(app=app)
@@ -641,7 +818,7 @@ async def test_a_game_saved_before_the_authoring_tables_is_read_after_upgrade_he
             alice = await session.get(User, ids["Алиса"])
             view = await snapshot_for(session, alice, ids["game_id"], srd=load_srd())
             drafts = list(await session.scalars(select(AdventureDraft)))
-        assert snapshot.to_state().model_dump(mode="json") == golden["state"]
+        assert_read_whole(golden, snapshot.to_state())
         assert adventure_from_data(game.adventure_data) == adventure_from_data(adventure)
         assert (game.phase.value, game.profanity) == ("playing", True)
         assert [m["name"] for m in view["party"]] == ["Алиса", "Борис", "Вера"]

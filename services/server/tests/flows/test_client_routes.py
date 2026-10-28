@@ -21,8 +21,10 @@ from typing import get_args
 import pytest
 from pydantic import BaseModel
 
+from dnd_engine.journal import SECTIONS, Section
 from dnd_server.app import create_app
 from dnd_server.config import Settings
+from dnd_server.realtime.hub import EVENT_TYPES
 
 # tests/flows/test_client_routes.py -> flows -> tests -> server -> services
 SERVICES = Path(__file__).resolve().parents[3]
@@ -299,6 +301,9 @@ RESPONSES = [
     ("dnd_engine.character.Character", "Character", set(), {"derived"}),
     # У предмета приключения сервер добавляет `name` (B8.s2).
     ("dnd_engine.character.InventoryItem", "InventoryItem", set(), {"name"}),
+    # Запись дневника отряда (блок B8 DND-2): уходит в снимке и кадрах `journal_entry`/`journal`
+    # как есть (`model_dump`), без добавленных и снятых полей.
+    ("dnd_engine.journal.JournalEntry", "JournalEntry", set(), set()),
 ]
 
 
@@ -393,3 +398,43 @@ def test_the_inline_comparison_goes_by_the_key_from_not_by_the_python_name():
     assert sent_names(choices) == {"count", "from"}
     magic = inline_object_fields("ClassDetails", "spellcasting")
     assert magic == {"ability", "cantrips", "prepared"}
+
+
+# --- дневник отряда: кадры, разделы и контракт хаба (финальное покрытие блока B8 DND-2) ---
+
+
+def test_the_journal_frames_and_the_journal_of_the_snapshot_are_on_both_sides():
+    # Дополнение контракта B8 §6: запись — кадром `journal_entry {entry}`, дневник целиком после
+    # отката — `journal {entries}`, в снимке — поле `journal`. Общая сверка видов и полей кадров
+    # выше прошла бы и тогда, когда обе стороны дневник потеряли бы вместе.
+    server, client = server_events(), client_events()
+
+    for events in (server, client):
+        assert events["journal_entry"] == {"entry"}
+        assert events["journal"] == {"entries"}
+        assert "journal" in events["snapshot"]
+
+
+def client_union(name: str) -> set[str]:
+    """Строковые значения объединения `export type <name> = "a" | "b" …;` из `types.ts`."""
+    declaration = re.search(rf"export type {name}\s*=\s*([^;]+);", client_text("types.ts"))
+    assert declaration is not None, f"тип {name} в types.ts не найден"
+    return set(re.findall(r'"(\w+)"', declaration.group(1)))
+
+
+def test_the_sections_of_the_journal_are_the_same_in_the_engine_and_in_the_client():
+    # Раздел записи клиент берёт из `section`: раздел, которого клиент не знает, не попал бы ни в
+    # одну вкладку дневника. Разделы движка — и в типе записи, и в таблице видов ссылок.
+    engine = set(get_args(Section))
+
+    assert client_union("JournalSection") == engine
+    assert set(SECTIONS.values()) == engine
+
+
+def test_every_frame_the_server_builds_passes_the_contract_of_the_hub():
+    # Хаб рассылает только кадры из `EVENT_TYPES`, а кадр другого вида молча не уходит (только
+    # ошибка в журнале сервера). Снимок и `pong` идут своему соединению мимо хаба.
+    built = set(server_events()) - {"snapshot", "pong"}
+
+    assert {"journal_entry", "journal"} <= built
+    assert built <= EVENT_TYPES, f"кадры вне контракта хаба: {sorted(built - EVENT_TYPES)}"

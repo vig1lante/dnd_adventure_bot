@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Browser, BrowserContext, Page } from "@playwright/test";
+import type { Browser, BrowserContext, Locator, Page } from "@playwright/test";
 import { className, expectPicked, pickQuickHero } from "./hero.ts";
 import { expectFitsPhone } from "./layout.ts";
 import { artifactsDir, expect, test } from "./server.ts";
@@ -78,6 +78,45 @@ const CAMP_LINE = "Подкину дров и расскажу, как мы вы
 
 const COMPOSER = "Что делает твой персонаж?";
 
+// Дневник отряда (блок B8 DND-2). Разделы по порядку: раздел записи → подпись вкладки.
+const JOURNAL_SECTIONS = [
+  ["main", "Главное"],
+  ["places", "Места"],
+  ["people", "Люди"],
+  ["gods", "Боги"],
+  ["factions", "Фракции"],
+  ["world", "Мир"],
+  ["rumors", "Слухи"],
+  ["clues", "Улики"],
+  ["items", "Предметы"],
+] as const;
+// Стартовый дневник «Склепа должника»: завязка, всё, что отряд знает с начала игры, и деревня,
+// где отряд стоит. Названия и тексты записей тест берёт из снимка, а не повторяет здесь.
+const START_JOURNAL_REFS = [
+  "intro",
+  "location:cemetery",
+  "location:village",
+  "npc:marta",
+  "deity:ossmar",
+  "deity:veyla",
+  "region:marshland",
+  "region:barrow-hill",
+  "rumor:1",
+];
+const JOURNAL_INTRO = /Пропал смотритель кладбища Ульрих/;
+// Поля записи дневника по контракту: ничего сверх них (тайн сущности, заметок мастера) нет.
+const JOURNAL_ENTRY_KEYS = [
+  "audience",
+  "id",
+  "ref",
+  "revision",
+  "section",
+  "text",
+  "title",
+  "turn",
+  "visited_turn",
+];
+
 interface Player {
   hero: Hero;
   context: BrowserContext;
@@ -152,6 +191,15 @@ const button = (page: Page, name: string) =>
   page.getByRole("button", { name, exact: true });
 const hpMeter = (page: Page, heroName: string) =>
   page.getByRole("meter", { name: `Здоровье: ${heroName}` });
+const journalOf = (page: Page) =>
+  page.getByRole("tabpanel", { name: "Дневник", exact: true });
+/** Вкладка раздела дневника: её имя — подпись и число записей («Места 2»). */
+const journalSection = (page: Page, label: string) =>
+  journalOf(page).getByRole("tab", { name: new RegExp(`^${label} \\d+$`) });
+/** Карточка записи в открытом разделе дневника: её заголовок — название записи. */
+const journalCard = (page: Page, title: string) =>
+  journalOf(page).getByRole("region", { name: title, exact: true });
+const newMark = (card: Locator) => card.getByText("новое", { exact: true });
 
 /** Окно игрока: свой контекст браузера, как отдельный телефон. */
 async function openPlayer(
@@ -245,6 +293,40 @@ function lastSheet(player: Player): JsonObject {
     if (sheet !== undefined && sheet !== null && isObject(sheet)) return sheet;
   }
   throw new Error(`${player.hero.login}: листа героя в кадрах нет`);
+}
+
+/** Дневник из последнего снимка игры: с ним страница открыла экран игры. */
+function snapshotJournal(player: Player): JsonObject[] {
+  for (const frame of parsedFrames(player).reverse()) {
+    if (frame.type === "snapshot" && Array.isArray(frame.journal)) {
+      return frame.journal.filter(isObject);
+    }
+  }
+  throw new Error(`${player.hero.login}: дневника в снимке нет`);
+}
+
+/** Все записи дневника, которые сервер прислал игроку: в снимках, по одной и целым дневником. */
+function journalOnWire(player: Player): JsonObject[] {
+  const entries: JsonObject[] = [];
+  for (const frame of parsedFrames(player)) {
+    const batch =
+      frame.type === "snapshot"
+        ? frame.journal
+        : frame.type === "journal"
+          ? frame.entries
+          : frame.type === "journal_entry"
+            ? [frame.entry]
+            : [];
+    if (Array.isArray(batch)) entries.push(...batch.filter(isObject));
+  }
+  return entries;
+}
+
+/** Общая запись дневника о `ref`; без неё тесту дальше проверять нечего. */
+function commonEntry(journal: JsonObject[], ref: string): JsonObject {
+  const entry = journal.find((item) => item.id === `${ref}@all`);
+  if (entry === undefined) throw new Error(`в дневнике нет записи ${ref}`);
+  return entry;
 }
 
 /** Id героев, которых игрок создал сам: они приходят в ответах на создание и `characters/mine`. */
@@ -600,6 +682,84 @@ test("шестеро друзей проходят вечер: игра, рау�
     });
 
     const [alisa, boris, vera] = players;
+    await test.step("3в. Дневник в начале игры: завязка, известные места и «новое» до первого открытия", async () => {
+      const { page } = boris;
+      const start = snapshotJournal(boris);
+      expect(
+        start.map((entry) => entry.ref).sort(),
+        "стартовый дневник «Склепа должника»",
+      ).toEqual([...START_JOURNAL_REFS].sort());
+      for (const entry of start) {
+        expect(
+          [entry.audience, entry.turn, entry.revision],
+          `${String(entry.ref)}: общая, с начала игры, первая версия`,
+        ).toEqual(["all", 0, 1]);
+      }
+      // Отряд стоит в деревне с начала игры, а о кладбище только знает.
+      const village = commonEntry(start, "location:village");
+      const cemetery = commonEntry(start, "location:cemetery");
+      expect(village.visited_turn, "деревня: были здесь").toBe(0);
+      expect(cemetery.visited_turn, "кладбище: ещё не были").toBeNull();
+
+      // «Дневник» стоит сразу после «Рассказа».
+      await expect(
+        page.getByRole("tablist", { name: "Разделы игры" }).getByRole("tab"),
+      ).toHaveText(["Рассказ", "Дневник", "Персонаж", "Отряд"]);
+      await tabOf(page, "Дневник").click();
+      const journal = journalOf(page);
+      await expect(
+        journal
+          .getByRole("tablist", { name: "Разделы дневника" })
+          .getByRole("tab"),
+      ).toHaveText(
+        JOURNAL_SECTIONS.map(([, label]) => new RegExp(`^${label} \\d+$`)),
+      );
+      await expect(journalSection(page, "Главное")).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      await expect(journalCard(page, "Главное")).toContainText(JOURNAL_INTRO);
+
+      // Каждый раздел показывает ровно присланное сервером, и до первого открытия всё «новое».
+      for (const [section, label] of JOURNAL_SECTIONS) {
+        const entries = start.filter((entry) => entry.section === section);
+        const tab = journalSection(page, label);
+        await expect(tab).toHaveAccessibleName(`${label} ${entries.length}`);
+        await tab.click();
+        await expect(tab).toHaveAttribute("aria-selected", "true");
+        const shown = journal.getByRole("tabpanel");
+        if (entries.length === 0) {
+          await expect(shown).toContainText("Пока ничего не известно");
+          continue;
+        }
+        await expect(shown.getByRole("region")).toHaveCount(entries.length);
+        for (const entry of entries) {
+          const card = journalCard(page, String(entry.title));
+          await expect(card).toContainText(String(entry.text));
+          await expect(card).toContainText(
+            entry.visited_turn === 0
+              ? "были здесь с начала игры"
+              : "известно с начала игры",
+          );
+          await expect(newMark(card)).toBeVisible();
+        }
+      }
+
+      // Игрок ушёл из раздела и вернулся: записи прочитаны, пометки «новое» больше нет.
+      await journalSection(page, "Места").click();
+      const villageCard = journalCard(page, String(village.title));
+      const cemeteryCard = journalCard(page, String(cemetery.title));
+      await expect(villageCard).toContainText("были здесь с начала игры");
+      await expect(cemeteryCard).toContainText("известно с начала игры");
+      await expect(newMark(villageCard)).toHaveCount(0);
+      await expect(newMark(cemeteryCard)).toHaveCount(0);
+      await expectFitsPhone(page, "вкладка «Дневник»: места");
+      await shoot(page, "05b-dnevnik");
+      await journalSection(page, "Главное").click();
+      await expect(newMark(journalCard(page, "Главное"))).toHaveCount(0);
+      await tabOf(page, "Рассказ").click();
+    });
+
     await test.step("4. Тайный ход Веры, черновик Бориса и сбор ходов с отсчётом", async () => {
       // Вера сдаёт ход «Тайно».
       await submitAction(vera.page, SECRET_ACTION, { secret: true });
@@ -680,6 +840,42 @@ test("шестеро друзей проходят вечер: игра, рау�
         ).toBeVisible();
         await expect(tabOf(player.page, "Бой")).toBeVisible();
       }
+
+      await test.step("6а. Отряд пришёл на кладбище: в дневнике «были здесь» и снова «новое»", async () => {
+        const { page } = boris;
+        // Приход отряда дополнил запись о кладбище: сервер прислал её новую версию.
+        const visit = await waitFor(
+          "запись дневника о приходе на кладбище",
+          async () => {
+            const entry = journalOnWire(boris).findLast(
+              (item) => item.id === "location:cemetery@all",
+            );
+            return typeof entry?.visited_turn === "number" ? entry : null;
+          },
+        );
+        expect(visit.revision, "кладбище: версия после прихода").toBe(2);
+        const round = Number(visit.visited_turn);
+        expect(round, "кладбище: раунд прихода").toBeGreaterThan(0);
+        const village = commonEntry(snapshotJournal(boris), "location:village");
+
+        // Вкладок в бою больше, а «Дневник» всё так же открывается и помещается на телефоне.
+        await tabOf(page, "Дневник").click();
+        await journalSection(page, "Места").click();
+        const cemeteryCard = journalCard(page, String(visit.title));
+        const villageCard = journalCard(page, String(village.title));
+        await expect(cemeteryCard).toContainText(`были здесь: раунд ${round}`);
+        await expect(newMark(cemeteryCard)).toBeVisible();
+        // Деревня не менялась и осталась прочитанной.
+        await expect(villageCard).toContainText("были здесь с начала игры");
+        await expect(newMark(villageCard)).toHaveCount(0);
+        await expectFitsPhone(page, "вкладка «Дневник» в бою");
+
+        await journalSection(page, "Главное").click();
+        await journalSection(page, "Места").click();
+        await expect(cemeteryCard).toContainText(`были здесь: раунд ${round}`);
+        await expect(newMark(cemeteryCard)).toHaveCount(0);
+        await tabOf(page, "Бой").click();
+      });
 
       // Порядок хода случайный (кубы настоящие), поэтому ходы разбираются по ходу боя.
       let heroTurns = 0;
@@ -854,6 +1050,19 @@ test("шестеро друзей проходят вечер: игра, рау�
         ).toHaveCount(0);
         expect(await player.page.content()).not.toContain("КРАСНЫЙ-ФОНАРЬ");
       }
+
+      // Дневник пережил перезапуск: снимок после него несёт приход на кладбище из сохранённой
+      // игры, а прочитанное до обрыва не стало снова «новым» у переподключившейся страницы.
+      const cemetery = commonEntry(snapshotJournal(boris), "location:cemetery");
+      expect(cemetery.revision, "кладбище в снимке после перезапуска").toBe(2);
+      await tabOf(boris.page, "Дневник").click();
+      await journalSection(boris.page, "Места").click();
+      const cemeteryCard = journalCard(boris.page, String(cemetery.title));
+      await expect(cemeteryCard).toContainText(
+        `были здесь: раунд ${Number(cemetery.visited_turn)}`,
+      );
+      await expect(newMark(cemeteryCard)).toHaveCount(0);
+      await tabOf(boris.page, "Рассказ").click();
     });
 
     await test.step("9. Тайны на проводе: что сервер прислал каждому, за весь вечер и после перезапуска", async () => {
@@ -908,6 +1117,21 @@ test("шестеро друзей проходят вечер: игра, рау�
         // не один (Егор правил своего: прежний заменён), поэтому «свои» — все, кого создал он сам.
         const ownIds = new Set(ownHeroIds(player));
         expect(ownIds.size, `${login}: id своих героев`).toBeGreaterThan(0);
+
+        // Дневник: у записи только поля контракта, и каждая — общая или про своего героя.
+        // Личных записей сценарий не делает; что чужая личная не уходит, проверяют тесты сервера.
+        const journal = journalOnWire(player);
+        expect(journal.length, `${login}: записи дневника`).toBeGreaterThan(0);
+        for (const entry of journal) {
+          expect(
+            Object.keys(entry).sort(),
+            `${login}: запись дневника`,
+          ).toEqual(JOURNAL_ENTRY_KEYS);
+          expect(
+            entry.audience === "all" || ownIds.has(String(entry.audience)),
+            `${login}: чужая личная запись ${String(entry.id)}`,
+          ).toBe(true);
+        }
         let sheets = 0;
         for (const frame of frames) {
           for (const { node, path } of objectsIn(frame)) {

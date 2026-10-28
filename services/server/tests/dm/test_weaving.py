@@ -39,6 +39,7 @@ from dnd_engine.adventure.schema import Adventure, Relation
 from dnd_engine.character import Character, Persona
 from dnd_engine.content import SrdContent, load_srd
 from dnd_engine.creation import quick_character
+from dnd_engine.journal import open_journal
 from dnd_engine.rng import SeededRng
 from dnd_engine.state import GameState, PcHook, SceneType
 from dnd_server.characters.service import new_character_id
@@ -514,6 +515,17 @@ def test_the_new_state_is_keyed_by_the_character_id_and_taken_from_the_adventure
     assert state.world.visited_locations == [adventure.start_location]
     assert state.rules.modules == list(adventure.rules.modules)
     assert state.pc_hooks == {} and state.chronicle.entries == [] and state.combat is None
+
+
+def test_the_new_state_opens_the_journal_of_the_party(srd, adventure):
+    # Дополнение контракта B8 §6: открытие игры создаёт стартовый дневник — «Главное», известное
+    # отряду со старта и стартовая локация, всё для всего отряда и с раунда 0.
+    state = new_game_state("game-1", adventure, heroes_of(srd, "pc_aaa", "pc_bbb"))
+
+    blank = state.model_copy(update={"journal": ()})
+    assert state.journal == open_journal(blank, adventure).journal
+    assert {"intro", f"location:{adventure.start_location}"} <= {e.ref for e in state.journal}
+    assert {(e.audience, e.turn) for e in state.journal} == {("all", 0)}
 
 
 def test_the_new_state_does_not_share_lists_with_the_adventure_copy(srd, adventure):
@@ -1127,6 +1139,8 @@ async def test_weaving_builds_the_state_writes_the_hooks_and_opens_the_game(worl
     assert log.error is None and log.request["mode"] == "opening"
     # Зацепки живут и в состоянии после открытия: мастер читает их каждый ход.
     assert set((await world.state(2)).pc_hooks) == set(first.pc_hooks)
+    # Стартовый дневник записан вместе с состоянием версии 1 и пережил открытие игры.
+    assert first.journal and (await world.state(2)).journal[: len(first.journal)] == first.journal
 
 
 async def test_the_hooks_stored_in_the_state_are_the_cleaned_ones(world):

@@ -23,6 +23,7 @@ from dnd_engine.adventure.loader import load_adventure
 from dnd_engine.adventure.schema import Adventure, Relation, RevealRef, WorldInfo
 from dnd_engine.content import SrdContent, load_srd
 from dnd_engine.creation import quick_character
+from dnd_engine.journal import SECTIONS, JournalEntry, open_journal, write
 from dnd_engine.modules import build_ruleset
 from dnd_engine.modules.base import NO_RULES
 from dnd_engine.modules.bg3_flavor import INSPIRATION_FRAGMENT, RULES_FRAGMENT
@@ -35,6 +36,7 @@ from dnd_server.dm.context import (
     DATA_END,
     HISTORY_MAX_CHARS,
     MAX_CHRONICLE_ENTRIES,
+    MAX_JOURNAL_REFS,
     MAX_LORE_LINES,
     Pacing,
     PlayerActionView,
@@ -129,6 +131,17 @@ def make_state(
             secret="тайно служит культу",
         )
     }
+    return state
+
+
+JOURNAL_NOTE = "ЗАПИСЬ-ДНЕВНИКА"  # метка текста записи: в контекст мастера тексты не идут
+
+
+def journaled_state(srd: SrdContent, adventure: Adventure) -> GameState:
+    """Состояние `make_state` со стартовым дневником, записью мастера и личной записью Лиры."""
+    state = open_journal(make_state(srd), adventure)
+    write(state, adventure, "faction:regulars", note=f"{JOURNAL_NOTE}: держатся Марты.")
+    write(state, adventure, "npc:fabian", audience=LIRA, note=f"{JOURNAL_NOTE}: Фабиан в долгах.")
     return state
 
 
@@ -328,6 +341,69 @@ def test_the_prompt_does_not_advise_a_contest_for_a_secret_action_of_an_npc():
     assert "проверку героя" in rule and "нейтральным `reason`" in rule
     assert "`private_message`" in rule  # подробности придут адресату личным сообщением
     assert "ставь состязание" not in prompt  # прежний совет, который раскрывал тайну
+
+
+def prompt_section(prompt: str, heading: str) -> str:
+    """Раздел промпта от заголовка второго уровня до следующего."""
+    return prompt.split(f"\n## {heading}\n", 1)[1].split("\n## ", 1)[0]
+
+
+def test_the_prompt_tells_when_to_write_the_journal_and_what_to_write(srd, adventure):
+    # Спека §12 и дополнение контракта B8 §6: модель может забывать звать `journal_add` (риск §18).
+    prompt = system_prompt(build_ruleset(BOTH_MODULES))
+
+    journal = prompt_section(prompt, "Дневник")
+
+    for ref in ("deity:", "faction:", "npc:", "region:", "rumor:", "`world`"):
+        assert ref in journal, ref
+    rule = prompt_line(journal, "`journal_add`, когда")
+    assert all(word in rule for word in ("бог", "фракци", "человек", "регион", "слух", "истори"))
+    note = prompt_line(journal, "- `note`")
+    assert "своими словами" in note and "без тайн" in note
+    assert "один герой" in prompt_line(journal, "- `for_hero`")
+    by_itself = prompt_line(journal, "сами")
+    assert all(word in by_itself for word in ("Места", "улики", "предметы", "не зови"))
+    assert "«Дневник отряда»" in journal  # строка контекста: что уже записано
+
+
+def test_the_prompt_asks_for_the_hero_of_every_finding_in_a_round_with_a_secret_turn(
+    srd, adventure
+):
+    # Дополнение §12 (поправка §11, п. 2): в раунде с тайным ходом движок отказывает каждому
+    # `reveal` без `for_hero`, который находит улику, сколько бы ни было тайных героев. Находка
+    # открытого героя остаётся общей, тайного — только его.
+    prompt = system_prompt(build_ruleset(BOTH_MODULES))
+
+    rule = prompt_line(prompt_section(prompt, "Дневник"), "`reveal`")
+
+    assert "`for_hero`" in rule and "в раунде с тайным ходом" in rule
+    assert "в каждом" in rule and "улик" in rule
+    assert "открытого героя" in rule and "общей" in rule
+    assert "тайного" in rule and "только" in rule
+    assert "ошибк" in rule  # без героя инструмент откажет
+    assert "один" not in rule and "несколько" not in rule  # прежнее правило §11 п. 2 снято
+
+
+def test_the_prompt_tells_how_to_share_a_secret_finding_with_the_whole_party(srd, adventure):
+    # R3: тайная находка остаётся личной; поделиться ею — `journal_add(clue:<id>)` без `for_hero`.
+    journal = prompt_section(system_prompt(build_ruleset(BOTH_MODULES)), "Дневник")
+
+    rule = prompt_line(journal, "`clue:<id>`")
+
+    assert "`journal_add`" in rule and "без `for_hero`" in rule
+    assert "всему отряду" in rule and "найденн" in rule
+    assert "кроме" in prompt_line(journal, "сами")  # исключение из «для мест и улик не зови»
+
+
+def test_the_prompt_warns_that_a_journal_entry_without_a_hero_opens_a_secret_to_everybody(
+    srd, adventure
+):
+    # S3: в тайном ходе `journal_add` без `for_hero` пишет запись для всех.
+    journal = prompt_section(system_prompt(build_ruleset(BOTH_MODULES)), "Дневник")
+
+    rule = prompt_line(journal, "`journal_add` без `for_hero`")
+
+    assert "тайном ходе" in rule and "всему отряду" in rule and "`for_hero`" in rule
 
 
 def test_the_prompt_leaves_a_contest_to_the_sides_that_are_in_plain_sight():
@@ -772,6 +848,62 @@ def test_the_world_section_has_time_scene_pacing_and_story_state(srd, adventure)
     assert "Посещённые локации: village" in world
     assert "feature:board" in world
     assert '"met_marta": true' in world
+
+
+# --- дневник отряда (блок B8, дополнение контракта §6) ---
+
+
+def journal_line(context: str) -> str:
+    (line,) = [line for line in context.splitlines() if line.startswith("Дневник отряда:")]
+    return line
+
+
+def test_the_world_section_lists_the_journal_by_refs_and_marks_a_personal_entry_by_its_hero(
+    srd, adventure
+):
+    state = journaled_state(srd, adventure)
+    outside, _ = split_data_blocks(context_of(srd, adventure, state=state))
+
+    line = journal_line(section(outside, "## Мир"))
+    refs = [
+        entry.ref if entry.audience == "all" else f"{entry.ref} (лично {entry.audience})"
+        for entry in state.journal
+    ]
+    assert line == f"Дневник отряда: {', '.join(refs)}."
+    assert line.endswith(f"faction:regulars, npc:fabian (лично {LIRA}).")
+
+
+def test_the_journal_line_has_no_texts_or_titles_of_the_entries(srd, adventure):
+    state = journaled_state(srd, adventure)
+
+    context = context_of(srd, adventure, state=state)
+
+    assert JOURNAL_NOTE not in context
+    line = journal_line(context)
+    for entry in state.journal:
+        assert entry.title not in line and entry.text not in line
+
+
+def test_an_empty_journal_is_named_empty(srd, adventure):
+    assert journal_line(context_of(srd, adventure)) == "Дневник отряда: пока пусто."
+
+
+def test_a_long_journal_keeps_its_latest_refs_and_counts_the_rest(srd, adventure):
+    state = make_state(srd)
+    state.journal = tuple(
+        JournalEntry(
+            id=f"rumor:{n}@all", ref=f"rumor:{n}", section="rumors", title="т", text="т",
+            audience="all", turn=n,
+        )
+        for n in range(1, MAX_JOURNAL_REFS + 16)
+    )  # fmt: skip
+
+    line = journal_line(context_of(srd, adventure, state=state))
+
+    assert MAX_JOURNAL_REFS == 60
+    assert line.count("rumor:") == MAX_JOURNAL_REFS
+    assert "rumor:15," not in line and "rumor:16, " in line and "rumor:75." in line
+    assert line.endswith("Ранних записей не показано: 15.")
 
 
 def test_the_location_snapshot_has_the_secrets_of_the_place_and_says_they_are_for_the_master(
@@ -1299,7 +1431,7 @@ def test_the_round_context_matches_the_golden_file(srd, adventure):
             ),
         )
     ]
-    context = context_of(srd, adventure, recent=recent)
+    context = context_of(srd, adventure, recent=recent, state=journaled_state(srd, adventure))
 
     if os.environ.get("UPDATE_GOLDEN"):
         GOLDEN.parent.mkdir(exist_ok=True)
@@ -1389,3 +1521,72 @@ def test_the_reading_guide_calls_the_texts_of_the_adventure_data_of_its_author(s
     # Сервер ручается только за свои строки и пометки, а не за весь текст вне блоков.
     assert "этому можно верить" not in guide
     assert "написал сервер" not in guide
+
+
+# --- дневник: граница строки и связь промпта с инструментами (финальное покрытие блока B8) ---
+
+
+def rumors_journal(count: int) -> tuple[JournalEntry, ...]:
+    """Дневник из `count` общих записей о слухах по порядку: `rumor:1` … `rumor:<count>`."""
+    return tuple(
+        JournalEntry(
+            id=f"rumor:{n}@all", ref=f"rumor:{n}", section="rumors", title="т", text="т",
+            audience="all", turn=n,
+        )
+        for n in range(1, count + 1)
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("count", "tail"),
+    [
+        (1, ""),
+        (MAX_JOURNAL_REFS - 1, ""),
+        (MAX_JOURNAL_REFS, ""),
+        (MAX_JOURNAL_REFS + 1, " Ранних записей не показано: 1."),
+    ],
+    ids=["одна", "предел-1", "предел", "предел+1"],
+)
+def test_the_journal_line_counts_the_left_out_refs_only_past_the_limit(
+    srd, adventure, count, tail
+):
+    state = make_state(srd)
+    state.journal = rumors_journal(count)
+
+    line = journal_line(context_of(srd, adventure, state=state))
+
+    shown = [f"rumor:{n}" for n in range(max(1, count - MAX_JOURNAL_REFS + 1), count + 1)]
+    assert line == f"Дневник отряда: {', '.join(shown)}.{tail}"
+
+
+def test_a_personal_entry_at_the_edge_of_the_line_keeps_the_mark_of_its_hero(srd, adventure):
+    # Окно строки — последние записи; личная запись, попавшая в окно первой, всё равно помечена.
+    state = make_state(srd)
+    personal = JournalEntry(
+        id=f"npc:fabian@{LIRA}", ref="npc:fabian", section="people", title="Фабиан", text="т",
+        audience=LIRA, turn=1,
+    )  # fmt: skip
+    state.journal = (*rumors_journal(5), personal, *rumors_journal(MAX_JOURNAL_REFS - 1))
+
+    line = journal_line(context_of(srd, adventure, state=state))
+
+    assert line.startswith(f"Дневник отряда: npc:fabian (лично {LIRA}), rumor:1, ")
+    assert line.endswith(" Ранних записей не показано: 5.")
+
+
+def test_the_journal_section_names_only_what_the_tools_of_the_engine_take(srd, adventure):
+    # Промпт и инструменты движка говорят об одном: имена аргументов в разделе «Дневник» есть у
+    # `journal_add` и `reveal`, а виды ссылок, которые мастер пишет сам, — это все виды дневника,
+    # кроме служебной «Главное» и того, что пишется само (места, улики, предметы).
+    rules = build_ruleset(BOTH_MODULES)
+    specs = {spec.name: spec for spec in build_registry(rules).specs()}
+    journal = prompt_section(system_prompt(rules), "Дневник")
+
+    assert set(specs["journal_add"].args_model.model_fields) == {"ref", "note", "for_hero"}
+    assert "for_hero" in specs["reveal"].args_model.model_fields
+    assert specs["reveal"].author_fields == ("for_hero",)
+    for name in ("`journal_add`", "`ref`", "`note`", "`for_hero`", "`reveal`"):
+        assert name in journal, name
+    rule = prompt_line(journal, "`journal_add`, когда")
+    kinds = set(re.findall(r"`(\w+):<", rule)) | ({"world"} if "`world`" in rule else set())
+    assert kinds == set(SECTIONS) - {"intro", "location", "clue", "item"}

@@ -7,6 +7,13 @@ JSON-схемам всех инструментов `build_registry`: чаще �
 закончиться результатом или ошибкой для модели; ошибка не меняет ни состояние, ни события, ни
 вдохновение; после удачного вызова состояние остаётся целым и сохраняется в JSON. Случайность
 только через `SeededRng`: любой сбой воспроизводится по номеру seed и шага.
+
+Серия не должна вырождаться в одни отказы: каждый инструмент обязан хоть раз сработать. Новый
+инструмент или образцовый вызов сдвигает всю случайную последовательность, и редкие удачи (ход
+монстра, атака в ближнем бою) могут уйти из первых игр. Поэтому серия — не меньше `MIN_SEEDS`
+игр, а дальше добирается новыми seed, пока не сработает каждый инструмент, но не дольше
+`MAX_SEEDS`: сдвиг последовательности тест не роняет, а инструмент, который не срабатывает
+никогда, роняет по-прежнему.
 """
 
 import json
@@ -18,7 +25,8 @@ from pydantic import TypeAdapter
 from tool_calls import ALLY, HERO, VALID_CALLS, WIZARD
 
 from dnd_engine.adventure.schema import Adventure
-from dnd_engine.combat.engine import current_actor
+from dnd_engine.combat.engine import can_act, current_actor
+from dnd_engine.combat.model import Combatant
 from dnd_engine.content import SrdContent
 from dnd_engine.events import Event, RollEvent
 from dnd_engine.rng import Rng, SeededRng
@@ -26,7 +34,8 @@ from dnd_engine.state import GameState, SceneType
 from dnd_engine.tools.registry import ToolContext, ToolSpec
 
 EVENTS = TypeAdapter(list[Event])
-SEEDS = range(80)
+MIN_SEEDS = 80  # столько игр серия проходит всегда
+MAX_SEEDS = 400  # предел добора: инструмент, не сработавший и здесь, — вырождение серии
 CALLS_PER_SEED = 100
 # Значения, которыми модель может ошибиться в любом поле: пустые, огромные, чужого типа.
 JUNK: list[Any] = [None, "", " ", "я" * 300, -1, 0, 7, 10**9, 1.5, True, [], {}, ["pc-1"]]
@@ -141,13 +150,30 @@ def start_game(seed: int, make_scene: Callable[..., ToolContext], rng: Rng) -> T
     return ctx
 
 
-def turn_call(rng: Rng, ctx: ToolContext, srd: SrdContent) -> tuple[str, dict[str, Any]]:
-    """Вызов за того, чей ход в бою: монстр действует по статблоку, герой бьёт, идёт или защищается.
+def next_actor(state: GameState) -> Combatant:
+    """Следующий в очереди, кто способен действовать; если такого нет — тот, чей ход сейчас.
 
-    Случайные вызовы редко попадают в очередь хода, и без этого бой почти не проверялся бы."""
+    Ход мастера разбирает ход героя и идущие за ним ходы монстров: обёртка боя передаёт ход
+    следующему бойцу (`advance_to`), если между ними нет способного действовать."""
+    combat = state.combat
+    for step in range(1, len(combat.order)):
+        fighter_id = combat.order[(combat.turn_index + step) % len(combat.order)]
+        if can_act(state, fighter_id):
+            return combat.combatants[fighter_id]
+    return current_actor(state)
+
+
+def turn_call(rng: Rng, ctx: ToolContext, srd: SrdContent) -> tuple[str, dict[str, Any]]:
+    """Вызов за того, чей ход в бою, или за следующего в очереди (ход переходит к нему): монстр
+    действует по статблоку, герой бьёт, идёт или защищается.
+
+    Случайные вызовы редко попадают в очередь хода, и без этого бой почти не проверялся бы. Без
+    передачи хода очередь стояла бы на первом герое, и монстры почти никогда не ходили бы."""
     combat = ctx.state.combat
-    actor = current_actor(ctx.state)
+    actor = pick(rng, [current_actor(ctx.state), next_actor(ctx.state)])
     enemies = [f for f in combat.combatants if f not in ctx.state.party]
+    # Герой бьёт булавой того, с кем сцепился, если такой есть: иначе удар почти всегда — отказ.
+    foes = [f for f in actor.engaged_with if f in enemies] or enemies
     if actor.kind == "monster":
         action = pick(rng, srd.monsters[actor.ref].actions)
         target = {"target_ids": [pick(rng, [*ctx.state.party])]}
@@ -155,7 +181,7 @@ def turn_call(rng: Rng, ctx: ToolContext, srd: SrdContent) -> tuple[str, dict[st
     return pick(
         rng,
         [
-            ("attack", {"actor_id": actor.id, "target_id": pick(rng, enemies), "weapon": "mace"}),
+            ("attack", {"actor_id": actor.id, "target_id": pick(rng, foes), "weapon": "mace"}),
             (
                 "cast_spell",
                 {"actor_id": actor.id, "spell_id": "fire_bolt", "target_ids": enemies[:1]},
@@ -254,10 +280,13 @@ def broken_invariants(state: GameState, adventure: Adventure) -> list[str]:
 
 
 def test_random_calls_never_break_the_turn_or_the_state(tool_registry, srd, make_scene):
+    tools = {spec.name for spec in tool_registry.specs()}
     succeeded: Counter[str] = Counter()
     total = 0
 
-    for seed in SEEDS:
+    for seed in range(MAX_SEEDS):
+        if seed >= MIN_SEEDS and set(succeeded) == tools:
+            break  # добор не нужен: каждый инструмент уже сработал
         rng = SeededRng(seed)
         ctx = start_game(seed, make_scene, rng)
         for step in range(CALLS_PER_SEED):
@@ -286,5 +315,5 @@ def test_random_calls_never_break_the_turn_or_the_state(tool_registry, srd, make
                 assert roll.audience != "all" or roll.actor_id not in ctx.secret_actors, where
 
     # Серия не должна тихо вырождаться в одни отказы: каждый инструмент хоть раз сработал.
-    assert set(succeeded) == {spec.name for spec in tool_registry.specs()}, succeeded
+    assert set(succeeded) == tools, (tools - set(succeeded), succeeded)
     assert sum(succeeded.values()) > total // 10

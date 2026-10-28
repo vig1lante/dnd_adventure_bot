@@ -357,6 +357,17 @@ def test_audience_for_is_all_for_ordinary_actors_and_own_id_for_secret_ones(make
     assert ctx.audience_for("pc-2") == "all"
 
 
+def test_audience_of_heroes_is_the_first_secret_one_by_id_or_everyone(make_ctx):
+    # Запись дневника о героях (предмет перешёл из рук в руки) — как строка ленты о них: тайный
+    # герой видит её один, без тайных — все. Аудитория одна, поэтому из двух тайных — первый по id.
+    ctx = make_ctx(secret_actors={"pc-2", "pc-3"})
+
+    assert ctx.audience_of(["pc-1"]) == "all"
+    assert ctx.audience_of(["pc-1", "pc-2"]) == "pc-2"
+    assert ctx.audience_of(["pc-3", "pc-2"]) == "pc-2"
+    assert ctx.audience_of([]) == "all"
+
+
 def test_secret_actors_cannot_contain_the_reserved_audience_all(make_ctx):
     # «all» в роли актёра сделал бы тайный бросок общим.
     with pytest.raises(ValueError, match="all"):

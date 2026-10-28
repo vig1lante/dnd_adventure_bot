@@ -16,11 +16,13 @@ import {
   feedEntry,
   gameView,
   heroFighter,
+  journalEntry,
   monsterFighter,
   myAction,
   phaseOf,
   rollEntry,
   sheetHero,
+  startJournal,
 } from "../components/fixtures";
 import { OPTIONS } from "./character/fixtures";
 import { sessionToken, useGame } from "../store/game";
@@ -341,6 +343,34 @@ describe("обрыв связи на экране игры", () => {
     expect(screen.queryByText(CONNECTION_LOST_NOTE)).toBeNull();
   });
 
+  test("обрыв не сбрасывает дневник: раздел и отметки остаются, снимок после возврата обновляет записи", async () => {
+    vi.useFakeTimers({ toFake: FAKE_TIMERS });
+    const { ws } = await openGame({
+      snapshot: snapshotWith({ journal: startJournal() }),
+    });
+    const section = (name: string) =>
+      screen.getByRole("tab", { name: new RegExp(`^${name} \\d+$`) });
+    const card = (name: string) => within(screen.getByRole("region", { name }));
+    fireEvent.click(tab("Дневник"));
+    fireEvent.click(section("Места"));
+    fireEvent.click(section("Главное"));
+    fireEvent.click(section("Места"));
+    expect(card("Старое кладбище").queryByText("новое")).toBeNull();
+
+    act(() => ws.last().drop(1006));
+    // Снимок после возврата: за время обрыва отряд пришёл на кладбище.
+    const journal = startJournal();
+    journal[2] = { ...journal[2], revision: 2, visited_turn: 3 };
+    await reconnect(ws, snapshotWith({ journal }));
+
+    expect(section("Места")).toHaveAttribute("aria-selected", "true");
+    expect(
+      card("Старое кладбище").getByText("были здесь: раунд 3"),
+    ).toBeVisible();
+    expect(card("Старое кладбище").getByText("новое")).toBeVisible();
+    expect(card("Деревня Мирра").queryByText("новое")).toBeNull();
+  });
+
   test("связь пропала до первого снимка: плашка остаётся и без строки статуса", async () => {
     const { ws } = await openGame({ snapshot: null });
 
@@ -388,11 +418,12 @@ describe("обрыв связи на экране игры", () => {
 });
 
 describe("вкладки", () => {
-  test("три вкладки; открыта «Рассказ»", async () => {
+  test("четыре вкладки, «Дневник» сразу после «Рассказа»; открыта «Рассказ»", async () => {
     await openGame();
 
     expect(screen.getAllByRole("tab").map((node) => node.textContent)).toEqual([
       "Рассказ",
+      "Дневник",
       "Персонаж",
       "Отряд",
     ]);
@@ -449,6 +480,8 @@ describe("вкладки", () => {
     await openGame();
 
     fireEvent.keyDown(tab("Рассказ"), { key: "ArrowRight" });
+    expect(tab("Дневник")).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(tab("Дневник"), { key: "ArrowRight" });
     expect(tab("Персонаж")).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(tab("Персонаж"), { key: "ArrowRight" });
     expect(tab("Отряд")).toHaveAttribute("aria-selected", "true");
@@ -463,7 +496,7 @@ describe("вкладки", () => {
 
     expect(tab("Рассказ")).toHaveAttribute("tabindex", "0");
     expect(tab("Рассказ")).toHaveClass("game-tab--active");
-    for (const other of ["Персонаж", "Отряд"]) {
+    for (const other of ["Дневник", "Персонаж", "Отряд"]) {
       expect(tab(other)).toHaveAttribute("tabindex", "-1");
       expect(tab(other)).not.toHaveClass("game-tab--active");
     }
@@ -799,13 +832,19 @@ describe("вкладка «Бой»", () => {
   test("без боя вкладки нет", async () => {
     await openGame();
 
-    expect(tabNames()).toEqual(["Рассказ", "Персонаж", "Отряд"]);
+    expect(tabNames()).toEqual(["Рассказ", "Дневник", "Персонаж", "Отряд"]);
   });
 
-  test("бой в снимке: вкладка «Бой» второй, после «Рассказа»", async () => {
+  test("бой в снимке: вкладка «Бой» после «Рассказа» и «Дневника»", async () => {
     await openGame({ snapshot: combatSnapshot() });
 
-    expect(tabNames()).toEqual(["Рассказ", "Бой", "Персонаж", "Отряд"]);
+    expect(tabNames()).toEqual([
+      "Рассказ",
+      "Дневник",
+      "Бой",
+      "Персонаж",
+      "Отряд",
+    ]);
     expect(tab("Рассказ")).toHaveAttribute("aria-selected", "true");
   });
 
@@ -917,7 +956,7 @@ describe("вкладка «Бой»", () => {
     await serve(ws.last(), { type: "phase", phase: phaseOf("resolving") });
     await serve(ws.last(), { type: "phase", phase: phaseOf("discussion") });
 
-    expect(tabNames()).toEqual(["Рассказ", "Персонаж", "Отряд"]);
+    expect(tabNames()).toEqual(["Рассказ", "Дневник", "Персонаж", "Отряд"]);
     expect(tab("Рассказ")).toHaveAttribute("aria-selected", "true");
     expect(screen.getByLabelText(FIELD)).toBeVisible();
   });
@@ -933,10 +972,12 @@ describe("вкладка «Бой»", () => {
     expect(tab("Бой")).toHaveAttribute("aria-selected", "false");
   });
 
-  test("стрелки обходят четыре вкладки по кругу", async () => {
+  test("стрелки обходят пять вкладок по кругу", async () => {
     await openGame({ snapshot: combatSnapshot() });
 
     fireEvent.keyDown(tab("Рассказ"), { key: "ArrowRight" });
+    expect(tab("Дневник")).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(tab("Дневник"), { key: "ArrowRight" });
     expect(tab("Бой")).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(tab("Бой"), { key: "ArrowRight" });
     expect(tab("Персонаж")).toHaveAttribute("aria-selected", "true");
@@ -948,12 +989,17 @@ describe("вкладка «Бой»", () => {
     expect(tab("Отряд")).toHaveAttribute("aria-selected", "true");
   });
 
-  test("при четырёх вкладках полоса обычная", async () => {
-    await openGame({ snapshot: combatSnapshot() });
+  test("при четырёх вкладках (вне боя) полоса обычная", async () => {
+    await openGame();
     expect(screen.getByRole("tablist")).not.toHaveClass("game-tabs--dense");
   });
 
-  test("при пяти вкладках полоса вкладок плотная, чтобы названия не слипались", async () => {
+  test("в бою пять вкладок: полоса плотная, чтобы названия поместились на телефоне", async () => {
+    await openGame({ snapshot: combatSnapshot() });
+    expect(screen.getByRole("tablist")).toHaveClass("game-tabs--dense");
+  });
+
+  test("при шести вкладках (бой и привал) полоса тоже плотная", async () => {
     await openGame({
       snapshot: combatSnapshot("pc_lira", {
         phase: phaseOf("camp", { deadline_at: CAMP_DEADLINE }),
@@ -962,6 +1008,7 @@ describe("вкладка «Бой»", () => {
 
     expect(tabNames()).toEqual([
       "Рассказ",
+      "Дневник",
       "Бой",
       "Привал",
       "Персонаж",
@@ -984,6 +1031,257 @@ describe("вкладка «Бой»", () => {
       DRAFT,
       SUBMIT,
     ]);
+  });
+});
+
+describe("вкладка «Дневник»", () => {
+  // Разделы дневника — тоже вкладки, но в своём наборе; ищем их по названию со счётчиком.
+  const section = (name: string) =>
+    screen.getByRole("tab", { name: new RegExp(`^${name} \\d+$`) });
+  const journal = () => within(panel("Дневник"));
+
+  test("дневник из снимка: разделы со счётчиками и записи «Главного»", async () => {
+    await openGame({ snapshot: snapshotWith({ journal: startJournal() }) });
+
+    fireEvent.click(tab("Дневник"));
+
+    expect(tab("Дневник")).toHaveAttribute("aria-selected", "true");
+    expect(section("Места")).toHaveTextContent("Места 2");
+    expect(
+      journal().getByText(
+        "Староста Мирры просит узнать, кто тревожит покой склепа.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText("Дверь склепа поддаётся с тихим вздохом."),
+    ).not.toBeVisible();
+  });
+
+  test("journal_entry добавляет новую запись и дополняет прежнюю", async () => {
+    const { ws } = await openGame({
+      snapshot: snapshotWith({ journal: startJournal() }),
+    });
+    fireEvent.click(tab("Дневник"));
+    fireEvent.click(section("Места"));
+
+    await serve(ws.last(), {
+      type: "journal_entry",
+      entry: journalEntry("location:crypt", {
+        title: "Склеп",
+        text: "Тяжёлая дверь в холме.",
+        turn: 2,
+        visited_turn: 2,
+      }),
+    });
+    await serve(ws.last(), {
+      type: "journal_entry",
+      entry: journalEntry("location:cemetery", {
+        title: "Старое кладбище",
+        text: "За деревней, у холма со склепом.\n\nНочью здесь бродят огни.",
+        revision: 3,
+        visited_turn: 2,
+      }),
+    });
+
+    expect(section("Места")).toHaveTextContent("Места 3");
+    const crypt = within(journal().getByRole("region", { name: "Склеп" }));
+    expect(crypt.getByText("были здесь: раунд 2")).toBeVisible();
+    expect(
+      journal().getAllByRole("region", { name: "Старое кладбище" }),
+    ).toHaveLength(1);
+    expect(journal().getByText("Ночью здесь бродят огни.")).toBeVisible();
+  });
+
+  test("journal заменяет дневник целиком: записи отката пропадают", async () => {
+    const { ws } = await openGame({
+      snapshot: snapshotWith({ journal: startJournal() }),
+    });
+    fireEvent.click(tab("Дневник"));
+
+    await serve(ws.last(), {
+      type: "journal",
+      entries: [startJournal()[0]],
+    });
+    fireEvent.click(section("Места"));
+
+    expect(section("Места")).toHaveTextContent("Места 0");
+    expect(journal().getByText("Пока ничего не известно")).toBeVisible();
+  });
+
+  test("«новое» гаснет, когда игрок вернулся в дневник после другой вкладки", async () => {
+    await openGame({ snapshot: snapshotWith({ journal: startJournal() }) });
+
+    fireEvent.click(tab("Дневник"));
+    const intro = () => journal().getByRole("region", { name: "Главное" });
+    expect(within(intro()).getByText("новое")).toBeVisible();
+
+    fireEvent.click(tab("Рассказ"));
+    fireEvent.click(tab("Дневник"));
+
+    expect(within(intro()).queryByText("новое")).toBeNull();
+    expect(
+      JSON.parse(window.localStorage.getItem("dnd-journal-seen:g1:u1") ?? "{}"),
+    ).toEqual({ "intro@all": 1 });
+  });
+
+  test("пока игрок не открывал дневник, ничего не помечено увиденным", async () => {
+    await openGame({ snapshot: snapshotWith({ journal: startJournal() }) });
+
+    fireEvent.click(tab("Отряд"));
+
+    expect(window.localStorage.getItem("dnd-journal-seen:g1:u1")).toBeNull();
+  });
+
+  test("в бою дневник открывается так же", async () => {
+    await openGame({
+      snapshot: combatSnapshot("pc_lira", { journal: startJournal() }),
+    });
+
+    fireEvent.click(tab("Дневник"));
+
+    expect(journal().getByRole("region", { name: "Главное" })).toBeVisible();
+  });
+
+  test.each([
+    ["обсуждение", () => snapshotWith({ phase: phaseOf("discussion") })],
+    ["сбор ходов", () => snapshotWith({ phase: phaseOf("collecting") })],
+    ["мастер думает", () => snapshotWith({ phase: phaseOf("resolving") })],
+    [
+      "мастер не справился",
+      () => snapshotWith({ phase: phaseOf("dm_failed") }),
+    ],
+    [
+      "пауза",
+      () =>
+        snapshotWith({
+          phase: phaseOf("discussion", {
+            phase: "paused",
+            remaining_seconds: 40,
+          }),
+        }),
+    ],
+    [
+      "игра окончена",
+      () =>
+        snapshotWith({
+          game: gameSummary({ phase: "finished" }),
+          phase: phaseOf(null, { phase: "finished" }),
+        }),
+    ],
+    ["бой", () => combatSnapshot()],
+    ["привал", () => campSnapshot()],
+  ])(
+    "%s: вкладка «Дневник» второй, дневник открывается",
+    async (_name, make) => {
+      await openGame({ snapshot: { ...make(), journal: startJournal() } });
+
+      expect(tabNames()[1]).toBe("Дневник");
+      fireEvent.click(tab("Дневник"));
+
+      expect(section("Места")).toHaveTextContent("Места 2");
+      expect(journal().getByRole("region", { name: "Главное" })).toBeVisible();
+    },
+  );
+
+  test("привал без боя: пять вкладок — полоса плотная", async () => {
+    await openGame({ snapshot: campSnapshot() });
+
+    expect(tabNames()).toHaveLength(5);
+    expect(screen.getByRole("tablist", { name: "Разделы игры" })).toHaveClass(
+      "game-tabs--dense",
+    );
+  });
+
+  test("дневник монтируется лениво и, открытый однажды, помнит выбранный раздел", async () => {
+    await openGame({ snapshot: snapshotWith({ journal: startJournal() }) });
+    const sections = () =>
+      screen.queryByRole("tablist", { name: "Разделы дневника", hidden: true });
+
+    // До первого открытия дневника нет даже в скрытой панели.
+    expect(sections()).toBeNull();
+    fireEvent.click(tab("Персонаж"));
+    expect(sections()).toBeNull();
+
+    fireEvent.click(tab("Дневник"));
+    fireEvent.click(section("Места"));
+    fireEvent.click(tab("Рассказ"));
+
+    // Ушли на другую вкладку — дневник остался в скрытой панели.
+    expect(sections()).not.toBeNull();
+    expect(sections()).not.toBeVisible();
+    fireEvent.click(tab("Дневник"));
+    expect(section("Места")).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("запись, пришедшая, пока игрок на другой вкладке, при возвращении помечена «новое»", async () => {
+    const { ws } = await openGame({
+      snapshot: snapshotWith({ journal: startJournal() }),
+    });
+    fireEvent.click(tab("Дневник"));
+    fireEvent.click(section("Места"));
+    fireEvent.click(tab("Рассказ"));
+
+    await serve(ws.last(), {
+      type: "journal_entry",
+      entry: journalEntry("location:crypt", {
+        title: "Склеп",
+        turn: 2,
+        visited_turn: 2,
+      }),
+    });
+    expect(
+      JSON.parse(window.localStorage.getItem("dnd-journal-seen:g1:u1") ?? "{}"),
+    ).not.toHaveProperty(["location:crypt@all"]);
+    fireEvent.click(tab("Дневник"));
+
+    const card = (name: string) =>
+      within(journal().getByRole("region", { name }));
+    expect(section("Места")).toHaveTextContent("Места 3");
+    expect(card("Склеп").getByText("новое")).toBeVisible();
+    expect(card("Деревня Мирра").queryByText("новое")).toBeNull();
+  });
+
+  test("личная запись героя на экране как обычная: из снимка и событием", async () => {
+    const { ws } = await openGame({
+      snapshot: snapshotWith({
+        journal: [
+          ...startJournal(),
+          journalEntry("location:village", {
+            title: "Деревня Мирра",
+            text: "Лира знает тайный ход под мельницей.",
+            audience: "pc_lira",
+            turn: 2,
+          }),
+        ],
+      }),
+    });
+    fireEvent.click(tab("Дневник"));
+
+    await serve(ws.last(), {
+      type: "journal_entry",
+      entry: journalEntry("npc:elder", {
+        title: "Староста Хорн",
+        text: "Шепнул Лире, где ключ.",
+        audience: "pc_lira",
+        turn: 3,
+      }),
+    });
+
+    fireEvent.click(section("Места"));
+    expect(section("Места")).toHaveTextContent("Места 3");
+    expect(
+      journal().getAllByRole("region", { name: "Деревня Мирра" }),
+    ).toHaveLength(2);
+    expect(
+      journal().getByText("Лира знает тайный ход под мельницей."),
+    ).toBeVisible();
+    fireEvent.click(section("Люди"));
+    const elder = within(
+      journal().getByRole("region", { name: "Староста Хорн" }),
+    );
+    expect(elder.getByText("Шепнул Лире, где ключ.")).toBeVisible();
+    expect(elder.getByText("узнали в раунде 3")).toBeVisible();
+    expect(elder.getByText("новое")).toBeVisible();
   });
 });
 
@@ -1184,7 +1482,13 @@ describe("вкладка «Привал»", () => {
   test("привал в снимке: вкладка «Привал» после «Рассказа», с отсчётом в строке статуса", async () => {
     await openGame({ snapshot: campSnapshot() });
 
-    expect(tabNames()).toEqual(["Рассказ", "Привал", "Персонаж", "Отряд"]);
+    expect(tabNames()).toEqual([
+      "Рассказ",
+      "Дневник",
+      "Привал",
+      "Персонаж",
+      "Отряд",
+    ]);
     expect(screen.getByText("До конца привала")).toBeInTheDocument();
   });
 

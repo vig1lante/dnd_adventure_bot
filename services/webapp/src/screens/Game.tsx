@@ -18,11 +18,13 @@ import { classNames } from "../ui/classNames";
 import "../components/game.css";
 import { Camp } from "./Camp";
 import { Combat } from "./Combat";
+import { Journal } from "./Journal";
 
-type TabId = "story" | "combat" | "camp" | "hero" | "party";
+type TabId = "story" | "journal" | "combat" | "camp" | "hero" | "party";
 
 const LABELS: Record<TabId, string> = {
   story: "Рассказ",
+  journal: "Дневник",
   combat: "Бой",
   camp: "Привал",
   hero: "Персонаж",
@@ -30,14 +32,18 @@ const LABELS: Record<TabId, string> = {
 };
 
 // Лист героя подгружает названия правил, поэтому, как и отряд, открывается лишь при первом заходе.
-const LAZY_TABS: ReadonlySet<TabId> = new Set(["hero", "party"]);
+// Дневник тоже: пока игрок его не открыл, отметки «новое» не читаются и не пишутся.
+const LAZY_TABS: ReadonlySet<TabId> = new Set(["journal", "hero", "party"]);
 
-// Столько вкладок помещается в строку обычным шрифтом; больше (бой и привал сразу) — мельче.
+// Столько вкладок помещается в строку обычным шрифтом; больше (бой или привал) — мельче.
 const MAX_ROOMY_TABS = 4;
 
-/** Вкладки по состоянию игры: «Бой» живёт, пока идёт бой, «Привал» — пока идёт привал. */
+/**
+ * Вкладки по состоянию игры: «Дневник» сразу после «Рассказа», «Бой» живёт, пока идёт бой,
+ * «Привал» — пока идёт привал.
+ */
 function tabsOf(view: GameView): TabId[] {
-  const tabs: TabId[] = ["story"];
+  const tabs: TabId[] = ["story", "journal"];
   if (view.combat !== null) tabs.push("combat");
   if (view.phase.turn_phase === "camp") tabs.push("camp");
   tabs.push("hero", "party");
@@ -142,6 +148,14 @@ function GameBody({
         )}
       </>
     ),
+    journal: () => (
+      <Journal
+        gameId={gameId}
+        userId={userId}
+        entries={view.journal}
+        active={tab === "journal"}
+      />
+    ),
     combat: () => <Combat gameId={gameId} view={view} turn={turn} />,
     camp: () => <Camp gameId={gameId} view={view} />,
     hero: () => <CharacterSheet character={view.character} />,
@@ -202,8 +216,8 @@ function GameBody({
 
 /**
  * Экран игры: строка статуса с отсчётом, кнопки хоста и вкладки — «Рассказ» (лента и поле
- * хода), «Бой» и «Привал» (только пока идут бой и привал), «Персонаж» и «Отряд». Игру ведёт
- * сокет: экран сам подключается к ней (`followGame`) и отключается при уходе; всё, что на
+ * хода), «Дневник», «Бой» и «Привал» (только пока идут бой и привал), «Персонаж» и «Отряд».
+ * Игру ведёт сокет: экран сам подключается к ней (`followGame`) и отключается при уходе; всё, что на
  * экране, приходит снимком и событиями. Обрыв связи показывает строка статуса, а пока её
  * нет (игра ещё грузится), — плашка на её месте.
  */

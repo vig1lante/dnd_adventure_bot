@@ -219,6 +219,7 @@ export function snapshotOf(
     party: [],
     combat: null,
     feed: [],
+    journal: [],
     ...overrides,
   };
 }

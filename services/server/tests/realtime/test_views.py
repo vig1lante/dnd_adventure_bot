@@ -60,6 +60,7 @@ from dnd_engine.events import (
     RollEvent,
     SceneEvent,
 )
+from dnd_engine.journal import open_journal, write
 from dnd_engine.modules import build_ruleset
 from dnd_engine.rng import ScriptedRng, SeededRng
 from dnd_engine.state import GameState, Scene, SceneType
@@ -96,6 +97,9 @@ from dnd_server.realtime.views import (
     feed_entries,
     feed_item_event,
     feed_withdrawn_event,
+    journal_entry_events,
+    journal_events,
+    journal_view,
     npc_fighter_names,
     party_event,
     phase_event,
@@ -899,12 +903,34 @@ async def test_nothing_of_the_world_gods_factions_relations_or_place_secrets_rea
     adventure = adventure_from_data(trapped)
 
     snapshot = await snapshot_of(db, srd, table, key)
+    journal = snapshot.pop("journal")
     events = [payload for payload, _ in state_events(table.state, srd, adventure)]
 
     for payload in (snapshot, *events):
         assert SECRET_MARK not in dump(payload)
         assert not LORE_KEYS & set(keys_of(payload))
     assert snapshot["game"]["adventure_title"] == trapped["title"]  # снимок читал эту копию
+    # Дневник (блок B8) называет то, что отряд знает со старта (`known_at_start`): имя бога и края и
+    # сам слух. Это не тайна мира, и других меток ловушки в нём нет.
+    known = known_at_start_marks(trapped)
+    assert known, "в образце должны быть известные со старта бог, край или слух"
+    assert set(re.findall(rf"{SECRET_MARK}[\w-]+", dump(journal))) == known
+    assert not LORE_KEYS & set(keys_of(journal))
+
+
+def known_at_start_marks(trapped: dict[str, Any]) -> set[str]:
+    """Метки ловушки (`trap_lore`) в том, что дневник показывает о сущностях, известных отряду со
+    старта: имя бога, имя края и текст слуха."""
+    world = trapped["world"]
+    return (
+        {f"{SECRET_MARK}name-{d['id']}" for d in trapped["deities"].values() if d["known_at_start"]}
+        | {f"{SECRET_MARK}край-{r['id']}" for r in world["regions"] if r["known_at_start"]}
+        | {
+            f"{SECRET_MARK}слух-{number}"
+            for number, rumor in enumerate(world["rumors"])
+            if rumor["known_at_start"] and not rumor["public"]
+        }
+    )
 
 
 async def test_snapshot_has_only_the_keys_of_the_contract(db, srd, table):
@@ -922,6 +948,7 @@ async def test_snapshot_has_only_the_keys_of_the_contract(db, srd, table):
         "party",
         "combat",
         "feed",
+        "journal",
     }
 
 
@@ -1651,7 +1678,11 @@ async def test_the_snapshot_has_the_same_sheet_as_the_event_after_the_turn(db, s
         assert snapshots[key]["character"] == sheets[seat.character.id], key
     assert KEY_NAME in dump(snapshots["alice"]) and POTION_NAME in dump(snapshots["alice"])
     for key in ("boris", "vera"):
-        assert "chest-key" not in dump(snapshots[key]) and KEY_NAME not in dump(snapshots[key])
+        # Дневник (блок B8) записывает предмет, полученный героем, для всего отряда — как строка
+        # ленты о передаче; в чужих листах предмета нет.
+        others = {name: block for name, block in snapshots[key].items() if name != "journal"}
+        assert "chest-key" not in dump(others) and KEY_NAME not in dump(others)
+        assert "item:chest-key@all" in {entry["id"] for entry in snapshots[key]["journal"]}
 
 
 async def test_the_snapshot_names_the_items_from_the_copy_of_the_adventure_of_the_game(
@@ -1670,7 +1701,9 @@ async def test_the_snapshot_names_the_items_from_the_copy_of_the_adventure_of_th
     boris = await snapshot_of(db, srd, table, "boris")
 
     assert lines_of(alice["character"])["chest-key"]["name"] == "Ключ из копии игры"
-    assert "chest-key" not in dump(boris) and "Ключ из копии игры" not in dump(boris)
+    # Запись дневника о полученном предмете общая (блок B8); в листе Бориса предмета нет.
+    others = {name: block for name, block in boris.items() if name != "journal"}
+    assert "chest-key" not in dump(others) and "Ключ из копии игры" not in dump(boris)
     assert SECRET_MARK not in dump(alice)
 
 
@@ -2514,3 +2547,202 @@ async def test_a_withdrawn_camp_line_is_not_in_the_snapshot_any_more(db, srd, ta
     feed = (await snapshot_of(db, srd, table, "boris"))["feed"]
 
     assert "Лишняя реплика." not in [item["text"] for item in feed]
+
+
+# --- дневник отряда (блок B8, дополнение контракта §6) ---
+# Дневник лежит в состоянии игры (движок); игроку уходят общие записи и личные записи его героя,
+# в снимке и в событиях. Адресат записи — id персонажа, как у событий движка: в id игрока его
+# переводит `audience_to_user`, и чужая личная запись не уходит никому, кроме её хозяина.
+
+JOURNAL_ENTRY_KEYS = {
+    "id", "ref", "section", "title", "text", "audience", "turn", "revision", "visited_turn",
+}  # fmt: skip
+PERSONAL_NOTE = "ЛИЧНОЕ-boris: Марта прячет ключ под стойкой."
+
+
+def journaled(table) -> GameState:
+    """Состояние стола со стартовым дневником и личной записью о Марте у Бориса."""
+    state = open_journal(table.state, table.adventure)
+    write(
+        state, table.adventure, "npc:marta", audience=table.boris.character.id, note=PERSONAL_NOTE
+    )
+    return state
+
+
+def visible_of(state: GameState, *audiences: str) -> list[dict[str, Any]]:
+    return [e.model_dump(mode="json") for e in state.journal if e.audience in audiences]
+
+
+async def test_the_snapshot_journal_has_the_common_entries_and_only_the_own_personal_ones(
+    db, srd, table
+):
+    state = journaled(table)
+    await save_state(db, table, state)
+
+    snapshots = {key: await snapshot_of(db, srd, table, key) for key in PLAYER_KEYS}
+
+    common = visible_of(state, "all")
+    assert common and all(set(entry) == JOURNAL_ENTRY_KEYS for entry in common)
+    assert snapshots["alice"]["journal"] == common
+    assert snapshots["vera"]["journal"] == common
+    assert snapshots["boris"]["journal"] == visible_of(state, "all", table.boris.character.id)
+    assert PERSONAL_NOTE in dump(snapshots["boris"])
+    for key in ("alice", "vera"):
+        assert PERSONAL_NOTE not in dump(snapshots[key])
+        assert table.boris.character.id not in {e["audience"] for e in snapshots[key]["journal"]}
+
+
+async def test_an_old_game_without_a_journal_gets_the_starting_one_in_the_snapshot_only(
+    db, srd, table
+):
+    # Состояние стола записано до дневника (`journal` пуст): снимок открывает дневник в памяти, а
+    # в базу ничего не пишет — сохранит его коммит следующего хода мастера.
+    assert table.state.journal == ()
+
+    snapshot = await snapshot_of(db, srd, table, "alice")
+
+    async with db() as session:
+        game = await session.get(Game, table.game_id)
+        stored = (await session.get(GameStateSnapshot, (table.game_id, 3))).to_state()
+        opened = open_journal(table.state, adventure_from_data(game.adventure_data))
+    assert snapshot["journal"] == visible_of(opened, "all")
+    assert {"intro", "location:village"} <= {e["ref"] for e in snapshot["journal"]}
+    assert stored.journal == ()
+
+
+async def test_the_starting_journal_has_no_secrets_of_the_adventure_copy(db, srd, table):
+    # В копии игры стола в заметках места и в секрете Марты лежат ловушки: дневник пишет только
+    # публичное.
+    snapshots = [await snapshot_of(db, srd, table, key) for key in PLAYER_KEYS]
+
+    for snapshot in snapshots:
+        assert snapshot["journal"]
+        assert SECRET_MARK not in dump(snapshot["journal"])
+
+
+async def test_the_lobby_snapshot_has_an_empty_journal(db, srd, lobby_table):
+    assert (await snapshot_of(db, srd, lobby_table, "alice"))["journal"] == []
+
+
+def test_a_new_entry_goes_to_everybody_and_a_personal_one_to_its_player_alone(table):
+    before = open_journal(table.state, table.adventure)
+    after = before.model_copy(deep=True)
+    write(after, table.adventure, "deity:ossmar", note="Оссмара чтут на кладбище.")
+    write(after, table.adventure, "rumor:2", audience=table.boris.character.id)
+
+    deliveries = journal_entry_events(before, after)
+
+    assert [(payload["type"], who) for payload, who in deliveries] == [
+        ("journal_entry", "all"),
+        ("journal_entry", table.boris.user_id),
+    ]
+    assert [payload["entry"]["id"] for payload, _ in deliveries] == [
+        "deity:ossmar@all",
+        f"rumor:2@{table.boris.character.id}",
+    ]
+    assert deliveries[0][0]["entry"]["revision"] == 2  # бог известен со старта: запись дополнена
+    assert all(set(payload["entry"]) == JOURNAL_ENTRY_KEYS for payload, _ in deliveries)
+    assert all(payload["type"] in EVENT_TYPES for payload, _ in deliveries)
+
+
+def test_an_unchanged_journal_gives_no_entry_events(table):
+    state = journaled(table)
+
+    assert journal_entry_events(state, state.model_copy(deep=True)) == []
+
+
+def test_an_entry_of_a_hero_without_a_player_goes_to_nobody_and_is_logged_without_its_text(
+    table, caplog
+):
+    before = open_journal(table.state, table.adventure)
+    orphan = before.party[table.boris.character.id].model_copy(update={"player_id": None})
+    after = before.model_copy(deep=True)
+    after.party[orphan.id] = orphan
+    write(after, table.adventure, "npc:fabian", audience=orphan.id, note=PERSONAL_NOTE)
+
+    with caplog.at_level(logging.WARNING):
+        deliveries = journal_entry_events(before, after)
+
+    assert deliveries == []
+    assert "дневник" in caplog.text.lower()
+    assert PERSONAL_NOTE not in caplog.text and "fabian" not in caplog.text
+
+
+def test_the_whole_journal_goes_to_every_player_with_his_own_entries(table):
+    state = journaled(table)
+    users = [seat.user_id for seat in table.seats.values()]
+
+    deliveries = journal_events(state, users)
+
+    assert [(payload["type"], who) for payload, who in deliveries] == [
+        ("journal", user_id) for user_id in users
+    ]
+    blocks = {who: payload["entries"] for payload, who in deliveries}
+    assert blocks[table.alice.user_id] == blocks[table.vera.user_id] == visible_of(state, "all")
+    assert blocks[table.boris.user_id] == visible_of(state, "all", table.boris.character.id)
+    assert all(payload["type"] in EVENT_TYPES for payload, _ in deliveries)
+
+
+def test_the_journal_block_of_the_event_is_the_journal_block_of_the_snapshot(table):
+    state = journaled(table)
+
+    for seat in table.seats.values():
+        ((payload, _),) = journal_events(state, [seat.user_id])
+        assert payload == {"type": "journal", "entries": journal_view(state, seat.user_id)}
+
+
+def test_a_character_named_all_makes_every_common_entry_go_to_nobody(table):
+    # Как у ленты (`audience_to_user`): слово «все» неоднозначно, общее не уходит никому.
+    state = journaled(table)
+    clash = state.party[table.alice.character.id].model_copy(update={"id": "all"})
+    state.party["all"] = clash
+
+    assert journal_view(state, table.vera.user_id) == []
+
+
+# --- дневник: адресат без игрока и совпадение id (финальное покрытие блока B8) ---
+
+
+async def test_a_personal_entry_of_a_hero_without_a_player_is_in_no_snapshot_and_no_block(
+    db, srd, table
+):
+    # Герой без игрока (`player_id` пуст) — его личную запись не видит никто: ни в снимке, ни в
+    # блоке `journal` после отката. Общие записи при этом доходят до всех как обычно.
+    state = open_journal(table.state, table.adventure)
+    orphan = state.party[table.alice.character.id].model_copy(
+        update={"id": "pc_orphan", "name": "Без игрока", "player_id": None}
+    )
+    state.party[orphan.id] = orphan
+    write(state, table.adventure, "npc:fabian", audience=orphan.id, note=PERSONAL_NOTE)
+    await save_state(db, table, state)
+    users = [seat.user_id for seat in table.seats.values()]
+
+    snapshots = [await snapshot_of(db, srd, table, key) for key in PLAYER_KEYS]
+    blocks = [payload for payload, _ in journal_events(state, users)]
+
+    for payload in (*snapshots, *blocks):
+        assert PERSONAL_NOTE not in dump(payload)
+        assert "npc:fabian@pc_orphan" not in dump(payload)
+    assert [snapshot["journal"] for snapshot in snapshots] == [visible_of(state, "all")] * 3
+    assert [block["entries"] for block in blocks] == [visible_of(state, "all")] * 3
+
+
+def test_a_personal_entry_follows_the_hero_even_when_his_id_is_the_id_of_another_player(table):
+    # Как у ленты (`audience_to_user`): адресат записи — id персонажа, и совпадение строки с id
+    # другого игрока не отдаёт тому чужую запись. Серверу так id не выдают, но проверка адресата не
+    # должна на это опираться.
+    before = open_journal(table.state, table.adventure)
+    state = before.model_copy(deep=True)
+    hero = state.party.pop(table.boris.character.id)
+    clash = hero.model_copy(update={"id": table.vera.user_id})
+    state.party[clash.id] = clash
+    write(state, table.adventure, "npc:marta", audience=clash.id, note=PERSONAL_NOTE)
+
+    deliveries = journal_entry_events(before, state)
+
+    assert PERSONAL_NOTE in dump(journal_view(state, table.boris.user_id))
+    assert PERSONAL_NOTE not in dump(journal_view(state, table.vera.user_id))
+    assert PERSONAL_NOTE not in dump(journal_view(state, table.alice.user_id))
+    assert [(payload["entry"]["ref"], who) for payload, who in deliveries] == [
+        ("npc:marta", table.boris.user_id)
+    ]

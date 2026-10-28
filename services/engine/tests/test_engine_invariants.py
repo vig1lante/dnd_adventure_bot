@@ -68,6 +68,10 @@ ALLOWED_IMPORTS: dict[str, str] = {
     "pathlib": "Path: папка данных в `load_srd(path)` (content.py), папка приключения (loader.py)",
     "random": "SeededRng: воспроизводимый генератор для тестов (rng.py)",
     "secrets": "SystemRng: криптостойкий генератор для игры (rng.py)",
+    "unicodedata": (
+        "категория знака (Zs): неразрывные пробелы в note мастера становятся обычными "
+        "(tools/world.py, дополнение B8 §11)"
+    ),
 }
 # Корни, которым место только в одном модуле: остальным они не нужны, а появление там — сигнал.
 # Модуль назван путём внутри пакета (`adventure/loader.py`), а не именем файла.
@@ -78,6 +82,7 @@ IMPORT_ONLY_IN: dict[str, set[str]] = {
     "yaml": {"content.py", "adventure/loader.py"},
     "importlib": {"content.py"},
     "pathlib": {"content.py", "adventure/loader.py"},
+    "unicodedata": {"tools/world.py"},
     "pydantic_core": {"content.py"},
 }
 # Динамический код и произвольный доступ к файлам. Имена встроенных функций ловятся по любому
