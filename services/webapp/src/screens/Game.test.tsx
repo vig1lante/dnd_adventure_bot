@@ -658,6 +658,40 @@ describe("строка статуса и панель хоста", () => {
     ).toBeInTheDocument();
   });
 
+  test("новый раунд (D17): «Готов» и «Пас» прошлого гаснут, «Пишет» не горит ни у кого; набрал черновик — «Пишет», стёр — значок пропал", async () => {
+    const { ws } = await openGame({
+      snapshot: snapshotWith({
+        phase: phaseOf("collecting"),
+        statuses: { u1: "ready", u2: "pass", u3: "writing" },
+      }),
+    });
+    const badges = () =>
+      screen
+        .getByRole("list", { name: "Игроки" })
+        .querySelectorAll(".ui-badge");
+
+    await serve(ws.last(), { type: "phase", phase: phaseOf("resolving") });
+    await serve(ws.last(), { type: "phase", phase: phaseOf("discussion") });
+    expect(badges()).toHaveLength(0);
+
+    await serve(ws.last(), {
+      type: "player_status",
+      user_id: "u2",
+      status: "writing",
+    });
+    expect(
+      within(screen.getByRole("list", { name: "Игроки" })).getByText("Пишет"),
+    ).toBeInTheDocument();
+    expect(badges()).toHaveLength(1);
+
+    await serve(ws.last(), {
+      type: "player_status",
+      user_id: "u2",
+      status: "idle",
+    });
+    expect(badges()).toHaveLength(0);
+  });
+
   test("хост видит кнопки, остальные — нет", async () => {
     await openGame({ as: "u1" });
     expect(button("Собрать ходы")).toBeInTheDocument();
@@ -734,6 +768,53 @@ describe("«Повторить», пока мастер думает (решен
     await wait(2 * MINUTE);
 
     noButton("Повторить");
+  });
+
+  test("после перезагрузки посреди разбора минута и «Ждём» идут от серверного начала (phase_since)", async () => {
+    vi.useFakeTimers({ toFake: [...FAKE_TIMERS, "Date"] });
+    vi.setSystemTime(Date.parse("2026-10-20T12:00:00+00:00"));
+    await openGame({
+      snapshot: snapshotWith({
+        phase: phaseOf("resolving", {
+          phase_since: "2026-10-20T11:59:10+00:00",
+        }),
+      }),
+    });
+
+    await wait(1000);
+    expect(
+      screen.getByRole("status", { name: "Мастер думает…" }),
+    ).toHaveTextContent("Ждём 0:51");
+    noButton("Повторить");
+
+    await wait(9000);
+    expect(button("Повторить")).toBeVisible();
+  });
+
+  // Финальное покрытие B11: сдвиг часов берётся из снимка, а не подставляется в стор вручную.
+  test("часы телефона отстают на 3 минуты: «Ждём» и минута до «Повторить» — по часам сервера", async () => {
+    const browserNow = Date.parse("2026-10-20T12:00:00+00:00");
+    const serverNow = browserNow + 180_000;
+    vi.useFakeTimers({ toFake: [...FAKE_TIMERS, "Date"] });
+    vi.setSystemTime(browserNow);
+    await openGame({
+      snapshot: snapshotWith({
+        server_time: new Date(serverNow).toISOString(),
+        // По часам сервера разбор идёт 50 с; по часам браузера начало — 3 мин 50 с назад.
+        phase: phaseOf("resolving", {
+          phase_since: new Date(serverNow - 50_000).toISOString(),
+        }),
+      }),
+    });
+
+    await wait(1000);
+    expect(
+      screen.getByRole("status", { name: "Мастер думает…" }),
+    ).toHaveTextContent("Ждём 0:51");
+    noButton("Повторить");
+
+    await wait(9000);
+    expect(button("Повторить")).toBeVisible();
   });
 
   test("в «Мастер не справился» кнопка есть сразу, без ожидания", async () => {
@@ -831,6 +912,69 @@ describe("ход игрока на экране игры", () => {
     await serve(ws.last(), { type: "phase", phase: phaseOf("discussion") });
 
     expect(screen.getByLabelText("Что делает твой персонаж?")).toHaveValue("");
+  });
+
+  test("черновик сдан по таймеру (action_auto_submitted): «Ход сдан» с текстом, «Изменить» нет", async () => {
+    const { ws } = await openGame({
+      as: "u2",
+      snapshot: snapshotWith({
+        phase: phaseOf("collecting"),
+        action: myAction({ status: "draft", text: "Осматриваю дверь" }),
+      }),
+    });
+    expect(screen.queryByText("Ход сдан")).toBeNull();
+
+    await serve(ws.last(), { type: "phase", phase: phaseOf("resolving") });
+    await serve(ws.last(), { type: "action_auto_submitted" });
+
+    expect(screen.getByText("Ход сдан")).toBeInTheDocument();
+    expect(screen.getByText("Осматриваю дверь")).toBeInTheDocument();
+    noButton("Изменить");
+  });
+
+  // Финальное покрытие B11: сервер шлёт «Ход сдан» сразу после коммита закрытия сбора, а фазу
+  // разбора — следом, отдельным кадром. Между ними экран уже не предлагает писать ход.
+  test("action_auto_submitted раньше смены фазы (порядок сервера): «Ход сдан» уже в сборе, поля и кнопок хода нет", async () => {
+    const { ws, server } = await openGame({
+      as: "u2",
+      snapshot: snapshotWith({
+        phase: phaseOf("collecting"),
+        action: myAction({
+          status: "draft",
+          text: "Шепчу пароль у двери",
+          secret: true,
+        }),
+      }),
+    });
+
+    await serve(ws.last(), { type: "action_auto_submitted" });
+
+    const sealed = screen.getByRole("region", { name: "Ход сдан" });
+    expect(within(sealed).getByText("Шепчу пароль у двери")).toBeVisible();
+    expect(within(sealed).getByText("Тайно")).toBeVisible();
+    expect(screen.queryByLabelText("Что делает твой персонаж?")).toBeNull();
+    noButton("Готов");
+    noButton("Пас");
+    noButton("Изменить");
+
+    await serve(ws.last(), { type: "phase", phase: phaseOf("resolving") });
+
+    expect(screen.getByRole("region", { name: "Ход сдан" })).toBeVisible();
+    expect(server.calls).toEqual([]);
+  });
+
+  test("черновик не успел дойти до клиента: «Ход сдан» без текста и без «Тайно»", async () => {
+    const { ws } = await openGame({
+      as: "u2",
+      snapshot: snapshotWith({ phase: phaseOf("collecting"), action: null }),
+    });
+
+    await serve(ws.last(), { type: "action_auto_submitted" });
+
+    const sealed = screen.getByRole("region", { name: "Ход сдан" });
+    expect(within(sealed).queryByText("Тайно")).toBeNull();
+    expect(sealed.querySelector(".composer__sealed-text")).toBeNull();
+    expect(screen.queryByLabelText("Что делает твой персонаж?")).toBeNull();
   });
 
   test("мастер закончил — новый ход начинается с пустого поля", async () => {

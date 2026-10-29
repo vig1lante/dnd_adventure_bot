@@ -14,7 +14,7 @@ import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,7 @@ import pytest
 from fastapi import FastAPI
 from generator_fakes import V2_SCENARIO, v2_answers, v2_draft
 from pydantic import BaseModel, SecretStr
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from dnd_engine.adventure.budget import XP_BUDGET_PER_CHARACTER
@@ -36,7 +36,7 @@ from dnd_server.authoring import cli, schemas, service
 from dnd_server.authoring.draft import STEPS, AuthoringDraft, from_adventure, seeded
 from dnd_server.authoring.pipeline import generate
 from dnd_server.config import Settings
-from dnd_server.db.models import AdventureDraft, User
+from dnd_server.db.models import AdventureDraft, AuthoredAdventure, User
 from dnd_server.llm.fake import FakeProvider, load_scenario
 
 SESSION_SECRET = "drafts-api-session-secret-0123456789-abcdef"
@@ -379,10 +379,119 @@ async def test_the_list_holds_only_the_authors_drafts_newest_first(stand):
     assert response.status_code == 200, response.text
     summaries = response.json()
     assert [s["id"] for s in summaries] == [second["id"], first["id"]]
-    assert set(summaries[0]) == {"id", "title", "adventure_id", "version", "updated_at"}
+    assert set(summaries[0]) == {
+        "id",
+        "title",
+        "adventure_id",
+        "version",
+        "updated_at",
+        "published_id",
+        "published_at",
+    }
     assert (summaries[0]["title"], summaries[0]["version"]) == ("Второй", 1)
     assert summaries[0]["adventure_id"] is None
     assert isinstance(summaries[0]["updated_at"], str)
+    # Ни один черновик не публиковался.
+    assert {(s["published_id"], s["published_at"]) for s in summaries} == {(None, None)}
+
+
+async def publish_rows(stand: Stand, author: Author, draft_id: str, *rows: tuple[str, datetime]):
+    """Строки опубликованного приключения из черновика, как их пишет публикация (блок B6)."""
+    async with stand.db() as session:
+        session.add_all(
+            AuthoredAdventure(
+                id=adventure_id,
+                owner_user_id=author.user_id,
+                data={},
+                source_draft_id=draft_id,
+                published_at=moment,
+            )
+            for adventure_id, moment in rows
+        )
+        await session.commit()
+
+
+async def test_the_list_tells_which_drafts_are_published_with_their_first_publication(stand):
+    # Дополнение B11 §2: бейдж «опубликовано» в списке черновиков. Если строк несколько (данные до
+    # fix-раунда B6), берётся самая ранняя публикация, как у `published_id` одного черновика.
+    author = await stand.author()
+    plain = await stand.new_draft(author, title="Черновик")
+    published = await stand.new_draft(author, title="Маяк")
+    early = datetime(2026, 10, 20, 9, 0, tzinfo=UTC)
+    await publish_rows(
+        stand,
+        author,
+        published["id"],
+        ("lighthouse-late", early + timedelta(days=1)),
+        ("lighthouse", early),
+    )
+
+    summaries = {s["id"]: s for s in (await stand.call(author, "GET", "/api/drafts")).json()}
+
+    assert (summaries[plain["id"]]["published_id"], summaries[plain["id"]]["published_at"]) == (
+        None,
+        None,
+    )
+    assert summaries[published["id"]]["published_id"] == "lighthouse"
+    assert summaries[published["id"]]["published_at"] == "2026-10-20T09:00:00+00:00"
+
+
+async def test_the_badge_of_the_list_names_the_same_publication_as_the_locked_id_of_the_draft(
+    stand,
+):
+    # Бейдж списка и закреплённый id черновика (`published_id`, блок B6) берут одну и ту же
+    # публикацию — самую раннюю, при равном времени — с меньшим id, в любом порядке строк.
+    author = await stand.author()
+    tie = await stand.new_draft(author, title="Ничья")
+    later = await stand.new_draft(author, title="Позже")
+    moment = datetime(2026, 10, 20, 9, 0, tzinfo=UTC)
+    await publish_rows(stand, author, tie["id"], ("tie-b", moment), ("tie-a", moment))
+    await publish_rows(
+        stand, author, later["id"], ("later-a", moment + timedelta(hours=1)), ("later-z", moment)
+    )
+
+    summaries = {s["id"]: s for s in (await stand.call(author, "GET", "/api/drafts")).json()}
+    async with stand.db() as session:
+        locked = {
+            draft["id"]: await service.published_id(session, draft["id"]) for draft in (tie, later)
+        }
+
+    assert locked == {tie["id"]: "tie-a", later["id"]: "later-z"}
+    assert {key: summaries[key]["published_id"] for key in locked} == locked
+    assert {summaries[key]["published_at"] for key in locked} == {"2026-10-20T09:00:00+00:00"}
+
+
+async def test_the_list_reads_the_publications_of_every_draft_at_once(stand):
+    # Без N+1: число запросов к базе не растёт с числом черновиков.
+    author = await stand.author()
+
+    async def statements_for_the_list() -> int:
+        executed: list[str] = []
+
+        def count(_conn, _cursor, statement, *_args) -> None:
+            executed.append(statement)
+
+        engine = stand.app.state.engine.sync_engine
+        event.listen(engine, "before_cursor_execute", count)
+        try:
+            response = await stand.call(author, "GET", "/api/drafts")
+        finally:
+            event.remove(engine, "before_cursor_execute", count)
+        assert response.status_code == 200, response.text
+        # JSON опубликованного приключения списку не нужен (R7 блока B11): его столбец не читается.
+        assert not any("authored_adventures.data" in statement for statement in executed)
+        return len(executed)
+
+    first = await stand.new_draft(author, title="Один")
+    await publish_rows(stand, author, first["id"], ("one", datetime(2026, 10, 20, tzinfo=UTC)))
+    with_one = await statements_for_the_list()
+    for number in range(4):
+        made = await stand.new_draft(author, title=f"Ещё {number}")
+        moment = datetime(2026, 10, 21, number, tzinfo=UTC)
+        await publish_rows(stand, author, made["id"], (f"more-{number}", moment))
+    with_five = await statements_for_the_list()
+
+    assert with_five == with_one
 
 
 async def test_an_edited_draft_moves_to_the_top_of_the_list(stand):

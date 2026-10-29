@@ -266,6 +266,44 @@ async def test_fake_is_available_with_a_scenario(settings, db):
     assert found["fake"]["available"] is True
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"provider": "fake"}, id="выбран fake"),
+        pytest.param({}, id="fake по умолчанию"),
+    ],
+)
+async def test_prod_refuses_a_game_with_the_test_master_even_with_a_scenario(settings, db, body):
+    # Спека §15: в боевом режиме тестового мастера нет, и FAKE_LLM_SCENARIO его не открывает.
+    async with serve(settings, app_env="prod", fake_llm_scenario=SCENARIO) as http:
+        creator = await add_player(db, tg_id=CREATOR_TG_ID)
+
+        created = await http.post(
+            "/api/games", headers=creator.headers, json={"adventure_id": "demo-crypt", **body}
+        )
+
+    assert created.status_code == 422
+    detail = created.json()["detail"]
+    assert detail == (
+        "Провайдер мастера не подходит: тестовый мастер fake доступен только в dev-режиме."
+    )
+    assert str(SCENARIO) not in created.text and SCENARIO.name not in created.text
+
+
+async def test_dev_creates_a_game_with_the_test_master_and_its_scenario(settings, db):
+    async with serve(settings, fake_llm_scenario=SCENARIO) as http:
+        creator = await add_player(db, tg_id=CREATOR_TG_ID)
+
+        created = await http.post(
+            "/api/games",
+            headers=creator.headers,
+            json={"adventure_id": "demo-crypt", "provider": "fake"},
+        )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["provider"] == "fake"
+
+
 CONFIGS = {
     "ничего": {},
     "anthropic": {"anthropic_api_key": SecretStr(ANTHROPIC_KEY)},

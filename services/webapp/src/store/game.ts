@@ -138,6 +138,35 @@ function startsNewTurn(before: PhaseView, after: PhaseView): boolean {
   );
 }
 
+/**
+ * Статусы нового хода: ход ещё никто не начал (`idle`, значка нет — решение D17). Клиент сбрасывает
+ * их вместе с фазой, не дожидаясь кадров `player_status`, которые сервер шлёт следом: иначе между
+ * кадрами горели бы «Готов», «Пас» и «Пишет» прошлого раунда. Так же статусы нового хода отдаёт
+ * снимок сервера; «Пишет» загорится кадром сервера, когда игрок наберёт черновик с текстом.
+ */
+const nobodyStarted = (view: GameView): GameView["statuses"] =>
+  Object.fromEntries(
+    view.game.players.map((player) => [player.user_id, "idle" as const]),
+  );
+
+/**
+ * Сервер сдал черновик автора по таймеру (кадр приходит только автору и только с текстом). Сданный
+ * или спасованный вручную ход не трогаем; черновика, ещё не дошедшего до клиента, текст неизвестен.
+ */
+function autoSubmitted(action: PlayerAction | null): PlayerAction | null {
+  if (action === null) {
+    return {
+      text: "",
+      secret: false,
+      inspiration: false,
+      status: "auto_submitted",
+    };
+  }
+  return action.status === "draft"
+    ? { ...action, status: "auto_submitted" }
+    : action;
+}
+
 function updateView(view: GameView, event: WsEvent): GameView {
   switch (event.type) {
     case "phase":
@@ -176,6 +205,10 @@ function updateView(view: GameView, event: WsEvent): GameView {
     }
     case "rest_ended":
       return view.rest === null ? view : { ...view, rest: null };
+    case "action_auto_submitted": {
+      const action = autoSubmitted(view.action);
+      return action === view.action ? view : { ...view, action };
+    }
     default:
       return view; // pong и события, которых клиент не знает
   }
@@ -219,7 +252,11 @@ export function applyEvent(
     // Сервер событием «ход обновлён» не шлёт: прежний ход игрока к новому не относится.
     return {
       ...state,
-      view: { ...withPhase(state.view, event.phase), action: null },
+      view: {
+        ...withPhase(state.view, event.phase),
+        action: null,
+        statuses: nobodyStarted(state.view),
+      },
       turn: state.turn + 1,
     };
   }
@@ -366,6 +403,7 @@ export const sessionToken = (): string | null =>
   useGame.getState().session?.token ?? null;
 
 const GAME_UNAVAILABLE = "Игра недоступна.";
+const KICKED = "Хост исключил вас.";
 
 let stopCurrent: (() => void) | null = null;
 
@@ -396,7 +434,8 @@ export async function leavingGame<T>(
  * одна игра: новый вызов останавливает прежний.
  *
  * Отказы сервера уводят с экрана игры без повторов: 4401 — сессия недействительна,
- * возврат на вход; 4403 — игры нет или игрок в ней не участник, «Мои игры» с пояснением.
+ * возврат на вход; 4403 — игры нет или игрок в ней не участник, «Мои игры» с пояснением
+ * («Хост исключил вас», если его исключил хост).
  */
 export function followGame(gameId: string): () => void {
   stopCurrent?.();
@@ -428,7 +467,7 @@ export function followGame(gameId: string): () => void {
           signOut();
         } else {
           show({ screen: "games" });
-          setNotice(GAME_UNAVAILABLE);
+          setNotice(reason === "kicked" ? KICKED : GAME_UNAVAILABLE);
         }
       },
     },

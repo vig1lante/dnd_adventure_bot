@@ -10,7 +10,7 @@ import json
 import logging
 import re
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -163,6 +163,21 @@ async def test_every_player_sees_the_profanity_flag_of_the_game_in_the_snapshot(
     assert flags == [False] * len(table.seats)
 
 
+async def test_the_snapshot_game_has_its_creation_time_and_the_hero_names_for_everybody(
+    db, srd, table
+):
+    # Контракт B11 §2: `created_at` — и в снимке (ISO с поясом UTC), имена героев видят все.
+    async with db() as session:
+        created = (await session.get(Game, table.game_id)).created_at
+
+    games = [(await snapshot_of(db, srd, table, key))["game"] for key in table.seats]
+
+    assert {game["created_at"] for game in games} == {created.astimezone(UTC).isoformat()}
+    assert games[0]["created_at"].endswith("+00:00")
+    heroes = [[p["hero_name"] for p in game["players"]] for game in games]
+    assert heroes == [["Алиса", "Борис", "Вера"]] * len(table.seats)
+
+
 async def test_snapshot_describes_game_phase_scene_host_and_server_time(db, srd, table):
     snapshot = await snapshot_of(db, srd, table, "alice")
 
@@ -179,6 +194,8 @@ async def test_snapshot_describes_game_phase_scene_host_and_server_time(db, srd,
         "deadline_at": "2030-05-01T12:30:00+00:00",
         "remaining_seconds": None,
         "scene": {"type": "combat", "day": 2, "part": "evening"},
+        "phase_since": None,  # стол собран прямой записью в базу: фазу никто не менял
+        "can_regenerate": False,  # идёт сбор ходов
     }
     assert datetime.fromisoformat(snapshot["server_time"]).utcoffset().total_seconds() == 0
 
@@ -194,11 +211,11 @@ async def test_statuses_show_every_player_as_writing_ready_or_pass_and_never_the
 
     snapshot = await snapshot_of(db, srd, table, "vera")
 
-    # Вера не начинала ход, Алиса «выжидает» (автопас), Борис сдал тайный ход.
+    # Вера не начинала ход (значка нет), Алиса «выжидает» (автопас), Борис сдал тайный ход.
     assert snapshot["statuses"] == {
         table.alice.user_id: "pass",
         table.boris.user_id: "ready",
-        table.vera.user_id: "writing",
+        table.vera.user_id: "idle",
     }
     assert "secret" not in dump(snapshot["statuses"])
 
@@ -787,6 +804,8 @@ async def test_lobby_snapshot_has_my_character_but_no_game_state(db, srd, lobby_
         "deadline_at": None,
         "remaining_seconds": None,
         "scene": None,
+        "phase_since": None,
+        "can_regenerate": False,
     }
     assert snapshot["character"]["id"] == lobby_table.alice.character.id
     assert snapshot["game"]["players"][2]["ready"] is False  # Вера ещё не готова
@@ -1197,18 +1216,59 @@ async def test_phase_event_carries_the_phase_block_of_the_snapshot(db, srd, tabl
 
     snapshot = await snapshot_of(db, srd, table, "alice")
 
-    assert phase_event(game, table.state) == {"type": "phase", "phase": snapshot["phase"]}
-    assert phase_event(game, None)["phase"]["scene"] is None
+    event = phase_event(game, table.state, can_regenerate=False)
+    assert event == {"type": "phase", "phase": snapshot["phase"]}
+    assert phase_event(game, None, can_regenerate=False)["phase"]["scene"] is None
+    assert phase_event(game, None, can_regenerate=True)["phase"]["can_regenerate"] is True
+
+
+async def test_the_phase_tells_since_when_the_turn_phase_goes_in_utc(db, srd, table):
+    # Минуту до «Повторить» клиент считает от серверного начала фазы (дополнение B11 §1 п. 1).
+    started = datetime(2030, 5, 1, 15, 0, tzinfo=timezone(timedelta(hours=3)))
+    async with db() as session:
+        game = await session.get(Game, table.game_id)
+        game.set_turn_phase(TurnPhase.RESOLVING, started)
+        await session.commit()
+
+    phase = (await snapshot_of(db, srd, table, "vera"))["phase"]
+
+    assert (phase["turn_phase"], phase["phase_since"]) == (
+        "resolving",
+        "2030-05-01T12:00:00+00:00",
+    )
+
+
+async def test_the_same_turn_phase_set_again_keeps_its_start(db, table):
+    first = datetime(2030, 5, 1, 12, 0, tzinfo=UTC)
+    async with db() as session:
+        game = await session.get(Game, table.game_id)
+        game.set_turn_phase(TurnPhase.DISCUSSION, first)
+        game.set_turn_phase(TurnPhase.DISCUSSION, first + timedelta(minutes=5))
+        await session.commit()
+
+    async with db() as session:
+        game = await session.get(Game, table.game_id)
+    assert (game.turn_phase, game.phase_since) == (TurnPhase.DISCUSSION, first)
+
+
+def row_of(status: ActionStatus, text: str = "") -> PlayerAction:
+    return PlayerAction(turn_id="t1", user_id="u1", text=text, status=status)
 
 
 def test_player_status_event_names_the_player_and_the_public_status():
-    assert player_status_event("u1", ActionStatus.AUTO_SUBMITTED) == {
+    # Решение D17: «пишет» — только черновик с видимым текстом; без строки хода и с пустым
+    # черновиком — `idle` (значка нет).
+    assert player_status_event("u1", row_of(ActionStatus.AUTO_SUBMITTED, "Иду")) == {
         "type": "player_status",
         "user_id": "u1",
         "status": "ready",
     }
-    assert player_status_event("u1", ActionStatus.DRAFT)["status"] == "writing"
-    assert player_status_event("u1", ActionStatus.PASS)["status"] == "pass"
+    assert player_status_event("u1", row_of(ActionStatus.DRAFT, "Иду"))["status"] == "writing"
+    assert player_status_event("u1", row_of(ActionStatus.DRAFT, " \n "))["status"] == "idle"
+    assert player_status_event("u1", None)["status"] == "idle"
+    assert player_status_event("u1", row_of(ActionStatus.PASS))["status"] == "pass"
+    assert player_status_event("u1", row_of(ActionStatus.AUTO_PASS))["status"] == "pass"
+    assert player_status_event("u1", row_of(ActionStatus.SUBMITTED, "Иду"))["status"] == "ready"
 
 
 async def test_feed_item_event_is_the_feed_item_of_the_snapshot(db, srd, table):
@@ -2652,6 +2712,8 @@ async def test_the_camp_phase_shows_the_running_deadline_and_the_camp_scene(db, 
         "deadline_at": "2030-05-01T12:30:00+00:00",
         "remaining_seconds": None,
         "scene": {"type": "camp", "day": 2, "part": "evening"},
+        "phase_since": None,
+        "can_regenerate": False,  # у стола нет разобранного хода: откатывать нечего
     }
     assert snapshot["combat"] is None
 
@@ -2704,6 +2766,7 @@ async def test_a_withdrawn_camp_line_is_not_in_the_snapshot_any_more(db, srd, ta
 
 JOURNAL_ENTRY_KEYS = {
     "id", "ref", "section", "title", "text", "audience", "turn", "revision", "visited_turn",
+    "updated_turn",
 }  # fmt: skip
 PERSONAL_NOTE = "ЛИЧНОЕ-boris: Марта прячет ключ под стойкой."
 

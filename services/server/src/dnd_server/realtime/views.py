@@ -39,6 +39,12 @@ id персонажей; в id игрока их переводит `audience_to
 отката хода. Игра, записанная до дневника, получает стартовый дневник при чтении для снимка — в
 памяти, в базу его запишет следующий ход мастера.
 
+Фаза (`phase_view`) несёт и момент начала фазы хода (`phase_since`, по нему клиент считает минуту
+до «Повторить» по серверному времени) и признак `can_regenerate`: можно ли сейчас нажать
+«Перегенерировать». Правило отката (`regeneration`) живёт здесь, а не в `dm.turn`: его проверяет
+откат хода мастера и видит клиент, а `dm.turn` импортирует этот модуль, а не наоборот. Так у кнопки
+и у сервера одно правило (дополнение B11 §1 п. 11).
+
 Привал (блок B9 DND-2) в снимке — блок `rest` (`rest_view`): вид, срок, личные идеи «расскажи о
 себе» только героя смотрящего (из `games.rest_ideas`) и реплики у костра этого привала (записи ленты
 `camp_line` открытого хода «конец привала»). Вне фазы `camp` блока нет. Кадры привала —
@@ -106,23 +112,28 @@ from dnd_server.db.models import (
     MessageKind,
     PlayerAction,
     PlayerCharacter,
+    Turn,
     TurnPhase,
+    TurnStatus,
     User,
+    iso_utc,
 )
 from dnd_server.dm.camp_flow import RestKind, rest_kind
-from dnd_server.games.service import get_game
+from dnd_server.games.service import Conflict, get_game
 
 logger = logging.getLogger(__name__)
 
 # Сколько последних сообщений, видимых игроку, входит в ленту снимка.
 FEED_LIMIT = 200
 
-# Статус хода игрока для всех: «пишет», «готов», «пас». Что ход тайный и что в нём написано,
-# статус не говорит. Автосдача и автопас по таймеру для остальных выглядят так же, как ручные.
+# Статус хода игрока для всех (решение D17 блока B11): `idle` — ещё ничего не написал (строки хода
+# нет или в черновике нет видимого текста), `writing` — черновик с текстом, `ready` — сдан, `pass` —
+# пас. Что ход тайный и что в нём написано, статус не говорит. Автосдача и автопас по таймеру для
+# остальных выглядят так же, как ручные. «Ещё не сдал» для сбора ходов — и `idle`, и `writing`.
+IDLE = "idle"
 WRITING = "writing"
-PUBLIC_STATUS: Mapping[ActionStatus, str] = MappingProxyType(
+SETTLED_STATUS: Mapping[ActionStatus, str] = MappingProxyType(
     {
-        ActionStatus.DRAFT: WRITING,
         ActionStatus.SUBMITTED: "ready",
         ActionStatus.AUTO_SUBMITTED: "ready",
         ActionStatus.PASS: "pass",
@@ -131,10 +142,13 @@ PUBLIC_STATUS: Mapping[ActionStatus, str] = MappingProxyType(
 )
 
 
-def iso_utc(moment: datetime) -> str:
-    """Время в ISO 8601 с явным поясом UTC (`+00:00`): без пояса браузер прочёл бы строку как
-    местное время и сдвинул отсчёт. База отдаёт время уже с поясом UTC (`UtcDateTime`)."""
-    return moment.astimezone(UTC).isoformat()
+def public_status(action: PlayerAction | None) -> str:
+    """Публичный статус игрока по его строке хода в текущем ходе (`None` — строки нет)."""
+    if action is None:
+        return IDLE
+    if action.status == ActionStatus.DRAFT:
+        return WRITING if action.text.strip() else IDLE
+    return SETTLED_STATUS[action.status]
 
 
 # --- названия и описания ---
@@ -189,12 +203,14 @@ def _running_deadline(game: Game) -> str | None:
     return iso_utc(game.deadline_at) if running and game.deadline_at is not None else None
 
 
-def phase_view(game: Game, state: GameState | None) -> dict[str, Any]:
+def phase_view(game: Game, state: GameState | None, *, can_regenerate: bool) -> dict[str, Any]:
     """Фаза игры, фаза хода, отсчёт и сцена. До старта игры состояния нет, и сцены тоже.
 
     Идущий отсчёт описывает срок `deadline_at`. На паузе отсчёт стоит: срока нет, а остаток в
     секундах (вверх) лежит в `remaining_seconds`, чтобы клиент показал его неподвижным; после
-    «Продолжить» приходит новый срок."""
+    «Продолжить» приходит новый срок. `phase_since` — когда началась фаза хода (пусто у игр,
+    записанных до миграции 0007, пока фаза не сменится); `can_regenerate` считает вызывающий
+    (`can_regenerate()`): для него нужны ходы игры из базы."""
     scene = None
     if state is not None:
         scene = {"type": state.scene.type.value, "day": state.time.day, "part": state.time.part}
@@ -205,7 +221,76 @@ def phase_view(game: Game, state: GameState | None) -> dict[str, Any]:
         "deadline_at": _running_deadline(game),
         "remaining_seconds": None if remaining is None else math.ceil(remaining.total_seconds()),
         "scene": scene,
+        "phase_since": None if game.phase_since is None else iso_utc(game.phase_since),
+        "can_regenerate": can_regenerate,
     }
+
+
+# Из каких фаз допустима «Перегенерировать»: игроки обсуждают следующий ход, сбор ещё не начался.
+REGENERATE_FROM = (TurnPhase.DISCUSSION, TurnPhase.COMBAT_WAIT, TurnPhase.CAMP)
+# Отказ «Перегенерировать», когда после хода игра менялась вне хода мастера (блок B9).
+CHANGED_SINCE_TURN = "После хода мастера игра уже изменилась: перегенерировать нельзя."
+
+
+@dataclass(frozen=True)
+class Regeneration:
+    """Что откатывает «Перегенерировать»: последний разобранный ход, нетронутый следующий за ним и
+    снимок состояния до разобранного хода."""
+
+    last: Turn
+    following: Turn
+    previous: GameStateSnapshot
+
+
+async def regeneration(session: AsyncSession, game: Game) -> Regeneration:
+    """Ход, который можно перегенерировать сейчас; нельзя — `Conflict` с причиной.
+
+    Можно, пока игроки обсуждают следующий ход (`REGENERATE_FROM`), следующий за разобранным ход
+    ещё открыт и не тронут, а состояние игры с его начала не менялось вне хода мастера (привал по
+    кнопке хоста, кость хитов): откат стёр бы эти изменения. Привал мастера (`start_camp`)
+    перегенерировать можно: его начал сам ход. Только читает базу."""
+    if game.turn_phase not in REGENERATE_FROM:
+        raise Conflict("Перегенерировать ответ можно, пока игроки обсуждают следующий ход.")
+    last = await session.scalar(
+        select(Turn)
+        .where(Turn.game_id == game.id, Turn.status == TurnStatus.DONE)
+        .order_by(Turn.number.desc(), Turn.created_at.desc())
+        .limit(1)
+    )
+    if last is None:
+        raise Conflict("Мастеру пока нечего перегенерировать: ни один ход не разобран.")
+    following = await session.get(Turn, game.current_turn_id) if game.current_turn_id else None
+    if (
+        following is None
+        or following.status != TurnStatus.OPEN
+        or following.number != last.number + 1
+    ):
+        raise Conflict("Следующий ход уже начат: перегенерировать нельзя.")
+    started_at = following.state_version_before
+    if started_at is not None and game.state_version != started_at:
+        raise Conflict(CHANGED_SINCE_TURN)
+    version_before = last.state_version_before
+    previous = (
+        None
+        if version_before is None
+        else await session.get(GameStateSnapshot, (game.id, version_before))
+    )
+    if previous is None:
+        raise Conflict("Состояния до этого хода нет: перегенерировать нельзя.")
+    return Regeneration(last, following, previous)
+
+
+async def can_regenerate(session: AsyncSession, game: Game) -> bool:
+    """Можно ли сейчас нажать «Перегенерировать»: игра идёт (на паузе кнопка отвечает 409, как
+    все кнопки хода) и `regeneration` не откажет. Вне идущей игры и фаз обсуждения отвечает сразу,
+    без запросов к базе."""
+    if game.phase != GamePhase.PLAYING or game.turn_phase not in REGENERATE_FROM:
+        return False
+    try:
+        await regeneration(session, game)
+    except Conflict:
+        return False
+    return True
 
 
 def party_view(state: GameState, srd: SrdContent) -> list[dict[str, Any]]:
@@ -484,12 +569,19 @@ def feed_item(message: Message) -> dict[str, Any]:
 # --- события: те же блоки, обёрнутые типом ---
 
 
-def phase_event(game: Game, state: GameState | None) -> dict[str, Any]:
-    return {"type": "phase", "phase": phase_view(game, state)}
+def phase_event(game: Game, state: GameState | None, *, can_regenerate: bool) -> dict[str, Any]:
+    return {"type": "phase", "phase": phase_view(game, state, can_regenerate=can_regenerate)}
 
 
-def player_status_event(user_id: str, status: ActionStatus) -> dict[str, Any]:
-    return {"type": "player_status", "user_id": user_id, "status": PUBLIC_STATUS[status]}
+def action_auto_submitted_event() -> dict[str, Any]:
+    """«Ход сдан» автору черновика с текстом, который сдал отсчёт (дополнение B11 §1 п. 5). Текста
+    хода в кадре нет: его адресат знает свой черновик, остальные этот кадр не получают."""
+    return {"type": "action_auto_submitted"}
+
+
+def player_status_event(user_id: str, action: PlayerAction | None) -> dict[str, Any]:
+    """Публичный статус игрока для всех; `action` — его строка хода (`None` — строки ещё нет)."""
+    return {"type": "player_status", "user_id": user_id, "status": public_status(action)}
 
 
 def feed_item_event(message: Message) -> dict[str, Any]:
@@ -999,12 +1091,10 @@ async def snapshot_for(
         "server_time": iso_utc(datetime.now(UTC)),
         "game": game_out.model_dump(mode="json"),
         "host_user_id": game.host_user_id,
-        "phase": phase_view(game, state),
+        "phase": phase_view(game, state, can_regenerate=await can_regenerate(session, game)),
         "statuses": (
             {
-                player.user_id: PUBLIC_STATUS[actions[player.user_id].status]
-                if player.user_id in actions
-                else WRITING
+                player.user_id: public_status(actions.get(player.user_id))
                 for player in game_out.players
             }
             if game.current_turn_id is not None

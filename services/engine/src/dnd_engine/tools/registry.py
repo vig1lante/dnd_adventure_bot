@@ -26,7 +26,7 @@
 """
 
 import functools
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -114,32 +114,38 @@ class ToolContext:
         secret = sorted(set(subjects) & self.secret_actors)
         return secret[0] if secret else PUBLIC_AUDIENCE
 
-    def mark_secret_rolls(self, authors: Iterable[str] = ()) -> None:
+    def mark_secret_rolls(
+        self, authors: Iterable[str] = (), public_labels: Collection[str] = ()
+    ) -> None:
         """Закрывает броски действия вызова (`events[action_from:]`) по его авторам.
 
         Единственное место, где размечается аудитория бросков: обработчики о тайных ходах не
         знают. Автор вызова — тот, чьё это действие (`ToolSpec.author_fields`); кто бросал
         кубы, не важно: толчок заставляет бросать цель, а ход тайный. Правило закрыто по
-        умолчанию, бросок никогда не становится общим:
+        умолчанию:
         - собственный бросок тайного актёра видит только он;
         - остальные броски действия тайного автора — часть его действия, их видит автор;
           при нескольких тайных авторах бросок достаётся первому по id: аудитория события одна;
-        - если автора нет или он не тайный, остальные броски общие (инициатива в начале боя).
+        - если автора нет или он не тайный, остальные броски общие;
+        - единственное исключение — броски с подписью из `public_labels`
+          (`ToolSpec.public_roll_labels`): их видят все, даже у тайного актёра.
         """
-        self._close_rolls(self.action_from, len(self.events), authors)
+        self._close_rolls(self.action_from, len(self.events), authors, public_labels)
 
     def begin_action(self, first_event: int) -> None:
         """Отделяет передачу хода от действия: `events[action_from:first_event]` — броски конца
         хода и спасброски от смерти бойцов, которых пришлось пройти. Они не часть действия
         автора и размечаются только по своим актёрам; действие начинается с `first_event`."""
-        self._close_rolls(self.action_from, first_event, ())
+        self._close_rolls(self.action_from, first_event, (), ())
         self.action_from = first_event
 
-    def _close_rolls(self, start: int, end: int, authors: Iterable[str]) -> None:
+    def _close_rolls(
+        self, start: int, end: int, authors: Iterable[str], public_labels: Collection[str]
+    ) -> None:
         secret_authors = sorted(set(authors) & self.secret_actors)
         for index in range(start, end):
             event = self.events[index]
-            if not isinstance(event, RollEvent):
+            if not isinstance(event, RollEvent) or event.label in public_labels:
                 continue
             audience = self.audience_for(event.actor_id)
             if audience == PUBLIC_AUDIENCE and secret_authors:
@@ -180,6 +186,11 @@ class ToolSpec:
     # Поля аргументов с id автора вызова (персонаж или боец, чьё это действие): по ним реестр
     # решает, чьи броски вызова тайные. Пусто — у инструмента автора нет (лор, мир, начало боя).
     author_fields: tuple[str, ...] = ()
+    # Подписи бросков, которые этот инструмент всегда показывает всем, даже у тайного актёра:
+    # инициатива начала боя и так видна в порядке хода (спека DND-2 §15). Подпись сверяется
+    # только в вызовах этого инструмента: та же подпись в другом (имя действия монстра из
+    # приключения, против которого тайный герой спасается) бросок не открывает.
+    public_roll_labels: tuple[str, ...] = ()
 
     def authors(self, args: ToolArgs) -> set[str]:
         """id авторов вызова; необязательное поле без значения автора не даёт."""
@@ -281,5 +292,5 @@ class ToolRegistry:
             result = spec.handler(ctx, args)
         except ToolError as exc:
             return ToolOutcome(name=name, args=raw_args, error=_shorten(str(exc)))
-        ctx.mark_secret_rolls(spec.authors(args))
+        ctx.mark_secret_rolls(spec.authors(args), spec.public_roll_labels)
         return ToolOutcome(name=name, args=raw_args, result=result)

@@ -100,7 +100,7 @@ export class FakeSocket {
   clientCloseCode: number | null = null;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
-  onclose: ((event: { code: number }) => void) | null = null;
+  onclose: ((event: { code: number; reason: string }) => void) | null = null;
   readonly url: string;
 
   constructor(url: string) {
@@ -132,10 +132,10 @@ export class FakeSocket {
     this.onmessage?.({ data });
   }
 
-  /** Связь оборвалась или сервер закрыл сокет с кодом. */
-  drop(code = 1006) {
+  /** Связь оборвалась или сервер закрыл сокет с кодом и причиной (`kicked` у 4403 исключённого). */
+  drop(code = 1006, reason = "") {
     this.readyState = FakeSocket.CLOSED;
-    this.onclose?.({ code });
+    this.onclose?.({ code, reason });
   }
 }
 
@@ -179,6 +179,7 @@ export function gameSummary(overrides: Partial<GameSummary> = {}): GameSummary {
     short_rest_seconds: 120,
     profanity: true,
     players: [],
+    created_at: "2026-10-20T09:30:00+00:00",
     ...overrides,
   };
 }
@@ -193,6 +194,7 @@ export function lobbyPlayer(
     is_host: false,
     ready: false,
     has_character: false,
+    hero_name: null,
     ...overrides,
   };
 }
@@ -213,6 +215,8 @@ export function snapshotOf(
       deadline_at: null,
       remaining_seconds: null,
       scene: null,
+      phase_since: null,
+      can_regenerate: false,
     },
     statuses: {},
     character: null,

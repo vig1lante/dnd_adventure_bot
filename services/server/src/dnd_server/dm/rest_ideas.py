@@ -33,12 +33,27 @@
 приключение и место, недавние общие рассказы. Ловится дословный перенос, пересказ своими словами —
 нет: это остаточный риск того же рода, что у мастера и вплетения. Ложное срабатывание лишь снимает
 необязательную идею; в журнал идёт только число отброшенных, без текстов.
+
+Усиление B11 (находка S4 блока B9). Перед сверкой обе стороны нормализуются одинаково
+(`_normalized`): NFKC, без знаков сочетания (ударение, «й» читается как «и») и невидимых знаков
+форматирования (мягкий перенос, нулевая ширина — и их видимая запись `\xad` после
+`printable_line`), латинские буквы-двойники — кириллицей, дефисы внутри слова убраны. Серия из
+`GLUED_LETTERS` и больше одиночных букв («н а й т и») склеивается в одно слово и сверяется ещё и
+как строка: в ней ищутся склеенные фрагменты и имена. Слова с заглавной буквы не в начале
+предложения из личных текстов A — имена собственные (`_proper_names`): идея B с таким именем
+(тоже с заглавной, в любом падеже) отбрасывается. Чтобы реже снимать безобидные идеи (находка N1),
+у коротких имён окончание не длиннее `SHORT_NAME_ENDING` букв: «Брод» — «Броде», но не «Бродяга».
+Перестановка слов, вставка слова и транслит не ловятся: защита от них — только отдельный запрос на
+адресата (решение владельца).
 """
 
 import asyncio
 import logging
 import re
 import time
+import unicodedata
+from bisect import bisect_left
+from itertools import islice
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -260,39 +275,115 @@ _WORD = re.compile(r"\w+")
 Fragment = tuple[str, ...]  # тройка слов подряд или пара значимых слов подряд
 # Пара слов — фрагмент, когда оба слова не короче этого: предлоги и союзы («ей за») не в счёт.
 SIGNIFICANT_LETTERS = 4
+# Видимая запись невидимого знака, которую оставляет `printable_line` (`\xad`, `\u200b`).
+_ESCAPED = re.compile(r"\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8})")
+# Дефисы между буквами одного слова («на-йти»); тире между словами остаётся разделителем.
+_INNER_HYPHENS = re.compile(r"(?<=\w)[-\u2010\u2011\u2012\u2043\ufe63\uff0d]+(?=\w)")
+# Латинские буквы, похожие на кириллические, — кириллицей.
+_LOOKALIKES = str.maketrans("ABCEHKMOPTXYaceopxyk", "АВСЕНКМОРТХУасеорхук")
+# Столько одиночных букв подряд («н а й т и») — это слово, разбитое пробелами.
+GLUED_LETTERS = 3
+# Короткое имя (не длиннее `SHORT_NAME`) узнаётся с окончанием не длиннее этого (находка N1).
+SHORT_NAME = 4
+SHORT_NAME_ENDING = 2
+# Знаки конца предложения: слово после них с заглавной — не обязательно имя.
+_SENTENCE_ENDS = frozenset(".!?…")
+
+
+def _normalized(text: str) -> str:
+    """Текст для сверки с сохранённым регистром: без невидимых знаков и знаков сочетания, с
+    кириллицей вместо латинских двойников и без дефисов внутри слов."""
+    text = unicodedata.normalize("NFKC", _ESCAPED.sub("", text))
+    kept = (
+        char
+        for char in unicodedata.normalize("NFD", text)
+        if unicodedata.category(char) not in ("Mn", "Cf")
+    )
+    return _INNER_HYPHENS.sub("", "".join(kept).translate(_LOOKALIKES))
+
+
+def _tokens(text: str) -> list[tuple[str, bool]]:
+    """Слова нормализованного текста с регистром и признаком «склеено из одиночных букв»."""
+    tokens: list[tuple[str, bool]] = []
+    letters: list[str] = []
+    for word in [*_WORD.findall(_normalized(text)), ""]:  # "" закрывает последнюю серию
+        if len(word) == 1:
+            letters.append(word)
+            continue
+        if len(letters) >= GLUED_LETTERS:
+            tokens.append(("".join(letters), True))
+        else:
+            tokens += [(letter, False) for letter in letters]
+        letters = []
+        if word:
+            tokens.append((word, False))
+    return tokens
 
 
 def _words(text: str) -> list[str]:
-    """Слова текста в нижнем регистре, без знаков препинания; «ё» читается как «е»."""
-    return _WORD.findall(text.lower().replace("ё", "е"))
+    """Слова текста для сверки в нижнем регистре, без знаков препинания (`_tokens`)."""
+    return [word.lower() for word, _glued in _tokens(text)]
+
+
+def _proper_names(text: str) -> list[str]:
+    """Слова с заглавной буквы не в начале предложения: имена собственные чужого текста.
+
+    Один проход по словам: начало предложения — первое слово текста и слово, перед которым (после
+    прошлого слова) стоит знак конца предложения. Каждый знак текста смотрится один раз, поэтому
+    подделанная предыстория («!» тысячу раз и много слов с заглавной) не стоит квадратичного
+    поиска (находка S1 блока B11)."""
+    normalized = _normalized(text)
+    names: list[str] = []
+    previous_end = 0
+    for found in _WORD.finditer(normalized):
+        gap = normalized[previous_end : found.start()]
+        starts_sentence = previous_end == 0 or not _SENTENCE_ENDS.isdisjoint(gap)
+        if found.group()[0].isupper() and not starts_sentence:
+            names.append(found.group().lower())
+        previous_end = found.end()
+    return names
 
 
 def _fragments(texts: Iterable[str]) -> frozenset[Fragment]:
     """Фрагменты текстов для сверки: тройки слов подряд и пары значимых слов подряд."""
-    found: set[Fragment] = set()
-    for text in texts:
-        words = _words(text)
-        found |= {(a, b, c) for a, b, c in zip(words, words[1:], words[2:], strict=False)}
-        found |= {
-            (a, b)
-            for a, b in zip(words, words[1:], strict=False)
-            if min(len(a), len(b)) >= SIGNIFICANT_LETTERS
-        }
-    return frozenset(found)
+    return frozenset(fragment for text in texts for fragment in _fragments_of(_words(text)))
+
+
+def _fragments_of(words: Sequence[str]) -> set[Fragment]:
+    triples = {(a, b, c) for a, b, c in zip(words, words[1:], words[2:], strict=False)}
+    pairs = {
+        (a, b)
+        for a, b in zip(words, words[1:], strict=False)
+        if min(len(a), len(b)) >= SIGNIFICANT_LETTERS
+    }
+    return triples | pairs
+
+
+def _stem(name_word: str) -> str:
+    """Неизменная часть слова имени: короткое — целиком, длинное — без одной-двух букв конца."""
+    size = len(name_word)
+    return name_word if size <= SHORT_NAME else name_word[: -1 if size == 5 else -2]
 
 
 def _same_word(name_word: str, word: str) -> bool:
     """Слово имени в тексте с русским окончанием: «Марта» — «Марте», «Мшистый Брод» — «Мшистого
-    Брода». Короткое слово — с прибавленным окончанием, длинное — ещё и со сменой одной-двух букв
-    конца. Грубо, но ложное срабатывание лишь снимает необязательную идею."""
-    size = len(name_word)
-    stem = name_word if size <= 4 else name_word[: -1 if size == 5 else -2]
-    return word.startswith(stem) and len(word) - size <= 3
+    Брода». Короткое слово — с прибавленным окончанием не длиннее `SHORT_NAME_ENDING` букв
+    («Брод» — «Бродом», но не «Бродяга»), длинное — ещё и со сменой одной-двух букв конца. Грубо,
+    но ложное срабатывание лишь снимает необязательную идею."""
+    longest = SHORT_NAME_ENDING if len(name_word) <= SHORT_NAME else 3
+    return word.startswith(_stem(name_word)) and len(word) - len(name_word) <= longest
 
 
-def _mentions(name: str, words: Sequence[str]) -> bool:
+Name = tuple[str, ...]  # слова имени после `_words`: считаются один раз, при сборке фильтра
+
+
+def _in_glued(parts: Name, glued: Sequence[str]) -> bool:
+    """Имя в слове, склеенном из одиночных букв: каждая его часть встречается там подстрокой."""
+    return bool(parts) and any(all(_stem(part) in run for part in parts) for run in glued)
+
+
+def _mentions(parts: Name, words: Sequence[str]) -> bool:
     """Имя (одно или несколько слов подряд) встречается в словах текста."""
-    parts = _words(name)
     if not parts:
         return False
     return any(
@@ -303,37 +394,73 @@ def _mentions(name: str, words: Sequence[str]) -> bool:
 
 @dataclass(frozen=True)
 class _Private:
-    """Личные сведения одного адресата в запросе: фрагменты слов и имена NPC и мест из связей."""
+    """Личные сведения одного адресата в запросе: фрагменты слов, имена NPC и мест из связей,
+    имена собственные из его текстов (по одному слову, без повторов) и все его слова по порядку
+    (`known` — что он знает сам)."""
 
     fragments: frozenset[Fragment]
-    names: tuple[str, ...]
+    names: tuple[Name, ...]
+    proper_names: tuple[str, ...]
+    known: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _Foreign:
+    """Личные сведения другого адресата, которых герой идеи не знает сам и которых нет в общем
+    тексте: только с ними и сверяется его идея."""
+
+    fragments: frozenset[Fragment]
+    names: tuple[Name, ...]
+    proper_names: tuple[str, ...]
+
+
+def _known(name_word: str, known: Sequence[str]) -> bool:
+    """Слово имени есть среди отсортированных слов `known` (с окончанием, как `_same_word`).
+
+    Слова с основой имени лежат в отсортированном списке подряд: двоичный поиск находит начало, и
+    просматриваются только они, а не весь текст (находка S4 блока B11)."""
+    stem = _stem(name_word)
+    for word in islice(known, bisect_left(known, stem), None):
+        if not word.startswith(stem):
+            return False
+        if _same_word(name_word, word):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
 class IdeaGuard:
     """Фильтр ответа модели: идея героя не несёт личных сведений других адресатов.
 
-    `private` — личные сведения каждого адресата (ровно то, что ушло в его личный раздел),
-    `shared_fragments` и `shared_words` — то, что знают все (карточки отряда, приключение и место,
-    недавние рассказы)."""
+    `foreign` — для каждого адресата то, чего он не знает из личных разделов других (`_Foreign`),
+    `stranger` — то же для героя вне адресатов: всё личное, кроме общего. Что знают все (карточки
+    отряда, приключение и место, недавние рассказы) и что знает сам адресат, от идеи не зависит:
+    это вычтено один раз при сборке (`idea_guard`), а проверка идеи — только сверка с её словами."""
 
-    private: Mapping[str, _Private]
-    shared_fragments: frozenset[Fragment]
-    shared_words: tuple[str, ...]
+    foreign: Mapping[str, tuple[_Foreign, ...]]
+    stranger: tuple[_Foreign, ...]
 
     def leaks(self, hero_id: str, text: str) -> bool:
-        """В идее героя `hero_id` есть фрагмент личных сведений другого адресата."""
-        words = _words(text)
-        fragments = _fragments([text])
-        own = self.private.get(hero_id, _Private(frozenset(), ()))
-        for other_id, other in self.private.items():
-            if other_id == hero_id:
-                continue
-            if fragments & (other.fragments - own.fragments - self.shared_fragments):
+        """В идее героя `hero_id` есть фрагмент личных сведений другого адресата: фрагмент слов,
+        имя NPC или места из его связей или имя собственное из его текстов."""
+        tokens = _tokens(text)
+        words = [word.lower() for word, _glued in tokens]
+        # Имя собственное узнаётся только с заглавной: «Серой гавани» — не «в серой мгле».
+        capitalized = [word.lower() for word, _glued in tokens if word[0].isupper()]
+        glued = [word.lower() for word, joined in tokens if joined]
+        fragments = _fragments_of(words)
+        for other in self.foreign.get(hero_id, self.stranger):
+            if fragments & other.fragments:
+                return True
+            if any("".join(fragment) in run for fragment in other.fragments for run in glued):
                 return True
             for name in other.names:
-                known = name in own.names or _mentions(name, self.shared_words)
-                if not known and _mentions(name, words):
+                if _mentions(name, words) or _in_glued(name, glued):
+                    return True
+            for single in other.proper_names:
+                if any(_same_word(single, word) for word in capitalized):
+                    return True
+                if _in_glued((single,), glued):
                     return True
         return False
 
@@ -356,22 +483,56 @@ def idea_guard(
     addressees: Sequence[str],
     stories: Sequence[str],
 ) -> IdeaGuard:
-    """Фильтр для запроса `ideas_request` с теми же данными: личные разделы адресатов против общего."""
-    private = {
-        hero_id: _Private(
-            fragments=_fragments(_texts(_addressee(state, adventure, hero_id))),
-            names=tuple(_link_names(state, adventure, hero_id)),
-        )
-        for hero_id in addressees
-    }
+    """Фильтр для запроса `ideas_request` с теми же данными: личные разделы адресатов против общего.
+
+    Здесь же один раз вычитается известное: общий текст — из сведений каждого адресата, сведения
+    самого героя — для каждой пары «герой идеи — другой адресат»."""
+    private = {hero_id: _private(state, adventure, hero_id) for hero_id in addressees}
     shared = [
         adventure.title,
         _place_name(state, adventure),
         *(text for hero in state.party.values() for text in _hero_card(hero, srd).values()),
         *stories,
     ]
-    return IdeaGuard(
-        private, _fragments(shared), tuple(word for text in shared for word in _words(text))
+    shared_words = [word for text in shared for word in _words(text)]
+    shared_known = sorted(set(shared_words))
+    shared_fragments = _fragments(shared)
+    unshared = {
+        hero_id: _Foreign(
+            fragments=found.fragments - shared_fragments,
+            names=tuple(name for name in found.names if not _mentions(name, shared_words)),
+            proper_names=tuple(
+                name for name in found.proper_names if not _known(name, shared_known)
+            ),
+        )
+        for hero_id, found in private.items()
+    }
+    foreign = {
+        hero_id: tuple(
+            _unknown_to(own, other) for other_id, other in unshared.items() if other_id != hero_id
+        )
+        for hero_id, own in private.items()
+    }
+    return IdeaGuard(foreign, tuple(unshared.values()))
+
+
+def _private(state: GameState, adventure: Adventure, hero_id: str) -> _Private:
+    """Личный раздел адресата для сверки: ровно то, что ушло модели (`_addressee`)."""
+    texts = _texts(_addressee(state, adventure, hero_id))
+    return _Private(
+        fragments=_fragments(texts),
+        names=tuple(tuple(_words(name)) for name in _link_names(state, adventure, hero_id)),
+        proper_names=tuple(dict.fromkeys(name for text in texts for name in _proper_names(text))),
+        known=tuple(sorted({word for text in texts for word in _words(text)})),
+    )
+
+
+def _unknown_to(own: _Private, other: _Foreign) -> _Foreign:
+    """Сведения другого адресата без того, что герой знает сам (его фрагменты, связи и слова)."""
+    return _Foreign(
+        fragments=other.fragments - own.fragments,
+        names=tuple(name for name in other.names if name not in own.names),
+        proper_names=tuple(name for name in other.proper_names if not _known(name, own.known)),
     )
 
 

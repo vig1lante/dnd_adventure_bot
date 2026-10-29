@@ -129,6 +129,16 @@ function whenText(entry: JournalEntry): string {
     : `узнали в раунде ${entry.turn}`;
 }
 
+/**
+ * Когда текст записи дополняли в последний раз; не дополняли — ничего. Первый приход в место
+ * дополнением не считается (контракт B11, §1 п. 4), а сервер до B11 поля не присылает.
+ */
+function updatedText(entry: JournalEntry): string | null {
+  const turn = entry.updated_turn ?? null;
+  if (turn === null) return null;
+  return turn === 0 ? "дополнено в начале игры" : `дополнено в раунде ${turn}`;
+}
+
 const squeezed = (text: string) => text.split(/\s+/).join(" ").trim();
 
 /**
@@ -150,6 +160,7 @@ function EntryCard({
   unseen: boolean;
 }) {
   const paragraphs = paragraphsOf(entry);
+  const updated = updatedText(entry);
   return (
     <Card title={entry.title} headingLevel={3} className="journal-entry">
       {unseen && <Badge tone="amber">новое</Badge>}
@@ -159,6 +170,7 @@ function EntryCard({
         </p>
       ))}
       <p className="journal-entry__when">{whenText(entry)}</p>
+      {updated !== null && <p className="journal-entry__when">{updated}</p>}
     </Card>
   );
 }

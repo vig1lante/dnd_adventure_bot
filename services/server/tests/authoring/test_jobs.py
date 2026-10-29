@@ -23,6 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from test_drafts_api import (  # noqa: F401  (фикстуры стенда API черновиков)
+    CREATOR_TG_ID,
     JOB_FIELDS,
     SECTIONS,
     Author,
@@ -681,6 +682,34 @@ async def test_a_provider_that_is_not_configured_says_so_and_hides_the_setting(
     assert (job["status"], job["error"]) == ("failed", jobs.NOT_CONFIGURED)
     assert jobs.NOT_CONFIGURED != jobs.FAILED
     assert "ConfigError" in caplog.text and "FAKE_LLM_SCENARIO" not in caplog.text
+
+
+async def test_in_prod_the_test_master_does_not_write_a_step_of_the_constructor(
+    stand, settings, caplog
+):
+    # Спека DND-2 §15: в боевом режиме тестового мастера нет, даже со сценарием, — и у конструктора.
+    # Шаг не пишется по сценарию: задание падает с «не настроена», черновик прежний, а путь сценария
+    # не попадает ни в ответы, ни в журнал.
+    stand.app.state.settings = settings.model_copy(update={"app_env": "prod"})
+    author = await stand.author(tg_id=CREATOR_TG_ID)
+    draft = await stand.new_draft(author)
+    before = await stand.draft(author, draft["id"])
+    caplog.set_level(logging.INFO)
+
+    started = await generate(stand, author, draft, step="world")
+    await stand.app.state.authoring_tasks.join()
+
+    job = await job_of(stand, author, draft, started.json()["id"])
+    assert started.status_code == 202, started.text
+    assert (job["status"], job["error"]) == ("failed", jobs.NOT_CONFIGURED)
+    after = await stand.draft(author, draft["id"])
+    # Черновик тот же: изменилось только задание в его ответе.
+    assert {k: v for k, v in after.items() if k != "job"} == {
+        k: v for k, v in before.items() if k != "job"
+    }
+    shown = started.text + json.dumps(job, ensure_ascii=False) + caplog.text
+    assert str(settings.fake_llm_scenario) not in shown
+    assert settings.fake_llm_scenario.name not in shown
 
 
 # --- пожелание: недоверенный текст хранится как есть и остаётся данными запроса ---

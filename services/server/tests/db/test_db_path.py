@@ -299,6 +299,16 @@ def test_opening_the_owner_database_from_a_test_is_refused_and_recorded(live_cal
     live_call_attempts.clear()
 
 
+def test_opening_the_owner_database_by_a_read_only_address_is_refused_too(live_call_attempts):
+    # Так сервер читает ревизию базы при старте (`require_current_schema`): адрес `file:`,
+    # только на чтение (`mode=ro`).
+    with pytest.raises(AssertionError, match="базу владельца"):
+        sqlite3.connect(f"{Path(OWNER_DATABASE).resolve().as_uri()}?mode=ro", uri=True)
+
+    assert len(live_call_attempts) == 1
+    live_call_attempts.clear()
+
+
 def file_state(path: Path) -> tuple[int, int] | None:
     """Размер и время изменения файла; `None` — файла нет."""
     try:

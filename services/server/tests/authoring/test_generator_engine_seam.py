@@ -168,6 +168,14 @@ def long_game_for_a_short_wish(data: dict[str, Any]) -> None:
     data["target_hours"] = 10
 
 
+def clue_without_description(data: dict[str, Any]) -> None:
+    data["revelations"]["bell-truth"]["clues"][1]["description"] = " "
+
+
+def item_without_text(data: dict[str, Any]) -> None:
+    data["items"]["undercroft-key"] |= {"name": " ", "public": ""}
+
+
 # (имя, поломка, код, ref настоящего валидатора, шаг-владелец или None)
 ROUTES: list[tuple[str, Mutation, str, str, str | None]] = [
     ("orphan location", orphan_location, "unreachable_location", "location:well", "locations"),
@@ -251,6 +259,15 @@ ROUTES: list[tuple[str, Mutation, str, str, str | None]] = [
         "location_contents",
     ),
     ("duration", long_game_for_a_short_wish, "duration_mismatch", "adventure", None),
+    # Предупреждения движка B11.1: улика без описания и предмет без названия и `public`.
+    (
+        "clue without description",
+        clue_without_description,
+        "clue_without_description",
+        "revelation:bell-truth/clue:clue-otto",
+        "clues",
+    ),
+    ("item without text", item_without_text, "item_without_text", "item:undercroft-key", "items"),
 ]
 
 
@@ -669,6 +686,13 @@ def test_every_code_the_validator_can_give_has_a_routing_case_above():
 
 
 # --- коды выхода и записанная папка ---
+
+
+@pytest.fixture(autouse=True)
+def dev_mode(monkeypatch) -> None:
+    """Генератор с тестовым мастером запускают в dev, как в README: `fake` вне dev не собирается
+    (спека DND-2 §15)."""
+    monkeypatch.setenv("APP_ENV", "dev")
 
 
 def test_warnings_alone_do_not_fail_the_command(monkeypatch, tmp_path, capsys):

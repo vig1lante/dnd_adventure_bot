@@ -114,8 +114,12 @@ const JOURNAL_ENTRY_KEYS = [
   "text",
   "title",
   "turn",
+  "updated_turn",
   "visited_turn",
 ];
+
+// Время в полях B11 (`created_at`, `phase_since`): ISO 8601 в UTC с явным `+00:00`.
+const ISO_UTC = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?\+00:00$/;
 
 interface Player {
   hero: Hero;
@@ -603,6 +607,19 @@ test("шестеро друзей проходят вечер: игра, рау�
       ).toBeVisible();
       await markReady(egor);
       await expect(button(host.page, "Начать")).toBeEnabled();
+
+      // Имя героя каждого видят все (B11, §1 п. 3): шесть строк с именами помещаются на телефоне.
+      for (const player of players) {
+        await expect(
+          host.page
+            .getByRole("listitem")
+            .filter({
+              has: host.page.getByText(player.hero.login, { exact: true }),
+            })
+            .getByText(/^Герой: /),
+        ).toHaveText(`Герой: ${player.hero.name}`);
+      }
+      await expectFitsPhone(host.page, "лобби на шестерых: имена героев");
       await button(host.page, "Начать").click();
     });
 
@@ -854,6 +871,8 @@ test("шестеро друзей проходят вечер: игра, рау�
           },
         );
         expect(visit.revision, "кладбище: версия после прихода").toBe(2);
+        // Первый приход — не дополнение текста (B11, §1 п. 4): `updated_turn` пуст.
+        expect(visit.updated_turn, "кладбище: раунд дополнения").toBeNull();
         const round = Number(visit.visited_turn);
         expect(round, "кладбище: раунд прихода").toBeGreaterThan(0);
         const village = commonEntry(snapshotJournal(boris), "location:village");
@@ -864,6 +883,7 @@ test("шестеро друзей проходят вечер: игра, рау�
         const cemeteryCard = journalCard(page, String(visit.title));
         const villageCard = journalCard(page, String(village.title));
         await expect(cemeteryCard).toContainText(`были здесь: раунд ${round}`);
+        await expect(cemeteryCard).not.toContainText("дополнено");
         await expect(newMark(cemeteryCard)).toBeVisible();
         // Деревня не менялась и осталась прочитанной.
         await expect(villageCard).toContainText("были здесь с начала игры");
@@ -944,6 +964,14 @@ test("шестеро друзей проходят вечер: игра, рау�
       await expect(
         alisa.page.getByRole("timer", { name: /До конца привала/ }),
       ).toBeVisible();
+      // Привал начал сам ход мастера (`start_camp`): этот ход перегенерировать можно, и сервер
+      // говорит это признаком фазы (B11, §1 п. 11); у остальных кнопки хоста нет.
+      await expect(
+        button(alisa.page, "Перегенерировать ответ мастера"),
+      ).toBeVisible();
+      await expect(
+        button(boris.page, "Перегенерировать ответ мастера"),
+      ).toHaveCount(0);
       await tabOf(boris.page, "Привал").click();
       await boris.page.getByLabel("Сказать у костра").fill(CAMP_LINE);
       await button(boris.page, "Сказать").click();
@@ -984,6 +1012,32 @@ test("шестеро друзей проходят вечер: игра, рау�
         }
         await tabOf(player.page, "Рассказ").click();
       }
+      // Утро — новый раунд (B11, решение D17): «Готов» и «Пас» прошлого погасли, а «Пишет» не
+      // горит ни у кого — ход ещё никто не начал. Борис набрал черновик — у остальных у него
+      // «Пишет»; стёр — значок пропал.
+      const statuses = alisa.page
+        .getByRole("list", { name: "Игроки" })
+        .getByRole("listitem");
+      await expect(statuses).toHaveCount(HEROES.length);
+      for (const status of await statuses.all()) {
+        await expect(status).not.toContainText(/Пишет|Готов|Пас/);
+      }
+      const borisChip = (page: Page) =>
+        page
+          .getByRole("list", { name: "Игроки" })
+          .getByRole("listitem")
+          .filter({ hasText: boris.hero.login });
+      await composerOf(boris.page).fill("Прислушиваюсь к туману у ворот");
+      for (const player of players.filter((item) => item !== boris)) {
+        await expect(borisChip(player.page)).toContainText("Пишет");
+      }
+      await composerOf(boris.page).fill("");
+      for (const player of players.filter((item) => item !== boris)) {
+        await expect(borisChip(player.page)).not.toContainText("Пишет");
+      }
+      await expect(alisa.page.getByText("Пишет", { exact: true })).toHaveCount(
+        0,
+      );
     });
 
     await test.step("8. Перезапуск сервера: страницы переподключаются, лента и фаза на месте", async () => {
@@ -1117,6 +1171,62 @@ test("шестеро друзей проходят вечер: игра, рау�
         // не один (Егор правил своего: прежний заменён), поэтому «свои» — все, кого создал он сам.
         const ownIds = new Set(ownHeroIds(player));
         expect(ownIds.size, `${login}: id своих героев`).toBeGreaterThan(0);
+
+        // «Ход сдан» по таймеру получает только автор черновика с текстом — Борис в шаге 4, один
+        // раз; исключений в игре не было, кадра `kicked` нет ни у кого (B11, §2).
+        const types = parsedFrames(player).map((frame) => frame.type);
+        expect(
+          types.filter((type) => type === "action_auto_submitted"),
+          `${login}: action_auto_submitted`,
+        ).toHaveLength(player === boris ? 1 : 0);
+        expect(types, `${login}: kicked`).not.toContain("kicked");
+
+        // Новые поля B11 на проводе — в той форме, которую читает клиент (`api/types.ts`): время
+        // ISO с +00:00; у идущей игры начало фазы известно (игра начата уже с колонкой).
+        for (const frame of parsedFrames(player)) {
+          const phase =
+            frame.type === "snapshot" || frame.type === "phase"
+              ? frame.phase
+              : null;
+          if (phase !== null && isObject(phase)) {
+            expect(
+              typeof phase.can_regenerate,
+              `${login}: can_regenerate`,
+            ).toBe("boolean");
+            if (phase.phase === "playing") {
+              expect(
+                String(phase.phase_since),
+                `${login}: phase_since`,
+              ).toMatch(ISO_UTC);
+            } else {
+              expect(
+                phase.phase_since === null ||
+                  ISO_UTC.test(String(phase.phase_since)),
+                `${login}: phase_since вне игры`,
+              ).toBe(true);
+            }
+          }
+          const game =
+            frame.type === "snapshot" || frame.type === "lobby"
+              ? frame.game
+              : null;
+          if (game !== null && isObject(game)) {
+            expect(String(game.created_at), `${login}: created_at`).toMatch(
+              ISO_UTC,
+            );
+            for (const member of Array.isArray(game.players)
+              ? game.players
+              : []) {
+              expect(
+                isObject(member) &&
+                  "hero_name" in member &&
+                  (member.hero_name === null ||
+                    typeof member.hero_name === "string"),
+                `${login}: hero_name игрока`,
+              ).toBe(true);
+            }
+          }
+        }
 
         // Дневник: у записи только поля контракта, и каждая — общая или про своего героя.
         // Личных записей сценарий не делает; что чужая личная не уходит, проверяют тесты сервера.

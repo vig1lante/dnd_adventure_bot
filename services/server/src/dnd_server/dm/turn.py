@@ -86,7 +86,7 @@ from fastapi import FastAPI
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from dnd_engine.adventure.loader import adventure_from_data
+from dnd_engine.adventure.loader import AdventureFormatError, adventure_from_data
 from dnd_engine.adventure.schema import Adventure
 from dnd_engine.content import SrdContent, load_srd
 from dnd_engine.events import Event
@@ -158,6 +158,8 @@ from dnd_server.llm.base import (
 from dnd_server.llm.internal_api import TurnTokens
 from dnd_server.realtime.views import (
     FeedEntry,
+    action_auto_submitted_event,
+    can_regenerate,
     feed_entries,
     feed_item_event,
     feed_withdrawn_event,
@@ -166,6 +168,7 @@ from dnd_server.realtime.views import (
     phase_event,
     player_status_event,
     rest_ended_event,
+    regeneration,
     rest_started_event,
     state_events,
 )
@@ -183,10 +186,11 @@ MAX_ATTEMPTS = 2  # первая попытка и один автоповтор
 SERVER_END_TURN = "server_end_turn"  # запись журнала о передаче хода, которую делает сервер
 SERVER_END_CAMP = "server_end_camp"  # запись журнала об отдыхе по виду привала в его конце
 
-# Из каких фаз допустима «Перегенерировать»: игроки обсуждают следующий ход, сбор ещё не начался.
-REGENERATE_FROM = (TurnPhase.DISCUSSION, TurnPhase.COMBAT_WAIT, TurnPhase.CAMP)
-# Отказ «Перегенерировать», когда после хода игра менялась вне хода мастера (блок B9).
-CHANGED_SINCE_TURN = "После хода мастера игра уже изменилась: перегенерировать нельзя."
+# Отказ хосту, когда копия приключения игры не читается: ход не начинается, ничего не меняется.
+BROKEN_COPY = (
+    "Копия приключения этой игры повреждена: мастер не может вести игру. "
+    "Сообщите владельцу сервера."
+)
 # Сообщения, которые создаёт сам ход мастера. Ходы игроков (`action`) и реплики у костра
 # (`camp_line`) — его входные данные, и при перегенерации они остаются.
 OUTPUT_KINDS = (
@@ -196,6 +200,21 @@ OUTPUT_KINDS = (
     MessageKind.SYSTEM,
 )
 PASS_STATUSES = (ActionStatus.PASS, ActionStatus.AUTO_PASS)
+
+
+def game_adventure(game: Game) -> Adventure:
+    """Приключение игры из её копии (любого поколения формата); битая копия — `Conflict`.
+
+    Копию проверяют до любой записи все пути, которые начинают ход или что-то закрывают ради него
+    (сбор ходов, «Поторопить», привал по кнопке): иначе сбор закрылся бы, а ход не начался.
+    Подробности — в журнал сервера: проблемы схемы называют поля, но не их значения."""
+    try:
+        return adventure_from_data(game.adventure_data)
+    except AdventureFormatError as error:
+        logger.error(
+            "Копия приключения игры %s не читается: %s", game.id, "; ".join(error.problems)
+        )
+        raise Conflict(BROKEN_COPY) from None
 
 
 def discussion_follow_up(_state: GameState) -> tuple[TurnPhase, TurnKind]:
@@ -515,11 +534,11 @@ async def _reserve(
         # открытии хода, а после изменений вне хода мастера (привал по кнопке, кость хитов) — новее:
         # откат этого хода должен вернуться к ней, а не к версии до привала.
         turn.state_version_before = game.state_version
-        game.turn_phase = TurnPhase.RESOLVING
+        game.set_turn_phase(TurnPhase.RESOLVING, deps.clock())
         game.deadline_at = None
         await session.commit()
         with announcing(deps, game_id, plan.turn_id):
-            await _announce_reserve(deps, game, plan)
+            await _announce_reserve(deps, session, game, plan)
     return plan
 
 
@@ -556,37 +575,13 @@ async def _turn_to_resolve(session: AsyncSession, game: Game, mode: TurnKind) ->
 async def _rewind(
     session: AsyncSession, game: Game
 ) -> tuple[Turn, TurnKind, list[str] | None, list[tuple[int, str]]]:
-    """Откат последнего разобранного хода: возвращает его, режим, бойцов и снятые записи ленты."""
-    if game.turn_phase not in REGENERATE_FROM:
-        raise Conflict("Перегенерировать ответ можно, пока игроки обсуждают следующий ход.")
-    last = await session.scalar(
-        select(Turn)
-        .where(Turn.game_id == game.id, Turn.status == TurnStatus.DONE)
-        .order_by(Turn.number.desc(), Turn.created_at.desc())
-        .limit(1)
-    )
-    if last is None:
-        raise Conflict("Мастеру пока нечего перегенерировать: ни один ход не разобран.")
-    following = await session.get(Turn, game.current_turn_id) if game.current_turn_id else None
-    next_is_untouched = (
-        following is not None
-        and following.status == TurnStatus.OPEN
-        and following.number == last.number + 1
-    )
-    if not next_is_untouched:
-        raise Conflict("Следующий ход уже начат: перегенерировать нельзя.")
-    started_at = following.state_version_before
-    if started_at is not None and game.state_version != started_at:
-        # Привал по кнопке хоста или кость хитов: откат стёр бы их вместе с ходом.
-        raise Conflict(CHANGED_SINCE_TURN)
-    version_before = last.state_version_before
-    previous = (
-        None
-        if version_before is None
-        else await session.get(GameStateSnapshot, (game.id, version_before))
-    )
-    if previous is None:
-        raise Conflict("Состояния до этого хода нет: перегенерировать нельзя.")
+    """Откат последнего разобранного хода: возвращает его, режим, бойцов и снятые записи ленты.
+
+    Можно ли откатывать, решает общее правило `realtime.views.regeneration` (его же видит клиент
+    признаком `phase.can_regenerate`); отказ — `Conflict`."""
+    found = await regeneration(session, game)
+    last, following = found.last, found.following
+    version_before = found.previous.version
     last_log = await session.scalar(
         select(DmTurnLog).where(DmTurnLog.turn_id == last.id).order_by(DmTurnLog.id.desc()).limit(1)
     )
@@ -622,7 +617,7 @@ async def _plan(
     row = await session.get(GameStateSnapshot, (game.id, game.state_version))
     if row is None:
         raise Conflict("У игры ещё нет состояния: мастеру нечего разбирать.")
-    adventure = adventure_from_data(game.adventure_data)  # копия любого поколения формата
+    adventure = game_adventure(game)  # копия любого поколения формата
     # Игра, записанная до дневника, получает стартовый: его сохранит коммит этого хода.
     state = open_journal(row.to_state(), adventure)
     if mode == TurnKind.COMBAT and acting is None:
@@ -760,9 +755,12 @@ async def _recent_turns(
     return recent
 
 
-async def _announce_reserve(deps: Deps, game: Game, plan: _Plan) -> None:
+async def _announce_reserve(deps: Deps, session: AsyncSession, game: Game, plan: _Plan) -> None:
     """«Мастер думает»; при перегенерации — ещё откат ленты, состояния и дневника игроков."""
-    await send_to_game(deps.broadcaster, game.id, phase_event(game, plan.state))
+    regenerable = await can_regenerate(session, game)
+    await send_to_game(
+        deps.broadcaster, game.id, phase_event(game, plan.state, can_regenerate=regenerable)
+    )
     for message_id, audience in plan.withdrawn:
         await send_to_game(deps.broadcaster, game.id, feed_withdrawn_event(message_id), audience)
     if plan.rewound:
@@ -1042,17 +1040,17 @@ async def _commit_success(deps: Deps, plan: _Plan, attempts: list[_Attempt]) -> 
         turn.state_version_after = work.version
         if game.phase == GamePhase.WEAVING:  # открытие игры; пауза хоста остаётся паузой
             game.phase = GamePhase.PLAYING
-        game.turn_phase = next_phase
+        game.set_turn_phase(next_phase, deps.clock())
         game.deadline_at = _countdown(deps, game, next_phase, work)
         game.state_version = work.version
         game.current_turn_id = following.id
         if plan.mode == TurnKind.CAMP_END or next_phase == TurnPhase.CAMP:
             game.rest_ideas = None  # идеи живут один привал: его конец и новое начало их снимают
-        await _finish_actions(session, plan.turn_id)
+        auto_submitted = await _finish_actions(session, plan.turn_id)
         session.add_all(_log_rows(deps, plan, attempts))
         await session.commit()
         with announcing(deps, plan.game_id, plan.turn_id):
-            await _announce_commit(deps, game, plan, work, messages)
+            await _announce_commit(deps, session, game, plan, work, messages, auto_submitted)
             await _announce_rest(deps, game, plan, work)
     if next_phase == TurnPhase.CAMP:
         # Мастер начал привал (`start_camp`): идеи для рассказа идут фоновой задачей после
@@ -1106,25 +1104,37 @@ def _message(plan: _Plan, entry: FeedEntry) -> Message:
     )
 
 
-async def _finish_actions(session: AsyncSession, turn_id: str) -> None:
-    """Черновики разобранного хода закрываются: с текстом — автосдача, без — автопас."""
+async def _finish_actions(session: AsyncSession, turn_id: str) -> list[str]:
+    """Черновики разобранного хода закрываются: с текстом — автосдача, без — автопас. Возвращает
+    авторов автосданных черновиков: мастер разобрал их ход, и им говорят «Ход сдан»."""
     rows = await session.scalars(
         select(PlayerAction).where(
             PlayerAction.turn_id == turn_id, PlayerAction.status == ActionStatus.DRAFT
         )
     )
+    authors = []
     for action in rows:
-        action.status = (
-            ActionStatus.AUTO_SUBMITTED if action.text.strip() else ActionStatus.AUTO_PASS
-        )
+        if action.text.strip():
+            action.status = ActionStatus.AUTO_SUBMITTED
+            authors.append(action.user_id)
+        else:
+            action.status = ActionStatus.AUTO_PASS
+    return authors
 
 
 async def _announce_commit(
-    deps: Deps, game: Game, plan: _Plan, work: GameState, messages: list[Message]
+    deps: Deps,
+    session: AsyncSession,
+    game: Game,
+    plan: _Plan,
+    work: GameState,
+    messages: list[Message],
+    auto_submitted: list[str],
 ) -> None:
     """Рассылка после коммита: записи ленты, отряд, бой, листы, дневник, фаза и статусы нового
     хода. Дневник — новые и дополненные записи, а после открытия игры — каждому игроку целиком:
-    сокет, открытый ещё в лобби, получил снимок без дневника."""
+    сокет, открытый ещё в лобби, получил снимок без дневника. Автору черновика, который сдал сам
+    ход, — «Ход сдан» (`action_auto_submitted`), только ему."""
     for message in messages:
         await send_to_game(deps.broadcaster, game.id, feed_item_event(message), message.audience)
     journal = (
@@ -1135,10 +1145,15 @@ async def _announce_commit(
     deliveries = [*state_events(work, deps.srd, plan.adventure), *journal]
     for event, audience in deliveries:
         await send_to_game(deps.broadcaster, game.id, event, audience)
-    await send_to_game(deps.broadcaster, game.id, phase_event(game, work))
+    for user_id in auto_submitted:
+        await send_to_game(deps.broadcaster, game.id, action_auto_submitted_event(), user_id)
+    regenerable = await can_regenerate(session, game)
+    await send_to_game(
+        deps.broadcaster, game.id, phase_event(game, work, can_regenerate=regenerable)
+    )
     for user_id in plan.user_ids:
-        status = player_status_event(user_id, ActionStatus.DRAFT)
-        await send_to_game(deps.broadcaster, game.id, status)
+        # Новый ход: строк хода ещё нет, никто не пишет (`idle`, решение D17).
+        await send_to_game(deps.broadcaster, game.id, player_status_event(user_id, None))
 
 
 async def _announce_rest(deps: Deps, game: Game, plan: _Plan, work: GameState) -> None:
@@ -1260,7 +1275,7 @@ async def _commit_failure(deps: Deps, plan: _Plan, attempts: list[_Attempt]) -> 
         session.add_all(_log_rows(deps, plan, attempts))
         note = None
         if game.turn_phase == TurnPhase.RESOLVING and game.current_turn_id == plan.turn_id:
-            game.turn_phase = TurnPhase.DM_FAILED
+            game.set_turn_phase(TurnPhase.DM_FAILED, deps.clock())
             game.deadline_at = None
             turn.status = TurnStatus.FAILED
             note = Message(
@@ -1320,7 +1335,7 @@ async def _mark_dm_failed(deps: Deps, plan: _Plan) -> None:
         turn = await session.get(Turn, plan.turn_id, populate_existing=True)
         if game.turn_phase != TurnPhase.RESOLVING or game.current_turn_id != plan.turn_id:
             return
-        game.turn_phase = TurnPhase.DM_FAILED
+        game.set_turn_phase(TurnPhase.DM_FAILED, deps.clock())
         game.deadline_at = None
         turn.status = TurnStatus.FAILED
         await session.commit()
@@ -1332,14 +1347,13 @@ async def _announce_failure(deps: Deps, game: Game, note: Message | None) -> Non
     """Рассылка после записи неудачи: сообщение хосту (если оно записано) и новая фаза игры."""
     if note is not None:
         await send_to_game(deps.broadcaster, game.id, feed_item_event(note), note.audience)
-    row = await _state_of(deps, game)
-    await send_to_game(deps.broadcaster, game.id, phase_event(game, row))
-
-
-async def _state_of(deps: Deps, game: Game) -> GameState | None:
     async with deps.sessionmaker() as session:
         row = await session.get(GameStateSnapshot, (game.id, game.state_version))
-    return None if row is None else row.to_state()
+        regenerable = await can_regenerate(session, game)
+    state = None if row is None else row.to_state()
+    await send_to_game(
+        deps.broadcaster, game.id, phase_event(game, state, can_regenerate=regenerable)
+    )
 
 
 async def _record_cancellation(deps: Deps, plan: _Plan) -> None:

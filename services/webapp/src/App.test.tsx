@@ -434,6 +434,44 @@ describe("каркас экранов", () => {
     expect(ws.last().url).toContain("/ws/games/g1");
   });
 
+  test("хост исключил игрока: из лобби — «Мои игры» с «Хост исключил вас.» на экране (B11.3)", async () => {
+    const ws = fakeWebSocket();
+    const server = await signedIn();
+    act(() => useGame.getState().show({ screen: "lobby", gameId: "g1" }));
+    await act(async () => {
+      ws.last().open();
+      ws.last().serve(
+        snapshotOf(
+          gameSummary({
+            players: [
+              lobbyPlayer({
+                user_id: "id-dev-1",
+                name: "dev-1",
+                is_host: true,
+              }),
+              lobbyPlayer({ user_id: "id-dev-3", name: "dev-3" }),
+            ],
+          }),
+        ),
+      );
+    });
+
+    act(() => {
+      ws.last().serve({ type: "kicked" });
+      ws.last().drop(4403, "kicked");
+    });
+
+    expect(
+      await screen.findByRole("heading", { name: "Мои игры" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Хост исключил вас.")).toBeVisible();
+    expect(screen.queryByText("Игра недоступна.")).toBeNull();
+    expect(ws.sockets).toHaveLength(1);
+    expect(
+      server.calls.filter((call) => call.path === "/api/games"),
+    ).toHaveLength(2);
+  });
+
   test("лобби → создание героя → лобби: экран получает игру, назад возвращает в то же лобби", async () => {
     const ws = fakeWebSocket();
     const game = gameSummary({

@@ -1117,6 +1117,43 @@ describe("followGame: игра из сокета в хранилище", () => {
     expect(sockets).toHaveLength(1);
   });
 
+  test("хост исключил игрока (кадр kicked и 4403): «Хост исключил вас.» на «Мои игры», без повторов", () => {
+    const { sockets, last } = fakeWebSocket();
+    signedIn();
+    followGame("g1");
+    last().open();
+    last().serve(snapshot());
+
+    last().serve({ type: "kicked" });
+    last().drop(4403, "kicked");
+    vi.advanceTimersByTime(10 * MINUTE);
+
+    const state = useGame.getState();
+    expect(state.session).toEqual(SESSION);
+    expect(state.screen).toBe("games");
+    expect(state.gameId).toBeNull();
+    expect(state.notice).toBe("Хост исключил вас.");
+    expect(state.live).toEqual(NO_LIVE);
+    expect(sockets).toHaveLength(1);
+  });
+
+  // Финальное покрытие B11: кадр мог потеряться, причина закрытия всё равно говорит об исключении.
+  test("4403 с причиной kicked без кадра — тоже «Хост исключил вас.»", () => {
+    const { last } = fakeWebSocket();
+    signedIn();
+    followGame("g1");
+    last().open();
+    last().serve(snapshot());
+
+    last().drop(4403, "kicked");
+
+    expect(useGame.getState()).toMatchObject({
+      screen: "games",
+      gameId: null,
+      notice: "Хост исключил вас.",
+    });
+  });
+
   test("stop закрывает сокет, сбрасывает игру и глушит поздние события", () => {
     const { sockets, last } = fakeWebSocket();
     signedIn();
@@ -1319,6 +1356,145 @@ describe("applyEvent: новый ход начинается без хода и�
     );
 
     expect(before).toEqual(frozen);
+  });
+});
+
+describe("applyEvent: новый ход — ход ещё никто не начал (B11.3, решение D17)", () => {
+  const players = gameSummary({
+    players: ["u1", "u2", "u3"].map((user_id) => ({
+      user_id,
+      name: user_id,
+      is_host: user_id === "u1",
+      ready: true,
+      has_character: true,
+    })),
+  });
+  /** Конец прошлого раунда: один сдал ход, другой спасовал, третий писал черновик. */
+  const lastRound = () =>
+    started({
+      game: players,
+      statuses: { u1: "ready", u2: "pass", u3: "writing" },
+    });
+  const run = (state: LiveState, ...events: WsEvent[]) =>
+    events.reduce(
+      (current, event) => applyEvent(current, event, SERVER_MS),
+      state,
+    );
+  const allIdle = { u1: "idle", u2: "idle", u3: "idle" };
+
+  test.each(["discussion", "combat_wait", "camp"] as const)(
+    "мастер закончил (resolving → %s): у всех «idle» — «Пишет» не горит ни у кого, как в снимке нового хода",
+    (next) => {
+      const state = run(lastRound(), phaseEvent("resolving"), phaseEvent(next));
+
+      expect(viewOf(state).statuses).toEqual(allIdle);
+    },
+  );
+
+  test("пока мастер думает и после его сбоя значки прошлого раунда остаются: ходы ещё не разобраны", () => {
+    const thinking = run(lastRound(), phaseEvent("resolving"));
+    const failed = run(thinking, phaseEvent("dm_failed"));
+
+    expect(viewOf(thinking).statuses).toEqual(lastRound().view?.statuses);
+    expect(viewOf(failed).statuses).toEqual(lastRound().view?.statuses);
+  });
+
+  test("после сбоя мастера и «Повторить» (dm_failed → resolving → discussion) ход тоже никто не начал", () => {
+    const state = run(
+      lastRound(),
+      phaseEvent("resolving"),
+      phaseEvent("dm_failed"),
+      phaseEvent("resolving"),
+      phaseEvent("discussion"),
+    );
+
+    expect(viewOf(state).statuses).toEqual(allIdle);
+    expect(state.turn).toBe(1);
+  });
+
+  test("обычные смены фазы (обсуждение → сбор) значки не трогают", () => {
+    const state = run(lastRound(), phaseEvent("collecting"));
+
+    expect(viewOf(state).statuses).toEqual(lastRound().view?.statuses);
+  });
+
+  test("игрок набрал черновик — «writing», стёр — снова «idle», сдал — «ready»: кадры ложатся на значки нового хода", () => {
+    const opened = run(
+      lastRound(),
+      phaseEvent("resolving"),
+      phaseEvent("discussion"),
+    );
+    const status = (
+      user_id: string,
+      value: "idle" | "writing" | "ready",
+    ): WsEvent => ({ type: "player_status", user_id, status: value });
+
+    const typed = run(opened, status("u2", "writing"));
+    expect(viewOf(typed).statuses).toEqual({ ...allIdle, u2: "writing" });
+
+    const erased = run(typed, status("u2", "idle"));
+    expect(viewOf(erased).statuses).toEqual(allIdle);
+
+    const sealed = run(erased, status("u3", "ready"));
+    expect(viewOf(sealed).statuses).toEqual({ ...allIdle, u3: "ready" });
+  });
+});
+
+describe("applyEvent: автосдача черновика по таймеру (контракт B11, §2)", () => {
+  const autoSubmitted: WsEvent = { type: "action_auto_submitted" };
+
+  test("черновик с текстом становится сданным ходом: экран покажет «Ход сдан»", () => {
+    const state = applyEvent(
+      started({ action: draftAction({ secret: true }) }),
+      autoSubmitted,
+      SERVER_MS,
+    );
+
+    expect(viewOf(state).action).toEqual(
+      draftAction({ secret: true, status: "auto_submitted" }),
+    );
+    expect(state.turn).toBe(0);
+  });
+
+  test.each(["submitted", "pass", "auto_pass"] as const)(
+    "ход, уже закрытый иначе (%s), не меняется",
+    (status) => {
+      const before = started({ action: draftAction({ status }) });
+
+      expect(applyEvent(before, autoSubmitted, SERVER_MS)).toBe(before);
+    },
+  );
+
+  test("черновик ещё не дошёл до клиента: ход сдан, а текста клиент не знает", () => {
+    const state = applyEvent(
+      started({ action: null }),
+      autoSubmitted,
+      SERVER_MS,
+    );
+
+    expect(viewOf(state).action).toEqual({
+      text: "",
+      secret: false,
+      inspiration: false,
+      status: "auto_submitted",
+    });
+  });
+
+  test("до снимка применять не к чему", () => {
+    expect(applyEvent(NO_LIVE, autoSubmitted, SERVER_MS)).toBe(NO_LIVE);
+  });
+
+  test("остальные блоки и прежнее состояние не меняются", () => {
+    const before = started({ action: draftAction() });
+    const frozen = structuredClone(before);
+
+    const state = applyEvent(before, autoSubmitted, SERVER_MS);
+
+    expect(before).toEqual(frozen);
+    expect({ ...viewOf(state), action: null }).toEqual({
+      ...viewOf(before),
+      action: null,
+    });
   });
 });
 

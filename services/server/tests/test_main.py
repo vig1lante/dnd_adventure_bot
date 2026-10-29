@@ -5,6 +5,7 @@ import logging
 import logging.config
 import os
 import socket
+import sqlite3
 from contextlib import closing, suppress
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -15,6 +16,10 @@ import uvicorn
 from uvicorn.config import LOGGING_CONFIG
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
+
+from alembic import command
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from dnd_server import __main__ as server_main
 from dnd_server.__main__ import LOG_CONFIG, main, mask_query_values
@@ -69,6 +74,91 @@ async def test_main_app_path_builds_app_from_environment(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "env": "dev"}
+
+
+# --- тестовый мастер в боевом режиме (спека DND-2 §15, дополнение B11 §1 п. 7) ---
+
+NO_MASTER_WARNING = "тестовый мастер в боевом режиме недоступен: задайте LLM_PROVIDER"
+SCENARIO_FILE = Path(__file__).resolve().parent / "scenarios" / "basic_round.yaml"
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        pytest.param({}, id="LLM_PROVIDER по умолчанию"),
+        pytest.param(
+            {"LLM_PROVIDER": "fake", "FAKE_LLM_SCENARIO": str(SCENARIO_FILE)},
+            id="fake со сценарием",
+        ),
+    ],
+)
+def test_prod_with_the_test_master_starts_and_warns_once(monkeypatch, caplog, environment):
+    # Сервер владельца не падает: он стартует, пишет одно предупреждение, а игры с `fake`
+    # не создаются (422 при создании игры).
+    monkeypatch.setenv("APP_ENV", "prod")
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    get_settings.cache_clear()
+
+    with caplog.at_level(logging.WARNING, logger="dnd_server"):
+        app_path, _options = run_main_with_fake_uvicorn(monkeypatch)
+
+    assert app_path == "dnd_server.app:create_app"
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [r.getMessage() for r in warnings] == [NO_MASTER_WARNING]
+    assert str(SCENARIO_FILE) not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        pytest.param({"APP_ENV": "dev"}, id="dev с fake"),
+        pytest.param({"APP_ENV": "prod", "LLM_PROVIDER": "anthropic_api"}, id="prod с моделью"),
+    ],
+)
+def test_a_server_with_a_real_or_a_dev_master_starts_without_the_warning(
+    monkeypatch, caplog, environment
+):
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    get_settings.cache_clear()
+
+    with caplog.at_level(logging.WARNING, logger="dnd_server"):
+        run_main_with_fake_uvicorn(monkeypatch)
+
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+# Секреты в окружении сервера: ни одно значение не должно попасть в журнал старта.
+STARTUP_SECRETS = {
+    "SESSION_SECRET": "startup-session-secret-0123456789-abcdefgh",
+    "TELEGRAM_BOT_TOKEN": "123456:startup-bot-token-secret",
+    "ANTHROPIC_API_KEY": "sk-ant-startup-secret-key",
+    "OPENAI_COMPAT_API_KEY": "sk-compat-startup-secret",
+}
+
+
+def test_without_app_env_the_server_is_prod_and_warns_once_without_secrets_or_paths(
+    monkeypatch, caplog
+):
+    # APP_ENV не задан — это боевой режим (значение по умолчанию). Тестовый мастер со сценарием
+    # там недоступен: одно предупреждение, в нём нет ни секретов окружения, ни пути сценария.
+    for name, value in {
+        **STARTUP_SECRETS,
+        "LLM_PROVIDER": "fake",
+        "FAKE_LLM_SCENARIO": str(SCENARIO_FILE),
+    }.items():
+        monkeypatch.setenv(name, value)
+    get_settings.cache_clear()
+
+    with caplog.at_level(logging.DEBUG, logger="dnd_server"):
+        run_main_with_fake_uvicorn(monkeypatch)
+
+    assert get_settings().app_env == "prod"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == [NO_MASTER_WARNING]
+    for value in (*STARTUP_SECRETS.values(), str(SCENARIO_FILE), SCENARIO_FILE.name):
+        assert value not in caplog.text
 
 
 def test_dnd_server_console_script_points_to_main():
@@ -529,6 +619,299 @@ def test_the_lock_file_lies_next_to_the_database_and_is_left_in_place_at_the_exi
     assert lock.is_file()
 
 
+# Lock-файл (спека DND-2 §15, дополнение B11 §1 п. 15): не идёт по символической ссылке и закрыт от
+# чужих глаз — права 0600 у нового файла и у прежнего файла своего пользователя.
+
+
+def mode_of(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+@pytest.mark.real_database_lock
+def test_a_new_lock_file_is_readable_by_its_owner_only(monkeypatch, tmp_path, use_database):
+    previous = os.umask(0o022)  # обычный umask дал бы 0644
+    try:
+        monkeypatch.setattr(uvicorn, "run", lambda app, **options: None)
+        use_database(sqlite_url(tmp_path / "one.sqlite3"))
+
+        main(["--port", "5301"])
+    finally:
+        os.umask(previous)
+
+    assert mode_of(tmp_path / "one.sqlite3.lock") == 0o600
+
+
+@pytest.mark.real_database_lock
+def test_an_old_lock_file_of_the_owner_gets_owner_only_rights_and_stays_in_place(
+    monkeypatch, tmp_path, use_database
+):
+    lock = tmp_path / "one.sqlite3.lock"
+    lock.write_bytes(b"")
+    lock.chmod(0o644)
+    inode = lock.stat().st_ino
+    started = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **options: started.append(mode_of(lock)))
+    use_database(sqlite_url(tmp_path / "one.sqlite3"))
+
+    main(["--port", "5301"])
+
+    assert started == [0o600]
+    assert lock.stat().st_ino == inode  # тот же файл: его не пересоздавали
+
+
+@pytest.mark.real_database_lock
+def test_a_hard_link_in_place_of_the_lock_file_keeps_the_rights_of_the_linked_file(
+    monkeypatch, tmp_path, use_database, caplog
+):
+    # Дополнение B11 §5 п. 5 (S2): `O_NOFOLLOW` жёсткую ссылку не видит, а `fchmod` сменил бы права
+    # связанного файла (скрипт 0755 стал бы 0600). Права меняются только у обычного файла с одной
+    # ссылкой; иначе — предупреждение, файл и его права как были.
+    script = tmp_path / "elsewhere" / "script.sh"
+    script.parent.mkdir()
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.chmod(0o755)
+    os.link(script, tmp_path / "one.sqlite3.lock")
+    started = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **options: started.append(app))
+    monkeypatch.setenv("APP_ENV", "dev")  # без предупреждения о тестовом мастере
+    use_database(sqlite_url(tmp_path / "one.sqlite3"))
+
+    with caplog.at_level(logging.WARNING, logger="dnd_server"):
+        main(["--port", "5301"])
+
+    assert started  # замок взят, сервер запущен
+    assert mode_of(script) == 0o755
+    assert script.read_text(encoding="utf-8") == "#!/bin/sh\n"
+    [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "ссылк" in warning.getMessage()
+    assert str(tmp_path / "one.sqlite3") in warning.getMessage()
+    assert str(script) not in warning.getMessage()
+
+
+@pytest.mark.real_database_lock
+def test_a_lock_file_of_another_user_is_kept_as_it_is_with_a_warning(
+    monkeypatch, tmp_path, use_database, caplog
+):
+    lock = tmp_path / "one.sqlite3.lock"
+    lock.write_bytes(b"")
+    lock.chmod(0o644)
+    started = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **options: started.append(app))
+    monkeypatch.setattr(server_main.os, "getuid", lambda: lock.stat().st_uid + 1)
+    monkeypatch.setenv("APP_ENV", "dev")  # без предупреждения о тестовом мастере
+    use_database(sqlite_url(tmp_path / "one.sqlite3"))
+
+    with caplog.at_level(logging.WARNING, logger="dnd_server"):
+        main(["--port", "5301"])
+
+    assert started and mode_of(lock) == 0o644
+    [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "другому пользователю" in warning.getMessage()
+    assert str(tmp_path / "one.sqlite3") in warning.getMessage()
+    # Названа база, а не lock-файл: его путь в сообщения не попадает (как и в отказе «занято»).
+    assert ".lock" not in warning.getMessage()
+
+
+@pytest.mark.real_database_lock
+@pytest.mark.parametrize("target_exists", [True, False], ids=["на чужой файл", "в никуда"])
+def test_a_symlink_in_place_of_the_lock_file_stops_the_server_and_touches_nothing(
+    monkeypatch, tmp_path, use_database, target_exists
+):
+    target = tmp_path / "elsewhere" / "victim.txt"
+    target.parent.mkdir()
+    if target_exists:
+        target.write_text("чужие данные", encoding="utf-8")
+        target.chmod(0o644)
+    (tmp_path / "one.sqlite3.lock").symlink_to(target)
+    started = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **options: started.append(app))
+    use_database(sqlite_url(tmp_path / "one.sqlite3"))
+
+    with pytest.raises(SystemExit) as stop:
+        main(["--port", "5301"])
+
+    assert started == []
+    message = stop.value.code
+    assert isinstance(message, str)
+    assert "символическая ссылка" in message and str(tmp_path / "one.sqlite3") in message
+    assert str(target) not in message
+    assert ".lock" not in message  # названа база, а не lock-файл
+    if target_exists:
+        assert target.read_text(encoding="utf-8") == "чужие данные" and mode_of(target) == 0o644
+    else:
+        assert not target.exists()
+
+
+# --- ревизия базы при старте (спека DND-2 §15, дополнение B11 §1 п. 8) ---
+#
+# Новый код на старой базе падал бы непонятными ошибками запросов. Поэтому до uvicorn сервер сверяет
+# ревизию файла базы с `head` миграций: базы нет или она не на `head` — запуск останавливается с
+# командой, которая это исправит. Адреса `DATABASE_URL` в тексте нет.
+
+ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
+UPGRADE = "uv run alembic -c services/server/alembic.ini upgrade head"
+HEAD = ScriptDirectory.from_config(Config(str(ALEMBIC_INI))).get_current_head()
+
+
+def migrated_to(monkeypatch, path: Path, revision: str) -> None:
+    """База теста, поднятая настоящими миграциями до `revision`."""
+    monkeypatch.setenv("DATABASE_URL", sqlite_url(path))
+    get_settings.cache_clear()
+    command.upgrade(Config(str(ALEMBIC_INI)), revision)
+    get_settings.cache_clear()
+
+
+def started_or_stopped(monkeypatch, url: str) -> tuple[list[str], object]:
+    """Дошёл ли `main()` до uvicorn и с какой причиной остановился (`None` — запустился)."""
+    started: list[str] = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **options: started.append(app))
+    monkeypatch.setenv("DATABASE_URL", url)
+    get_settings.cache_clear()
+    try:
+        main(["--port", "5301"])
+    except SystemExit as stop:
+        return started, stop.code
+    return started, None
+
+
+@pytest.mark.real_revision_check
+def test_a_database_at_the_head_revision_starts_the_server(monkeypatch, tmp_path):
+    base = tmp_path / "data" / "dnd.sqlite3"
+    migrated_to(monkeypatch, base, "head")
+
+    started, refusal = started_or_stopped(monkeypatch, sqlite_url(base))
+
+    assert started == ["dnd_server.app:create_app"] and refusal is None
+
+
+@pytest.mark.real_revision_check
+def test_an_older_database_stops_the_server_with_the_command_that_updates_it(monkeypatch, tmp_path):
+    base = tmp_path / "data" / "dnd.sqlite3"
+    migrated_to(monkeypatch, base, "0006")
+    before = base.read_bytes()
+
+    started, refusal = started_or_stopped(monkeypatch, sqlite_url(base))
+
+    assert started == []
+    assert isinstance(refusal, str)
+    assert str(base) in refusal and "0006" in refusal and HEAD in refusal
+    assert UPGRADE in refusal
+    assert "DATABASE_URL" not in refusal and "sqlite+aiosqlite" not in refusal
+    assert base.read_bytes() == before  # проверка только читает базу
+
+
+@pytest.mark.real_revision_check
+def test_a_missing_database_stops_the_server_and_is_not_created(monkeypatch, tmp_path):
+    base = tmp_path / "data" / "dnd.sqlite3"
+
+    started, refusal = started_or_stopped(monkeypatch, sqlite_url(base))
+
+    assert started == []
+    assert isinstance(refusal, str)
+    assert str(base) in refusal and UPGRADE in refusal
+    assert "DATABASE_URL" not in refusal
+    assert not base.exists()
+
+
+@pytest.mark.real_revision_check
+def test_a_database_written_by_a_newer_server_stops_this_one(monkeypatch, tmp_path):
+    base = tmp_path / "data" / "dnd.sqlite3"
+    migrated_to(monkeypatch, base, "head")
+    with closing(sqlite3.connect(base)) as connection:
+        connection.execute("UPDATE alembic_version SET version_num = '9999'")
+        connection.commit()
+
+    started, refusal = started_or_stopped(monkeypatch, sqlite_url(base))
+
+    assert started == []
+    assert isinstance(refusal, str)
+    assert "9999" in refusal and "обновите сервер" in refusal
+    assert UPGRADE not in refusal  # миграции тут не помогут
+
+
+@pytest.mark.real_revision_check
+@pytest.mark.parametrize(
+    "url",
+    [
+        pytest.param("sqlite+aiosqlite:///:memory:", id="SQLite в памяти"),
+        pytest.param("postgresql+asyncpg://dnd:pw@db.example/dnd", id="другая СУБД"),
+    ],
+)
+def test_databases_without_a_file_are_not_checked(monkeypatch, tmp_path, url):
+    started, refusal = started_or_stopped(monkeypatch, url)
+
+    assert started and refusal is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_main_checks_the_revision_of_the_database_it_will_open(monkeypatch, no_real_revision_check):
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///./data/another.sqlite3")
+    get_settings.cache_clear()
+
+    run_main_with_fake_uvicorn(monkeypatch)
+
+    assert no_real_revision_check == ["sqlite+aiosqlite:///./data/another.sqlite3"]
+
+
+def files_of(folder: Path) -> dict[str, tuple[int, int]]:
+    """Файлы папки базы: имя -> (размер, время изменения в наносекундах)."""
+    return {path.name: (path.stat().st_size, path.stat().st_mtime_ns) for path in folder.iterdir()}
+
+
+@pytest.mark.real_revision_check
+@pytest.mark.parametrize("kind", ["пустой файл", "пустая таблица ревизии"])
+def test_a_database_without_a_recorded_revision_stops_the_server_with_the_command(
+    monkeypatch, tmp_path, kind
+):
+    # Третий вид «база старее кода»: файл есть, а ревизии в нём нет (пустой файл, запись ревизии
+    # стёрта). Отказ называет файл, нужную ревизию и команду; адреса DATABASE_URL в нём нет.
+    base = tmp_path / "data" / "dnd.sqlite3"
+    if kind == "пустой файл":
+        base.parent.mkdir()
+        base.write_bytes(b"")
+    else:
+        migrated_to(monkeypatch, base, "head")
+        with closing(sqlite3.connect(base)) as connection:
+            connection.execute("DELETE FROM alembic_version")
+            connection.commit()
+    before = files_of(base.parent)
+
+    started, refusal = started_or_stopped(monkeypatch, sqlite_url(base))
+
+    assert started == []
+    assert isinstance(refusal, str)
+    assert "не записана" in refusal and HEAD in refusal and str(base) in refusal
+    assert UPGRADE in refusal
+    assert "DATABASE_URL" not in refusal and "sqlite+aiosqlite" not in refusal
+    assert files_of(base.parent) == before
+
+
+@pytest.mark.real_revision_check
+@pytest.mark.parametrize(
+    "recorded", ["head", "0006", "9999"], ids=["на head", "старее", "новее кода"]
+)
+def test_the_revision_check_only_reads_the_database_and_leaves_nothing_next_to_it(
+    monkeypatch, tmp_path, recorded
+):
+    # Ревизия читается адресом `mode=ro`: файл базы не меняется, журналов SQLite (`-journal`,
+    # `-wal`, `-shm`) рядом не появляется — ни при запуске, ни при любом отказе.
+    base = tmp_path / "data" / "dnd.sqlite3"
+    migrated_to(monkeypatch, base, "0006" if recorded == "0006" else "head")
+    if recorded == "9999":
+        with closing(sqlite3.connect(base)) as connection:
+            connection.execute("UPDATE alembic_version SET version_num = '9999'")
+            connection.commit()
+    before = files_of(base.parent)
+
+    started, refusal = started_or_stopped(monkeypatch, sqlite_url(base))
+
+    assert files_of(base.parent) == before
+    assert bool(started) is (recorded == "head")
+    if refusal is not None:
+        assert str(base) in refusal
+        assert "DATABASE_URL" not in refusal and "sqlite+aiosqlite" not in refusal
+
+
 def open_descriptors_of(path: Path) -> list[int]:
     """Дескрипторы этого процесса, открытые на файл `path` (сверка по устройству и номеру файла)."""
     target = os.stat(path)
@@ -873,6 +1256,48 @@ def test_application_records_are_written_once(server_log):
     assert server_log.getvalue().count("Один раз") == 1
 
 
+@pytest.mark.real_logging_setup
+@pytest.mark.real_database_lock
+def test_warnings_of_the_start_come_out_with_their_level_and_the_masking_stays(
+    monkeypatch, tmp_path, use_database, uvicorn_loggers_restored
+):
+    # Дополнение B11 §7 п. 3 (N1): предупреждения старта (тестовый мастер в prod, жёсткая ссылка
+    # на месте lock-файла) идут через настроенный журнал — с меткой WARNING и именем журнала, как
+    # обещает README, а не голым текстом `logging.lastResort`. Настройка та же, что у uvicorn.
+    stream = io.StringIO()
+    monkeypatch.setattr(server_main, "LOG_CONFIG", written_to(stream, LOG_CONFIG))
+    script = tmp_path / "script.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.link(script, tmp_path / "one.sqlite3.lock")
+    handed: list[dict] = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **options: handed.append(options["log_config"]))
+    use_database(sqlite_url(tmp_path / "one.sqlite3"))  # APP_ENV не задан: боевой режим
+
+    main(["--port", "5301"])
+    logging.getLogger("dnd_server.realtime.ws").warning("Сокет: /ws/games/g1?token=%s", "abc.DEF")
+
+    lines = stream.getvalue().splitlines()
+    master = [line for line in lines if NO_MASTER_WARNING in line]
+    lock = [line for line in lines if "Файл блокировки базы" in line]
+    assert len(master) == len(lock) == 1
+    for line in (*master, *lock):
+        assert line.startswith("WARNING:") and "dnd_server.main:" in line
+    assert "abc.DEF" not in stream.getvalue() and "token=***" in stream.getvalue()
+    assert handed == [server_main.LOG_CONFIG]  # uvicorn получает ту же настройку
+
+
+def test_main_sets_up_the_logs_before_the_checks_of_the_start(monkeypatch, no_real_logging_setup):
+    order: list[str] = []
+    monkeypatch.setattr(server_main, "configure_logging", lambda: order.append("журналы"))
+    monkeypatch.setattr(
+        server_main, "warn_without_master", lambda _settings: order.append("мастер")
+    )
+
+    run_main_with_fake_uvicorn(monkeypatch)
+
+    assert order == ["журналы", "мастер"]
+
+
 def test_the_bot_token_filter_still_hides_the_token_in_the_configured_logs(server_log):
     token_part = BOT_TOKEN.partition(":")[2]
     with hide_token_in_logs(BOT_TOKEN):
@@ -889,3 +1314,22 @@ def test_the_bot_token_filter_still_hides_the_token_in_the_configured_logs(serve
     assert "***" in log
     assert BOT_TOKEN not in log and token_part not in log
     assert "Traceback" in log
+
+
+@pytest.mark.real_revision_check
+@pytest.mark.parametrize("folder", ["папка с пробелом", "data#1", "50%"], ids=["пробел", "#", "%"])
+def test_the_revision_is_read_from_a_database_whose_path_has_special_characters(
+    monkeypatch, tmp_path, folder
+):
+    # Адрес `file:…?mode=ro` строится из пути: пробел, `#` и `%` в папке базы не ломают чтение
+    # ревизии и не подменяют параметры адреса (база на head запускает сервер, старая — нет).
+    # `?` в пути здесь не проверяется: в DATABASE_URL он начинает параметры адреса SQLAlchemy.
+    current, older = tmp_path / folder / "dnd.sqlite3", tmp_path / folder / "old.sqlite3"
+    migrated_to(monkeypatch, current, "head")
+    migrated_to(monkeypatch, older, "0006")
+
+    started, refusal = started_or_stopped(monkeypatch, sqlite_url(current))
+    stopped, old_refusal = started_or_stopped(monkeypatch, sqlite_url(older))
+
+    assert started and refusal is None
+    assert stopped == [] and isinstance(old_refusal, str) and "0006" in old_refusal

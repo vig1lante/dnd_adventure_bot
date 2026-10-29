@@ -1373,6 +1373,63 @@ async def test_a_secret_hero_action_in_combat_is_seen_only_by_its_author(fight):
         assert attack_rolls(await table.feed_of("vera")) == []
 
 
+async def test_the_initiative_of_a_secret_hero_reaches_everybody_and_his_own_check_only_him(fight):
+    # Общая инициатива (B11.1) на проводе сервера: тайный ход Алисы начинает бой. Карточку её
+    # инициативы видят все — в кадрах и в снимке, а её собственная проверка остаётся только ей.
+    scenario = [
+        scenario_turn(
+            tool(
+                "request_check",
+                character_id="$pc1",
+                ability="wis",
+                skill="perception",
+                dc=15,
+                reason="прислушивается",
+            ),
+            tool("start_combat", monsters=[{"monster_id": "skeleton", "count": 1, "zone": "gate"}]),
+            say("Из тумана выходит скелет."),
+        )
+    ]
+    # Кубы: проверка Алисы 10, затем инициатива Алисы 20, Бориса 1, Веры 1 и скелета 5.
+    async with fight(None, scenario=scenario, rng=ScriptedRng([10, 20, 1, 1, 5])) as table:
+        await table.submit("alice", "Тихо подкрасться к воротам", secret=True)
+        await table.pass_("boris")
+        await table.pass_("vera")
+
+        response = await table.host("collect")
+        await table.settle()
+
+        assert response.status_code == 200, response.text
+        assert await table.whose_turn() == "alice"
+        alice = table.user_id("alice")
+        rolls = [
+            (p["item"]["data"]["actor_id"], p["item"]["data"]["label"], who)
+            for p, who in table.broadcaster.of_type("feed_item")
+            if p["item"]["kind"] == "roll"
+        ]
+        initiative = sorted((actor, who) for actor, label, who in rolls if label == "Инициатива")
+        assert initiative == sorted(
+            [("alice", "all"), ("boris", "all"), ("vera", "all"), ("skeleton-1", "all")]
+        )
+        [(check_label, check_audience)] = [
+            (label, who)
+            for actor, label, who in rolls
+            if actor == "alice" and label != "Инициатива"
+        ]
+        assert check_audience == alice
+
+        def cards_of_alice(feed: list[dict[str, Any]]) -> set[str]:
+            return {
+                item["data"]["label"]
+                for item in feed
+                if item["kind"] == "roll" and item["data"].get("actor_id") == "alice"
+            }
+
+        assert cards_of_alice(await table.feed_of("alice")) == {"Инициатива", check_label}
+        for other in ("boris", "vera"):
+            assert cards_of_alice(await table.feed_of(other)) == {"Инициатива"}, other
+
+
 async def test_collecting_and_closing_are_refused_in_combat(fight):
     async with fight(QUEUE) as table:
         for button in ("collect", "close", "extend"):
@@ -1457,6 +1514,12 @@ async def test_regenerate_rolls_back_the_death_saves_of_the_hand_over_too(fight)
         await table.submit("alice", "Прикрыться")
         await table.settle()
         assert (await table.state()).party["boris"].death_saves.successes == 1
+        # Бой ждёт следующего героя после разобранного хода: откатить можно, клиент видит кнопку.
+        [*_, (waiting, _who)] = table.broadcaster.of_type("phase")
+        assert (waiting["phase"]["turn_phase"], waiting["phase"]["can_regenerate"]) == (
+            "combat_wait",
+            True,
+        )
         table.set_rng(ScriptedRng([1, 5]))  # промах скелета; на этот раз спасбросок провален
 
         response = await table.host("regenerate")
@@ -1656,6 +1719,8 @@ async def test_when_the_countdown_ends_an_empty_turn_becomes_a_dodge(fight):
         [log] = await table.logs()
         assert f'"text": "{DODGE_TEXT}"' in log.request["context"]
         assert table.scheduler.pending() == {}
+        # «Уклоняется» игрок не писал: «Ход сдан» ему не приходит (дополнение B11 §1 п. 5).
+        assert table.broadcaster.of_type("action_auto_submitted") == []
 
 
 async def test_when_the_countdown_ends_the_draft_of_the_hero_is_submitted_as_it_is(fight):
@@ -1670,6 +1735,10 @@ async def test_when_the_countdown_ends_the_draft_of_the_hero_is_submitted_as_it_
         row = (await table.actions())["alice"]
         assert (row.status, row.text) == (ActionStatus.AUTO_SUBMITTED, "Бью скелета мечом")
         assert await table.whose_turn() == "boris"
+        # Черновик с текстом сдан отсчётом: «Ход сдан» — только Алисе и без текста хода.
+        assert table.broadcaster.of_type("action_auto_submitted") == [
+            ({"type": "action_auto_submitted"}, table.user_id("alice"))
+        ]
 
 
 async def test_a_hero_who_is_ready_before_the_countdown_ends_stops_it(fight):

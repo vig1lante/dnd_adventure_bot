@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { flushSync } from "react-dom";
+import type { PhaseView } from "../api/types";
 import { ActionComposer } from "../components/ActionComposer";
 import {
   composerAccess,
@@ -13,7 +14,7 @@ import { HostPanel } from "../components/HostPanel";
 import { PartyList } from "../components/PartyList";
 import { restLabel } from "../components/phases";
 import { ReconnectingNote, StatusBar } from "../components/StatusBar";
-import { useThinking } from "../components/waiting";
+import { phaseStartedAt, useThinking } from "../components/waiting";
 import { followGame, gameStage, useGame } from "../store/game";
 import type { GameView, LiveConnection } from "../store/game";
 import { buzz } from "../theme/haptics";
@@ -287,9 +288,21 @@ function SideLink({ view, open }: SideLinkProps) {
   );
 }
 
-/** «Мастер думает…» на «Рассказе»: фраза по времени и сколько уже ждём, пока идёт разбор. */
-function MasterThinking() {
-  const thinking = useThinking("resolving");
+interface MasterThinkingProps {
+  /** Серверное начало разбора (`phase.phase_since`); без него счёт идёт с показа экрана. */
+  since: PhaseView["phase_since"];
+  clockOffsetMs: number;
+}
+
+/**
+ * «Мастер думает…» на «Рассказе»: фраза по времени и сколько уже ждём, пока идёт разбор. Счёт
+ * идёт от серверного начала разбора, поэтому перезагрузка страницы его не обнуляет.
+ */
+function MasterThinking({ since, clockOffsetMs }: MasterThinkingProps) {
+  const thinking = useThinking(
+    `resolving@${since ?? ""}`,
+    phaseStartedAt(since, clockOffsetMs),
+  );
   return <Waiting {...thinking} />;
 }
 
@@ -383,7 +396,12 @@ function GameBody({
     story: () => (
       <>
         <Feed items={view.feed} heroIds={heroIds} onHero={openHero} />
-        {resolving && <MasterThinking />}
+        {resolving && (
+          <MasterThinking
+            since={view.phase.phase_since}
+            clockOffsetMs={clockOffsetMs}
+          />
+        )}
         {sideScreen ? (
           <SideLink view={view} open={goTo} />
         ) : (

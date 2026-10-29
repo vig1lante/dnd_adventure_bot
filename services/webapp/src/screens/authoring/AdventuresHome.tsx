@@ -3,6 +3,7 @@ import { useApi } from "../../api/context";
 import type { AdventureSummary, DraftSummary } from "../../api/types";
 import {
   Alert,
+  Badge,
   Button,
   Card,
   EmptyState,
@@ -30,19 +31,29 @@ const MONTHS = [
   "декабря",
 ];
 
-/** Время правки черновика по часам телефона: «изменён 29 октября 2026, 07:05». */
-function editedText(iso: string): string {
+/**
+ * Момент по часам телефона: «29 октября 2026, 07:05»; непонятная строка — пусто. Им же «Мои игры»
+ * подписывают дату создания игры.
+ */
+export function momentText(iso: string): string {
   const moment = new Date(iso);
   if (Number.isNaN(moment.getTime())) return "";
   const time = [moment.getHours(), moment.getMinutes()]
     .map((part) => String(part).padStart(2, "0"))
     .join(":");
-  return `изменён ${moment.getDate()} ${MONTHS[moment.getMonth()]} ${moment.getFullYear()}, ${time}`;
+  return `${moment.getDate()} ${MONTHS[moment.getMonth()]} ${moment.getFullYear()}, ${time}`;
+}
+
+/** Время правки черновика: «изменён 29 октября 2026, 07:05». */
+function editedText(iso: string): string {
+  const moment = momentText(iso);
+  return moment === "" ? "" : `изменён ${moment}`;
 }
 
 /**
- * Строка черновика: название, id приключения и время правки. Копии одного приключения с тем же
- * названием различаются временем правки — оно же описывает кнопку «Открыть» для читалки.
+ * Строка черновика: название, отметка «опубликовано», id приключения и время правки. Копии одного
+ * приключения с тем же названием различаются временем правки — оно же описывает кнопку «Открыть»
+ * для читалки. Сервер до B11 полей публикации не присылает — тогда и отметки нет.
  */
 function DraftRow({
   draft,
@@ -58,6 +69,9 @@ function DraftRow({
       <div className="games-item__main">
         <span className="games-item__title">{title}</span>
         <div id={metaId} className="games-item__meta">
+          {draft.published_id != null && (
+            <Badge tone="cloth">опубликовано</Badge>
+          )}
           {draft.adventure_id !== null && <span>{draft.adventure_id}</span>}
           <span>{editedText(draft.updated_at)}</span>
         </div>

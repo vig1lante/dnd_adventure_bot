@@ -89,7 +89,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from dnd_engine import rest as rest_rules
-from dnd_engine.adventure.loader import adventure_from_data
 from dnd_engine.character import Character
 from dnd_engine.events import RollEvent
 from dnd_engine.modules import build_ruleset
@@ -141,6 +140,7 @@ from dnd_server.dm.turn import (
     TurnOutcome,
     failed_turn_refusal,
     failure_text,
+    game_adventure,
     regenerate_last_turn,
     run_dm_turn,
 )
@@ -148,14 +148,16 @@ from dnd_server.dm.weaving import begin_weaving
 from dnd_server.games.hooks import send_to_game
 from dnd_server.games.service import Conflict, Forbidden, GameError, Invalid, NotFound
 from dnd_server.realtime.views import (
+    action_auto_submitted_event,
+    can_regenerate,
     character_event,
     feed_entries,
     feed_item_event,
     feed_withdrawn_event,
     party_event,
     phase_event,
-    phase_view,
     player_status_event,
+    public_status,
     rest_started_event,
 )
 from dnd_server.turns.timers import Action, Scheduler, TaskSet
@@ -232,7 +234,10 @@ async def _state_of(session: AsyncSession, game: Game) -> GameState | None:
 
 
 async def _phase_delivery(session: AsyncSession, game: Game) -> Delivery:
-    return phase_event(game, await _state_of(session, game)), AUDIENCE_ALL
+    """Событие `phase` для всех: с признаком «можно перегенерировать» по ходам игры в базе."""
+    regenerable = await can_regenerate(session, game)
+    state = await _state_of(session, game)
+    return phase_event(game, state, can_regenerate=regenerable), AUDIENCE_ALL
 
 
 async def _member(session: AsyncSession, game_id: str, user_id: str) -> tuple[Game, GamePlayer]:
@@ -304,8 +309,9 @@ def _still_writing(rows: dict[str, PlayerAction], user_id: str) -> bool:
     return row is None or row.status == ActionStatus.DRAFT
 
 
-def _status_delivery(user_id: str, status: ActionStatus) -> Delivery:
-    return player_status_event(user_id, status), AUDIENCE_ALL
+def _status_delivery(user_id: str, row: PlayerAction) -> Delivery:
+    """Публичный статус игрока по его строке хода — всем (`realtime.views.public_status`)."""
+    return player_status_event(user_id, row), AUDIENCE_ALL
 
 
 def _arm(flow: Flow, game: Game) -> None:
@@ -429,7 +435,8 @@ async def save_draft(
     """Черновик хода. Любая правка возвращает сданный ход или пас в черновик.
 
     «Вдохновение» без вдохновения у героя тихо снимается: клиент мог показать галочку по
-    устаревшим данным."""
+    устаревшим данным. Статус игрока всем уходит, только если публичный статус сменился («не
+    пишет» ↔ «пишет», сданный или пас → черновик): правка текста черновика событий не даёт."""
     async with _locked(flow, game_id) as session:
         game, turn, player = await _turn_for_action(session, game_id, user_id)
         row = await session.get(PlayerAction, (turn.id, user_id))
@@ -437,6 +444,7 @@ async def save_draft(
             raise Conflict("Сбор ходов закрыт: мастер уже разбирает раунд.")
         inspiration = inspiration and await _has_inspiration(session, game, player)
         deliveries: list[Delivery] = []
+        shown_before = public_status(row)
         if row is None:
             row = PlayerAction(
                 turn_id=turn.id,
@@ -453,7 +461,8 @@ async def save_draft(
             row.status = ActionStatus.DRAFT
             if not was_writing:
                 deliveries += await _sync_feed(session, game, turn, player, row)
-                deliveries.append(_status_delivery(user_id, row.status))
+        if public_status(row) != shown_before:
+            deliveries.append(_status_delivery(user_id, row))
         await session.commit()
         await _send(flow, game_id, deliveries)
     return row
@@ -472,7 +481,7 @@ async def submit_action(flow: Flow, game_id: str, user_id: str) -> PlayerAction:
         row.text = row.text.strip()
         if row.status != ActionStatus.SUBMITTED:
             row.status = ActionStatus.SUBMITTED
-            deliveries.append(_status_delivery(user_id, row.status))
+            deliveries.append(_status_delivery(user_id, row))
         deliveries += await _sync_feed(session, game, turn, player, row)
         in_combat = game.turn_phase == TurnPhase.COMBAT_WAIT
         last_one = game.turn_phase == TurnPhase.COLLECTING and await _everyone_ready(
@@ -498,11 +507,11 @@ async def pass_action(flow: Flow, game_id: str, user_id: str) -> PlayerAction:
         if row is None:
             row = PlayerAction(turn_id=turn.id, user_id=user_id, text="", status=ActionStatus.PASS)
             session.add(row)
-            deliveries.append(_status_delivery(user_id, row.status))
+            deliveries.append(_status_delivery(user_id, row))
         elif row.status != ActionStatus.PASS:
             row.status = ActionStatus.PASS
             deliveries += await _sync_feed(session, game, turn, player, row)
-            deliveries.append(_status_delivery(user_id, row.status))
+            deliveries.append(_status_delivery(user_id, row))
         in_combat = game.turn_phase == TurnPhase.COMBAT_WAIT
         last_one = game.turn_phase == TurnPhase.COLLECTING and await _everyone_ready(
             session, game, turn
@@ -699,7 +708,7 @@ async def phase_now(flow: Flow, game_id: str) -> dict[str, Any]:
         game = await session.get(Game, game_id)
         if game is None:
             raise NotFound("Игра не найдена.")
-        return phase_view(game, await _state_of(session, game))
+        return (await _phase_delivery(session, game))[0]["phase"]
 
 
 # --- кнопки хоста ---
@@ -716,11 +725,12 @@ async def collect(flow: Flow, game_id: str, user_id: str) -> dict[str, Any]:
             raise Conflict("Сбор ходов уже идёт.")
         if game.turn_phase != TurnPhase.DISCUSSION:
             raise Conflict("Собирать ходы можно, пока игроки обсуждают их.")
+        game_adventure(game)  # битая копия — отказ до сбора: ход по ней не начнётся
         turn = await _current_turn(session, game)
         if await _everyone_ready(session, game, turn):
             run_now = turn.kind
         else:
-            game.turn_phase = TurnPhase.COLLECTING
+            game.set_turn_phase(TurnPhase.COLLECTING, flow.scheduler.now())
             game.deadline_at = flow.scheduler.now() + timedelta(seconds=game.collect_seconds)
             turn.status = TurnStatus.COLLECTING
             rows = await _actions(session, turn.id)
@@ -768,6 +778,8 @@ async def close_collecting(
             raise Conflict("Это уже другой ход.")
         if due and game.deadline_at is not None and game.deadline_at > flow.scheduler.now():
             raise Conflict("Срок отсчёта ещё не вышел.")
+        # Битая копия — отказ до закрытия: сбор, закрытый без хода, не открыть заново.
+        game_adventure(game)
         turn = await _current_turn(session, game)
         deliveries = await _finish_actions(session, game, turn)
         await session.commit()
@@ -780,7 +792,8 @@ async def close_collecting(
 
 async def _finish_actions(session: AsyncSession, game: Game, turn: Turn) -> list[Delivery]:
     """Закрытие сбора: непустой черновик сдаётся сам, пустой — пас, игроку без строки хода
-    сервер создаёт пас (мастер не видит игрока без строки)."""
+    сервер создаёт пас (мастер не видит игрока без строки). Автор сданного черновика получает
+    «Ход сдан» (`action_auto_submitted`) — только он и после коммита, как всё из этого списка."""
     rows = await _actions(session, turn.id)
     deliveries: list[Delivery] = []
     for player in await _players(session, game.id):
@@ -795,9 +808,10 @@ async def _finish_actions(session: AsyncSession, game: Game, turn: Turn) -> list
             row.status = ActionStatus.AUTO_SUBMITTED if filled else ActionStatus.AUTO_PASS
         else:
             continue
-        deliveries.append(_status_delivery(player.user_id, row.status))
+        deliveries.append(_status_delivery(player.user_id, row))
         if row.status == ActionStatus.AUTO_SUBMITTED:
             deliveries += await _sync_feed(session, game, turn, player, row)
+            deliveries.append((action_auto_submitted_event(), player.user_id))
     return deliveries
 
 
@@ -873,7 +887,7 @@ async def start_rest(flow: Flow, game_id: str, user_id: str, kind: RestKind) -> 
         state = await _state_of(session, game)
         if state is None:
             raise Conflict("У игры ещё нет состояния: привал начать нельзя.")
-        adventure = adventure_from_data(game.adventure_data)
+        adventure = game_adventure(game)
         try:
             camped, _events = begin_rest(
                 state, kind, build_ruleset(state.rules), content=flow.dm.srd, adventure=adventure
@@ -882,7 +896,7 @@ async def start_rest(flow: Flow, game_id: str, user_id: str, kind: RestKind) -> 
             raise Conflict(str(refusal)) from None
         await _save_state(session, game, camped)
         turn.kind = TurnKind.CAMP_END
-        game.turn_phase = TurnPhase.CAMP
+        game.set_turn_phase(TurnPhase.CAMP, flow.scheduler.now())
         game.deadline_at = flow.scheduler.now() + timedelta(seconds=rest_seconds(game, kind))
         game.rest_ideas = None
         await session.commit()
@@ -915,6 +929,7 @@ async def spend_hit_die(flow: Flow, game_id: str, user_id: str) -> Character:
         hero = state.party.get(player.character_id or "")
         if hero is None:
             raise Conflict("У вас нет героя в этой игре.")
+        adventure = game_adventure(game)  # битая копия — отказ до броска, а не после
         try:
             rested, rolled = rest_rules.spend_hit_die(hero, flow.dm.srd, flow.dm.rng)
         except rest_rules.RestError as refusal:
@@ -922,7 +937,6 @@ async def spend_hit_die(flow: Flow, game_id: str, user_id: str) -> Character:
         after = state.model_copy(deep=True)
         after.party[hero.id] = rested
         await _save_state(session, game, after)
-        adventure = adventure_from_data(game.adventure_data)
         card = RollEvent(audience=AUDIENCE_ALL, actor_id=hero.id, label=HIT_DIE_LABEL, roll=rolled)
         entries = feed_entries(
             [card],
@@ -1053,6 +1067,7 @@ async def close_hurry(flow: Flow, game_id: str, *, turn_id: str) -> None:
         player = None if hero is None else await _player_of(session, game_id, hero.id)
         if player is None:
             raise Conflict("Сейчас ходит мастер: торопить некого.")
+        game_adventure(game)  # битая копия — ход героя не сдаётся без мастера
         deliveries = await _submit_for(session, game, await _current_turn(session, game), player)
         await session.commit()
         flow.scheduler.cancel(game_id)
@@ -1064,8 +1079,12 @@ async def close_hurry(flow: Flow, game_id: str, *, turn_id: str) -> None:
 async def _submit_for(
     session: AsyncSession, game: Game, turn: Turn, player: GamePlayer
 ) -> list[Delivery]:
-    """Сдаёт ход героя за игрока: черновик как есть, пустой или отсутствующий — «Уклоняется»."""
+    """Сдаёт ход героя за игрока: черновик как есть, пустой или отсутствующий — «Уклоняется».
+
+    «Ход сдан» (`action_auto_submitted`) получает только автор черновика с текстом: «Уклоняется»
+    вместо пустого или отсутствующего хода игрок не писал (дополнение B11 §1 п. 5)."""
     row = await session.get(PlayerAction, (turn.id, player.user_id))
+    written = row is not None and row.status == ActionStatus.DRAFT and bool(row.text.strip())
     if row is None:
         row = PlayerAction(
             turn_id=turn.id,
@@ -1081,10 +1100,13 @@ async def _submit_for(
         row.status = ActionStatus.AUTO_SUBMITTED
     else:
         return []  # ход уже сдан или спасован: мастер разберёт его как есть
-    return [
-        _status_delivery(player.user_id, row.status),
+    deliveries = [
+        _status_delivery(player.user_id, row),
         *await _sync_feed(session, game, turn, player, row),
     ]
+    if written:
+        deliveries.append((action_auto_submitted_event(), player.user_id))
+    return deliveries
 
 
 async def on_deadline(flow: Flow, game_id: str, turn_id: str) -> None:
@@ -1353,7 +1375,7 @@ async def _write_interrupted(
     В начале игры хода ещё нет (вплетение шло или открытие не началось): запись журнала невозможна
     (она привязана к ходу), остаётся фаза и сообщение хосту."""
     turn = None if game.current_turn_id is None else await _current_turn(session, game)
-    game.turn_phase = TurnPhase.DM_FAILED
+    game.set_turn_phase(TurnPhase.DM_FAILED, flow.scheduler.now())
     game.deadline_at = None
     note = None
     if note_text is not None:

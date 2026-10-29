@@ -10,6 +10,11 @@ Create Date: 2026-10-20 03:10:00
 
 Старые игры не теряются: колонка пустая и необязательная, а у игр, которые уже идут (`weaving`,
 `playing`), часы заводятся со времени старта, чтобы время игры продолжало считаться.
+
+Миграция повторяема (спека DND-2 §15), как 0003–0006: SQLite не откатывает DDL, и обрыв после
+`ADD COLUMN` до записи ревизии оставляет колонку. Поэтому колонка добавляется только по результату
+осмотра таблицы, а часы заводятся только там, где их ещё нет (`clock_at IS NULL`): повтор не
+возвращает к старту часы игры, которая уже вставала на паузу, и не сбрасывает её время.
 """
 
 from collections.abc import Sequence
@@ -23,11 +28,20 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _has_column(table: str, column: str) -> bool:
+    """Есть ли у таблицы колонка. В режиме `--sql` базы нет: перед этим шагом колонки нет, и
+    печатаются все шаги подряд."""
+    if op.get_context().as_sql:
+        return False
+    return any(found["name"] == column for found in sa.inspect(op.get_bind()).get_columns(table))
+
+
 def upgrade() -> None:
-    op.add_column("games", sa.Column("clock_at", sa.DateTime(), nullable=True))
+    if not _has_column("games", "clock_at"):
+        op.add_column("games", sa.Column("clock_at", sa.DateTime(), nullable=True))
     op.execute(
-        "UPDATE games SET clock_at = started_at"
-        " WHERE started_at IS NOT NULL AND phase IN ('weaving', 'playing')"
+        "UPDATE games SET clock_at = started_at WHERE clock_at IS NULL"
+        " AND started_at IS NOT NULL AND phase IN ('weaving', 'playing')"
     )
 
 

@@ -110,6 +110,8 @@ export function summaryOf(overrides: Partial<DraftSummary> = {}): DraftSummary {
     adventure_id: null,
     version: 1,
     updated_at: "2026-10-25T10:00:00+00:00",
+    published_id: null,
+    published_at: null,
     ...overrides,
   };
 }

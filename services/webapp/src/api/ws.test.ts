@@ -275,6 +275,74 @@ describe("connectGame: отказ в доступе", () => {
     expect(connection.sockets).toHaveLength(2);
   });
 
+  test("исключение хостом: кадр kicked, затем 4403 — отказ «kicked», кадр до onEvent не доходит", () => {
+    const connection = connect();
+    connection.last().open();
+    connection.last().serve(SNAPSHOT);
+
+    connection.last().serve({ type: "kicked" });
+    connection.last().drop(4403, "kicked");
+    vi.advanceTimersByTime(10 * 60 * 1000);
+
+    expect(connection.rejections).toEqual(["kicked"]);
+    expect(connection.events.map((event) => event.type)).toEqual(["snapshot"]);
+    expect(connection.sockets).toHaveLength(1);
+  });
+
+  test("4403 с причиной kicked, хотя кадр потерялся, — тоже исключение", () => {
+    const connection = connect();
+    connection.last().open();
+
+    connection.last().drop(4403, "kicked");
+
+    expect(connection.rejections).toEqual(["kicked"]);
+  });
+
+  test("кадр kicked, обрыв, а 4403 уже на новом сокете — всё равно исключение", () => {
+    const connection = connect();
+    connection.last().open();
+    connection.last().serve(SNAPSHOT);
+    connection.last().serve({ type: "kicked" });
+    const again = reconnectAfter(connection, 1000, 1006);
+    again.open();
+
+    again.drop(4403);
+
+    expect(connection.rejections).toEqual(["kicked"]);
+  });
+
+  // Финальное покрытие B11: признак исключения уточняет только 4403.
+  test("кадр kicked, а сокет закрыт 4401 — отказ «unauthorized»: недействительная сессия важнее", () => {
+    const connection = connect();
+    connection.last().open();
+    connection.last().serve({ type: "kicked" });
+
+    connection.last().drop(4401, "kicked");
+
+    expect(connection.rejections).toEqual(["unauthorized"]);
+  });
+
+  test("кадр kicked, а сокет просто оборвался — переподключение, как при любом обрыве", () => {
+    const connection = connect();
+    connection.last().open();
+    connection.last().serve(SNAPSHOT);
+    connection.last().serve({ type: "kicked" });
+
+    reconnectAfter(connection, 1000, 1006);
+
+    expect(connection.rejections).toEqual([]);
+    expect(connection.events.map((event) => event.type)).toEqual(["snapshot"]);
+  });
+
+  test("4403 с другой причиной и без кадра kicked — прежний отказ «not-a-member»", () => {
+    const connection = connect();
+    connection.last().open();
+
+    connection.last().drop(4403, "not a member");
+
+    expect(connection.rejections).toEqual(["not-a-member"]);
+  });
+
   test("отказ без обработчика не ломает клиента", () => {
     const { sockets, last } = fakeWebSocket();
     openConnections.push(connectGame("g1", TOKEN, () => {}));

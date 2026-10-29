@@ -10,10 +10,12 @@
 создаётся. `ProviderError` из `base.py` остаётся ошибкой самого хода.
 
 Провайдер `claude_code_cli` собирается только при `APP_ENV=dev` (спека §2) — и для настроек по
-умолчанию, и для переопределения при создании игры. Модель подписки ему задают модель игры (она
-сильнее окружения, если CLI её примет) или CLAUDE_CLI_MODEL, CLAUDE_CLI_EFFORT и
-CLAUDE_CLI_CHEAP_MODEL (спека DND-2 §11); незаданное выбирает сам CLI. LLM_MODEL, LLM_EFFORT и
-LLM_CHEAP_MODEL — модели Anthropic API — ему не передаются.
+умолчанию, и для переопределения при создании игры. Тестовый мастер `fake` — тоже только в dev
+(спека DND-2 §15), даже если задан FAKE_LLM_SCENARIO: в боевом режиме игру ведёт настоящая
+модель. Модели подписки `claude_code_cli` задают модель игры (она сильнее окружения, если CLI её
+примет) или CLAUDE_CLI_MODEL, CLAUDE_CLI_EFFORT и CLAUDE_CLI_CHEAP_MODEL (спека DND-2 §11);
+незаданное выбирает сам CLI. LLM_MODEL, LLM_EFFORT и LLM_CHEAP_MODEL — модели Anthropic API —
+ему не передаются.
 
 Клиенты SDK адрес, учётные данные и заголовки берут из настроек, а не из окружения процесса: SDK
 сами читают переменные владельца (`OPENAI_ORG_ID`, `ANTHROPIC_BASE_URL`, `*_CUSTOM_HEADERS`…), и
@@ -58,6 +60,10 @@ KEYLESS_API_KEY = "not-needed"
 ANTHROPIC_API_URL = "https://api.anthropic.com"
 
 
+# Отказ `fake` вне dev: без пути и содержимого сценария (их в боевом режиме показывать незачем).
+FAKE_DEV_ONLY = "тестовый мастер fake доступен только в dev-режиме"
+
+
 class ConfigError(Exception):
     """Конфигурация провайдера неверна или неполна; в тексте нет значений секретов."""
 
@@ -91,6 +97,8 @@ def make_provider(
 
 
 def _fake(settings: Settings, pc_ids: Sequence[str]) -> FakeProvider:
+    if settings.app_env != "dev":
+        raise ConfigError(FAKE_DEV_ONLY)
     path = settings.fake_llm_scenario
     if path is None:
         raise ConfigError("провайдер fake: не задан FAKE_LLM_SCENARIO (путь к YAML-сценарию)")

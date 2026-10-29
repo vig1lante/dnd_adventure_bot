@@ -631,6 +631,9 @@ COMBAT_TOOLS = (
         ),
         args_model=StartCombatArgs,
         handler=start_combat,
+        # Инициатива всегда общая, даже у тайного актёра (спека DND-2 §15): она и так видна
+        # всем в порядке хода. Спасбросок от смерти первого бойца остаётся его тайным броском.
+        public_roll_labels=(INITIATIVE_LABEL,),
     ),
     ToolSpec(
         name="attack",

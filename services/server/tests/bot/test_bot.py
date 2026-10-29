@@ -450,6 +450,35 @@ async def test_a_provider_that_cannot_be_built_is_reported_not_raised(deps, db):
     assert await count(db, Game) == 0
 
 
+FAKE_REFUSAL = "Провайдер мастера не подходит: тестовый мастер fake доступен только в dev-режиме."
+
+
+async def test_in_prod_the_test_master_is_refused_by_the_bot_as_by_the_app(deps, db):
+    # Спека DND-2 §15: `/newgame` выбирает провайдера по умолчанию (`fake` со сценарием), а в
+    # боевом режиме тестового мастера нет — тот же отказ, что у `POST /api/games`, без пути сценария.
+    prod = deps.settings.model_copy(update={"app_env": "prod"})
+
+    reply = await lobby_reply(BotDeps(prod, deps.sessionmaker, deps.catalog, None))
+
+    assert (reply.created, reply.link, reply.text) == (False, None, FAKE_REFUSAL)
+    assert str(SCENARIO) not in reply.text and SCENARIO.name not in reply.text
+    assert await count(db, Game) == 0
+
+
+async def test_in_prod_the_button_of_newgame_shows_the_refusal_of_the_test_master(deps, db):
+    prod = BotDeps(
+        deps.settings.model_copy(update={"app_env": "prod"}), deps.sessionmaker, deps.catalog, None
+    )
+    [button] = adventure_buttons(deps.catalog)
+
+    session = await feed(prod, callback_update(button.callback_data, CREATOR_TG_ID))
+
+    assert await count(db, Game) == 0
+    assert session.sent() == []  # приглашения нет
+    [answer] = session.answers()
+    assert answer.show_alert is True and answer.text == FAKE_REFUSAL
+
+
 async def test_without_a_bot_username_the_reply_gives_the_code_instead_of_a_link(deps, db):
     nameless = deps.settings.model_copy(update={"telegram_bot_username": None})
 

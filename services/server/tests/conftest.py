@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import httpx
 import pytest
@@ -256,7 +257,11 @@ def owner_database_guard(monkeypatch, live_call_attempts: list[str]) -> None:
 
     def connect(database, *args, **kwargs):
         is_file_path = isinstance(database, str | os.PathLike)
-        if is_file_path and Path(database).resolve().is_relative_to(OWNER_DATA_DIR):
+        path = os.fspath(database) if is_file_path else ""
+        if kwargs.get("uri") and isinstance(path, str) and path.startswith("file:"):
+            # Адрес `file:///…?mode=ro` (так сервер читает ревизию базы): сверяется его путь.
+            path = unquote(urlsplit(path).path)
+        if path and Path(path).resolve().is_relative_to(OWNER_DATA_DIR):
             live_call_attempts.append(f"sqlite: {database}")
             raise AssertionError(f"тест открыл базу владельца: {database}")
         return real_connect(database, *args, **kwargs)
@@ -286,6 +291,14 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
         "real_database_lock: тест проверяет настоящую `claim_database` на базе во временной папке",
+    )
+    config.addinivalue_line(
+        "markers",
+        "real_revision_check: тест проверяет настоящую `require_current_schema` на своей базе",
+    )
+    config.addinivalue_line(
+        "markers",
+        "real_logging_setup: тест проверяет настоящую `configure_logging` (журналы процесса)",
     )
 
 
@@ -349,6 +362,45 @@ def no_real_database_lock(monkeypatch, request) -> Iterator[list[str]]:
         yield
 
     monkeypatch.setattr(server_main, "claim_database", claim)
+    yield asked
+
+
+# --- ревизия базы при старте (DND-2 B11) ---
+#
+# `main()` сверяет ревизию базы с `head` до запуска uvicorn. База по умолчанию — база владельца:
+# тест, который просто вызвал `main()`, не должен её читать и не должен падать оттого, что её нет.
+# Поэтому по умолчанию `require_current_schema` ничего не читает и записывает, какую базу у неё
+# просили. Тесты самой проверки ставят маркер `real_revision_check` и берут базу во временной папке.
+
+
+@pytest.fixture(autouse=True)
+def no_real_revision_check(monkeypatch, request) -> Iterator[list[str]]:
+    """Адреса баз, ревизию которых `main()` просил сверить; настоящая база не читается."""
+    asked: list[str] = []
+    if request.node.get_closest_marker("real_revision_check") is not None:
+        yield asked
+        return
+    monkeypatch.setattr(server_main, "require_current_schema", asked.append)
+    yield asked
+
+
+# --- журналы процесса при старте (DND-2 B11, находка N1) ---
+#
+# `main()` настраивает журналы (LOG_CONFIG) до проверок старта, чтобы их предупреждения шли с меткой
+# уровня. Настройка глобальна для процесса: у `dnd_server` она снимает передачу записей корневому
+# журналу, и `caplog` соседних тестов перестал бы их видеть. Поэтому по умолчанию `configure_logging`
+# ничего не настраивает; тест самой настройки ставит маркер `real_logging_setup` и возвращает
+# журналы как были.
+
+
+@pytest.fixture(autouse=True)
+def no_real_logging_setup(monkeypatch, request) -> Iterator[list[bool]]:
+    """Сколько раз `main()` просил настроить журналы; настоящая настройка не применяется."""
+    asked: list[bool] = []
+    if request.node.get_closest_marker("real_logging_setup") is not None:
+        yield asked
+        return
+    monkeypatch.setattr(server_main, "configure_logging", lambda: asked.append(True))
     yield asked
 
 

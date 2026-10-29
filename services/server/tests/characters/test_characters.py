@@ -1698,7 +1698,7 @@ async def test_random_builds_the_engines_character_with_model_text(world):
     game, host, _ = await make_game(world)
     world.app.state.rng = SeededRng(11)
 
-    response = await create(world, host, game["id"], {"mode": "random"})
+    response = await random_hero(world, host, game["id"])
 
     assert response.status_code == 201, response.text
     character = Character.model_validate(response.json()["character"])
@@ -1721,7 +1721,7 @@ async def test_random_takes_the_one_class_nobody_has_yet(world):
     # Несколько раз подряд: прежний класс самого хоста при замене занятым не считается.
     for seed in range(6):
         world.app.state.rng = SeededRng(seed)
-        response = await create(world, host, game["id"], {"mode": "random"})
+        response = await random_hero(world, host, game["id"])
 
         assert response.status_code == 201, response.text
         assert response.json()["character"]["class_id"] == "wizard"
@@ -1737,16 +1737,19 @@ async def test_creating_again_replaces_the_character_and_resets_ready(world):
     assert (await mark_ready(world, host, game["id"])).status_code == 200
     world.broadcaster.sent.clear()
 
-    second = (await create(world, host, game["id"], {"mode": "random"})).json()["character"]
+    second = (await random_hero(world, host, game["id"])).json()["character"]
 
     assert second["id"] != first["id"]
     rows = {row.id: row for row in await stored_characters(world.db, game["id"])}
     assert set(rows) == {kept["character"]["id"], second["id"]}
     player = await stored_player(world.db, game["id"], host.id)
     assert (player.character_id, player.ready) == (second["id"], False)
-    [event] = world.broadcaster.lobby_events()
-    me = next(p for p in event["game"]["players"] if p["user_id"] == host.id)
+    # Кадр при сохранении героя и кадр после описания от модели (с её именем героя).
+    saved, described = world.broadcaster.lobby_events()
+    me = next(p for p in saved["game"]["players"] if p["user_id"] == host.id)
     assert (me["has_character"], me["ready"]) == (True, False)
+    me = next(p for p in described["game"]["players"] if p["user_id"] == host.id)
+    assert (me["ready"], me["hero_name"]) == (False, FLAVOR_ANSWER["name"])
 
 
 async def test_the_lobby_event_goes_out_once_per_character_under_the_game_lock(world):
@@ -1757,12 +1760,35 @@ async def test_the_lobby_event_goes_out_once_per_character_under_the_game_lock(w
     await create(world, host, game["id"], quick_body())
     await create(world, host, game["id"], detailed_body())
 
+    # Быстрый герой: кадр при сохранении и кадр после описания от модели; подробный — один.
     events = world.broadcaster.lobby_events()
-    assert len(events) == 2
+    assert len(events) == 3
     assert {audience for _g, _p, audience in world.broadcaster.sent} == {"all"}
     assert {game_id for game_id, _p, _a in world.broadcaster.sent} == {game["id"]}
     assert all(event["game"]["id"] == game["id"] for event in events)
     assert all(event["game"]["players"][0]["has_character"] for event in events)
+    assert world.broadcaster.under_lock == [True, True, True]
+
+
+async def test_the_name_the_model_gave_a_quick_hero_reaches_the_lobby_of_everybody(world):
+    # Дополнение B11 §5 п. 2 (R1): имя от модели приходит новым кадром `lobby` после записи
+    # описания, а не остаётся заглушкой из первого кадра.
+    game, host, [friend] = await make_game(world, friends=1)
+    world.broadcaster.sent.clear()
+    world.broadcaster.under_lock.clear()
+
+    response = await create(world, friend, game["id"], quick_body())
+
+    assert response.status_code == 201, response.text
+    saved, described = world.broadcaster.lobby_events()
+
+    def hero_of(event: dict[str, Any]) -> str | None:
+        return next(p for p in event["game"]["players"] if p["user_id"] == friend.id)["hero_name"]
+
+    assert hero_of(saved) == UNNAMED_CHARACTER_NAME
+    assert hero_of(described) == FLAVOR_ANSWER["name"] == response.json()["character"]["name"]
+    assert {audience for _g, _p, audience in world.broadcaster.sent} == {"all"}
+    # Кадр после записи описания — под той же блокировкой игры, что и кадр сохранения.
     assert world.broadcaster.under_lock == [True, True]
 
 
@@ -1906,11 +1932,11 @@ async def test_quick_remembers_the_name_the_player_gave(world):
 async def test_random_remembers_only_the_mode(world, monkeypatch):
     game, host, [friend] = await make_game(world, friends=1)
     use_provider(monkeypatch, ScriptedProvider())
-    legacy = (await create(world, host, game["id"], {"mode": "random"})).json()
+    first = (await random_hero(world, host, game["id"])).json()
     hero = await shown(world, friend, game["id"])
     taken = (await take(world, friend, game["id"], hero["preview_id"])).json()
 
-    for player, created in ((host, legacy), (friend, taken)):
+    for player, created in ((host, first), (friend, taken)):
         body = (await my_character(world, player, game["id"])).json()
 
         assert body == {"mode": "random", "character": created["character"], "choices": None}
@@ -2003,12 +2029,17 @@ async def test_creating_again_overwrites_the_choice(world):
     sequence = [
         (quick_body(name="Борис"), "quick", {**QUICK_CHOICES, "name": "Борис"}),
         (detailed_body(), "detailed", detailed_choices_as_stored()),
-        ({"mode": "random"}, "random", None),
+        (None, "random", None),  # случайный герой — по предпросмотру
         (quick_body(class_id="wizard"), "quick", {**QUICK_CHOICES, "class_id": "wizard"}),
     ]
 
     for body, mode, choices in sequence:
-        created = (await create(world, host, game["id"], body)).json()
+        made = (
+            await random_hero(world, host, game["id"])
+            if body is None
+            else await create(world, host, game["id"], body)
+        )
+        created = made.json()
 
         mine = (await my_character(world, host, game["id"])).json()
 
@@ -2060,8 +2091,10 @@ async def test_the_owner_still_reads_the_choice_after_the_game_has_started(world
 
 async def test_nobody_gets_the_choice_of_another_player(world):
     game, host, [friend, newcomer] = await make_game(world, friends=2)
+    # Метка — в предыстории выбора: имя героя не тайна, его видят все в лобби (`hero_name`).
     marker = "Тайный-замысел-хоста-7261"
-    await create(world, host, game["id"], detailed_body(name=marker))
+    persona = {**detailed_choices()["persona"], "backstory": marker}
+    await create(world, host, game["id"], detailed_body(persona=persona))
     await create(world, friend, game["id"], quick_body(class_id="rogue", name="Друг"))
     world.broadcaster.sent.clear()
 
@@ -2069,7 +2102,7 @@ async def test_nobody_gets_the_choice_of_another_player(world):
     mine_friend = await my_character(world, friend, game["id"])
     mine_newcomer = await my_character(world, newcomer, game["id"])  # героя нет: чужого не дают
 
-    assert mine_host.json()["choices"]["name"] == marker
+    assert mine_host.json()["choices"]["persona"]["backstory"] == marker
     assert mine_friend.json()["choices"] == {**QUICK_CHOICES, "class_id": "rogue", "name": "Друг"}
     assert mine_newcomer.status_code == 404
     assert marker not in mine_friend.text + mine_newcomer.text
@@ -2240,7 +2273,7 @@ async def test_the_provider_of_the_game_describes_its_characters(world, monkeypa
     calls = use_provider(monkeypatch, ScriptedProvider())
 
     await create(world, host, game["id"], quick_body())
-    await create(world, host, game["id"], {"mode": "random"})
+    await random_hero(world, host, game["id"])
 
     assert [(c["provider"], c["model"]) for c in calls] == [("fake", "some-model-1")] * 2
 
@@ -2393,6 +2426,8 @@ async def test_a_character_replaced_while_the_model_thinks_keeps_the_newer_data(
     [row] = await stored_characters(world.db, game["id"])
     assert row.data == newer.json()["character"]
     assert (await stored_player(world.db, game["id"], host.id)).character_id == row.id
+    # Отказ описания кадра не шлёт: два кадра — сохранение медленного героя и нового.
+    assert len(world.broadcaster.lobby_events()) == 2
 
 
 async def test_a_player_who_left_while_the_model_thinks_gets_a_conflict_and_leaves_no_character(
@@ -2450,6 +2485,8 @@ async def test_the_description_is_not_written_after_the_game_has_started(world, 
     [row] = await stored_characters(world.db, game["id"])
     assert body["character"] == row.data
     assert row.data["name"] == UNNAMED_CHARACTER_NAME and row.data["persona"]["backstory"] == ""
+    # Описание не записано — и кадра о нём нет: только кадр сохранения героя.
+    assert len(world.broadcaster.lobby_events()) == 1
 
 
 async def test_the_host_starts_the_game_while_the_model_still_describes_a_ready_hero(
@@ -2624,7 +2661,7 @@ async def test_no_database_connection_is_held_while_the_model_thinks(world, monk
     requests = {
         "backstory": lambda: backstory_help(world, host, game["id"]),
         "quick": lambda: create(world, host, game["id"], quick_body()),
-        "random": lambda: create(world, host, game["id"], {"mode": "random"}),
+        "random": lambda: random_hero(world, host, game["id"]),
     }
 
     pending = asyncio.create_task(requests[kind]())
@@ -2851,7 +2888,7 @@ async def test_openapi_describes_the_character_routes(world):
 MODEL_REQUESTS = {
     "backstory": lambda world, player, game_id: backstory_help(world, player, game_id),
     "quick": lambda world, player, game_id: create(world, player, game_id, quick_body()),
-    "random": lambda world, player, game_id: create(world, player, game_id, {"mode": "random"}),
+    "random": lambda world, player, game_id: random_hero(world, player, game_id),
 }
 
 
@@ -3085,6 +3122,11 @@ async def take(world: World, player: Player, game_id: str, preview_id: str) -> h
     return await create(world, player, game_id, {"mode": "random", "preview_id": preview_id})
 
 
+async def random_hero(world: World, player: Player, game_id: str) -> httpx.Response:
+    """Случайный герой единственным путём (спека DND-2 §15): «Бросить судьбу», затем «Беру»."""
+    return await take(world, player, game_id, (await shown(world, player, game_id))["preview_id"])
+
+
 async def test_a_preview_shows_the_engines_hero_and_writes_nothing(world, monkeypatch):
     game, host, _ = await make_game(world)
     world.app.state.rng = SeededRng(11)
@@ -3165,9 +3207,12 @@ async def test_taking_replaces_the_old_hero_like_any_other_creation(world):
     assert first["id"] not in rows
     player = await stored_player(world.db, game["id"], host.id)
     assert (player.character_id, player.ready) == (hero["character"]["id"], False)
-    [event] = world.broadcaster.lobby_events()
-    me = next(p for p in event["game"]["players"] if p["user_id"] == host.id)
+    # Кадр при сохранении героя и кадр после описания от модели (с её именем героя).
+    saved, described = world.broadcaster.lobby_events()
+    me = next(p for p in saved["game"]["players"] if p["user_id"] == host.id)
     assert (me["has_character"], me["ready"]) == (True, False)
+    me = next(p for p in described["game"]["players"] if p["user_id"] == host.id)
+    assert (me["ready"], me["hero_name"]) == (False, FLAVOR_ANSWER["name"])
 
 
 async def test_a_preview_can_be_taken_only_once(world, monkeypatch):
@@ -3502,12 +3547,36 @@ async def test_two_simultaneous_takes_of_one_preview_leave_exactly_one_hero(worl
     assert row.id == hero["character"]["id"]
 
 
-async def test_the_legacy_random_mode_still_rolls_and_creates_at_once(world):
+RANDOM_NEEDS_PREVIEW = (
+    "Случайного героя сначала покажите предпросмотром: «Бросить судьбу», затем «Беру»."
+)
+
+
+async def test_a_random_hero_without_a_preview_is_422_and_nothing_is_rolled_or_saved(
+    world, monkeypatch
+):
+    # Прежнего пути «бросить и сразу сохранить» больше нет (спека DND-2 §15): только предпросмотр.
     game, host, _ = await make_game(world)
-    world.app.state.rng = SeededRng(11)
+    calls = use_provider(monkeypatch, ScriptedProvider())
+    world.broadcaster.sent.clear()
 
     response = await create(world, host, game["id"], {"mode": "random"})
 
-    assert response.status_code == 201, response.text
-    assert (await stored_player(world.db, game["id"], host.id)).character_id is not None
-    assert world.app.state.random_previews.current(game["id"], host.id) is None
+    assert response.status_code == 422
+    assert response.json() == {"detail": RANDOM_NEEDS_PREVIEW}
+    assert await stored_characters(world.db, game["id"]) == []
+    assert (await stored_player(world.db, game["id"], host.id)).character_id is None
+    assert world.broadcaster.lobby_events() == [] and calls == []
+
+
+async def test_a_random_hero_without_a_preview_is_refused_even_with_a_preview_waiting(world):
+    # Показанный герой не берётся «по умолчанию»: «Беру» называет его id, и он остаётся ждать.
+    game, host, _ = await make_game(world)
+    hero = await shown(world, host, game["id"])
+
+    refused = await create(world, host, game["id"], {"mode": "random"})
+    taken = await take(world, host, game["id"], hero["preview_id"])
+
+    assert refused.status_code == 422 and refused.json() == {"detail": RANDOM_NEEDS_PREVIEW}
+    assert taken.status_code == 201, taken.text
+    assert taken.json()["character"]["id"] == hero["character"]["id"]

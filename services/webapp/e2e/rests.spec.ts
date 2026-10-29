@@ -107,6 +107,7 @@ const rollCard = (page: Page, heroName: string) =>
 // Кнопки хоста называют срок привала из настроек игры: «Короткий привал (20 сек)».
 const SHORT_REST_BUTTON = /^Короткий привал \(/;
 const LONG_REST_BUTTON = /^Долгий привал \(/;
+const REGENERATE_BUTTON = "Перегенерировать ответ мастера";
 // Адресаты идей короткого привала (индексы HEROES): двое дольше всех вне фокуса рассказа, а
 // Алису черепица в открытии поставила в фокус.
 const SHORT_REST_ADDRESSEES = new Set([1, 2]);
@@ -448,6 +449,15 @@ test("привалы по кнопке хоста: короткий с кост�
         await expect(button(page, SHORT_REST_BUTTON)).toHaveCount(0);
         await expect(button(page, LONG_REST_BUTTON)).toHaveCount(0);
       }
+      // «Перегенерировать» — по признаку сервера (B11, §1 п. 11): ход открытия разобран, игра с
+      // тех пор не менялась, и кнопку видит только хост.
+      expect(lastPhase(alisa).can_regenerate, "признак после открытия").toBe(
+        true,
+      );
+      await expect(button(alisa.page, REGENERATE_BUTTON)).toBeVisible();
+      for (const { page } of friends) {
+        await expect(button(page, REGENERATE_BUTTON)).toHaveCount(0);
+      }
       // Панель хоста в обсуждении с двумя новыми кнопками привалов (финальное покрытие B9).
       await expectFitsPhone(alisa.page, "обсуждение: кнопки привалов у хоста");
       // Настройки интерфейса на экране игры у игрока (финальное покрытие B10).
@@ -478,11 +488,32 @@ test("привалы по кнопке хоста: короткий с кост�
       await expectCampOpen(players, "Короткий привал");
 
       await expect.poll(() => campDeadline(alisa)).not.toBeNull();
+      // Привал начал хост, а не ход мастера: откат хода стёр бы привал, поэтому сервер
+      // перегенерацию не разрешает, и кнопки нет (B11, §1 п. 11).
+      expect(lastPhase(alisa).can_regenerate, "признак на привале хоста").toBe(
+        false,
+      );
+      await expect(button(alisa.page, REGENERATE_BUTTON)).toHaveCount(0);
       const deadline = campDeadline(alisa) ?? 0;
       await button(alisa.page, "+1 мин").click();
       await expect
         .poll(() => (campDeadline(alisa) ?? 0) - deadline)
         .toBe(60_000);
+      // После «+1 мин» до конца больше настроенных 20 с: свеча снова полная и сразу тает от
+      // нового остатка, а не стоит полной, пока остаток не опустится до срока (B11, §1 п. 16).
+      const wax = alisa.page
+        .getByRole("timer", { name: /До конца привала/ })
+        .locator(".ui-countdown__wax > span");
+      const waxPercent = async () =>
+        Number(
+          /width:\s*([\d.]+)%/.exec(
+            (await wax.getAttribute("style")) ?? "",
+          )?.[1],
+        );
+      await expect.poll(waxPercent, { timeout: 5_000 }).toBeLessThan(100);
+      expect(await waxPercent(), "воск сразу после продления").toBeGreaterThan(
+        80,
+      );
     });
 
     await test.step("4. Идея для рассказа только адресатам: Борису и Вере, Алиса в фокусе — без идеи", async () => {

@@ -25,6 +25,8 @@
    раундом 0, а стартовый дневник такой игре открывает сервер (снимок игрока — в памяти, ход
    мастера — со своим коммитом). Версия 3 (DND-2, блок B9) добавила вложенное поле вида привала
    `scene.rest`: у старых снимков оно `null`, и сцена `camp` без вида — долгий привал DND-1.
+   Версия 4 (DND-2, блок B11) добавила записи дневника раунд последнего дополнения текста
+   `updated_turn`: у записей старых снимков оно `null` — «текст не дополняли».
 3. Копия приключения хранится по поколениям формата: `golden/adventure_v<N>.json` — дамп
    `model_dump(mode="json")` приключения `demo-crypt` тем кодом, который писал копии формата N.
    `adventure_v1.json` — копия DND-1 (без `format_version`), `adventure_v2.json` — формат v2
@@ -98,6 +100,7 @@ SAVED_GAME_TESTS = {
     "0004": "test_a_game_saved_before_the_profanity_flag_allows_profanity_after_upgrade_head",
     "0005": "test_a_game_saved_before_the_authoring_tables_is_read_after_upgrade_head",
     "0006": "test_a_game_saved_before_the_short_rest_columns_is_read_after_upgrade_head",
+    "0007": "test_a_game_saved_before_the_phase_start_column_is_read_after_upgrade_head",
 }
 
 
@@ -207,9 +210,17 @@ def test_every_snapshot_schema_version_has_its_golden_file_and_old_ones_stay():
 # Версия схемы старого снимка -> поля, которые нынешний код добавляет к нему (путь на любой
 # глубине, как у `lost_fields`), и их значения по умолчанию (как их пишет снимок). Новая версия
 # схемы дописывает свои поля во все прежние версии.
+def journal_without_updates(version: int) -> dict[str, None]:
+    """`updated_turn` (версия 4) у каждой записи дневника образца `version`: `null`."""
+    golden = json.loads(golden_files()[version].read_text(encoding="utf-8"))
+    entries = golden["state"].get("journal", [])
+    return {f"/journal/{index}/updated_turn": None for index in range(len(entries))}
+
+
 ADDED_FIELDS: dict[int, dict[str, Any]] = {
     1: {"/journal": [], "/party_round": 0, "/scene/rest": None},
-    2: {"/scene/rest": None},
+    2: {"/scene/rest": None, **journal_without_updates(2)},
+    3: journal_without_updates(3),
 }
 
 
@@ -271,10 +282,10 @@ def test_a_snapshot_of_the_first_schema_gets_exactly_the_new_fields_with_their_d
 
 
 def test_every_older_schema_gets_the_kind_of_rest_of_the_scene_as_null():
-    # Блок B9: вид привала вложен в сцену. Старый снимок читается с `scene.rest = null`; у сцены
-    # `camp` это долгий привал DND-1, у остальных сцен вида нет.
+    # Блок B9: вид привала вложен в сцену (версия 3). Снимок версии до 3 читается с
+    # `scene.rest = null`; у сцены `camp` это долгий привал DND-1, у остальных сцен вида нет.
     for version, path in golden_files().items():
-        if version == GAME_STATE_SCHEMA_VERSION:
+        if version >= 3:
             continue
         golden = json.loads(path.read_text(encoding="utf-8"))
         assert "rest" not in golden["state"]["scene"], version
@@ -289,9 +300,35 @@ def test_the_sample_of_the_current_schema_writes_the_kind_of_rest_of_the_scene()
     # Образец версии 3 записан кодом версии 3: вид привала у сцены лежит в снимке явно.
     golden = json.loads(golden_files()[GAME_STATE_SCHEMA_VERSION].read_text(encoding="utf-8"))
 
-    assert GAME_STATE_SCHEMA_VERSION == 3
+    assert GAME_STATE_SCHEMA_VERSION >= 3
     assert set(golden["state"]["scene"]) == set(Scene.model_fields)
     assert "rest" in golden["state"]["scene"]
+
+
+def test_the_sample_of_the_current_schema_writes_when_journal_entries_were_last_updated():
+    # Версия 4 (блок B11): у каждой записи дневника поле `updated_turn` лежит в снимке явно;
+    # дополненная запись несёт раунд дополнения, остальные — `null`.
+    golden = json.loads(golden_files()[GAME_STATE_SCHEMA_VERSION].read_text(encoding="utf-8"))
+    journal = golden["state"]["journal"]
+
+    assert GAME_STATE_SCHEMA_VERSION == 4
+    assert all("updated_turn" in entry for entry in journal)
+    updated = [entry for entry in journal if entry["updated_turn"] is not None]
+    assert updated and {entry["updated_turn"] for entry in updated} == {
+        golden["state"]["party_round"]
+    }
+    assert all(entry["revision"] > 1 for entry in updated)
+
+
+def test_every_older_schema_reads_its_journal_entries_as_never_updated():
+    for version, path in golden_files().items():
+        if version == GAME_STATE_SCHEMA_VERSION:
+            continue
+        golden = json.loads(path.read_text(encoding="utf-8"))
+
+        state = GameState.model_validate(golden["state"])
+
+        assert all(entry.updated_turn is None for entry in state.journal), version
 
 
 def test_the_search_for_added_fields_goes_into_nested_objects_and_lists():
@@ -671,8 +708,8 @@ async def test_an_old_game_without_a_journal_shows_the_starting_one_and_saves_it
     assert {"intro", "location:village"} <= {entry.ref for entry in starting}
     assert before["journal"] == [entry.model_dump(mode="json") for entry in starting]
     assert "journal" not in old.data  # снимок игрока ничего не записал
-    # Ход пишет снимок текущей схемы (с B9 — версии 3, с видом привала у сцены).
-    assert new.schema_version == GAME_STATE_SCHEMA_VERSION == 3
+    # Ход пишет снимок текущей схемы (с B11 — версии 4, с раундом дополнения записей дневника).
+    assert new.schema_version == GAME_STATE_SCHEMA_VERSION == 4
     assert new.data["scene"]["rest"] is None
     assert new.to_state().journal == starting
     assert after["journal"] == before["journal"]
@@ -942,6 +979,36 @@ async def test_a_game_saved_before_the_short_rest_columns_is_read_after_upgrade_
         assert response.json()["short_rest_seconds"] == 120
     finally:
         await app.state.engine.dispose()
+        await engine.dispose()
+
+
+async def test_a_game_saved_before_the_phase_start_column_is_read_after_upgrade_head(
+    settings, migrate
+):
+    # Ревизия 0007 (DND-2 B11) завела момент начала фазы хода: игра на ревизии 0006 со снимком
+    # схемы 3 читается теми же моделями, а у её фазы начала нет (`phase_since: null`): клиент
+    # ждёт «Повторить» по своим часам, как раньше.
+    golden = json.loads(golden_files()[3].read_text(encoding="utf-8"))
+    adventure = json.loads(golden_adventures()[2].read_text(encoding="utf-8"))
+    await migrate("upgrade", "0006")
+    ids = insert_saved_game(
+        sqlite_file(settings.database_url), golden, adventure, pending_roll=False
+    )
+    await migrate("upgrade", "head")
+
+    engine = make_engine(settings.database_url)
+    db = make_sessionmaker(engine)
+    try:
+        async with db() as session:
+            game = await session.get(Game, ids["game_id"])
+            snapshot = await session.get(GameStateSnapshot, (ids["game_id"], game.state_version))
+            alice = await session.get(User, ids["Алиса"])
+            view = await snapshot_for(session, alice, ids["game_id"], srd=load_srd())
+        assert game.phase_since is None
+        assert_read_whole(golden, snapshot.to_state())
+        assert view["phase"]["turn_phase"] == "collecting"
+        assert view["phase"]["phase_since"] is None
+    finally:
         await engine.dispose()
 
 

@@ -46,6 +46,11 @@ export interface PlayerSummary {
   is_host: boolean;
   ready: boolean;
   has_character: boolean;
+  /**
+   * Имя героя игрока; `null` — героя ещё нет. Его видят все (контракт B11, §1 п. 3). Сервер до B11
+   * поля не присылает — тогда имени просто нет.
+   */
+  hero_name?: string | null;
 }
 
 export interface GameSummary {
@@ -67,6 +72,8 @@ export interface GameSummary {
   /** Флажок «Мат и грубая речь»: его видят мастер и служебные роли нейронки. */
   profanity: boolean;
   players: PlayerSummary[];
+  /** Когда создана игра, ISO с `+00:00` (контракт B11, §2); сервер до B11 его не присылает. */
+  created_at?: string;
 }
 
 /** Лобби — та же сводка игры: её же присылает событие `lobby`. */
@@ -567,8 +574,12 @@ export interface HitDieResult {
 
 // --- снимок и события сокета ---
 
-/** Статус хода для всех: что в ходе написано и тайный ли он, статус не говорит. */
-export type PlayerStatus = "writing" | "ready" | "pass";
+/**
+ * Статус хода для всех: что в ходе написано и тайный ли он, статус не говорит. `idle` — ход ещё не
+ * начат (строки хода нет или в черновике нет видимого текста), `writing` — черновик с текстом,
+ * `ready` — сдан (вручную или по таймеру), `pass` — пас (решение D17, контракт B11, §7).
+ */
+export type PlayerStatus = "idle" | "writing" | "ready" | "pass";
 
 export type FeedKind =
   "narration" | "roll" | "private" | "system" | "camp_line" | "action";
@@ -620,6 +631,16 @@ export interface PhaseView {
   deadline_at: string | null;
   remaining_seconds: number | null;
   scene: SceneView | null;
+  /**
+   * Серверное время начала текущей фазы хода, ISO с `+00:00` (контракт B11, §2). `null` — игра
+   * шла до B11 и сервер его не знает; у сервера до B11 поля нет вовсе.
+   */
+  phase_since?: string | null;
+  /**
+   * Примет ли сервер «Перегенерировать ответ мастера» сейчас (то же правило, что у сервера:
+   * контракт B11, §1 п. 11). Без поля (сервер до B11) кнопки нет.
+   */
+  can_regenerate?: boolean;
 }
 
 export interface PartyMember {
@@ -703,6 +724,11 @@ export interface JournalEntry {
   revision: number;
   /** Только у мест: раунд, когда отряд впервые пришёл сюда; иначе `null`. */
   visited_turn: number | null;
+  /**
+   * Раунд последнего дополнения текста (контракт B11, §1 п. 4); первый приход в место его не
+   * ставит. `null` — текст не дополняли; у сервера до B11 поля нет.
+   */
+  updated_turn?: number | null;
 }
 
 export interface Snapshot {
@@ -763,6 +789,13 @@ export type WsEvent =
   | { type: "rest_idea"; text: string }
   /** Привал кончился (всем), мастер рассказал его итог. */
   | { type: "rest_ended"; kind: RestKind }
+  /** Черновик автора сдан по таймеру — только автору, без текста (контракт B11, §2). */
+  | { type: "action_auto_submitted" }
+  /**
+   * Хост исключил игрока — только его соединениям, следом сокет закрывается кодом 4403 с причиной
+   * `kicked` (контракт B11, §2). Его разбирает подключение (`api/ws.ts`), до игры он не доходит.
+   */
+  | { type: "kicked" }
   | { type: "error"; detail: string }
   | { type: "pong" };
 
@@ -1217,6 +1250,12 @@ export interface DraftSummary {
   adventure_id: string | null;
   version: number;
   updated_at: string;
+  /**
+   * id приключения первой публикации черновика и её время, ISO (контракт B11, §2); `null` —
+   * черновик не публиковали. У сервера до B11 полей нет.
+   */
+  published_id?: string | null;
+  published_at?: string | null;
 }
 
 export interface GenerateBody {

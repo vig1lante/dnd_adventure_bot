@@ -66,7 +66,7 @@ from dnd_server.db.models import (
 )
 from dnd_server.dm import provider as provider_module
 from dnd_server.dm.provider import GameProviders
-from dnd_server.dm.turn import Deps, run_dm_turn
+from dnd_server.dm.turn import BROKEN_COPY, Deps, run_dm_turn
 from dnd_server.games.service import Conflict, NotFound
 from dnd_server.llm.base import ProviderError, TurnRequest, TurnResult, Usage
 from dnd_server.realtime.views import snapshot_for
@@ -977,10 +977,69 @@ async def test_a_draft_can_be_rewritten_and_stays_one_row(table):
     assert len(await table.actions()) == 1
 
 
-async def test_a_draft_announces_nothing_because_everybody_is_writing_anyway(table):
-    await table.draft("boris", "Подкрасться")
+async def statuses_in_the_snapshot(table: Table, key: str = "vera") -> dict[str, str]:
+    """Статусы игроков в снимке по ключам игроков."""
+    key_of = {seat.user_id: seat.key for seat in table.seats.values()}
+    async with table.db() as session:
+        user = await session.get(User, table.user_id(key))
+        snapshot = await snapshot_for(session, user, table.game_id, srd=table.srd)
+    return {key_of[user_id]: status for user_id, status in snapshot["statuses"].items()}
 
-    assert table.broadcaster.sent == []
+
+async def test_nobody_is_writing_until_he_writes_and_a_draft_with_text_is_told_once(table):
+    # Решение D17 (дополнение B11 §7): «Пишет» — только у черновика с видимым текстом. Кадр
+    # `player_status` уходит, лишь когда публичный статус сменился; правка текста кадра не даёт.
+    assert await statuses_in_the_snapshot(table) == {
+        "alice": "idle",
+        "boris": "idle",
+        "vera": "idle",
+    }
+
+    await table.draft("boris", "Подкрасться")
+    await table.draft("boris", "Подкрасться к двери")  # правка внутри «пишет»
+    await table.draft("vera", "   ")  # одни пробелы — не текст
+
+    assert table.statuses_sent() == [("boris", "writing")]
+    assert await statuses_in_the_snapshot(table, "alice") == {
+        "alice": "idle",
+        "boris": "writing",
+        "vera": "idle",
+    }
+    # Кадр статуса не несёт ни текста, ни тайности хода.
+    [(event, _who)] = table.broadcaster.of_type("player_status")
+    assert set(event) == {"type", "user_id", "status"}
+
+
+async def test_erasing_the_text_of_a_draft_tells_everybody_the_player_is_idle_again(table):
+    await table.draft("boris", "Подкрасться")
+    await table.draft("boris", "")
+    await table.draft("boris", "  ")  # снова пусто: статус не сменился
+
+    assert table.statuses_sent() == [("boris", "writing"), ("boris", "idle")]
+    assert (await statuses_in_the_snapshot(table))["boris"] == "idle"
+
+
+async def test_a_submitted_or_passed_turn_taken_back_to_a_draft_shows_its_text_or_nothing(table):
+    await table.submit("alice", "Осмотреть дверь")
+    await table.pass_("boris")
+    table.broadcaster.sent.clear()
+
+    await table.draft("alice", "Выбить дверь")  # сданный ход снова черновик с текстом
+    await table.draft("boris", "")  # пас снова пустой черновик
+
+    assert table.statuses_sent() == [("alice", "writing"), ("boris", "idle")]
+
+
+async def test_at_the_start_of_a_round_everybody_is_idle_in_the_frames_and_the_snapshot(table):
+    await resolved_round(table)  # в прошлом раунде все сдали ход или спасовали
+
+    # После хода мастера статусы нового раунда — «никто не пишет», и в кадрах, и в снимке.
+    *_, last_phase = [
+        i for i, (_g, p, _w) in enumerate(table.broadcaster.sent) if p["type"] == "phase"
+    ]
+    after = [p for _g, p, _w in table.broadcaster.sent[last_phase:] if p["type"] == "player_status"]
+    assert sorted(p["status"] for p in after) == ["idle", "idle", "idle"]
+    assert set((await statuses_in_the_snapshot(table)).values()) == {"idle"}
 
 
 async def test_the_inspiration_flag_is_dropped_when_the_hero_has_no_inspiration(table):
@@ -1195,7 +1254,8 @@ async def test_submitting_marks_the_player_ready_and_puts_the_action_into_the_co
     response = await table.call("alice", "POST", "/action/submit")
 
     assert action_fields(response) == ("submitted", "Осмотреть дверь", False, False)
-    assert table.statuses_sent() == [("alice", "ready")]
+    # Черновик с текстом — «пишет», сданный ход — «готов» (решение D17).
+    assert table.statuses_sent() == [("alice", "writing"), ("alice", "ready")]
     [(item, audience)] = table.broadcaster.of_type("feed_item")
     assert audience == "all"
     assert item["item"]["kind"] == "action"
@@ -1219,8 +1279,8 @@ async def test_a_secret_action_reaches_only_its_author_and_the_others_never_see_
     assert audience == table.user_id("boris")
     assert item["item"]["text"] == "Украсть ключ у стражника" and item["item"]["private"] is True
     assert item["item"]["data"]["secret"] is True
-    # Статус для всех — просто «готов»: тайный ход он не выдаёт.
-    assert table.statuses_sent() == [("boris", "ready")]
+    # Статус для всех — просто «пишет» и «готов»: тайный ход он не выдаёт.
+    assert table.statuses_sent() == [("boris", "writing"), ("boris", "ready")]
     assert [e["text"] for e in await table.feed_of("boris")] == ["Украсть ключ у стражника"]
     for key in ("alice", "vera"):
         assert await table.feed_of(key) == []
@@ -1268,7 +1328,7 @@ async def test_editing_a_submitted_action_takes_it_back_to_a_draft_and_withdraws
     response = await table.draft("alice", "Выбить дверь")
 
     assert action_fields(response) == ("draft", "Выбить дверь", False, False)
-    assert table.statuses_sent() == [("alice", "writing")]
+    assert table.statuses_sent() == [("alice", "writing")]  # черновик с текстом — «пишет»
     [(tombstone, audience)] = table.broadcaster.of_type("feed_item")
     assert tombstone == {"type": "feed_item", "item": {"id": first.id, "superseded": True}}
     assert audience == "all"
@@ -1323,7 +1383,7 @@ async def test_a_submitted_action_is_readable_by_its_author_in_the_snapshot(tabl
         "status": "submitted",
     }
     assert snapshot["statuses"][table.user_id("alice")] == "ready"
-    assert snapshot["statuses"][table.user_id("boris")] == "writing"
+    assert snapshot["statuses"][table.user_id("boris")] == "idle"  # строки хода нет — не пишет
 
 
 # --- сбор ходов ---
@@ -1507,6 +1567,408 @@ async def test_when_the_time_is_up_drafts_are_submitted_and_the_rest_pass(table)
         table.seats["vera"].character_id: ["пас"],
     }
     assert table.scheduler.pending() == {}
+
+
+# --- битая копия приключения (ручная проверка B2, дополнение B11 §3) ---
+
+
+async def break_the_copy(table: Table) -> None:
+    """Копия приключения игры перестала читаться (правка базы руками, сбой диска)."""
+    async with table.db() as session:
+        game = await session.get(Game, table.game_id)
+        data = json.loads(json.dumps(game.adventure_data))  # новый объект: SQLAlchemy увидит правку
+        data["world"]["history"] = {"текст": "не строка"}
+        game.adventure_data = data
+        await session.commit()
+
+
+async def test_collect_with_a_broken_copy_is_409_and_starts_nothing(table):
+    await table.submit("alice", "Осмотреть дверь")
+    await table.pass_("boris")
+    await table.pass_("vera")
+    await break_the_copy(table)
+    table.broadcaster.sent.clear()
+
+    response = await table.host("collect")
+    await table.settle()
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": BROKEN_COPY}
+    game = await table.game()
+    assert (game.turn_phase, game.state_version) == (TurnPhase.DISCUSSION, 1)
+    assert [t.status for t in await table.turns()] == [TurnStatus.OPEN]
+    assert table.broadcaster.sent == [] and await table.logs() == []
+
+
+async def test_closing_a_collection_with_a_broken_copy_keeps_it_open_and_the_drafts_editable(
+    table,
+):
+    # Прежде сбор закрывался (ходы сданы, строки в ленте), а разбор падал с 500: ход без мастера.
+    await table.draft("alice", "Осмотреть дверь")
+    await table.host("collect")
+    await break_the_copy(table)
+    table.broadcaster.sent.clear()
+
+    closed = await table.host("close")
+    await table.scheduler.advance(COLLECT_SECONDS)  # и отсчёт ничего не закрывает
+    await table.settle()
+
+    assert closed.status_code == 409 and closed.json() == {"detail": BROKEN_COPY}
+    game = await table.game()
+    assert game.turn_phase == TurnPhase.COLLECTING
+    assert {key: row.status for key, row in (await table.actions()).items()} == {
+        "alice": ActionStatus.DRAFT
+    }
+    assert await table.messages(MessageKind.ACTION) == []
+    assert table.broadcaster.sent == []
+    assert (await table.draft("alice", "Ещё подумаю")).status_code == 200
+
+
+async def test_the_last_player_ready_with_a_broken_copy_keeps_the_collection_open(table):
+    await table.draft("alice", "Осмотреть дверь")
+    await table.host("collect")
+    await table.submit("alice")
+    await table.pass_("boris")
+    await break_the_copy(table)
+
+    last = await table.pass_("vera")
+    await table.settle()
+
+    assert last.status_code == 200, last.text
+    assert (await table.game()).turn_phase == TurnPhase.COLLECTING
+    statuses = {key: row.status for key, row in (await table.actions()).items()}
+    assert ActionStatus.AUTO_SUBMITTED not in statuses.values()
+    assert await table.logs() == []
+
+
+def iso(moment: datetime) -> str:
+    return moment.astimezone(UTC).isoformat()
+
+
+async def test_the_author_of_a_draft_with_text_is_told_alone_that_it_was_submitted_for_him(table):
+    # Дополнение B11 §1 п. 5: «Ход сдан» — только автору черновика с текстом; пустой черновик и
+    # отсутствующий ход — пас без кадра. В кадре нет текста хода.
+    await table.draft("alice", "Осмотреть дверь")
+    await table.draft("vera", "   ")
+    await table.host("collect")
+    table.broadcaster.sent.clear()
+
+    await table.scheduler.advance(COLLECT_SECONDS)
+    await table.settle()
+
+    told = table.broadcaster.of_type("action_auto_submitted")
+    assert told == [({"type": "action_auto_submitted"}, table.user_id("alice"))]
+    # Кадр уходит после коммита: строка хода уже закрыта, когда автор узнаёт о сдаче.
+    first_told = next(
+        i
+        for i, (_g, p, _w) in enumerate(table.broadcaster.sent)
+        if p["type"] == "action_auto_submitted"
+    )
+    statuses = [
+        i for i, (_g, p, _w) in enumerate(table.broadcaster.sent) if p["type"] == "player_status"
+    ]
+    assert statuses and statuses[0] < first_told
+
+
+async def test_a_player_who_submitted_or_passed_himself_gets_no_auto_submit_frame(table):
+    await table.submit("alice", "Осмотреть дверь")
+    await table.pass_("boris")
+    await table.draft("vera", "Пишу")
+    await table.host("collect")
+    await table.host("close")
+    await table.settle()
+
+    told = table.broadcaster.of_type("action_auto_submitted")
+    assert told == [({"type": "action_auto_submitted"}, table.user_id("vera"))]
+
+
+async def test_each_new_turn_phase_starts_at_the_server_time_of_its_change(table):
+    # Дополнение B11 §1 п. 1: смена фазы хода пишет момент её начала той же транзакцией, а кадр
+    # фазы и снимок отдают его в UTC. «+1 минута» фазу не меняет и момент не сдвигает.
+    await table.draft("alice", "Я ещё пишу")
+    collect_at = table.scheduler.now()
+    await table.host("collect")
+    await table.scheduler.advance(10)
+    await table.host("extend")
+    game = await table.game()
+    assert (game.turn_phase, game.phase_since) == (TurnPhase.COLLECTING, collect_at)
+
+    await table.scheduler.advance(COLLECT_SECONDS + 60)
+    await table.settle()
+
+    # Отсчёт срабатывает в свой срок (сбор плюс минута продления), а рассказ мастера записан,
+    # когда часы стенда уже дошли до конца сдвига.
+    closed_at = collect_at + timedelta(seconds=COLLECT_SECONDS + 60)
+    told_at = table.scheduler.now()
+    phases = [
+        (p["phase"]["turn_phase"], p["phase"]["phase_since"])
+        for p, _who in table.broadcaster.of_type("phase")
+    ]
+    assert phases == [
+        ("collecting", iso(collect_at)),
+        ("collecting", iso(collect_at)),  # «+1 минута»
+        ("resolving", iso(closed_at)),
+        ("discussion", iso(told_at)),
+    ]
+    game = await table.game()
+    assert (game.turn_phase, game.phase_since) == (TurnPhase.DISCUSSION, told_at)
+    async with table.db() as session:
+        user = await session.get(User, table.user_id("vera"))
+        snapshot = await snapshot_for(session, user, table.game_id, srd=table.srd)
+    assert snapshot["phase"]["phase_since"] == iso(told_at)
+
+
+async def test_a_failed_turn_starts_its_failed_phase_when_the_master_gives_up(table, monkeypatch):
+    use_provider(monkeypatch, StubProvider(ProviderError("модель недоступна")))
+    started = table.scheduler.now()
+    await table.host("collect")
+    await table.host("close")
+    await table.settle()
+
+    game = await table.game()
+    assert (game.turn_phase, game.phase_since) == (TurnPhase.DM_FAILED, started)
+    [*_, (failed, _who)] = table.broadcaster.of_type("phase")
+    assert (failed["phase"]["turn_phase"], failed["phase"]["phase_since"]) == (
+        "dm_failed",
+        iso(started),
+    )
+
+
+# --- финальное покрытие B11 (сервер): битая копия, «Ход сдан», «Перегенерировать», начало фазы ---
+
+
+async def snapshot_of(table: Table, key: str) -> dict[str, Any]:
+    async with table.db() as session:
+        user = await session.get(User, table.user_id(key))
+        return await snapshot_for(session, user, table.game_id, srd=table.srd)
+
+
+def copy_errors(caplog: pytest.LogCaptureFixture, table: Table) -> list[logging.LogRecord]:
+    """Записи журнала о битой копии этой игры (`dm.turn.game_adventure`)."""
+    return [
+        r
+        for r in caplog.records
+        if r.name == "dnd_server.dm.turn"
+        and r.levelno == logging.ERROR
+        and table.game_id in r.getMessage()
+    ]
+
+
+async def test_the_end_of_the_hurry_with_a_broken_copy_submits_nothing_and_logs_no_copy_values(
+    table, caplog, monkeypatch
+):
+    # «Поторопить» в бою: срок вышел, но копия не читается — ход героя не сдаётся без мастера.
+    provider = StubProvider()
+    use_provider(monkeypatch, provider)
+    await put_in_combat(table, "boris")
+    await table.draft("boris", "Ударить гоблина")
+    assert (await table.host("hurry")).status_code == 200
+    await break_the_copy(table)
+    table.broadcaster.sent.clear()
+
+    with caplog.at_level(logging.ERROR, logger="dnd_server.dm.turn"):
+        await table.scheduler.advance(60)
+        await table.settle()
+
+    row = (await table.actions())["boris"]
+    assert (row.status, row.text) == (ActionStatus.DRAFT, "Ударить гоблина")
+    assert (await table.game()).turn_phase == TurnPhase.COMBAT_WAIT
+    assert table.broadcaster.sent == [] and provider.requests == []
+    assert await table.logs() == []
+    [error] = copy_errors(caplog, table)
+    assert "world" in error.getMessage()  # где беда — названо
+    assert "не строка" not in caplog.text and "input_value" not in caplog.text
+
+
+async def resolved_round(table: Table) -> None:
+    """Раунд сдан и разобран мастером: игра снова в обсуждении, следующий ход открыт."""
+    await ready_round(table)
+    assert (await table.host("collect")).status_code == 200
+    await table.settle()
+    assert (await table.game()).turn_phase == TurnPhase.DISCUSSION
+
+
+async def failed_round(table: Table, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Мастер не справился со сбором: игра в `dm_failed`, хост может только «Повторить»."""
+    use_provider(monkeypatch, StubProvider(ProviderError("модель недоступна")))
+    await table.host("collect")
+    await table.host("close")
+    await table.settle()
+    assert (await table.game()).turn_phase == TurnPhase.DM_FAILED
+
+
+async def at_the_camp_end(table: Table, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Открытый ход — «конец привала», игра у костра: хост может закончить привал."""
+    async with table.db() as session:
+        await session.execute(
+            update(Turn).where(Turn.id == table.setup.turn_id).values(kind=TurnKind.CAMP_END)
+        )
+        await session.commit()
+    await table.update_game(turn_phase=TurnPhase.CAMP)
+
+
+async def after_a_round(table: Table, monkeypatch: pytest.MonkeyPatch) -> None:
+    await resolved_round(table)
+
+
+@pytest.mark.parametrize(
+    ("prepare", "button"),
+    [
+        pytest.param(failed_round, "retry", id="Повторить"),
+        pytest.param(after_a_round, "regenerate", id="Перегенерировать"),
+        pytest.param(at_the_camp_end, "camp-end", id="Закончить привал"),
+    ],
+)
+async def test_buttons_that_start_the_master_with_a_broken_copy_are_409_and_change_nothing(
+    table, caplog, monkeypatch, prepare, button
+):
+    # Отчёт B11.2: где записи до хода нет, отказ даёт резерв хода — тоже 409, а не 500, и игра
+    # остаётся, какой была: фаза, версия состояния, ходы, лента и журнал хода.
+    await prepare(table, monkeypatch)
+    await break_the_copy(table)
+    before = await table.game()
+    turns = [(t.id, t.status) for t in await table.turns()]
+    messages = [(m.id, m.superseded) for m in await table.messages()]
+    logs = len(await table.logs())
+    table.broadcaster.sent.clear()
+
+    with caplog.at_level(logging.ERROR, logger="dnd_server.dm.turn"):
+        response = await table.host(button)
+        await table.settle()
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": BROKEN_COPY}
+    after = await table.game()
+    assert (after.turn_phase, after.state_version, after.current_turn_id) == (
+        before.turn_phase,
+        before.state_version,
+        before.current_turn_id,
+    )
+    assert [(t.id, t.status) for t in await table.turns()] == turns
+    assert [(m.id, m.superseded) for m in await table.messages()] == messages
+    assert len(await table.logs()) == logs and table.broadcaster.sent == []
+    assert copy_errors(caplog, table)
+    assert "не строка" not in caplog.text and "input_value" not in caplog.text
+
+
+async def test_the_end_of_the_hurry_turns_a_blank_draft_into_a_dodge_without_telling_it_was_sent(
+    table, monkeypatch
+):
+    # Дополнение B11 §1 п. 5: черновик из одних пробелов — не ход игрока. Сервер сдаёт за него
+    # «Уклоняется», но «Ход сдан» не говорит: писать этот ход игрок не начинал.
+    use_provider(monkeypatch, StubProvider())
+    await put_in_combat(table, "boris")
+    await table.draft("boris", "   ")
+    await table.host("hurry")
+
+    await table.scheduler.advance(60)
+    await table.settle()
+
+    row = (await table.actions())["boris"]
+    assert (row.status, row.text) == (ActionStatus.AUTO_SUBMITTED, flow_module.DODGE_TEXT)
+    assert table.broadcaster.of_type("action_auto_submitted") == []
+
+
+class CommitWatcher:
+    """Рассылка, которая в момент кадра «Ход сдан» читает ход его адресата отдельной сессией."""
+
+    def __init__(self, inner: RecordingBroadcaster, table: Table) -> None:
+        self.inner = inner
+        self.table = table
+        self.seen: list[tuple[str, ActionStatus]] = []
+
+    async def send(self, game_id: str, payload: dict[str, Any], audience: str = "all") -> None:
+        if payload["type"] == "action_auto_submitted":
+            async with self.table.db() as session:
+                row = await session.get(PlayerAction, (self.table.setup.turn_id, audience))
+            self.seen.append((audience, row.status))
+        await self.inner.send(game_id, payload, audience)
+
+
+async def test_the_author_hears_that_his_draft_was_sent_only_after_it_is_committed(table):
+    # «Ход сдан» уходит после коммита: другое соединение с базой уже видит ход сданным.
+    watcher = CommitWatcher(table.broadcaster, table)
+    table.app.state.broadcaster = watcher
+    await table.draft("alice", "Осмотреть дверь")
+    await table.host("collect")
+
+    await table.scheduler.advance(COLLECT_SECONDS)
+    await table.settle()
+
+    assert watcher.seen == [(table.user_id("alice"), ActionStatus.AUTO_SUBMITTED)]
+
+
+async def nothing_resolved(table: Table, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Игра в обсуждении, но мастер ещё не разобрал ни одного хода."""
+
+
+async def collecting_after_a_round(table: Table, monkeypatch: pytest.MonkeyPatch) -> None:
+    await resolved_round(table)
+    assert (await table.host("collect")).status_code == 200
+    assert (await table.game()).turn_phase == TurnPhase.COLLECTING
+
+
+@pytest.mark.parametrize(
+    ("prepare", "expected"),
+    [
+        pytest.param(nothing_resolved, False, id="ни один ход не разобран"),
+        pytest.param(after_a_round, True, id="раунд разобран"),
+        pytest.param(collecting_after_a_round, False, id="идёт сбор следующего"),
+        pytest.param(failed_round, False, id="мастер не справился"),
+    ],
+)
+async def test_the_regenerate_flag_of_the_phase_is_the_answer_of_the_server_to_the_button(
+    table, monkeypatch, prepare, expected
+):
+    # Дополнение B11 §1 п. 11: клиент показывает «Перегенерировать» только при `can_regenerate`,
+    # поэтому признак в снимке и в последнем кадре фазы — ровно то, что ответит сервер на кнопку.
+    await prepare(table, monkeypatch)
+    flag = (await snapshot_of(table, "vera"))["phase"]["can_regenerate"]
+    frames = table.broadcaster.of_type("phase")
+
+    response = await table.host("regenerate")
+    await table.settle()
+
+    assert flag is expected
+    if frames:
+        assert frames[-1][0]["phase"]["can_regenerate"] is flag
+    assert (response.status_code == 200) is flag, response.text
+
+
+async def test_on_a_pause_the_regenerate_flag_says_no_as_the_server_does(table):
+    # Дополнение B11 §5 п. 3 (R2): на паузе «Перегенерировать» отвечает 409, и признак говорит то
+    # же; после «Продолжить» признак возвращается кадром фазы.
+    await resolved_round(table)
+    paused = await table.host("pause")
+
+    flag = paused.json()["can_regenerate"]
+    snapshot_flag = (await snapshot_of(table, "vera"))["phase"]["can_regenerate"]
+    response = await table.host("regenerate")
+    resumed = await table.host("resume")
+
+    assert response.status_code == 409 and "пауз" in response.json()["detail"]
+    assert (flag, snapshot_flag) == (False, False)
+    assert resumed.json()["can_regenerate"] is True
+    assert table.broadcaster.of_type("phase")[-1][0]["phase"]["can_regenerate"] is True
+
+
+async def test_a_pause_and_its_end_do_not_move_the_start_of_the_turn_phase(table):
+    # Дополнение B11 §1 п. 1: пауза меняет фазу игры, а не фазу хода — момент начала обсуждения
+    # остаётся прежним и в базе, и в кадрах фазы.
+    await resolved_round(table)
+    since = (await table.game()).phase_since
+    await table.scheduler.advance(30)
+
+    paused = await table.host("pause")
+    await table.scheduler.advance(300)
+    resumed = await table.host("resume")
+
+    assert since is not None
+    assert (paused.status_code, resumed.status_code) == (200, 200)
+    assert paused.json()["phase_since"] == resumed.json()["phase_since"] == iso(since)
+    assert (await table.game()).phase_since == since
+    [*_, (on_pause, _w1), (on_resume, _w2)] = table.broadcaster.of_type("phase")
+    assert on_pause["phase"]["phase_since"] == on_resume["phase"]["phase_since"] == iso(since)
 
 
 async def test_a_draft_written_while_collecting_is_submitted_when_the_time_is_up(table):
@@ -2271,6 +2733,26 @@ async def test_a_game_on_pause_gets_no_timer_and_resumes_with_the_saved_remainde
         assert second.scheduler.pending() == {
             setup.game_id: later.now() + timedelta(seconds=COLLECT_SECONDS - 50)
         }
+
+
+async def test_a_turn_cut_short_by_a_restart_starts_its_failed_phase_at_the_restart(
+    settings, db, srd, setup
+):
+    # Дополнение B11 §1 п. 1: «мастер не справился» после перезапуска — новая фаза хода, и её
+    # начало — время перезапуска, а не начало прерванного разбора: «Повторить» хост видит по нему.
+    cut_at = setup.created + timedelta(minutes=5)
+    stuck = {"turn_phase": TurnPhase.RESOLVING, "phase_since": cut_at}
+    async with db() as session:
+        await session.execute(update(Game).where(Game.id == setup.game_id).values(**stuck))
+        await session.commit()
+
+    later = ManualScheduler(setup.created + timedelta(hours=1))
+    async with running_table(settings, db, srd, setup, scheduler=later) as table:
+        game = await table.game()
+        phase = (await snapshot_of(table, "vera"))["phase"]
+
+    assert (game.turn_phase, game.phase_since) == (TurnPhase.DM_FAILED, later.now())
+    assert (phase["turn_phase"], phase["phase_since"]) == ("dm_failed", iso(later.now()))
 
 
 async def test_a_game_that_cannot_be_marked_after_a_restart_is_logged_without_the_input(

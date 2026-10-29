@@ -25,9 +25,9 @@ from dnd_server.dm.text import safe_traceback
 
 logger = logging.getLogger(__name__)
 
-# Типы событий плана B6.5, дневника отряда (блок B8 DND-2) и привалов (блок B9 DND-2). `snapshot` и
-# `pong` сюда не входят: их отправляет только WS-эндпоинт своему соединению, а рассылать их через
-# хаб незачем.
+# Типы событий плана B6.5, дневника отряда (блок B8 DND-2), привалов (блок B9 DND-2) и «Ход сдан»
+# автору автосданного черновика (блок B11 DND-2). `snapshot`, `pong` и `kicked` сюда не входят: их
+# отправляет только WS-эндпоинт своему соединению, а рассылать их через хаб незачем.
 EVENT_TYPES = frozenset(
     {
         "phase",
@@ -42,6 +42,7 @@ EVENT_TYPES = frozenset(
         "rest_started",
         "rest_idea",
         "rest_ended",
+        "action_auto_submitted",
         "error",
     }
 )
@@ -77,6 +78,8 @@ class Connection:
         self._on_stop = on_stop
         self._stopped = False
         self.task: asyncio.Task[None] | None = None
+        # Игрока исключил хост (`Hub.kick_user`): закрывая сокет, эндпоинт скажет ему об этом.
+        self.kicked = False
 
     def offer(self, text: str) -> bool:
         """Ставит сообщение в очередь без ожидания; `False` — очередь полна."""
@@ -169,6 +172,15 @@ class Hub:
         for connection in dropped:
             self.disconnect(connection)
         return len(dropped)
+
+    def kick_user(self, game_id: str, user_id: str) -> int:
+        """Как `drop_user`, но для исключённого хостом: его соединения помечаются `kicked`, и
+        эндпоинт (`realtime.ws`) шлёт каждому кадр `kicked` и закрывает его кодом 4403. Кадр идёт
+        прямо в сокет исключённого, а не рассылкой: другие игроки его не получают."""
+        for connection in self._games.get(game_id, ()):
+            if connection.user_id == user_id:
+                connection.kicked = True
+        return self.drop_user(game_id, user_id)
 
     def connections(self, game_id: str) -> int:
         return len(self._games.get(game_id, ()))

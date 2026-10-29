@@ -265,7 +265,11 @@ class Stand:
         return await self.create_character(player, game_id, body)
 
     async def random(self, player: Player, game_id: str) -> httpx.Response:
-        return await self.create_character(player, game_id, {"mode": "random"})
+        """Случайный герой единственным путём (спека DND-2 §15): предпросмотр, затем «Беру»."""
+        shown = await self.call(player, "POST", f"/api/games/{game_id}/characters/random-preview")
+        assert shown.status_code == 200, shown.text
+        body = {"mode": "random", "preview_id": shown.json()["preview_id"]}
+        return await self.create_character(player, game_id, body)
 
     async def random_abilities(
         self, player: Player, game_id: str, class_id: str = "fighter"

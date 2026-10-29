@@ -4,6 +4,8 @@ import type { WsEvent } from "./types";
 // перегрузка (1011, 1013, 1006…): их лечит переподключение.
 const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_NOT_A_MEMBER = 4403;
+// Причина закрытия 4403 у исключённого хостом (контракт B11, §2).
+const KICKED_REASON = "kicked";
 
 const PING_INTERVAL_MS = 25_000;
 // Сколько ждём хоть какой-нибудь кадр после ping. Смена Wi-Fi на мобильную сеть оставляет
@@ -16,8 +18,11 @@ const PING = JSON.stringify({ type: "ping" });
 /** Состояние связи: `open` — сокет открыт, `reconnecting` — оборвался и будет открыт снова. */
 export type ConnectionStatus = "open" | "reconnecting";
 
-/** Почему сервер отказал в доступе: переподключаться бесполезно. */
-export type Rejection = "unauthorized" | "not-a-member";
+/**
+ * Почему сервер отказал в доступе: переподключаться бесполезно. `kicked` — игрок больше не участник,
+ * потому что его исключил хост.
+ */
+export type Rejection = "unauthorized" | "not-a-member" | "kicked";
 
 const REJECTIONS: Partial<Record<number, Rejection>> = {
   [CLOSE_UNAUTHORIZED]: "unauthorized",
@@ -28,6 +33,21 @@ export interface GameConnectionHandlers {
   onStatus?: (status: ConnectionStatus) => void;
   /** Сервер закрыл сокет кодом 4401 или 4403; после этого подключение остановлено. */
   onRejected?: (reason: Rejection) => void;
+}
+
+/**
+ * Отказ по коду закрытия. 4403 — исключение хостом, если об этом сказала причина закрытия или
+ * кадр `kicked` (он мог прийти и на прежнем сокете, а 4403 — уже на новом).
+ */
+function rejectionOf(
+  code: number,
+  reason: string,
+  kicked: boolean,
+): Rejection | undefined {
+  const rejection = REJECTIONS[code];
+  return rejection === "not-a-member" && (kicked || reason === KICKED_REASON)
+    ? "kicked"
+    : rejection;
 }
 
 /**
@@ -96,6 +116,7 @@ export function connectGame(
   let pingTimer: ReturnType<typeof setInterval> | undefined;
   let pongTimer: ReturnType<typeof setTimeout> | undefined;
   let failures = 0; // обрывов подряд без снимка
+  let kicked = false; // сервер прислал кадр `kicked`: следующий 4403 — исключение
 
   const stopWatching = () => {
     clearInterval(pingTimer);
@@ -176,12 +197,16 @@ export function connectGame(
       pongTimer = undefined;
       const event = parseEvent(data);
       if (event === null || event.type === "pong") return;
+      if (event.type === "kicked") {
+        kicked = true;
+        return;
+      }
       if (event.type === "snapshot") failures = 0;
       onEvent(event);
     };
-    current.onclose = ({ code }) => {
+    current.onclose = ({ code, reason }) => {
       stopWatching();
-      const rejection = REJECTIONS[code];
+      const rejection = rejectionOf(code, reason, kicked);
       if (rejection !== undefined) {
         close();
         handlers.onRejected?.(rejection);

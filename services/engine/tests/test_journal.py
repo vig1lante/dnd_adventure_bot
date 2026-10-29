@@ -128,6 +128,7 @@ def test_an_entry_serializes_with_every_field_of_the_contract():
         turn=0,
         revision=2,
         visited_turn=3,
+        updated_turn=4,
     )
 
     assert entry.model_dump(mode="json") == {
@@ -140,6 +141,7 @@ def test_an_entry_serializes_with_every_field_of_the_contract():
         "turn": 0,
         "revision": 2,
         "visited_turn": 3,
+        "updated_turn": 4,
     }
     assert JournalEntry.model_validate_json(entry.model_dump_json()) == entry
 
@@ -636,10 +638,11 @@ CONTRACT_FIELDS = (
     "turn",
     "revision",
     "visited_turn",
+    "updated_turn",
 )
 
 
-def test_an_entry_has_exactly_the_nine_fields_of_the_contract_and_all_of_them_reach_json():
+def test_an_entry_has_exactly_the_ten_fields_of_the_contract_and_all_of_them_reach_json():
     # Webapp и сервер читают запись буква в букву (дополнение §2): лишнее или пропавшее поле
     # разошлось бы с `JournalEntry` клиента. Поля по умолчанию тоже уходят в JSON (`null`).
     entry = JournalEntry(
@@ -656,7 +659,7 @@ def test_an_entry_has_exactly_the_nine_fields_of_the_contract_and_all_of_them_re
 
     assert tuple(JournalEntry.model_fields) == CONTRACT_FIELDS
     assert tuple(dumped) == CONTRACT_FIELDS
-    assert (dumped["revision"], dumped["visited_turn"]) == (1, None)
+    assert (dumped["revision"], dumped["visited_turn"], dumped["updated_turn"]) == (1, None, None)
 
 
 @pytest.mark.parametrize("field", CONTRACT_FIELDS)
@@ -1109,3 +1112,310 @@ def test_an_entity_without_a_name_but_with_public_text_is_titled_by_its_text(
 
     assert entry.text == demo_adventure.npcs["fabian"].public
     assert entry.title and entry.text.startswith(entry.title.rstrip("…"))
+
+
+# --- B11.1 (дополнение контракта B11 §1 п. 4, §2): раунд последнего дополнения ---
+
+
+def test_extending_an_entry_with_a_note_remembers_the_round_of_the_players(
+    make_game, demo_adventure
+):
+    # Карточка говорит «дополнено в раунде N»: раунд игроков последнего дополнения текста.
+    state = make_game(turn=9, party_round=2)
+
+    first, _ = write(state, demo_adventure, "deity:ossmar", note="Его ключ висит на воротах.")
+    state.party_round = 5
+    second, _ = write(state, demo_adventure, "deity:ossmar", note="Жрецов у него нет.")
+    state.party_round = 7
+    third, _ = write(state, demo_adventure, "deity:ossmar", note="И храма тоже.")
+
+    assert first.updated_turn is None  # новая запись: раунд её появления — уже `turn`
+    assert (second.updated_turn, third.updated_turn) == (5, 7)
+    assert (third.turn, third.revision) == (2, 3)
+    assert state.journal == (third,)
+
+
+def test_a_personal_entry_is_extended_by_the_same_rule(make_game, demo_adventure):
+    state = make_game(party_round=1)
+    write(state, demo_adventure, "npc:fabian", audience="pc-1")
+    state.party_round = 3
+
+    entry, _ = write(state, demo_adventure, "npc:fabian", audience="pc-1", note="Он лжёт.")
+
+    assert (entry.audience, entry.updated_turn) == ("pc-1", 3)
+
+
+def test_a_repeat_without_a_note_keeps_the_round_of_the_last_extension(make_game, demo_adventure):
+    state = make_game(party_round=1)
+    write(state, demo_adventure, "faction:regulars")
+    state.party_round = 3
+    extended, _ = write(state, demo_adventure, "faction:regulars", note="Собираются по средам.")
+    state.party_round = 6
+
+    entry, new = write(state, demo_adventure, "faction:regulars")
+
+    assert (entry, new) == (extended, False)
+    assert entry.updated_turn == 3
+
+
+def test_a_refused_extension_leaves_the_round_of_the_extension_as_it_was(make_game, demo_adventure):
+    # Три заметки по 500 знаков с абзацами — 1504 знака; четвёртая вышла бы за предел 2000.
+    state = make_game(party_round=1)
+    write(state, demo_adventure, "world", note="я" * MAX_NOTE_CHARS)
+    state.party_round = 3
+    write(state, demo_adventure, "world", note="я" * MAX_NOTE_CHARS)
+    write(state, demo_adventure, "world", note="я" * MAX_NOTE_CHARS)
+    state.party_round = 4
+    before = state.model_dump()
+
+    with pytest.raises(JournalError):
+        write(state, demo_adventure, "world", note="я" * MAX_NOTE_CHARS)
+
+    assert state.model_dump() == before
+    assert entry_of(state, "world@all").updated_turn == 3
+
+
+def test_the_first_visit_and_automatic_entries_are_not_extensions_of_the_text(
+    make_game, demo_adventure
+):
+    # Решение D4: первый приход в место поднимает `revision`, но текст не дополняет.
+    state = open_journal(make_game(party_round=2), demo_adventure)
+
+    known = visit(state, demo_adventure, "cemetery")
+    unknown = visit(state, demo_adventure, "crypt")
+    recorded = record(state, demo_adventure, "item:chest-key")
+
+    assert known.revision == 2
+    assert [known.updated_turn, unknown.updated_turn, recorded.updated_turn] == [None] * 3
+    assert {entry.updated_turn for entry in state.journal} == {None}
+
+
+def test_a_visit_keeps_the_round_of_the_last_extension_of_the_place(make_game, demo_adventure):
+    state = open_journal(make_game(party_round=1), demo_adventure)
+    write(state, demo_adventure, "location:cemetery", note="Ворота скрипят.")
+    state.party_round = 4
+
+    visited = visit(state, demo_adventure, "cemetery")
+
+    assert (visited.updated_turn, visited.visited_turn, visited.revision) == (1, 4, 3)
+
+
+def test_an_entry_saved_before_the_round_of_the_extension_existed_reads_without_it():
+    # Сохранённые игры прежних версий: в дампе записи поля нет — оно читается как `None`.
+    saved = {
+        "id": "npc:marta@all",
+        "ref": "npc:marta",
+        "section": "people",
+        "title": "Марта",
+        "text": "Хозяйка трактира.",
+        "audience": "all",
+        "turn": 0,
+        "revision": 2,
+        "visited_turn": None,
+    }
+
+    entry = JournalEntry.model_validate(saved)
+
+    assert entry.updated_turn is None
+    assert entry.model_dump() == saved | {"updated_turn": None}
+
+
+# --- B11.coverage: раунд дополнения на границах (дополнение контракта B11 §1 п. 4, §2) ---
+
+
+def test_an_extension_in_round_zero_is_remembered_as_zero_and_not_as_none(
+    make_game, demo_adventure
+):
+    # Раунд 0 — значение, а не «не дополняли»: запись дописали в начале игры. Ни дамп записи, ни
+    # сохранённая игра не превращают его в `null`.
+    state = make_game(party_round=0)
+    write(state, demo_adventure, "deity:ossmar")
+
+    entry, _ = write(state, demo_adventure, "deity:ossmar", note="Его ключ висит на воротах.")
+
+    assert (entry.updated_turn, entry.revision) == (0, 2)
+    assert entry.model_dump(mode="json")["updated_turn"] == 0
+    restored = GameState.model_validate_json(state.model_dump_json())
+    assert entry_of(restored, "deity:ossmar@all").updated_turn == 0
+
+
+def test_extending_one_entry_does_not_touch_the_other_entry_about_the_same_thing(
+    make_game, demo_adventure
+):
+    # Общая и личная записи о Фабиане — разные записи (`ref@адресат`): раунд дополнения у каждой
+    # свой.
+    state = make_game(party_round=1)
+    common, _ = write(state, demo_adventure, "npc:fabian")
+    write(state, demo_adventure, "npc:fabian", audience="pc-1")
+    state.party_round = 4
+
+    personal, _ = write(state, demo_adventure, "npc:fabian", audience="pc-1", note="Он лжёт.")
+
+    assert personal.updated_turn == 4
+    assert entry_of(state, "npc:fabian@all") == common
+
+    state.party_round = 6
+    common, _ = write(state, demo_adventure, "npc:fabian", note="Должен Марте.")
+
+    assert common.updated_turn == 6
+    assert entry_of(state, "npc:fabian@pc-1").updated_turn == 4
+
+
+def test_an_automatic_record_of_an_extended_entry_keeps_the_round_of_the_extension(
+    make_game, demo_adventure
+):
+    # Авто-запись уже записанное не меняет: полученный снова предмет не сбрасывает «дополнено».
+    state = make_game(party_round=1)
+    write(state, demo_adventure, "item:chest-key")
+    state.party_round = 2
+    extended, _ = write(state, demo_adventure, "item:chest-key", note="Висит на шнурке.")
+    state.party_round = 5
+
+    assert record(state, demo_adventure, "item:chest-key") is None
+    assert entry_of(state, "item:chest-key@all") == extended
+    assert extended.updated_turn == 2
+
+
+def test_an_extended_entry_is_among_the_changed_ones_with_its_round(make_game, demo_adventure):
+    # Сервер рассылает изменённые записи (`changed_entries`) целиком: клиент получает раунд
+    # дополнения в том же событии, что и новый текст.
+    state = make_game(party_round=1)
+    write(state, demo_adventure, "faction:regulars")
+    before = state.journal
+    state.party_round = 3
+
+    write(state, demo_adventure, "faction:regulars", note="Собираются по средам.")
+
+    [changed] = changed_entries(before, state.journal)
+    assert (changed.id, changed.updated_turn) == ("faction:regulars@all", 3)
+    assert changed.model_dump(mode="json")["updated_turn"] == 3
+
+
+# --- B11.1.fix1 (дополнение B11 §5 п. 1): текст из одних пробелов — пустой текст ---
+
+BLANK = " \n\t "  # пробелы, перенос и табуляция: на экране — пустое место
+
+
+def blank_texts(data: dict[str, Any]) -> None:
+    """Те же сущности без текста, что в `without_texts`, но вместо пустых строк — пробелы."""
+    data["revelations"]["kidnapper"]["clues"][0]["description"] = BLANK  # clue-diary
+    data["items"]["chest-key"].update(name=BLANK, public=BLANK)
+    data["world"]["rumors"][0].update(text=BLANK, public=BLANK)  # известен со старта
+    data["world"]["regions"][0].update(name=BLANK, public=BLANK)  # известен со старта
+    data["npcs"]["marta"].update(name=BLANK, public=BLANK)  # известна со старта
+    data["locations"]["village"].update(name=BLANK, public=BLANK)  # стартовая локация
+    data["locations"]["crypt"].update(name=BLANK, public=BLANK)
+
+
+def test_an_automatic_entry_about_an_entity_of_only_spaces_is_not_written(
+    make_game, demo_adventure
+):
+    # Валидатор считает такие тексты пустыми (`clue_without_description`, `item_without_text`):
+    # дневник следует тому же правилу и не пишет запись, которая выглядит пустой.
+    adventure = variant(demo_adventure, blank_texts)
+    state = make_game()
+
+    assert record(state, adventure, "clue:clue-diary") is None
+    assert record(state, adventure, "item:chest-key", audience="pc-2") is None
+    assert record(state, adventure, "rumor:1") is None
+    assert visit(state, adventure, "crypt") is None
+    assert state.journal == ()
+
+
+def test_the_start_skips_entities_of_only_spaces_including_the_start_location(
+    make_game, demo_adventure
+):
+    adventure = variant(demo_adventure, blank_texts)
+
+    state = open_journal(make_game(), adventure)
+
+    refs = {entry.ref for entry in state.journal}
+    assert refs == START_REFS - {"rumor:1", "region:marshland", "npc:marta", "location:village"}
+    assert all(entry.title.strip() and entry.text.strip() for entry in state.journal)
+
+
+def test_the_master_writes_an_entity_of_only_spaces_only_with_a_note(make_game, demo_adventure):
+    adventure = variant(demo_adventure, blank_texts)
+    state = make_game()
+
+    for ref in ("clue:clue-diary", "item:chest-key", "rumor:1", "npc:marta", "location:crypt"):
+        with pytest.raises(JournalError, match="note"):
+            write(state, adventure, ref)
+    assert state.journal == ()
+    entry, _ = write(state, adventure, "item:chest-key", note="Маленький ключ.")
+
+    assert (entry.title, entry.text) == ("Маленький ключ.", "Маленький ключ.")
+
+
+NAMED_ENTITIES = [
+    pytest.param(("locations", "crypt"), "location:crypt", id="location"),
+    pytest.param(("npcs", "fabian"), "npc:fabian", id="npc"),
+    pytest.param(("deities", "ossmar"), "deity:ossmar", id="deity"),
+    pytest.param(("factions", "regulars"), "faction:regulars", id="faction"),
+    pytest.param(("world", "regions", 1), "region:barrow-hill", id="region"),
+    pytest.param(("items", "chest-key"), "item:chest-key", id="item"),
+]
+
+
+def with_fields(adventure: Adventure, path: tuple[str | int, ...], **fields: str) -> Adventure:
+    """Копия приключения, где у сущности по пути `path` в данных изменены поля `fields`."""
+
+    def edit(data: dict[str, Any]) -> None:
+        target: Any = data
+        for key in path:
+            target = target[key]
+        target.update(fields)
+
+    return variant(adventure, edit)
+
+
+@pytest.mark.parametrize(("path", "ref"), NAMED_ENTITIES)
+def test_a_public_text_of_only_spaces_gives_way_to_the_name(make_game, demo_adventure, path, ref):
+    adventure = with_fields(demo_adventure, path, name="Название сущности", public=BLANK)
+
+    entry, _ = write(make_game(), adventure, ref)
+
+    assert (entry.title, entry.text) == ("Название сущности", "Название сущности")
+
+
+@pytest.mark.parametrize(("path", "ref"), NAMED_ENTITIES)
+def test_a_name_of_only_spaces_is_no_title_and_the_title_comes_from_the_text(
+    make_game, demo_adventure, path, ref
+):
+    adventure = with_fields(demo_adventure, path, name=BLANK, public="Что знают о сущности.")
+
+    entry, _ = write(make_game(), adventure, ref)
+
+    assert (entry.title, entry.text) == ("Что знают о сущности.", "Что знают о сущности.")
+
+
+def test_a_rumor_with_a_public_text_of_only_spaces_is_written_by_the_rumor_itself(
+    make_game, demo_adventure
+):
+    adventure = variant(
+        demo_adventure, lambda data: data["world"]["rumors"][1].update(public=BLANK)
+    )
+    rumor = demo_adventure.world.rumors[1].text
+
+    entry, _ = write(make_game(), adventure, "rumor:2")
+
+    assert entry.text == rumor
+    assert entry.title.strip() and rumor.startswith(entry.title.rstrip("…"))
+
+
+def test_an_intro_of_only_spaces_gives_way_to_the_pitch(make_game, demo_adventure):
+    # Схема заменяет пустое `journal_intro` на `pitch`; из одних пробелов — тоже пустое.
+    adventure = variant(demo_adventure, lambda data: data.update(journal_intro=BLANK))
+
+    state = open_journal(make_game(), adventure)
+
+    assert entry_of(state, "intro@all").text == demo_adventure.pitch
+
+
+def test_an_intro_and_a_pitch_of_only_spaces_give_no_main_entry(make_game, demo_adventure):
+    adventure = variant(demo_adventure, lambda data: data.update(pitch=BLANK, journal_intro=BLANK))
+
+    state = open_journal(make_game(), adventure)
+
+    assert "intro" not in {entry.ref for entry in state.journal}
+    assert len(state.journal) == len(START_REFS) - 1

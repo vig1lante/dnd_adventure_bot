@@ -437,6 +437,34 @@ describe("форма с прежним выбором («Изменить гер
     });
   });
 
+  test.each([
+    ["прежнего класса", { class_id: "artificer" }, "Класс", "Плут"],
+    ["прежней расы", { species: "kenku" }, "Раса", "Человек"],
+  ] as const)(
+    "«Изменить героя»: %s больше нет в правилах — выбор не показан и «Создать героя» недоступна, пока игрок не выберет",
+    async (_what, gone, label, pick) => {
+      const { server, onCreated } = renderQuick(created(), {
+        ...STORED_QUICK,
+        ...gone,
+      });
+
+      expect(chosenIn(label)).toBeNull();
+      expect(submitButton()).toBeDisabled();
+      fireEvent.click(submitButton());
+      expect(posts(server)).toHaveLength(0);
+
+      choose(label, pick);
+      expect(submitButton()).toBeEnabled();
+      fireEvent.click(submitButton());
+
+      await vi.waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+      expect(posts(server)[0].body).toMatchObject({
+        class_id: "rogue",
+        species: "human",
+      });
+    },
+  );
+
   test("без прежнего выбора форма пустая, как раньше", () => {
     renderQuick();
 

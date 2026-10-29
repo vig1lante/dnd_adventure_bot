@@ -7,9 +7,10 @@ import { Countdown } from "./Countdown";
 import "./game.css";
 import { phaseLabel } from "./phases";
 
-const STATUS_BADGES: Record<
-  PlayerStatus,
-  { label: string; tone: BadgeProps["tone"] }
+// У `idle` (ход ещё не начат) значка нет: «Пишет» горит, только пока у игрока черновик с текстом
+// (решение D17). Незнакомый статус тоже остаётся без значка.
+const STATUS_BADGES: Partial<
+  Record<PlayerStatus, { label: string; tone: BadgeProps["tone"] }>
 > = {
   writing: { label: "Пишет", tone: "amber" },
   ready: { label: "Готов", tone: "cloth" },
@@ -117,7 +118,8 @@ export function StatusBar({ view, clockOffsetMs, connection }: StatusBarProps) {
         <ul className="game-players" aria-label="Игроки">
           {game.players.map((player) => {
             const status = statuses[player.user_id];
-            const badge = status === undefined ? null : STATUS_BADGES[status];
+            const badge =
+              status === undefined ? null : (STATUS_BADGES[status] ?? null);
             return (
               <li key={player.user_id} className="game-players__item">
                 <Avatar name={player.name} size="sm" decorative />

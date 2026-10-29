@@ -537,6 +537,10 @@ def short_rest_party(ctx: ToolContext, args: ShortRestArgs) -> dict[str, Any]:
 
 
 _SOFT_HYPHEN = "\u00ad"
+# Знаки-заполнители: буквы и символы Юникода, которые печатаемы, но рисуются пустым местом
+# (заполнители хангыля, пустой шаблон Брайля, пустая нотная головка). Заметка только из них
+# выглядела бы пустым абзацем, поэтому видимыми они не считаются.
+_BLANK_GLYPHS = frozenset("\u115f\u1160\u3164\uffa0\u2800\U0001d159")
 
 
 def _plain_spaces(note: Any) -> Any:
@@ -549,15 +553,25 @@ def _plain_spaces(note: Any) -> Any:
     )
 
 
+def _is_visible(char: str) -> bool:
+    # Видимый знак — буква, цифра, знак препинания или символ (категории L, N, P, S), кроме
+    # заполнителей. Пробелы, переносы и управляющие знаки не видны, а комбинируемые знаки
+    # (ударение, U+034F) рисуются только поверх буквы и без неё видимым текстом не считаются.
+    return unicodedata.category(char)[0] in "LNPS" and char not in _BLANK_GLYPHS
+
+
 def _printable_note(note: str) -> str:
     # Слова мастера уходят игрокам: управляющие знаки, знаки нулевой ширины и разворота строки
     # (escape, U+200B, U+202E, U+2066–2069) исказили бы экран или спрятали текст.
     if not all(char.isprintable() or char == "\n" for char in note):
         raise ValueError("только печатаемый текст и переносы строк")
+    if not any(_is_visible(char) for char in note):
+        raise ValueError("нужен хотя бы один видимый знак")
     return note
 
 
-# Порядок важен: сначала типографика (`_plain_spaces`), потом обрезка и длина, потом печатаемость.
+# Порядок важен: сначала типографика (`_plain_spaces`), потом обрезка и длина, потом печатаемость
+# и видимость.
 JournalNote = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_NOTE_CHARS),

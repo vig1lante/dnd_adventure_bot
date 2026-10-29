@@ -8,7 +8,8 @@
 дубля не бывает; общая и личная запись об одной сущности — две разные записи.
 
 Текст записи — только то, что могут знать игроки: `public` сущности, а если он пуст — её
-название; у улики — описание найденного, у слуха — `public` или сам слух. Тайны (`secret`,
+название; у улики — описание найденного, у слуха — `public` или сам слух. Текст из одних пробелов
+считается пустым (дополнение B11 §5 п. 1). Тайны (`secret`,
 мотивы, заметки мастера, тайны мест, правда о слухах, утверждения открытий, полное описание
 предмета) сюда не попадают никогда. Дополнение мастера (`note`) — его слова о том, что узнали
 герои; длину и печатаемость проверяет инструмент `journal_add`. Номер раунда записи — раунд
@@ -81,7 +82,8 @@ class JournalError(ValueError):
 
 class JournalEntry(BaseModel):
     """Запись дневника (дополнение §2). `visited_turn` — только у мест: раунд первого прихода
-    отряда."""
+    отряда. `updated_turn` — раунд последнего дополнения текста словами мастера (дополнение B11
+    §1 п. 4): первый приход в место текст не дополняет и его не ставит."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -94,6 +96,7 @@ class JournalEntry(BaseModel):
     turn: int  # раунд, когда запись появилась; 0 — старт игры
     revision: int = 1  # +1 при каждом дополнении и при первом приходе в место
     visited_turn: int | None = None
+    updated_turn: int | None = None  # None — текст не дополняли; в старых сохранениях поля нет
 
 
 class _Page(NamedTuple):
@@ -120,12 +123,28 @@ def _short(text: str) -> str:
     return head.rstrip(_TITLE_TRIM) + "…"
 
 
+def _first_text(*candidates: str) -> str:
+    """Первый кандидат, в котором есть не только пробелы, иначе пусто.
+
+    Текст из одних пробелов и переносов игроку ничего не скажет: для дневника он пустой, как и для
+    валидатора (`clue_without_description`, `item_without_text`). Так сущность без текста не
+    получает записи, а пробелы в `public` не закрывают название."""
+    return next((text for text in candidates if text.strip()), "")
+
+
+def _unnamed(text: str, known_at_start: bool = False) -> _Page:
+    """Страница сущности без имени (слух, улика): название — начало текста."""
+    return _Page(_short(text), text, known_at_start)
+
+
 def _named(
     kind: str, entities: Iterable[Location | Npc | Deity | Faction | Item | Region]
 ) -> dict[str, _Page]:
     return {
         f"{kind}:{entity.id}": _Page(
-            entity.name, entity.public or entity.name, entity.known_at_start
+            _first_text(entity.name),
+            _first_text(entity.public, entity.name),
+            entity.known_at_start,
         )
         for entity in entities
     }
@@ -135,24 +154,23 @@ def _pages(adventure: Adventure, kind: str) -> dict[str, _Page]:
     """Ссылки вида `kind`, которые есть в приключении: ссылка → страница сущности."""
     match kind:
         case "intro":
-            intro = adventure.journal_intro
+            # Пустое `journal_intro` схема заменяет на `pitch`; из одних пробелов — тоже пустое.
+            intro = _first_text(adventure.journal_intro, adventure.pitch)
             return {INTRO_REF: _Page("Главное", intro, True)} if intro else {}
         case "world":
             return {WORLD_REF: _Page("История мира", "")}  # история мира — данные мастера
         case "rumor":
             # Слухи без id адресуются номером в `world.rumors` (дополнение §1); `true` не читается.
             return {
-                f"rumor:{number}": _Page(
-                    _short(rumor.public or rumor.text),
-                    rumor.public or rumor.text,
-                    rumor.known_at_start,
+                f"rumor:{number}": _unnamed(
+                    _first_text(rumor.public, rumor.text), rumor.known_at_start
                 )
                 for number, rumor in enumerate(adventure.world.rumors, start=1)
             }
         case "clue":
             # Улика — то, что нашли герои; утверждение открытия не показывается.
             return {
-                f"clue:{clue.id}": _Page(_short(clue.description), clue.description)
+                f"clue:{clue.id}": _unnamed(_first_text(clue.description))
                 for revelation in adventure.revelations.values()
                 for clue in revelation.clues
             }
@@ -250,10 +268,11 @@ def write(
     ли она).
 
     Новая запись — публичный текст сущности и `note` новым абзацем; существующая с `note` —
-    дописывается и поднимает `revision`; без `note` повтор ничего не меняет. Всё проверяется до
-    изменения: неизвестная ссылка или адресат, запись без текста (история мира или сущность без
-    текста — без `note`) и текст с дополнением сверх `MAX_TEXT_CHARS` — `JournalError`, дневник
-    прежний. Раунд новой записи — `state.party_round`."""
+    дописывается, поднимает `revision` и запоминает раунд дополнения (`updated_turn`); без `note`
+    повтор ничего не меняет. Всё проверяется до изменения: неизвестная ссылка или адресат, запись
+    без текста (история мира или сущность без текста — без `note`) и текст с дополнением сверх
+    `MAX_TEXT_CHARS` — `JournalError`, дневник прежний. Раунд новой записи и дополнения —
+    `state.party_round`."""
     page = _page(adventure, ref)
     if audience != ALL and audience not in state.party:
         raise JournalError(f"Нет героя отряда {audience!r}. Есть: {', '.join(state.party)}")
@@ -271,7 +290,9 @@ def write(
         return current, False
     text = current.text + PARAGRAPH + note
     _check_length(text)
-    entry = current.model_copy(update={"text": text, "revision": current.revision + 1})
+    entry = current.model_copy(
+        update={"text": text, "revision": current.revision + 1, "updated_turn": state.party_round}
+    )
     _put(state, entry)
     return entry, False
 

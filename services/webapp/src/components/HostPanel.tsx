@@ -7,12 +7,13 @@ import type {
   RestKind,
 } from "../api/types";
 import { useAction } from "../screens/hooks";
+import { useGame } from "../store/game";
 import type { GameView } from "../store/game";
 import { Alert, Button, Panel } from "../ui";
 import { cannotAct, currentFighter } from "./access";
 import "./game.css";
 import { restLabel } from "./phases";
-import { RETRY_PATIENCE_MS, useStaysFor } from "./waiting";
+import { RETRY_PATIENCE_MS, phaseStartedAt, useStaysFor } from "./waiting";
 
 /**
  * Ходит монстр, спрятанный монстр или герой, который не может действовать: ждать игрока некого,
@@ -109,13 +110,16 @@ function HostControls({ gameId, view, isResolving }: Controls) {
   const api = useApi();
   const { busy, error, run } = useAction();
   const [asking, setAsking] = useState<Question | null>(null);
-  // Сервер не говорит, когда начался разбор: ждём минуту с того, как экран увидел «Мастер думает».
+  const clockOffsetMs = useGame((state) => state.live.clockOffsetMs);
+  const { phase, combat, game } = view;
+  // Минута до «Повторить» идёт от серверного начала разбора: перезагрузка страницы её не
+  // перезапускает. Сервер его не знает (игра шла до B11) — минута с показа «Мастер думает».
   const waitedLong = useStaysFor(
-    isResolving ? "resolving" : null,
+    isResolving ? `resolving@${phase.phase_since ?? ""}` : null,
     RETRY_PATIENCE_MS,
+    phaseStartedAt(phase.phase_since, clockOffsetMs),
   );
 
-  const { phase, combat, game } = view;
   const turn = phase.turn_phase;
   const playing = phase.phase === "playing";
   const paused = phase.phase === "paused";
@@ -145,10 +149,9 @@ function HostControls({ gameId, view, isResolving }: Controls) {
         (turn === "combat_wait" && masterMoves(combat))),
     pause: playing,
     resume: paused,
-    // «Перегенерировать» сервер принимает, пока игроки обсуждают следующий ход.
-    regenerate:
-      playing &&
-      (turn === "discussion" || turn === "combat_wait" || turn === "camp"),
+    // «Перегенерировать» — по признаку сервера (контракт B11, §1 п. 11): привал по кнопке хоста
+    // перегенерировать нельзя, привал мастера — можно. Сервер до B11 признака не шлёт — кнопки нет.
+    regenerate: playing && phase.can_regenerate === true,
   };
 
   // Лобби, начало игры и конец игры: хосту в этой панели делать нечего.

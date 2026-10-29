@@ -86,6 +86,8 @@ export function phaseOf(
     deadline_at: null,
     remaining_seconds: null,
     scene: { type: "exploration", day: 1, part: "morning" },
+    phase_since: null,
+    can_regenerate: false,
     ...overrides,
   };
 }
@@ -316,6 +318,7 @@ export function journalEntry(
     turn: 0,
     revision: 1,
     visited_turn: null,
+    updated_turn: null,
     ...overrides,
   };
 }

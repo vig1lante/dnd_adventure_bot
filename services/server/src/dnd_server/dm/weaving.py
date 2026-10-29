@@ -47,7 +47,6 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dnd_engine.adventure.loader import adventure_from_data
 from dnd_engine.adventure.schema import Adventure, Location, Npc
 from dnd_engine.character import Character
 from dnd_engine.content import SrdContent
@@ -77,20 +76,28 @@ from dnd_server.dm.text import (
     printable_line,
     safe_traceback,
 )
-from dnd_server.dm.turn import Deps, TurnOutcome, announcing, failure_text, run_dm_turn
+from dnd_server.dm.turn import (
+    Deps,
+    TurnOutcome,
+    announcing,
+    failure_text,
+    game_adventure,
+    run_dm_turn,
+)
 from dnd_server.games.hooks import send_to_game
 from dnd_server.games.service import Conflict, NotFound
 from dnd_server.llm.base import JsonRequest, LLMProvider
 from dnd_server.prompts import role_with_style
-from dnd_server.realtime.views import feed_item_event, phase_event
+from dnd_server.realtime.views import can_regenerate, feed_item_event, phase_event
 
 logger = logging.getLogger(__name__)
 
-# Сколько ждём один ответ модели, секунд. Вплетение просит обычную модель (`cheap=False`: у
-# `anthropic_api` оно не идёт на LLM_CHEAP_MODEL; `claude_code_cli` все ответы по схеме отдаёт
-# дешёвой модели подписки, спека §11) и пишет зацепки на всех героев сразу; внутри `complete_json`
-# до трёх попыток, а каждую SDK ещё повторяет при 429 и 5xx. Тайм-аут стоит на каждый запрос
-# отдельно, повторный запрос — тоже под своим.
+# Сколько ждём один ответ модели, секунд. Вплетение пишет зацепки на всех героев сразу. Запрос
+# помечен `cheap=False`, но модель выбирает провайдер: у `anthropic_api` это модель игры, а не
+# LLM_CHEAP_MODEL; `claude_code_cli` флаг не смотрит и отдаёт все ответы по схеме, вплетение тоже,
+# дешёвой модели подписки CLAUDE_CLI_CHEAP_MODEL, если она задана (спека §11). Внутри
+# `complete_json` до трёх попыток, а каждую SDK ещё повторяет при 429 и 5xx. Тайм-аут стоит на
+# каждый запрос отдельно, повторный запрос — тоже под своим.
 WEAVING_TIMEOUT_S = 120.0
 
 # Пределы текстов зацепки: они применяются при записи, ответу модели длина не доверяется. Блок
@@ -541,11 +548,13 @@ async def _reserve(game_id: str, deps: Deps) -> _Plan | None:
         if game.state_version >= 1:
             return None
         plan = await _load(session, game)
-        game.turn_phase = TurnPhase.RESOLVING
+        game.set_turn_phase(TurnPhase.RESOLVING, deps.clock())
         game.deadline_at = None
         await session.commit()
         with announcing(deps, game_id, None):
-            await send_to_game(deps.broadcaster, game_id, phase_event(game, None))
+            regenerable = await can_regenerate(session, game)
+            event = phase_event(game, None, can_regenerate=regenerable)
+            await send_to_game(deps.broadcaster, game_id, event)
     return plan
 
 
@@ -577,7 +586,7 @@ async def _load(session: AsyncSession, game: Game) -> _Plan:
         raise ValueError("в игре нет ни одного персонажа")
     return _Plan(
         game_id=game.id,
-        adventure=adventure_from_data(game.adventure_data),
+        adventure=game_adventure(game),
         heroes=heroes,
         provider_name=game.provider,
         model=game.model,
@@ -677,7 +686,7 @@ async def _write_hooks(deps: Deps, plan: _Plan, hooks: Mapping[str, PcHook]) -> 
         ]
         session.add_all([GameStateSnapshot.from_state(state), *messages])
         game.state_version = state.version
-        game.turn_phase = None
+        game.set_turn_phase(None, deps.clock())
         await session.commit()
         with announcing(deps, plan.game_id, None):
             for message in messages:
@@ -750,7 +759,7 @@ async def _abandon(deps: Deps, game_id: str, note_text: str | None) -> None:
             or game.turn_phase not in (None, TurnPhase.RESOLVING)
         ):
             return
-        game.turn_phase = TurnPhase.DM_FAILED
+        game.set_turn_phase(TurnPhase.DM_FAILED, deps.clock())
         game.deadline_at = None
         note = None
         if note_text is not None:
@@ -772,4 +781,6 @@ async def _abandon(deps: Deps, game_id: str, note_text: str | None) -> None:
             state = None if row is None else row.to_state()
             if note is not None:
                 await send_to_game(deps.broadcaster, game_id, feed_item_event(note), note.audience)
-            await send_to_game(deps.broadcaster, game_id, phase_event(game, state))
+            regenerable = await can_regenerate(session, game)
+            event = phase_event(game, state, can_regenerate=regenerable)
+            await send_to_game(deps.broadcaster, game_id, event)

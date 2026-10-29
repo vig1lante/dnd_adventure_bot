@@ -252,6 +252,74 @@ describe("карточка записи", () => {
     expect(screen.queryByText(/раунд 0/)).toBeNull();
   });
 
+  test("дополненная запись: под «узнали» — «дополнено в раунде N» (B11.3)", () => {
+    renderJournal({
+      entries: [
+        journalEntry("npc:elder", {
+          title: "Староста Хорн",
+          text: "Седой и упрямый.\n\nБоится склепа.",
+          turn: 1,
+          revision: 2,
+          updated_turn: 4,
+        }),
+        journalEntry("location:crypt", {
+          title: "Склеп",
+          turn: 2,
+          revision: 3,
+          visited_turn: 3,
+          updated_turn: 5,
+        }),
+      ],
+    });
+
+    open("Люди");
+    const elder = within(card("Староста Хорн"));
+    expect(elder.getByText("узнали в раунде 1")).toBeVisible();
+    expect(elder.getByText("дополнено в раунде 4")).toBeVisible();
+
+    open("Места");
+    const crypt = within(card("Склеп"));
+    expect(crypt.getByText("были здесь: раунд 3")).toBeVisible();
+    expect(crypt.getByText("дополнено в раунде 5")).toBeVisible();
+  });
+
+  test("дополнение в самом начале игры — без «раунда 0»", () => {
+    renderJournal({
+      entries: [
+        journalEntry("intro", {
+          title: "Главное",
+          revision: 2,
+          updated_turn: 0,
+        }),
+      ],
+    });
+
+    expect(
+      within(card("Главное")).getByText("дополнено в начале игры"),
+    ).toBeVisible();
+    expect(screen.queryByText(/раунд(е)? 0/)).toBeNull();
+  });
+
+  test("не дополнялась (null) или сервер до B11 без поля — строки «дополнено» нет", () => {
+    const { updated_turn: _dropped, ...old } = journalEntry("npc:smith", {
+      title: "Кузнец",
+      revision: 2,
+    });
+    renderJournal({
+      entries: [
+        journalEntry("npc:elder", { title: "Староста Хорн", revision: 2 }),
+        old,
+      ],
+    });
+
+    open("Люди");
+
+    expect(screen.queryByText(/дополнено/)).toBeNull();
+    expect(
+      within(card("Кузнец")).getByText("известно с начала игры"),
+    ).toBeVisible();
+  });
+
   test("место, где отряд ещё не был, подписано как обычная запись", () => {
     renderJournal();
 

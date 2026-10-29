@@ -311,8 +311,10 @@ def test_random_calls_never_break_the_turn_or_the_state(tool_registry, srd, make
             assert EVENTS.validate_json(EVENTS.dump_json(new_events)) == new_events, where
             for roll in (e for e in new_events if isinstance(e, RollEvent)):
                 # Бросок тайного автора не бывает общим, а адресат тайного — герой отряда.
+                # Исключение — броски, которые инструмент объявил общими (инициатива, §15).
                 assert roll.audience == "all" or roll.audience in ctx.state.party, where
-                assert roll.audience != "all" or roll.actor_id not in ctx.secret_actors, where
+                if roll.label not in spec.public_roll_labels:
+                    assert roll.audience != "all" or roll.actor_id not in ctx.secret_actors, where
 
     # Серия не должна тихо вырождаться в одни отказы: каждый инструмент хоть раз сработал.
     assert set(succeeded) == tools, (tools - set(succeeded), succeeded)

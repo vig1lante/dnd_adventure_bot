@@ -709,8 +709,8 @@ async def assert_clients_agree_with_snapshots(
 ) -> None:
     """У каждого игрока клиент, собранный из событий, совпадает с новым снимком.
 
-    Игрок без записи в статусах «пишет»: так читает его и сам снимок, у которого статусов нет, пока
-    нет открытого хода (между вплетением и открытием игры)."""
+    Игрок без записи в статусах — `idle` (ещё ничего не написал): так читает его и сам снимок, у
+    которого статусов нет, пока нет открытого хода (между вплетением и открытием игры)."""
     await server.sync()
     everyone = [person.user_id for person in server.people.values()]
     for key in server.watchers:
@@ -720,8 +720,8 @@ async def assert_clients_agree_with_snapshots(
             if block in skip:
                 continue
             if block == "statuses":
-                known[block] = {u: known[block].get(u, "writing") for u in everyone}
-                fresh[block] = {u: fresh[block].get(u, "writing") for u in everyone}
+                known[block] = {u: known[block].get(u, "idle") for u in everyone}
+                fresh[block] = {u: fresh[block].get(u, "idle") for u in everyone}
             assert known[block] == fresh[block], f"{where}: у {key} расходится блок {block}"
 
 

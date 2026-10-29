@@ -54,6 +54,8 @@ _STEP_BY_CODE = {
     "unreachable_key": "items",
     "too_few_clues": "clues",
     "clues_same_place": "clues",
+    "clue_without_description": "clues",
+    "item_without_text": "items",
 }
 # Владелец объекта из `ref` проблемы (`dangling_ref`, `schema`): вложенная часть важнее сущности.
 _STEP_BY_PART = {

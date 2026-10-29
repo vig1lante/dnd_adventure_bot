@@ -2,7 +2,9 @@ import { act, renderHook } from "@testing-library/react";
 import {
   THINKING_PHRASES,
   THINKING_TITLE,
+  phaseStartedAt,
   thinkingPhrase,
+  useStaysFor,
   useThinking,
   useWaitedSeconds,
 } from "./waiting";
@@ -104,5 +106,112 @@ describe("useWaitedSeconds: сколько уже ждём", () => {
       phrase: THINKING_PHRASES[1],
       seconds: 9,
     });
+  });
+});
+
+// --- серверное начало фазы (контракт B11, §2: `phase.phase_since`) ---
+
+const NOW = Date.parse("2026-10-20T12:00:00+00:00");
+/** Время по часам браузера `seconds` секунд назад. */
+const ago = (seconds: number) => NOW - seconds * 1000;
+
+describe("phaseStartedAt: начало фазы по часам браузера", () => {
+  test("серверное время начала минус сдвиг часов", () => {
+    // Сервер впереди браузера на 3 минуты: его 12:00:00 — это 11:57:00 браузера.
+    const since = "2026-10-20T12:00:00+00:00";
+
+    expect(phaseStartedAt(since, 0)).toBe(NOW);
+    expect(phaseStartedAt(since, 180_000)).toBe(NOW - 180_000);
+  });
+
+  test("начала нет (игра шла до B11), сервер до B11 без поля или строка не читается — неизвестно", () => {
+    expect(phaseStartedAt(null, 0)).toBeUndefined();
+    expect(phaseStartedAt(undefined, 0)).toBeUndefined();
+    expect(phaseStartedAt("вчера", 0)).toBeUndefined();
+  });
+});
+
+describe("useStaysFor: ждать от серверного начала фазы", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: FAKE_CLOCK });
+    vi.setSystemTime(NOW);
+  });
+
+  test("без начала — срок с того мига, как экран увидел ключ (как раньше)", () => {
+    const { result } = renderHook(() => useStaysFor("resolving", 60_000));
+
+    tick(59_999);
+    expect(result.current).toBe(false);
+    tick(1);
+    expect(result.current).toBe(true);
+  });
+
+  test("фаза началась 40 с назад (перезагрузка): до минуты осталось 20 с, а не снова минута", () => {
+    const { result } = renderHook(() =>
+      useStaysFor("resolving", 60_000, ago(40)),
+    );
+
+    tick(19_999);
+    expect(result.current).toBe(false);
+    tick(1);
+    expect(result.current).toBe(true);
+  });
+
+  test("фаза началась больше минуты назад: срок уже прошёл", () => {
+    const { result } = renderHook(() =>
+      useStaysFor("resolving", 60_000, ago(90)),
+    );
+
+    tick(0);
+
+    expect(result.current).toBe(true);
+  });
+
+  test("уточнилось начало (новый снимок с другим сдвигом часов) — срок пересчитан, прошедший не гаснет", () => {
+    const { result, rerender } = renderHook(
+      ({ since }: { since: number }) => useStaysFor("resolving", 60_000, since),
+      { initialProps: { since: ago(90) } },
+    );
+    tick(0);
+    expect(result.current).toBe(true);
+
+    rerender({ since: ago(89) });
+
+    expect(result.current).toBe(true);
+  });
+});
+
+describe("useWaitedSeconds: счёт от серверного начала фазы", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: FAKE_CLOCK });
+    vi.setSystemTime(NOW);
+  });
+
+  test("фаза началась 40 с назад: счётчик продолжает с 40, а не с нуля", () => {
+    const { result } = renderHook(() => useWaitedSeconds("resolving", ago(40)));
+
+    tick(1000);
+
+    expect(result.current).toBe(41);
+  });
+
+  // Финальное покрытие B11: сдвиг часов оценивается по снимку и может чуть ошибиться.
+  test("начало фазы чуть впереди часов браузера — счётчик стоит на нуле, а не уходит в минус", () => {
+    const { result } = renderHook(() =>
+      useWaitedSeconds("resolving", NOW + 5_000),
+    );
+
+    tick(1000);
+    expect(result.current).toBe(0);
+    tick(6000);
+    expect(result.current).toBe(2);
+  });
+
+  test("useThinking тоже считает от начала фазы", () => {
+    const { result } = renderHook(() => useThinking("resolving", ago(30)));
+
+    tick(2000);
+
+    expect(result.current.seconds).toBe(32);
   });
 });

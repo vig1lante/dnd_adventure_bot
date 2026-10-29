@@ -53,9 +53,13 @@ async def test_rolling_again_and_taking_a_hero_over_the_wire(stand):
     for field in ("class_id", "species", "background", "scores", "hp_max", "inventory", "cantrips"):
         assert created[field] == shown[field], field
     assert created["name"] != shown["name"]  # имя дописала нейронка уже после «Беру»
-    assert [event["type"] for event in events] == ["lobby"]
-    me = next(p for p in events[0]["game"]["players"] if p["user_id"] == host.id)
-    assert me["has_character"] is True
+    # Кадр лобби при сохранении героя и ещё один после описания — с именем от нейронки.
+    assert [event["type"] for event in events] == ["lobby", "lobby"]
+    saved, described = (
+        next(p for p in event["game"]["players"] if p["user_id"] == host.id) for event in events
+    )
+    assert saved["has_character"] is True
+    assert described["hero_name"] == created["name"]
     stand.assert_clean()
 
 

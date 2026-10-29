@@ -9,7 +9,7 @@ import type {
   TurnPhase,
 } from "../api/types";
 import { holdRequests } from "../screens/character/fixtures";
-import { sessionToken } from "../store/game";
+import { NO_LIVE, sessionToken, useGame } from "../store/game";
 import type { GameView } from "../store/game";
 import { fakeServer, signInAs } from "../test-setup";
 import type { FakeReply, RecordedCall } from "../test-setup";
@@ -68,10 +68,23 @@ interface Setup {
   rest?: RestView | null;
   /** Поправки к сводке игры (сроки привалов и др.). */
   game?: Partial<GameSummary>;
+  /**
+   * Признак сервера «можно перегенерировать» (контракт B11, §1 п. 11). По умолчанию — как решает
+   * сервер: пока игроки обсуждают следующий ход (обсуждение, ход в бою, привал мастера).
+   */
+  canRegenerate?: boolean;
+  /** Серверное начало фазы хода (`phase.phase_since`); по умолчанию его нет. */
+  phaseSince?: string | null;
   user?: string;
   routes?: Record<string, FakeReply | ((call: RecordedCall) => FakeReply)>;
   hold?: string;
 }
+
+const REGENERATES_IN: ReadonlySet<TurnPhase | null> = new Set([
+  "discussion",
+  "combat_wait",
+  "camp",
+]);
 
 function viewFor({
   turnPhase = "discussion",
@@ -80,12 +93,19 @@ function viewFor({
   deadline = null,
   rest = null,
   game = {},
+  canRegenerate = phase === "playing" && REGENERATES_IN.has(turnPhase),
+  phaseSince = null,
 }: Setup): GameView {
   const base = gameView();
   return {
     ...base,
     game: { ...base.game, ...game },
-    phase: phaseOf(turnPhase, { phase, deadline_at: deadline }),
+    phase: phaseOf(turnPhase, {
+      phase,
+      deadline_at: deadline,
+      can_regenerate: canRegenerate,
+      phase_since: phaseSince,
+    }),
     combat,
     rest,
   };
@@ -956,6 +976,71 @@ describe("«Перегенерировать ответ мастера»", () =>
   });
 });
 
+describe("«Перегенерировать» — только когда сервер разрешает (контракт B11, §1 п. 11)", () => {
+  test("привал по кнопке хоста: сервер не разрешает — кнопки нет, «+1 мин» и «Закончить привал» на месте", () => {
+    renderPanel({
+      turnPhase: "camp",
+      deadline: CAMP_DEADLINE,
+      canRegenerate: false,
+    });
+
+    expect(buttons()).toEqual(["+1 мин", "Закончить привал", "Пауза"]);
+  });
+
+  test("привал мастера: сервер разрешает — кнопка есть", () => {
+    renderPanel({
+      turnPhase: "camp",
+      deadline: CAMP_DEADLINE,
+      canRegenerate: true,
+    });
+
+    expect(button("Перегенерировать ответ мастера")).toBeEnabled();
+  });
+
+  test("обсуждение, а сервер не разрешает (например, нечего перегенерировать) — кнопки нет", () => {
+    renderPanel({ turnPhase: "discussion", canRegenerate: false });
+
+    noButton("Перегенерировать ответ мастера");
+    expect(button("Собрать ходы")).toBeInTheDocument();
+  });
+
+  test("сервер до B11 без признака — кнопки нет, остальные кнопки на месте", () => {
+    const view = viewFor({ turnPhase: "discussion" });
+    const { can_regenerate: _dropped, ...old } = view.phase;
+    signInAs({ id: HOST, name: "Игрок" });
+    const api = createApi(fakeServer(HOST_ROUTES).fetch, sessionToken);
+    render(
+      <ApiContext value={api}>
+        <HostPanel gameId="g1" view={{ ...view, phase: old }} userId={HOST} />
+      </ApiContext>,
+    );
+
+    noButton("Перегенерировать ответ мастера");
+    expect(button("Собрать ходы")).toBeInTheDocument();
+  });
+
+  // Финальное покрытие B11: признак сервера — необходимое условие, но не достаточное.
+  test.each(["paused", "finished"] as const)(
+    "игра %s, а признак сервера true — кнопки нет: перегенерировать можно только в идущей игре",
+    (phase) => {
+      renderPanel({ turnPhase: "discussion", phase, canRegenerate: true });
+
+      noButton("Перегенерировать ответ мастера");
+    },
+  );
+
+  test("признак пропал, пока открыт вопрос, — вопрос закрывается", () => {
+    const { show } = renderPanel({ turnPhase: "discussion" });
+    fireEvent.click(button("Перегенерировать ответ мастера"));
+
+    show({ turnPhase: "discussion", canRegenerate: false });
+
+    expect(
+      screen.queryByRole("group", { name: "Перегенерировать ответ мастера?" }),
+    ).toBeNull();
+  });
+});
+
 describe("«Повторить» в «Мастер думает»: только через минуту ожидания", () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: FAKE_TIMERS });
@@ -1020,5 +1105,67 @@ describe("«Повторить» в «Мастер думает»: только 
     unmount();
 
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("«Повторить» по серверному началу разбора (phase_since, контракт B11, §2)", () => {
+  const NOW = Date.parse("2026-10-20T12:00:00+00:00");
+  /** Серверное время `seconds` секунд назад. */
+  const ago = (seconds: number) => new Date(NOW - seconds * 1000).toISOString();
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: [...FAKE_TIMERS, "Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  const wait = (ms: number) => act(() => vi.advanceTimersByTime(ms));
+
+  test("перезагрузка на 50-й секунде разбора: кнопка через 10 с, а не через минуту", () => {
+    renderPanel({ turnPhase: "resolving", phaseSince: ago(50) });
+
+    wait(9_999);
+    noButton("Повторить");
+    wait(1);
+
+    expect(button("Повторить")).toBeEnabled();
+  });
+
+  test("разбор идёт дольше минуты: кнопка сразу после перезагрузки", () => {
+    renderPanel({ turnPhase: "resolving", phaseSince: ago(75) });
+
+    wait(0);
+
+    expect(button("Повторить")).toBeEnabled();
+  });
+
+  test("часы телефона отстают на 3 минуты: срок всё равно по серверу", () => {
+    useGame.setState({ live: { ...NO_LIVE, clockOffsetMs: 180_000 } });
+    // По часам сервера разбор идёт 50 с; по часам браузера начало было 3 мин 50 с назад.
+    renderPanel({
+      turnPhase: "resolving",
+      phaseSince: new Date(NOW + 180_000 - 50_000).toISOString(),
+    });
+
+    wait(9_999);
+    noButton("Повторить");
+    wait(1);
+
+    expect(button("Повторить")).toBeEnabled();
+  });
+
+  test("новый разбор с новым началом отсчитывает минуту от него", () => {
+    const { show } = renderPanel({
+      turnPhase: "resolving",
+      phaseSince: ago(90),
+    });
+    wait(0);
+    expect(button("Повторить")).toBeInTheDocument();
+
+    show({ turnPhase: "resolving", phaseSince: ago(0) });
+    wait(0);
+
+    noButton("Повторить");
+    wait(60_000);
+    expect(button("Повторить")).toBeInTheDocument();
   });
 });

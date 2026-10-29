@@ -38,7 +38,7 @@ from sqlalchemy import text as raw_sql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from websockets.asyncio.client import connect
 
-from dnd_engine.adventure.loader import AdventureFormatError, adventure_from_data, load_adventure
+from dnd_engine.adventure.loader import adventure_from_data, load_adventure
 from dnd_engine.adventure.schema import Adventure
 from dnd_engine.character import Character
 from dnd_engine.content import SrdContent, load_srd
@@ -74,8 +74,8 @@ from dnd_server.dm import provider as provider_module
 from dnd_server.dm import turn as turn_module
 from dnd_server.dm.provider import GameProviders, bridge_url, game_provider
 from dnd_server.dm.spotlight import SPOTLIGHT_HINT_AFTER, spotlight_hints, update_spotlight
-from dnd_server.dm.text import safe_traceback
 from dnd_server.dm.turn import (
+    BROKEN_COPY,
     Deps,
     TurnOutcome,
     failed_turn_refusal,
@@ -810,7 +810,7 @@ async def test_events_are_broadcast_after_the_commit_by_the_view_builders(world)
     statuses = sent.of_type("player_status")
     everybody = {p.user_id for p in world.players.values()}
     assert {payload["user_id"] for payload, _ in statuses} == everybody
-    assert {payload["status"] for payload, _ in statuses} == {"writing"}
+    assert {payload["status"] for payload, _ in statuses} == {"idle"}  # новый ход: никто не пишет
 
 
 async def test_a_roll_of_a_secret_turn_goes_only_to_its_author(world):
@@ -1497,6 +1497,9 @@ async def test_player_actions_are_finished_when_the_turn_is_done(world):
     assert actions[world.alice.user_id].status == ActionStatus.AUTO_SUBMITTED
     assert actions[world.boris.user_id].status == ActionStatus.AUTO_PASS
     assert actions[world.vera.user_id].status == ActionStatus.SUBMITTED
+    # Мастер разобрал черновик Алисы как сданный ход: «Ход сдан» — только ей и после коммита.
+    told = [(p, who) for p, who in world.broadcaster.sent if p["type"] == "action_auto_submitted"]
+    assert told == [({"type": "action_auto_submitted"}, world.alice.user_id)]
 
 
 async def test_the_spotlight_counts_submitted_turns_and_the_focus_of_the_events(world):
@@ -1754,7 +1757,7 @@ BROKEN_VALUE = "ЗНАЧЕНИЕ-ИЗ-КОПИИ"
 
 
 async def test_a_broken_adventure_copy_stops_the_turn_before_the_reserve_and_changes_nothing(
-    world,
+    world, caplog
 ):
     async with world.db() as session:
         game = await session.get(Game, world.game_id)
@@ -1768,8 +1771,9 @@ async def test_a_broken_adventure_copy_stops_the_turn_before_the_reserve_and_cha
     await world.act("alice", "Иду вперёд")
     messages_before = [message.id for message in await world.messages()]
 
-    with pytest.raises(AdventureFormatError) as failure:
-        await world.run()
+    with caplog.at_level(logging.ERROR, logger="dnd_server.dm.turn"):
+        with pytest.raises(Conflict) as failure:
+            await world.run()
 
     # Ход не начался: резерв откатился целиком, игра ждёт хоста в той же фазе.
     game = await world.game()
@@ -1784,9 +1788,11 @@ async def test_a_broken_adventure_copy_stops_the_turn_before_the_reserve_and_cha
     ]
     assert [message.id for message in await world.messages()] == messages_before
     assert await world.logs() == [] and world.broadcaster.sent == []
-    # Текст ошибки и трассировка для журнала сервера говорят, где беда, но не несут значений входа.
-    assert failure.value.problems
-    for text in (str(failure.value), safe_traceback(failure.value, world.deps.settings)):
+    # Хост получает понятный отказ (409, а не 500), журнал сервера — где беда, без значений копии.
+    assert failure.value.message == BROKEN_COPY
+    [record] = [r for r in caplog.records if r.name == "dnd_server.dm.turn"]
+    assert world.game_id in record.getMessage() and "world" in record.getMessage()
+    for text in (str(failure.value), caplog.text):
         assert BROKEN_VALUE not in text and "input_value" not in text
 
 
@@ -1913,7 +1919,7 @@ async def test_a_failing_announcement_is_logged_without_the_input_and_the_turn_s
 ):
     use_provider(monkeypatch, StubProvider())
 
-    def broken(*_args: Any) -> None:
+    def broken(*_args: Any, **_options: Any) -> None:
         raise leak.error
 
     monkeypatch.setattr(turn_module, "phase_event", broken)

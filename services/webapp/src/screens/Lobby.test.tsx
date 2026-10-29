@@ -269,6 +269,54 @@ describe("подключение и состав лобби", () => {
     ).toBeInTheDocument();
   });
 
+  test("у игрока с героем видно имя героя — и хосту, и другим игрокам (B11.3)", async () => {
+    const game = lobbyOf([
+      host({ hero_name: "Торин" }),
+      boris({ hero_name: "Мила Тень" }),
+      lira(),
+    ]);
+    await openLobby({ as: "u3", game });
+
+    expect(within(rowOf("Вика")).getByText("Герой: Торин")).toBeVisible();
+    expect(within(rowOf("Борис")).getByText("Герой: Мила Тень")).toBeVisible();
+    expect(within(rowOf("Лира")).queryByText(/Герой:/)).toBeNull();
+    // Значок статуса остаётся рядом: на его тексты («Персонаж создан») опираются e2e.
+    expect(
+      within(rowOf("Борис")).getByText("Готов", { selector: ".ui-badge" }),
+    ).toBeInTheDocument();
+  });
+
+  test("своё имя героя видно в своей строке и обновляется событием lobby", async () => {
+    const { ws } = await openLobby({
+      as: "u2",
+      game: lobbyOf([host(), boris({ hero_name: "Мила" })]),
+    });
+    expect(within(rowOf("Борис")).getByText("Герой: Мила")).toBeVisible();
+
+    await serve(ws.last(), {
+      type: "lobby",
+      game: lobbyOf([host(), boris({ hero_name: "Мила Тень" })]),
+    });
+
+    expect(within(rowOf("Борис")).getByText("Герой: Мила Тень")).toBeVisible();
+  });
+
+  test("имя героя — только текст: разметка не исполняется", async () => {
+    const markup = "<img src=x onerror=alert(1)>";
+    await openLobby({ game: lobbyOf([host({ hero_name: markup })]) });
+
+    expect(within(rowOf("Вика")).getByText(`Герой: ${markup}`)).toBeVisible();
+    expect(document.querySelector("img[src='x']")).toBeNull();
+  });
+
+  test("сервер без hero_name (до B11) — строка игрока как раньше", async () => {
+    const { hero_name: _dropped, ...old } = boris();
+    await openLobby({ game: lobbyOf([host(), old]) });
+
+    expect(screen.queryByText(/Герой:/)).toBeNull();
+    expect(within(rowOf("Борис")).getByText("Готов")).toBeInTheDocument();
+  });
+
   test("хост помечен, текущий игрок отмечен «вы»", async () => {
     await openLobby({ as: "u2" });
 
@@ -457,6 +505,21 @@ describe("лобби обновляется событием lobby", () => {
     expect(useGame.getState()).toMatchObject({
       screen: "games",
       notice: "Игра недоступна.",
+    });
+  });
+
+  test("хост исключил игрока (кадр kicked и 4403) — «Мои игры» с «Хост исключил вас.»", async () => {
+    const { ws } = await openLobby({ as: "u3" });
+
+    act(() => {
+      ws.last().serve({ type: "kicked" });
+      ws.last().drop(4403, "kicked");
+    });
+
+    expect(useGame.getState()).toMatchObject({
+      screen: "games",
+      gameId: null,
+      notice: "Хост исключил вас.",
     });
   });
 
@@ -1270,6 +1333,92 @@ describe("начало игры: вплетение", () => {
       await wait(MINUTE);
 
       expect(button("Повторить")).toBeInTheDocument();
+    });
+
+    describe("от серверного начала вплетения (phase_since, контракт B11, §2)", () => {
+      const NOW = Date.parse("2026-10-20T12:00:00+00:00");
+      const ago = (seconds: number) =>
+        new Date(NOW - seconds * 1000).toISOString();
+
+      /** Лобби открыто посреди вплетения: снимок, затем фаза с серверным началом. */
+      async function reopenedAfter(seconds: number, as: "u1" | "u2" = "u1") {
+        vi.useFakeTimers({ toFake: [...FAKE_TIMERS, "Date"] });
+        vi.setSystemTime(NOW);
+        const opened = await openLobby({ as, game: weavingGame("resolving") });
+        await serve(opened.ws.last(), {
+          type: "phase",
+          phase: {
+            ...phaseEvent("weaving", "resolving").phase,
+            phase_since: ago(seconds),
+          },
+        });
+        return opened;
+      }
+
+      test("перезагрузка на 50-й секунде: «Повторить» через 10 с, а не через минуту", async () => {
+        await reopenedAfter(50);
+
+        await wait(9_000);
+        noButton("Повторить");
+        await wait(1_000);
+
+        expect(button("Повторить")).toBeInTheDocument();
+        expect(
+          screen.getByText("Мастер думает дольше обычного."),
+        ).toBeVisible();
+      });
+
+      test("счётчик «Ждём» продолжает с серверного начала", async () => {
+        await reopenedAfter(50, "u2");
+
+        await wait(1_000);
+
+        expect(thinking()).toHaveTextContent("Ждём 0:51");
+      });
+
+      test("игроку кнопки нет и при серверном начале", async () => {
+        await reopenedAfter(120, "u2");
+
+        await wait(1_000);
+
+        noButton("Повторить");
+      });
+
+      // Финальное покрытие B11: после перезагрузки начало вплетения приходит в самом снимке,
+      // а сдвиг часов стор берёт из его `server_time`.
+      test("перезагрузка: снимок с началом вплетения, часы телефона отстают на 3 минуты — «Повторить» через 10 с", async () => {
+        vi.useFakeTimers({ toFake: [...FAKE_TIMERS, "Date"] });
+        vi.setSystemTime(NOW);
+        const serverNow = NOW + 180_000;
+        const game = weavingGame("resolving");
+        const { ws } = await openLobby({ as: "u1", game: null });
+        await act(async () => {
+          ws.last().open();
+          ws.last().serve(
+            snapshotOf(game, {
+              server_time: new Date(serverNow).toISOString(),
+              phase: {
+                phase: "weaving",
+                turn_phase: "resolving",
+                deadline_at: null,
+                remaining_seconds: null,
+                scene: null,
+                // По часам сервера вплетение идёт 50 с.
+                phase_since: new Date(serverNow - 50_000).toISOString(),
+                can_regenerate: false,
+              },
+            }),
+          );
+        });
+
+        await wait(1_000);
+        expect(thinking()).toHaveTextContent("Ждём 0:51");
+        await wait(8_000);
+        noButton("Повторить");
+        await wait(1_000);
+
+        expect(button("Повторить")).toBeInTheDocument();
+      });
     });
 
     test("смена фазы хода отсчитывает минуту заново", async () => {

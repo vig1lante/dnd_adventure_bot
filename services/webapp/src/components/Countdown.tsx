@@ -15,7 +15,12 @@ export interface CountdownProps {
   label?: string;
 }
 
-/** Идущий отсчёт: оставшееся время считается от серверного срока и часов, а не по числу тиков. */
+/**
+ * Идущий отсчёт: оставшееся время считается от серверного срока и часов, а не по числу тиков.
+ * Воск тает от большего из настроенного срока и остатка в миг, когда пришёл этот срок: после
+ * «+1 мин» остаток больше настроенного, и свеча полна и тает до самого конца (контракт B11,
+ * §1 п. 16), а не стоит полной, пока остаток не опустится до прежнего срока.
+ */
 function Running({
   phase,
   clockOffsetMs,
@@ -24,6 +29,7 @@ function Running({
 }: CountdownProps) {
   const [now, setNow] = useState(() => Date.now());
   const left = secondsLeft(phase, clockOffsetMs, now) ?? 0;
+  const [leftAtStart] = useState(left);
   const ticking = left > 0;
 
   useEffect(() => {
@@ -35,7 +41,11 @@ function Running({
   return (
     <CandleCountdown
       remainingSeconds={left}
-      totalSeconds={totalSeconds}
+      totalSeconds={
+        totalSeconds === undefined
+          ? undefined
+          : Math.max(totalSeconds, leftAtStart)
+      }
       label={label}
     />
   );

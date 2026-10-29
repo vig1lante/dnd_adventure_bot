@@ -11,8 +11,9 @@ import { expect, test } from "./server.ts";
 // Состав лобби на настоящем сервере: выход игрока, повторный вход по коду и исключение хостом.
 // Юнит-тесты экранов проверяют это на заглушках сокета; здесь сервер сам рвёт сокет кодом 4403
 // (игрок больше не участник), и клиент должен отреагировать так, как описано в плане B8.3 и B8.5:
-// выходящему не мигает «Игра недоступна.», исключённому она показывается, герой исчезает вместе
-// с игроком, а чужие данные игры перестают быть доступными.
+// выходящему не мигает «Игра недоступна.», исключённому показывается «Хост исключил вас.» (кадр
+// `kicked` перед 4403, B11), герой исчезает вместе с игроком, а чужие данные игры перестают быть
+// доступными.
 
 interface Player {
   login: string;
@@ -40,6 +41,35 @@ async function openPlayer(
 
 const button = (page: Page, name: string) =>
   page.getByRole("button", { name, exact: true });
+
+// Время в полях B11 (`created_at`): ISO 8601 в UTC с явным `+00:00`.
+const ISO_UTC = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?\+00:00$/;
+// Часовой пояс второго телефона хоста: круглый год UTC+5, без перехода на летнее время.
+const PHONE_TIMEZONE = "Asia/Yekaterinburg";
+const PHONE_OFFSET_MS = 5 * 60 * 60 * 1000;
+const MONTHS = [
+  "января",
+  "февраля",
+  "марта",
+  "апреля",
+  "мая",
+  "июня",
+  "июля",
+  "августа",
+  "сентября",
+  "октября",
+  "ноября",
+  "декабря",
+];
+
+/** Момент сервера по часам телефона в `PHONE_TIMEZONE`: «29 октября 2026, 19:05». */
+function phoneMoment(iso: string): string {
+  const local = new Date(Date.parse(iso) + PHONE_OFFSET_MS);
+  const time = [local.getUTCHours(), local.getUTCMinutes()]
+    .map((part) => String(part).padStart(2, "0"))
+    .join(":");
+  return `${local.getUTCDate()} ${MONTHS[local.getUTCMonth()]} ${local.getUTCFullYear()}, ${time}`;
+}
 
 async function tokenOf(request: APIRequestContext, login: string) {
   const response = await request.post("/api/auth/dev", { data: { login } });
@@ -103,6 +133,46 @@ test("лобби: выход, возврат по коду и исключени
       return found?.id ?? "";
     });
 
+    // Финальное покрытие B11 (контракт, §2): дата создания приходит от сервера в UTC, а строка
+    // «Мои игры» показывает её по часам телефона.
+    await test.step("«Мои игры» на втором телефоне хоста: дата создания игры по его часовому поясу", async () => {
+      const hostToken = await tokenOf(request, "dev-3");
+      const games = await request.get("/api/games", {
+        headers: { Authorization: `Bearer ${hostToken}` },
+      });
+      const game = (
+        (await games.json()) as {
+          id: string;
+          adventure_title: string;
+          created_at: string;
+        }[]
+      ).find((item) => item.id === gameId);
+      if (game === undefined) throw new Error("игры хоста нет в списке");
+      expect(game.created_at, "дата создания в ответе").toMatch(ISO_UTC);
+
+      const context = await browser.newContext({
+        baseURL,
+        locale: "ru-RU",
+        timezoneId: PHONE_TIMEZONE,
+        viewport: { width: 390, height: 844 },
+      });
+      try {
+        const page = await context.newPage();
+        await page.goto("/?dev=dev-3");
+        await expect(page.getByText("Вы вошли как dev-3.")).toBeVisible();
+
+        const created = `создана ${phoneMoment(game.created_at)}`;
+        const row = page.getByRole("listitem").filter({ hasText: created });
+        await expect(row).toHaveCount(1);
+        await expect(
+          row.getByRole("button", { name: `Открыть: ${game.adventure_title}` }),
+        ).toHaveAccessibleDescription(new RegExp(created));
+        await expectFitsPhone(page, "«Мои игры»: строка игры с датой создания");
+      } finally {
+        await context.close();
+      }
+    });
+
     await test.step("Друг выходит из лобби: «Игра недоступна» не мигает, герой исчезает", async () => {
       await button(friend.page, "Выйти из лобби").click();
       await expect(
@@ -127,7 +197,7 @@ test("лобби: выход, возврат по коду и исключени
       await expect(button(friend.page, "Создать персонажа")).toBeVisible();
     });
 
-    await test.step("Хост исключает друга: тот видит «Игра недоступна.», доступ к игре закрыт", async () => {
+    await test.step("Хост исключает друга: тот видит «Хост исключил вас.», доступ к игре закрыт", async () => {
       await host.page
         .getByRole("button", { name: "Исключить dev-4", exact: true })
         .click();
@@ -138,11 +208,13 @@ test("лобби: выход, возврат по коду и исключени
       await button(host.page, "Да, исключить").click();
       await expect(host.page.getByText("Игроки (1)")).toBeVisible();
 
-      // Сервер закрыл сокет кодом 4403: клиент ведёт в «Мои игры» и объясняет почему.
+      // Сервер прислал кадр `kicked` и закрыл сокет кодом 4403: клиент ведёт в «Мои игры» и
+      // объясняет почему.
       await expect(
         friend.page.getByRole("heading", { name: "Мои игры" }),
       ).toBeVisible();
-      await expect(friend.page.getByText("Игра недоступна.")).toBeVisible();
+      await expect(friend.page.getByText("Хост исключил вас.")).toBeVisible();
+      await expect(friend.page.getByText("Игра недоступна.")).toHaveCount(0);
 
       // Для исключённого игры больше нет: ни сводки, ни героя, ни предпросмотра.
       const friendToken = await tokenOf(request, "dev-4");

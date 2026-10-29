@@ -24,6 +24,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -1455,6 +1456,35 @@ async def test_a_failure_of_the_weaving_leaves_a_game_the_host_can_repeat(
     assert world.recorder.phases()[-1] == ("weaving", "dm_failed")
     # Остальным игрокам записи нет.
     assert await world.feed_of("boris") == []
+
+
+async def test_the_phases_of_the_weaving_start_at_the_clock_of_the_master(monkeypatch, world):
+    # Дополнение B11 §1 п. 1: «мастер думает» и «мастер не справился» вплетения пишут момент начала
+    # фазы теми же часами, что и ход мастера, и отдают его в кадре фазы.
+    seen: list[datetime] = []
+
+    def clock() -> datetime:
+        seen.append(datetime(2030, 5, 1, 12, 0, tzinfo=UTC) + timedelta(minutes=len(seen)))
+        return seen[-1]
+
+    world.deps = dataclasses.replace(world.deps, clock=clock)
+    use_provider(monkeypatch, StubProvider(RuntimeError("баг")))
+
+    await world.run()
+
+    game = await world.game()
+    phases = [
+        (p["phase"]["turn_phase"], p["phase"]["phase_since"])
+        for p, _who in world.recorder.of_type("phase")
+    ]
+    assert phases == [
+        ("resolving", seen[0].isoformat()),
+        ("dm_failed", seen[-1].isoformat()),
+    ]
+    assert len(seen) == 2 and (game.turn_phase, game.phase_since) == (
+        TurnPhase.DM_FAILED,
+        seen[-1],
+    )
 
 
 async def test_the_note_of_a_failed_weaving_is_worded_like_the_one_of_a_failed_opening(

@@ -1214,6 +1214,20 @@ test("конструктор III: двенадцать шагов на загл�
     const game =
       await test.step("8. Игра на опубликованном: каталог уже знает его, сервер не перезапускался", async () => {
         await button(page, "К списку приключений").click();
+        // Опубликованный черновик помечен в списке (B11, §2: `published_id` от сервера), отметка
+        // описывает и кнопку «Открыть»; строка с отметкой помещается на телефоне.
+        const reopen = button(page, `Открыть: ${ADVENTURE_TITLE}`);
+        await expect(reopen).toHaveAccessibleDescription(/опубликовано/);
+        await expect(
+          page
+            .getByRole("listitem")
+            .filter({ has: reopen })
+            .getByText("опубликовано", { exact: true }),
+        ).toBeVisible();
+        await expectFitsPhone(
+          page,
+          "список приключений: опубликованный черновик",
+        );
         await page.getByRole("tab", { name: "Мои игры", exact: true }).click();
         const catalog = page.waitForResponse(
           (response) =>

@@ -2289,6 +2289,41 @@ def test_the_master_cannot_write_an_entity_without_text_without_a_note(
     assert [entry.text for entry in state.journal] == ["Маленький ключ."]
 
 
+# Текст из одних пробелов — пустой, как и у валидатора (`clue_without_description`,
+# `item_without_text`; дополнение B11 §5 п. 1): найденная улика без описания записи не даёт, а
+# предмет с `public` из пробелов записывается по названию — как при пустом тексте выше.
+
+
+def blank_texts(data: dict[str, Any]) -> None:
+    data["revelations"]["kidnapper"]["clues"][2]["description"] = " \n "  # clue-tracks
+    data["items"]["chest-key"].update(name="Ключ от сундука", public="  ")
+
+
+def test_a_clue_described_only_by_spaces_is_found_without_an_empty_entry(
+    run, make_ctx, make_state, demo_adventure
+):
+    adventure = variant(demo_adventure, blank_texts)
+    ctx = make_ctx(make_state(location_id="cemetery"), adventure=adventure)
+
+    outcome = run(ctx, "reveal", ref="feature:tracks")
+
+    assert outcome.error is None and "clue:clue-tracks" in ctx.state.world.revealed
+    assert ctx.state.journal == ()
+
+
+def test_an_item_with_spaces_instead_of_public_text_is_written_by_its_name(
+    run, make_ctx, make_state, demo_adventure
+):
+    adventure = variant(demo_adventure, blank_texts)
+    ctx = make_ctx(make_state(), adventure=adventure)
+
+    outcome = run(ctx, "give_item", item_id="chest-key", character_id="pc-2")
+
+    assert outcome.error is None
+    [entry] = ctx.state.journal
+    assert (entry.title, entry.text) == ("Ключ от сундука", "Ключ от сундука")
+
+
 # --- journal_add: только найденная улика (S4) и печатаемость note (R4), дополнение §11 ---
 
 
@@ -2346,6 +2381,265 @@ def test_journal_add_still_refuses_invisible_and_reversing_characters(
 
     assert outcome.result is None and "note" in outcome.error
     assert ctx.state.journal == ()
+
+
+@pytest.mark.parametrize(
+    "note",
+    [
+        pytest.param("\u3164", id="hangul-filler"),
+        pytest.param("\u115f\u1160", id="hangul-choseong-jungseong-fillers"),
+        pytest.param("\uffa0 \u3164", id="halfwidth-filler-and-space"),
+        pytest.param("\u2800\u2800\u2800", id="braille-blank"),
+        pytest.param("\u3164\n\u2800", id="fillers-on-two-lines"),
+        pytest.param("\U0001d159", id="null-notehead"),
+        pytest.param("\u0301\u034f", id="marks-without-a-letter"),
+    ],
+)
+def test_journal_add_refuses_a_note_without_a_single_visible_character(
+    run, make_ctx, make_state, note
+):
+    # Знаки-заполнители печатаемы и не обрезаются strip(), но на экране игрок увидел бы пустой
+    # абзац: в заметке нужен хотя бы один видимый знак.
+    ctx = make_ctx(make_state())
+
+    outcome = run(ctx, "journal_add", ref="world", note=note)
+
+    assert outcome.result is None and "note" in outcome.error
+    assert ctx.state.journal == ()
+
+
+@pytest.mark.parametrize(
+    "note",
+    [
+        pytest.param("Ключ — у Марты.", id="cyrillic"),
+        pytest.param("Cafe\u0301 у тракта", id="combining-accent"),
+        pytest.param("\u9375\u306f\u4e95\u6238\u306e\u4e2d", id="cjk"),
+        pytest.param("\u0663 \u0630\u0647\u0628", id="arabic"),
+        pytest.param("\U0001f5dd", id="symbol"),
+        pytest.param("…", id="punctuation"),
+    ],
+)
+def test_journal_add_accepts_a_note_with_a_visible_character_in_any_script(
+    run, make_ctx, make_state, note
+):
+    ctx = make_ctx(make_state())
+
+    outcome = run(ctx, "journal_add", ref="world", note=note)
+
+    assert outcome.error is None, outcome.error
+    assert ctx.state.journal[0].text == note
+
+
+# --- B11.coverage: видимый знак в note — весь список, смеси, комбинируемые знаки, RTL ---
+
+# Печатаемые, но пустые на экране знаки из справочников «невидимых символов»: заполнители хангыля,
+# пустой шаблон Брайля, пустая нотная головка и комбинируемые знаки без буквы (соединитель графем,
+# немые гласные кхмерского, селектор варианта, заполнитель киданьского письма).
+PRINTABLE_BLANKS = {
+    "U+115F": "\u115f",
+    "U+1160": "\u1160",
+    "U+3164": "\u3164",
+    "U+FFA0": "\uffa0",
+    "U+2800": "\u2800",
+    "U+1D159": "\U0001d159",
+    "U+034F": "\u034f",
+    "U+17B4": "\u17b4",
+    "U+17B5": "\u17b5",
+    "U+FE0F": "\ufe0f",
+    "U+16FE4": "\U00016fe4",
+}
+# Остальные знаки тех же справочников: пробелы разной ширины, мягкий перенос, знаки нулевой
+# ширины, метки направления, невидимые операторы, нотные форматирующие знаки и тег-пробел.
+OTHER_BLANKS = {
+    "U+00A0": "\u00a0",
+    "U+00AD": "\u00ad",
+    "U+061C": "\u061c",
+    "U+180E": "\u180e",
+    "U+2000": "\u2000",
+    "U+200A": "\u200a",
+    "U+200B": "\u200b",
+    "U+200C": "\u200c",
+    "U+200E": "\u200e",
+    "U+200F": "\u200f",
+    "U+202F": "\u202f",
+    "U+205F": "\u205f",
+    "U+2060": "\u2060",
+    "U+2061": "\u2061",
+    "U+2064": "\u2064",
+    "U+3000": "\u3000",
+    "U+FEFF": "\ufeff",
+    "U+1D173": "\U0001d173",
+    "U+1D17A": "\U0001d17a",
+    "U+E0020": "\U000e0020",
+}
+
+
+@pytest.mark.parametrize("char", PRINTABLE_BLANKS.values(), ids=PRINTABLE_BLANKS.keys())
+def test_journal_add_refuses_a_note_of_any_printable_blank_and_tells_the_model_why(
+    run, make_ctx, make_state, char
+):
+    # Ошибка называет причину: модель исправляет заметку сама, а не повторяет её.
+    ctx = make_ctx(make_state())
+
+    outcome = run(ctx, "journal_add", ref="world", note=f"{char} {char}\n{char}")
+
+    assert outcome.result is None
+    assert "note" in outcome.error and "видимый знак" in outcome.error
+    assert ctx.state.journal == ()
+
+
+@pytest.mark.parametrize("char", OTHER_BLANKS.values(), ids=OTHER_BLANKS.keys())
+def test_journal_add_refuses_a_note_of_any_other_invisible_character(
+    run, make_ctx, make_state, char
+):
+    ctx = make_ctx(make_state())
+
+    outcome = run(ctx, "journal_add", ref="world", note=char * 3)
+
+    assert outcome.result is None and "note" in outcome.error
+    assert ctx.state.journal == ()
+
+
+def test_journal_add_refuses_a_note_mixing_every_printable_blank_with_spaces_and_lines(
+    run, make_ctx, make_state
+):
+    ctx = make_ctx(make_state())
+    note = " ".join(PRINTABLE_BLANKS.values()) + "\n\u3164\u0301 \u2800"
+
+    outcome = run(ctx, "journal_add", ref="world", note=note)
+
+    assert outcome.result is None and "видимый знак" in outcome.error
+    assert ctx.state.journal == ()
+
+
+@pytest.mark.parametrize(
+    "note",
+    [
+        pytest.param("\u3164Ключ у Марты\u2800", id="word-between-fillers"),
+        pytest.param("\u2800 \u2800 7", id="digit-after-braille-blanks"),
+        pytest.param("\u3164\n…", id="punctuation-after-a-filler"),
+        pytest.param("\u0301\u034fЛ", id="loose-marks-before-a-letter"),
+    ],
+)
+def test_journal_add_accepts_one_visible_character_among_blanks_and_keeps_the_note_as_is(
+    run, make_ctx, make_state, note
+):
+    # Видимого знака достаточно: заметку не чистят, она уходит игрокам как есть.
+    ctx = make_ctx(make_state())
+
+    outcome = run(ctx, "journal_add", ref="world", note=note)
+
+    assert outcome.error is None, outcome.error
+    assert ctx.state.journal[0].text == note
+
+
+@pytest.mark.parametrize(
+    ("note", "accepted"),
+    [
+        pytest.param("\u3164\u0301", False, id="accent-over-a-filler"),
+        pytest.param("\u2800\u20dd", False, id="enclosing-circle-over-braille-blank"),
+        pytest.param("\u0e31\u0e34", False, id="thai-vowel-marks-without-a-consonant"),
+        pytest.param("\u0301\u0301\u0301", False, id="stacked-accents-alone"),
+        pytest.param("1\u20e3", True, id="keycap-digit"),
+        pytest.param("a\u0300\u0301\u0302", True, id="stacked-accents-over-a-letter"),
+        pytest.param("\u0915\u094d\u0937", True, id="devanagari-conjunct"),
+        pytest.param("\u0e01\u0e31", True, id="thai-consonant-with-a-vowel-mark"),
+    ],
+)
+def test_combining_marks_count_only_on_top_of_a_visible_character(
+    run, make_ctx, make_state, note, accepted
+):
+    # Комбинируемый знак рисуется поверх соседа: над заполнителем он так же пуст, над буквой или
+    # цифрой — часть видимого текста.
+    ctx = make_ctx(make_state())
+
+    outcome = run(ctx, "journal_add", ref="world", note=note)
+
+    assert (outcome.error is None) is accepted, outcome.error
+    assert [entry.text for entry in ctx.state.journal] == ([note] if accepted else [])
+
+
+@pytest.mark.parametrize(
+    ("note", "accepted"),
+    [
+        pytest.param("\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd", True, id="hebrew-with-niqqud"),
+        pytest.param(
+            "\u0645\u064e\u0631\u0652\u062d\u064e\u0628\u064b\u0627", True, id="arabic-with-harakat"
+        ),
+        pytest.param("Марта сказала: «\u05e9\u05dc\u05d5\u05dd»", True, id="rtl-inside-cyrillic"),
+        pytest.param("\u0661\u0662\u0663", True, id="arabic-indic-digits"),
+        pytest.param("\u200f\u200e", False, id="direction-marks-alone"),
+        pytest.param("\u05e9\u05dc\u05d5\u05dd\u200f", False, id="rtl-mark-after-hebrew"),
+        pytest.param("\u061c\u0645\u0631\u062d\u0628\u0627", False, id="arabic-letter-mark"),
+    ],
+)
+def test_right_to_left_text_is_visible_but_direction_marks_are_refused(
+    run, make_ctx, make_state, note, accepted
+):
+    # Письмо справа налево — обычный видимый текст. Метки направления невидимы и переставляют
+    # соседний текст на экране игрока: с ними заметка не проходит, даже рядом с буквами.
+    ctx = make_ctx(make_state())
+
+    outcome = run(ctx, "journal_add", ref="world", note=note)
+
+    assert (outcome.error is None) is accepted, outcome.error
+    assert [entry.text for entry in ctx.state.journal] == ([note] if accepted else [])
+
+
+# --- B11.coverage: раунд дополнения записи через инструменты (дополнение B11 §1 п. 4) ---
+
+
+def test_journal_add_remembers_the_round_of_each_extension_and_only_of_an_extension(
+    run, make_ctx, make_state
+):
+    # Три заметки по 500 знаков с абзацами — 1504 знака; четвёртая вышла бы за предел 2000.
+    state = make_state(party_round=2)
+    ctx = make_ctx(state)
+    note = "я" * MAX_NOTE_CHARS
+
+    run(ctx, "journal_add", ref="world", note=note)
+    created = journal_of(state)["world@all"]
+    state.party_round = 5
+    run(ctx, "journal_add", ref="world", note=note)
+    extended = journal_of(state)["world@all"]
+    state.party_round = 6
+    run(ctx, "journal_add", ref="world")
+    state.party_round = 7
+    run(ctx, "journal_add", ref="world", note=note)
+    last = journal_of(state)["world@all"]
+    state.party_round = 8
+    before = state.model_dump()
+    refused = run(ctx, "journal_add", ref="world", note=note)
+
+    assert (created.updated_turn, extended.updated_turn, last.updated_turn) == (None, 5, 7)
+    assert last.revision == 3  # повтор без note ни текста, ни раунда не менял
+    assert refused.result is None and str(MAX_TEXT_CHARS) in refused.error
+    assert state.model_dump() == before
+
+
+def test_automatic_entries_of_the_tools_are_not_extensions_until_the_master_adds_a_note(
+    run, make_ctx, make_state, demo_adventure
+):
+    # Переход в известное место и находка улики пишут дневник сами, но текст словами мастера
+    # не дополняют (решение D4); раунд дополнения ставит только `journal_add` с note.
+    state = open_journal(make_state(party_round=2), demo_adventure)
+    ctx = make_ctx(state)
+
+    assert run(ctx, "move_party", location_id="cemetery").error is None
+    assert run(ctx, "reveal", ref="clue:clue-diary").error is None
+    cemetery = journal_of(state)["location:cemetery@all"]
+    clue = journal_of(state)["clue:clue-diary@all"]
+
+    assert (cemetery.revision, cemetery.visited_turn, cemetery.updated_turn) == (2, 2, None)
+    assert clue.updated_turn is None
+    assert {entry.updated_turn for entry in state.journal} == {None}
+
+    state.party_round = 4
+    outcome = run(ctx, "journal_add", ref="clue:clue-diary", note="Почерк Фабиана.")
+
+    assert outcome.result == {"entry_id": "clue:clue-diary@all", "new": False, "revision": 2}
+    assert journal_of(state)["clue:clue-diary@all"].updated_turn == 4
+    assert journal_of(state)["location:cemetery@all"] == cemetery
 
 
 def test_the_limit_of_a_note_counts_after_the_soft_hyphens_are_removed(run, make_ctx, make_state):

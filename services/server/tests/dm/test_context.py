@@ -1548,6 +1548,16 @@ def test_the_reading_guide_calls_the_texts_of_the_adventure_data_of_its_author(s
     assert "написал сервер" not in guide
 
 
+def test_the_reading_guide_gives_a_secret_turn_to_the_author_of_the_turn_not_of_the_adventure(
+    srd, adventure
+):
+    # Рядом сказано про «автора приключения»: тайный ход принадлежит автору хода (B6 N1, B11).
+    guide = context_of(srd, adventure).splitlines()[1]
+
+    assert "его результат и броски принадлежат автору хода," in guide
+    assert "принадлежат автору," not in guide
+
+
 # --- дневник: граница строки и связь промпта с инструментами (финальное покрытие блока B8) ---
 
 

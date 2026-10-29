@@ -16,7 +16,8 @@ dispatcher B4, B5 и B6).
 
 import asyncio
 from collections.abc import Iterable
-from typing import Any, ClassVar
+from datetime import datetime
+from typing import Any, ClassVar, NamedTuple
 
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import delete, select, update
@@ -53,6 +54,7 @@ from dnd_server.db.models import (
     AuthoredAdventure,
     AuthoringJob,
     User,
+    iso_utc,
     utcnow,
 )
 
@@ -191,14 +193,25 @@ def _ref_name(entity: Any) -> str:
     return name if name.strip() else entity.id
 
 
-def summary_out(row: AdventureDraft) -> dict[str, Any]:
-    """`DraftSummary`: строка списка черновиков без разбора всего черновика."""
+class Publication(NamedTuple):
+    """Публикация черновика для списка: id приключения и время, без JSON самого приключения."""
+
+    adventure_id: str
+    published_at: datetime
+
+
+def summary_out(row: AdventureDraft, published: Publication | None) -> dict[str, Any]:
+    """`DraftSummary`: строка списка черновиков без разбора всего черновика. `published` — первая
+    публикация черновика (`first_publications`) или `None`: по ней клиент ставит бейдж
+    «опубликовано» (дополнение B11 §2)."""
     return {
         "id": row.id,
         "title": row.title,
         "adventure_id": row.data.get("id"),
         "version": row.version,
         "updated_at": row.updated_at.isoformat(),
+        "published_id": None if published is None else published.adventure_id,
+        "published_at": None if published is None else iso_utc(published.published_at),
     }
 
 
@@ -207,12 +220,37 @@ async def _out(session: AsyncSession, row: AdventureDraft) -> dict[str, Any]:
 
 
 async def list_drafts(session: AsyncSession, user: User) -> list[dict[str, Any]]:
-    rows = await session.scalars(
-        select(AdventureDraft)
-        .where(AdventureDraft.owner_user_id == user.id)
-        .order_by(AdventureDraft.updated_at.desc())
+    rows = list(
+        await session.scalars(
+            select(AdventureDraft)
+            .where(AdventureDraft.owner_user_id == user.id)
+            .order_by(AdventureDraft.updated_at.desc())
+        )
     )
-    return [summary_out(row) for row in rows]
+    published = await first_publications(session, [row.id for row in rows])
+    return [summary_out(row, published.get(row.id)) for row in rows]
+
+
+async def first_publications(session: AsyncSession, draft_ids: list[str]) -> dict[str, Publication]:
+    """Первая публикация каждого черновика из `draft_ids` одним запросом на все (без N+1).
+
+    «Первая» — в том же порядке, что у `published_id`: по времени публикации, затем по id. Читаются
+    только три нужных столбца: JSON опубликованного приключения списку ни к чему."""
+    if not draft_ids:
+        return {}
+    rows = await session.execute(
+        select(
+            AuthoredAdventure.source_draft_id,
+            AuthoredAdventure.id,
+            AuthoredAdventure.published_at,
+        )
+        .where(AuthoredAdventure.source_draft_id.in_(draft_ids))
+        .order_by(AuthoredAdventure.published_at, AuthoredAdventure.id)
+    )
+    first: dict[str, Publication] = {}
+    for draft_id, adventure_id, published_at in rows:
+        first.setdefault(draft_id, Publication(adventure_id, published_at))
+    return first
 
 
 async def get_draft(session: AsyncSession, user: User, draft_id: str) -> dict[str, Any]:

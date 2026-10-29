@@ -56,6 +56,13 @@ HOSTILE_KEYS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def dev_mode(monkeypatch):
+    """Генератор без живой модели запускают в dev, как в README: тестовый мастер `fake` вне dev
+    не собирается (спека DND-2 §15). Тест боевого режима ставит APP_ENV=prod сам."""
+    monkeypatch.setenv("APP_ENV", "dev")
+
+
 @pytest.fixture
 def demo_env(monkeypatch):
     """Настройки dev-прогона без модели: провайдер fake и сценарий генератора."""
@@ -940,6 +947,19 @@ def test_missing_scenario_is_a_config_error_with_exit_code_2(tmp_path, capsys):
     assert not out.exists()
 
 
+def test_the_test_master_outside_dev_exits_with_2_without_naming_its_scenario(
+    demo_env, monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("APP_ENV", "prod")
+
+    code = generate_into(tmp_path / "out")
+
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "тестовый мастер fake доступен только в dev-режиме" in err
+    assert str(DEMO_SCENARIO) not in err and not (tmp_path / "out").exists()
+
+
 def test_claude_code_cli_outside_dev_exits_with_2_without_starting_a_process(
     monkeypatch, tmp_path, capsys
 ):
@@ -947,6 +967,7 @@ def test_claude_code_cli_outside_dev_exits_with_2_without_starting_a_process(
         raise AssertionError("процесс claude запущен")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", refuse)
+    monkeypatch.setenv("APP_ENV", "prod")
 
     code = generate_into(tmp_path / "out", "--provider", "claude_code_cli")
 

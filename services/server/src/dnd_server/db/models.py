@@ -19,8 +19,9 @@ from dnd_server.db.base import Base
 
 # Версия JSON-схемы снимка `GameState`. Растёт, когда формат снимка меняется несовместимо; сервер
 # отказывается читать снимок с версией новее своей, чтобы откат кода не терял поля молча. Версия 2 —
-# дневник отряда (DND-2, B8), версия 3 — вид привала у сцены `scene.rest` (DND-2, B9).
-GAME_STATE_SCHEMA_VERSION = 3
+# дневник отряда (DND-2, B8), версия 3 — вид привала у сцены `scene.rest` (DND-2, B9), версия 4 —
+# раунд последнего дополнения записи дневника `journal[].updated_turn` (DND-2, B11).
+GAME_STATE_SCHEMA_VERSION = 4
 
 # Срок короткого привала у игр, записанных до него (миграция 0006), — как `SHORT_REST_SECONDS` по
 # умолчанию.
@@ -110,6 +111,12 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def iso_utc(moment: datetime) -> str:
+    """Время в ISO 8601 с явным поясом UTC (`+00:00`): без пояса браузер прочёл бы строку как
+    местное время и сдвинул отсчёт. База отдаёт время уже с поясом UTC (`UtcDateTime`)."""
+    return moment.astimezone(UTC).isoformat()
+
+
 def enum_column(enum_type: type[StrEnum]) -> Enum:
     """Тип колонки-перечисления: в базе лежат значения (`lobby`), а не имена членов.
 
@@ -147,6 +154,7 @@ class Game(Base):
     adventure_data: Mapped[dict[str, Any]]
 
     phase: Mapped[GamePhase] = mapped_column(enum_column(GamePhase), default=GamePhase.LOBBY)
+    # Фазу хода меняет только `set_turn_phase`: вместе с ней пишется момент её начала.
     turn_phase: Mapped[TurnPhase | None] = mapped_column(enum_column(TurnPhase))
     deadline_at: Mapped[datetime | None]
 
@@ -182,6 +190,19 @@ class Game(Base):
     # часов нет: игра в лобби или законченная.
     clock_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    # Когда началась текущая `turn_phase` (миграция 0007, DND-2 B11): по ней клиент считает минуту
+    # до «Повторить» в фазе «мастер думает» по серверному времени. Пусто у игр, записанных до
+    # миграции, пока их фаза не сменится.
+    phase_since: Mapped[datetime | None]
+
+    def set_turn_phase(self, phase: TurnPhase | None, now: datetime) -> None:
+        """Новая фаза хода; если она сменилась, `phase_since` становится `now`.
+
+        Фаза и момент её начала пишутся вместе, в одной транзакции с остальными изменениями игры:
+        клиенты не видят новую фазу со старым временем. Та же фаза ещё раз время не сдвигает."""
+        if phase != self.turn_phase:
+            self.phase_since = now
+        self.turn_phase = phase
 
     def active_time(self, now: datetime) -> int:
         """Секунды игры без пауз на момент `now`; на паузе часы стоят."""

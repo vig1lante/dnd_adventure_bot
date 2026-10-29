@@ -816,6 +816,41 @@ def test_the_clean_statblock_is_accepted_and_every_call_but_two_really_resolves(
     assert refused_calls == {("attack", "multiattack"), ("attack", "screech")}
 
 
+# --- B11.coverage: общая только инициатива начала боя (спека DND-2 §15, дополнение B11 §3) ---
+
+
+def test_a_monster_action_named_like_the_initiative_does_not_open_the_save_of_a_secret_hero(
+    run, make_ctx, make_state, srd
+):
+    # Имя действия монстра приходит из данных приключения и входит в подпись спасброска цели. В
+    # одном бою инициатива тайного героя общая, а его спасбросок против «Инициативы» крысы — только
+    # его: открывает объявление `start_combat`, а не текст подписи.
+    adventure = rat_adventure(actions=rat_actions(2, name="Инициатива"))
+    assert not validate(adventure, srd).blocking
+    ctx = make_ctx(make_state(), adventure=adventure, rng=SeededRng(0), secret_actors={HERO})
+
+    assert run(ctx, "start_combat", monsters=[{"monster_id": RAT}]).error is None
+
+    initiative = events_of(ctx, RollEvent)
+    assert {(roll.label, roll.audience) for roll in initiative} == {("Инициатива", "all")}
+    assert {roll.actor_id for roll in initiative} == {HERO, RAT_1}
+
+    combat = ctx.state.combat
+    combat.combatants[HERO].engaged_with.append(RAT_1)
+    combat.combatants[RAT_1].engaged_with.append(HERO)
+    combat.turn_index = combat.order.index(RAT_1)
+    ctx.acting = (RAT_1,)
+    before = len(ctx.events)
+
+    outcome = run(ctx, "monster_action", monster_id=RAT_1, action_id="screech", target_ids=[HERO])
+
+    assert outcome.error is None, outcome.error
+    saves = [e for e in ctx.events[before:] if isinstance(e, RollEvent)]
+    assert [(roll.actor_id, roll.label, roll.audience) for roll in saves] == [
+        (HERO, "Спасбросок: Инициатива", HERO)
+    ]
+
+
 # --- вне боя ---
 
 

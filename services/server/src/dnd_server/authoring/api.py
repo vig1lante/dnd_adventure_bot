@@ -10,10 +10,13 @@ dispatcher B4, B5 и B6): тонкая обёртка над `service`, `jobs` �
 
 Импорт принимает сырое тело `application/zip` (без multipart и новых пакетов): тип и размер тела
 проверяются до разбора, размер — ещё и по мере чтения, так что большое тело не копится в памяти.
+Перед отказом 413 тело дочитывается и выбрасывается (не больше `DRAIN_LIMIT_BYTES`): ответ, данный
+до конца тела, заставил бы uvicorn закрыть соединение, а прокси (Vite, туннель), который ещё
+передаёт тело, отдал бы клиенту 502 вместо 413 (дополнение B11 §1 п. 9).
 """
 
-from collections.abc import Callable, Coroutine
-from typing import Annotated, Any
+from collections.abc import AsyncIterator, Callable, Coroutine
+from typing import Annotated, Any, NoReturn
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -77,6 +80,9 @@ class UnsupportedMedia(DraftError):
 
 ZIP_TYPE = "application/zip"
 TOO_LARGE = f"Архив больше {MAX_BODY_BYTES // (1024 * 1024)} МиБ."
+# Сколько тела сервер дочитывает и выбрасывает перед отказом 413; дальше — отказ без чтения, и
+# соединение закрывается: бесконечное тело не должно занимать сервер.
+DRAIN_LIMIT_BYTES = 4 * MAX_BODY_BYTES
 
 router = APIRouter(prefix="/api", route_class=DraftRoute)
 
@@ -148,13 +154,27 @@ async def zip_body(request: Request) -> bytes:
     declared = request.headers.get("content-length", "")
     # `isdigit` пропускает и цифры Unicode («³»), которые `int` не читает.
     if declared.isascii() and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
-        raise BodyTooLarge(TOO_LARGE, "too_large")
+        await _refuse_too_large(request.stream(), int(declared) <= DRAIN_LIMIT_BYTES, read=0)
     body = bytearray()
-    async for chunk in request.stream():
+    stream = request.stream()
+    async for chunk in stream:
         body += chunk
         if len(body) > MAX_BODY_BYTES:
-            raise BodyTooLarge(TOO_LARGE, "too_large")
+            read = len(body)
+            body.clear()  # прочитанное не нужно: держать в памяти его незачем
+            await _refuse_too_large(stream, True, read=read)
     return bytes(body)
+
+
+async def _refuse_too_large(stream: AsyncIterator[bytes], drain: bool, *, read: int) -> NoReturn:
+    """Отказ 413; если `drain`, сначала тело дочитывается и выбрасывается, пока прочитано не
+    больше `DRAIN_LIMIT_BYTES` (`read` — сколько уже прочитано)."""
+    if drain:
+        async for chunk in stream:
+            read += len(chunk)
+            if read > DRAIN_LIMIT_BYTES:
+                break
+    raise BodyTooLarge(TOO_LARGE, "too_large")
 
 
 @router.get("/drafts/{draft_id}")

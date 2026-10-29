@@ -18,13 +18,22 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
 
 
-async def one_lobby_event(watchers: dict[str, Any]) -> dict[str, Any]:
-    """Каждый участник получил ровно одно событие `lobby`, и у всех оно одно и то же."""
+async def lobby_events(watchers: dict[str, Any], count: int) -> list[dict[str, Any]]:
+    """Каждый участник получил ровно `count` событий `lobby`, у всех одни и те же; их сводки игры.
+
+    Герой, которого описывает модель (быстрый и случайный), даёт два кадра: при сохранении и после
+    описания — во втором имя героя от модели (дополнение B11 §5 п. 2)."""
     frames = {name: await watcher.drain() for name, watcher in watchers.items()}
     for name, events in frames.items():
-        assert [e["type"] for e in events] == ["lobby"], (name, events)
+        assert [e["type"] for e in events] == ["lobby"] * count, (name, events)
     assert len({json.dumps(events) for events in frames.values()}) == 1
-    return next(iter(frames.values()))[0]["game"]
+    return [event["game"] for event in next(iter(frames.values()))]
+
+
+async def one_lobby_event(watchers: dict[str, Any]) -> dict[str, Any]:
+    """Каждый участник получил ровно одно событие `lobby`, и у всех оно одно и то же."""
+    [game] = await lobby_events(watchers, 1)
+    return game
 
 
 async def nothing_happened(watchers: dict[str, Any]) -> None:
@@ -58,12 +67,21 @@ async def test_every_member_hears_each_change_of_the_lobby_and_the_start(stand):
         assert len((await one_lobby_event(watchers))["players"]) == 3
         watchers["ivan"] = await stand.watch(stack, gid, ivan)
 
-        # Три способа создать персонажа: событие после каждого, без текста героя в чужих кадрах.
-        for player, make in ((mia, stand.quick), (host, stand.detailed), (ivan, stand.random)):
+        # Три способа создать персонажа: событие после каждого (и ещё одно после описания от
+        # модели у быстрого и случайного), без текста героя в чужих кадрах.
+        for player, make, frames in (
+            (mia, stand.quick, 2),
+            (host, stand.detailed, 1),
+            (ivan, stand.random, 2),
+        ):
             response = await make(player, gid)
             assert response.status_code == 201, response.text
-            lobby = await one_lobby_event(watchers)
+            *_saved, lobby = await lobby_events(watchers, frames)
             assert seats(lobby)[player.name] == (False, True)
+            hero = response.json()["character"]["name"]
+            assert (
+                next(p for p in lobby["players"] if p["user_id"] == player.id)["hero_name"] == hero
+            )
         assert all(has for _ready, has in seats(lobby).values())
 
         # Готовность: событие после каждой отметки.
@@ -75,7 +93,8 @@ async def test_every_member_hears_each_change_of_the_lobby_and_the_start(stand):
         # Новый персонаж заменяет прежнего и сбрасывает «Готов»; это видно всем и в новом снимке.
         old_id = (await stand.snapshot(gid, mia))["character"]["id"]
         assert (await stand.random(mia, gid)).status_code == 201
-        assert seats(await one_lobby_event(watchers))["dev-2"] == (False, True)
+        saved, described = await lobby_events(watchers, 2)
+        assert seats(saved)["dev-2"] == seats(described)["dev-2"] == (False, True)
         for player in (host, mia, ivan):
             snapshot = await stand.snapshot(gid, player)
             assert seats(snapshot["game"])["dev-2"] == (False, True)
@@ -108,9 +127,12 @@ async def test_a_players_hero_never_reaches_the_frames_of_the_others(stand):
     host, mia = [await stand.dev_player(n) for n in (1, 2)]
     game = await stand.new_game(host)
     await stand.join(mia, game["code"])
-    secrets = ["ЗАМЫСЕЛ-миры-4242", "ИМЯ-героя-4242", "ПРЕДЫСТОРИЯ-миры-4242"]
+    # Имя героя — не тайна: его видят все в лобби (`hero_name`, решение D3 блока B11), как и в
+    # отряде после старта. Тайна — замысел и предыстория.
+    secrets = ["ЗАМЫСЕЛ-миры-4242", "ПРЕДЫСТОРИЯ-миры-4242"]
+    hero_name = "ИМЯ-героя-4242"
     # Имя героя нарочно совпадает с id другого игрока и словом «все»: это текст, а не адрес.
-    tricky = [host.id, "all", "ИМЯ-героя-4242"]
+    tricky = [host.id, "all", hero_name]
 
     async with AsyncExitStack() as stack:
         watchers = {
@@ -120,13 +142,14 @@ async def test_a_players_hero_never_reaches_the_frames_of_the_others(stand):
         for name in tricky:
             response = await stand.quick(mia, game["id"], name=name, concept=f"{secrets[0]} {name}")
             assert response.status_code == 201, response.text
-            lobby = await one_lobby_event(watchers)
-            assert seats(lobby)["dev-2"] == (False, True)
+            for lobby in await lobby_events(watchers, 2):  # сохранение и описание от модели
+                assert seats(lobby)["dev-2"] == (False, True)
+                assert [p["hero_name"] for p in lobby["players"]] == [None, name]
         response = await stand.detailed(
             mia,
             game["id"],
-            name=secrets[1],
-            persona={"concept": secrets[0], "backstory": secrets[2]},
+            name=hero_name,
+            persona={"concept": secrets[0], "backstory": secrets[1]},
         )
         assert response.status_code == 201, response.text
         await one_lobby_event(watchers)
@@ -147,10 +170,10 @@ async def test_a_players_hero_never_reaches_the_frames_of_the_others(stand):
     assert not {"choices", "base_scores", "background_bonus", "method"} & seen_keys
     assert host_mine.status_code == 404 and not any(s in host_mine.text for s in secrets)
     assert mia_mine.json()["mode"] == "detailed"
-    assert mia_mine.json()["choices"]["name"] == secrets[1]
+    assert mia_mine.json()["choices"]["name"] == hero_name
     # Сама Мия видит своего героя целиком.
-    assert mia_view["character"]["name"] == secrets[1]
-    assert mia_view["character"]["persona"]["backstory"] == secrets[2]
+    assert mia_view["character"]["name"] == hero_name
+    assert mia_view["character"]["persona"]["backstory"] == secrets[1]
     assert mia_view["character"]["player_id"] == mia.id
     stand.assert_clean()
 

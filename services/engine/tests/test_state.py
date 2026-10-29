@@ -154,8 +154,9 @@ def rich_state(character) -> GameState:
                 text="Зал склепа.\n\nЗдесь пахнет воском.",
                 audience="all",
                 turn=3,
-                revision=2,
+                revision=3,  # дополнена словами мастера и отмечена первым приходом
                 visited_turn=5,
+                updated_turn=4,
             ),
             JournalEntry(
                 id="clue:ring@pc-1",
@@ -309,8 +310,9 @@ def test_the_journal_of_a_state_is_written_to_json_as_a_list_of_entries(make_cha
         "text": "Зал склепа.\n\nЗдесь пахнет воском.",
         "audience": "all",
         "turn": 3,
-        "revision": 2,
+        "revision": 3,
         "visited_turn": 5,
+        "updated_turn": 4,
     }
 
 

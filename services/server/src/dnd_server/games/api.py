@@ -172,8 +172,14 @@ async def kick_player(
     broadcaster: BroadcasterDep,
     hub: HubDep,
 ) -> GameOut:
-    game = await service.kick_player(
-        session, user, game_id, user_id, locks=locks, broadcaster=broadcaster
+    # Исключённый больше не участник: его сокеты снимаются до рассылки нового лобби, слышат только
+    # `kicked` и закрываются кодом 4403.
+    return await service.kick_player(
+        session,
+        user,
+        game_id,
+        user_id,
+        locks=locks,
+        broadcaster=broadcaster,
+        cut_off=lambda target: hub.kick_user(game_id, target),
     )
-    hub.drop_user(game_id, user_id)
-    return game

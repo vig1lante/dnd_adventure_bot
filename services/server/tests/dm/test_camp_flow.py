@@ -20,6 +20,7 @@
 import ast
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
@@ -84,7 +85,7 @@ from dnd_server.dm.camp_flow import (
     CAMP_LINES_PER_HERO,
     end_camp,
 )
-from dnd_server.dm.turn import Deps, run_dm_turn
+from dnd_server.dm.turn import BROKEN_COPY, Deps, run_dm_turn
 from dnd_server.llm.base import JsonRequest, ProviderError, TurnRequest, TurnResult, Usage
 from dnd_server.llm.fake import FakeProvider
 from dnd_server.realtime.views import snapshot_for
@@ -2166,12 +2167,20 @@ async def test_regenerate_is_409_after_the_host_started_a_rest_and_the_rest_goes
         in_camp=False, scenario=scenario, json_answers={IDEAS_PURPOSE: {"ideas": []}}
     ) as table:
         await play_a_round(table)
+        assert table.broadcaster.of_type("phase")[-1][0]["phase"]["can_regenerate"] is True
         await start_rest(table, "short")
         await table.settle()
         version = (await table.game()).state_version
 
         refused = await table.host("regenerate")
 
+        # Клиент не показывает кнопку: признак фазы — то же правило, по которому сервер отказал.
+        [*_, (started, _who)] = table.broadcaster.of_type("phase")
+        assert (started["phase"]["turn_phase"], started["phase"]["can_regenerate"]) == (
+            "camp",
+            False,
+        )
+        assert (await snapshot_of(table, "alice"))["phase"]["can_regenerate"] is False
         assert refused.status_code == 409
         assert refused.json()["detail"] == REST_REFUSAL_REGENERATE
         game = await table.game()
@@ -2193,10 +2202,14 @@ async def test_regenerate_is_409_after_a_hit_die_too(camp):
         await play_a_round(table)
         await start_rest(table, "short")
         await spend_die(table, "alice")
+        # Кость хитов кадра фазы не шлёт: последний кадр (начало привала) и снимок говорят «нет».
+        [*_, (last, _who)] = table.broadcaster.of_type("phase")
+        snapshot_flag = (await snapshot_of(table, "boris"))["phase"]["can_regenerate"]
 
         refused = await table.host("regenerate")
         await table.settle()
 
+        assert (last["phase"]["can_regenerate"], snapshot_flag) == (False, False)
         assert refused.status_code == 409
         assert refused.json()["detail"] == REST_REFUSAL_REGENERATE
         assert (await table.state()).party["alice"].hit_dice == 2
@@ -2210,6 +2223,13 @@ async def test_regenerating_the_end_of_a_short_rest_keeps_the_spent_dice_and_cou
         healed = (await spend_die(table, "alice")).json()["hp"]
         await table.host("rest-end")
         await table.settle()
+        # Конец привала разобрал сам мастер: откатить его можно, и клиент видит кнопку.
+        [*_, (ended, _who)] = table.broadcaster.of_type("phase")
+        assert (ended["phase"]["turn_phase"], ended["phase"]["can_regenerate"]) == (
+            "discussion",
+            True,
+        )
+        assert (await snapshot_of(table, "vera"))["phase"]["can_regenerate"] is True
 
         response = await table.host("regenerate")
         await table.settle()
@@ -2231,6 +2251,13 @@ async def test_regenerate_during_a_master_camp_drops_its_ideas(camp):
         await start_the_camp(table)
         await table.settle()
         assert (await table.game()).rest_ideas == {"alice": ["Идея Алисы."]}
+        # Привал мастера начал сам ход: его можно перегенерировать, и клиент видит кнопку.
+        [*_, (camping, _who)] = table.broadcaster.of_type("phase")
+        assert (camping["phase"]["turn_phase"], camping["phase"]["can_regenerate"]) == (
+            "camp",
+            True,
+        )
+        assert (await snapshot_of(table, "alice"))["phase"]["can_regenerate"] is True
 
         response = await table.host("regenerate")
         await table.settle()
@@ -2238,6 +2265,92 @@ async def test_regenerate_during_a_master_camp_drops_its_ideas(camp):
         assert response.status_code == 200, response.text
         game = await table.game()
         assert (game.turn_phase, game.rest_ideas) == (TurnPhase.DISCUSSION, None)
+
+
+# --- битая копия приключения на привале (финальное покрытие B11, сервер) ---
+
+BROKEN_MARK = "ЗНАЧЕНИЕ-ИЗ-КОПИИ-B11"
+
+
+async def break_the_camp_copy(table: Table) -> dict[str, Any]:
+    """Копия приключения игры перестала читаться; возвращает прежнюю копию, чтобы её вернуть."""
+    async with table.db() as session:
+        game = await session.get(Game, table.game_id)
+        original = game.adventure_data
+        broken = json.loads(json.dumps(original))
+        broken["world"]["history"] = {"текст": BROKEN_MARK}
+        game.adventure_data = broken
+        await session.commit()
+    return original
+
+
+def broken_copy_errors(caplog: pytest.LogCaptureFixture, table: Table) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "dnd_server.dm.turn"
+        and r.levelname == "ERROR"
+        and table.game_id in r.getMessage()
+    ]
+
+
+async def test_a_rest_by_the_button_with_a_broken_copy_is_409_and_nothing_starts(camp, caplog):
+    # Отчёт B11.2: «Короткий привал» проверяет копию до записи — иначе привал начался бы, а его
+    # конец (ход мастера) — уже нет.
+    async with camp(in_camp=False, scenario=[morning_turn()]) as table:
+        await break_the_camp_copy(table)
+        before = await table.game()
+
+        with caplog.at_level("ERROR", logger="dnd_server.dm.turn"):
+            response = await start_rest(table, "short")
+            await table.settle()
+
+        assert response.status_code == 409
+        assert response.json() == {"detail": BROKEN_COPY}
+        game = await table.game()
+        assert (game.turn_phase, game.state_version, game.deadline_at, game.rest_ideas) == (
+            TurnPhase.DISCUSSION,
+            before.state_version,
+            None,
+            None,
+        )
+        assert [turn.kind for turn in await table.turns()] == [TurnKind.ROUND]
+        assert table.scheduler.pending() == {}
+        assert table.broadcaster.sent == [] and table.notifier.sent == []
+        assert broken_copy_errors(caplog, table)
+        assert BROKEN_MARK not in caplog.text and "input_value" not in caplog.text
+
+
+async def test_a_hit_die_with_a_broken_copy_is_409_before_the_die_is_rolled(camp, caplog):
+    # Отказ до броска: кубик сервера не тратится, кость хитов и хиты героя прежние. Когда копия
+    # снова читается, тот же бросок (6) достаётся первой настоящей кости.
+    async with camp(in_camp=False, scenario=[morning_turn()], rng=ScriptedRng([6])) as table:
+        assert (await start_rest(table, "short")).status_code == 200
+        await table.settle()
+        original = await break_the_camp_copy(table)
+        hero = (await table.state()).party["alice"]
+        version = (await table.game()).state_version
+        table.broadcaster.sent.clear()
+
+        with caplog.at_level("ERROR", logger="dnd_server.dm.turn"):
+            refused = await spend_die(table, "alice")
+
+        assert refused.status_code == 409
+        assert refused.json() == {"detail": BROKEN_COPY}
+        after = (await table.state()).party["alice"]
+        assert (after.hp, after.hit_dice) == (hero.hp, hero.hit_dice)
+        assert (await table.game()).state_version == version
+        assert await table.messages(MessageKind.ROLL) == []
+        assert table.broadcaster.sent == []
+        assert broken_copy_errors(caplog, table)
+        assert BROKEN_MARK not in caplog.text and "input_value" not in caplog.text
+
+        await table.update_game(adventure_data=original)
+        spent = await spend_die(table, "alice")
+
+        assert spent.status_code == 200, spent.text
+        [roll] = await table.messages(MessageKind.ROLL)
+        assert roll.data["label"] == "Кость хитов"
 
 
 # --- финальное покрытие привалов (B9.coverage) ---
@@ -2916,3 +3029,261 @@ def test_the_guard_ignores_names_of_heroes_and_words_of_the_cards_of_the_party(s
     kept, dropped = guard.screen({"vera": ["Спроси Бориса, бывшего стражника, о его пути."]})
 
     assert (kept, dropped) == ({"vera": ["Спроси Бориса, бывшего стражника, о его пути."]}, 0)
+
+
+# --- фильтр идей: обходы нормализацией и имена из чужих текстов (B11.2, S4 и N1 блока B9) ---
+
+# Предыстория Бориса с именами внутри текста: сестра Мирра и пёс Лист (короткое имя).
+BORIS_NAMES_BACKSTORY = "Младшая сестра Мирра осталась в приюте у монахинь. Пёс Лист ждёт её."
+
+
+def names_guard(srd: SrdContent, adventure: Adventure) -> rest_ideas.IdeaGuard:
+    state = camp_state(srd, adventure, {key: f"user-{key}" for key in HEROES})
+    boris_opens_up(state)
+    state.party["boris"].persona.backstory = BORIS_NAMES_BACKSTORY
+    return rest_ideas.idea_guard(state, adventure, srd, list(HEROES), [])
+
+
+@pytest.mark.parametrize(
+    "vera_idea",
+    [
+        "Помоги Борису: пропа́вшего бра́та ещё можно найти.",  # знак ударения (U+0301)
+        "Помоги Борису: прoпaвшего брaтa ещё можно найти.",  # латинские буквы-двойники
+        "Помоги Борису: ПРOПАВШЕГО БРATA ещё можно найти.",  # заглавные двойники
+        "Помоги Борису: про-павшего бра-та ещё можно найти.",  # дефисы внутри слов
+        "Помоги Борису: про­павшего бра­та ещё можно найти.",  # мягкие переносы
+        "Помоги Борису: про​павшего брата ещё можно найти.",  # пробел нулевой ширины
+        "Спроси: н а й т и п р о п а в ш е г о б р а т а.",  # буквы через пробел
+        "Помоги Борису: прｏпавшего брата ещё можно найти.",  # полноширинная буква-двойник
+    ],
+    ids=[
+        "ударение",
+        "двойники",
+        "заглавные двойники",
+        "дефисы",
+        "мягкие переносы",
+        "нулевая ширина",
+        "буквы через пробел",
+        "полноширинные",
+    ],
+)
+def test_the_guard_sees_a_private_fragment_through_unicode_tricks(srd, adventure, vera_idea):
+    guard = guard_for(srd, adventure)
+    shown = rest_ideas.printable_line(
+        vera_idea, rest_ideas.IDEA_MAX_CHARS
+    )  # как в `addressed_ideas`
+
+    assert guard.leaks("vera", vera_idea)
+    assert guard.leaks("vera", shown)
+
+
+@pytest.mark.parametrize(
+    "vera_idea",
+    ["Спроси Бориса о Мирре.", "Расскажи, что ты слышала про МИРРУ.", "Спроси, где сейчас Листа."],
+    ids=["имя сестры в падеже", "имя заглавными", "короткое имя в падеже"],
+)
+def test_the_guard_catches_a_name_from_the_private_texts_of_another_hero(srd, adventure, vera_idea):
+    # Имя с заглавной не в начале предложения из чужой предыстории — имя собственное (S4 п. 3).
+    assert names_guard(srd, adventure).leaks("vera", vera_idea)
+
+
+@pytest.mark.parametrize(
+    "vera_idea",
+    [
+        "Листвой укрыт твой храм — расскажи о нём.",  # «Лист» + три буквы — другое слово (N1)
+        "Спроси, почему в мирной деревне так тихо.",  # слово со строчной — не имя
+        "Младшая из сестёр храма — ты. Расскажи о ней.",  # начало предложения — не имя
+    ],
+    ids=["длинное окончание короткого имени", "строчная буква", "начало предложения"],
+)
+def test_the_guard_does_not_take_ordinary_words_for_the_names_of_another_hero(
+    srd, adventure, vera_idea
+):
+    assert not names_guard(srd, adventure).leaks("vera", vera_idea)
+
+
+def test_a_hero_may_hear_names_from_his_own_story_and_the_shared_one(srd, adventure):
+    guard = names_guard(srd, adventure)
+
+    # Своё имя Борису можно, а имя героя отряда и названия приключения знают все.
+    assert not guard.leaks("boris", "Расскажи, как ты оставил Мирру в приюте.")
+    assert not guard.leaks("vera", "Спроси Бориса, бывшего стражника, о его пути.")
+
+
+# --- фильтр идей: зонд security B9 целиком и обычные идеи (финальное покрытие B11, сервер) ---
+
+# Личное Бориса из зонда `probe_bypass.py` (security B9, находка S4): предыстория с именем сестры,
+# цель и знакомый NPC с заметкой. Вера — получатель идеи, её идея не должна нести личное Бориса.
+PROBE_BACKSTORY = "Сбежал из дома после пожара. Младшая сестра Мирра осталась в приюте у монахинь."
+
+
+def probe_guard(
+    srd: SrdContent, adventure: Adventure, vera_backstory: str = "Выросла при храме в горах."
+) -> rest_ideas.IdeaGuard:
+    state = camp_state(srd, adventure, {key: f"user-{key}" for key in HEROES})
+    state.party["boris"].persona.backstory = PROBE_BACKSTORY
+    state.party["vera"].persona.backstory = vera_backstory
+    state.pc_hooks = {
+        "boris": PcHook(
+            character_id="boris",
+            personal_goal="Найти пропавшего брата",
+            npc_links=[{"npc_id": "marta", "relation": "должник", "note": "задолжал ей серебро"}],
+        )
+    }
+    return rest_ideas.idea_guard(state, adventure, srd, list(HEROES), [])
+
+
+# Попытки зонда, которые после усиления B11 фильтр обязан отбросить. Перестановка слов, вставка
+# слова и транслит — принятый остаточный риск (отчёт B11.2, решение владельца §11 п. 3): их здесь нет.
+PROBE_ATTEMPTS = {
+    "дословно цель": "Спроси Бориса, как он хочет найти пропавшего брата.",
+    "регистр и пунктуация": "СПРОСИ: найти — ПРОПАВШЕГО, брата?!",
+    "падеж (цель)": "Спроси Бориса о поисках пропавшего брата.",
+    "падеж (предыстория)": "Расскажи, как Борис сбежал из дома, когда случился пожар.",
+    "одно редкое слово (имя сестры)": "Спроси Бориса о Мирре.",
+    "имя NPC из связи (падеж)": "Спроси Бориса, сколько он должен Марте.",
+    "заметка связи дословно": "Спроси, правда ли он задолжал ей серебро.",
+    "латинские буквы-двойники": "Спроси, как нaйти прoпавшего брaта.",
+    "ударение (комбинируемый знак)": "Спроси, как на́йти пропа́вшего бра́та.",
+    "буквы через пробел": "Спроси: н а й т и  п р о п а в ш е г о  б р а т а.",
+    "дефисы внутри слов": "Спроси, как на-йти про-павшего бра-та.",
+}
+
+
+@pytest.mark.parametrize("vera_idea", list(PROBE_ATTEMPTS.values()), ids=list(PROBE_ATTEMPTS))
+def test_every_bypass_of_the_security_probe_is_caught_now(srd, adventure, vera_idea):
+    # Тот же путь, что у ответа модели: `printable_line`, затем `leaks`.
+    shown = rest_ideas.printable_line(vera_idea, rest_ideas.IDEA_MAX_CHARS)
+
+    assert probe_guard(srd, adventure).leaks("vera", shown)
+
+
+@pytest.mark.parametrize(
+    "vera_idea",
+    [
+        "Спроси Бориса о Mиppe.",  # латинские M, p, e в имени
+        "Спроси Бориса о Ми́рре.",  # знак ударения в имени
+        "Спроси Бориса о Мир-ре.",  # дефис внутри имени
+        "Спроси Бориса о Мир­ре.",  # мягкий перенос внутри имени
+        "Спроси Бориса о М и р р е.",  # имя буквами через пробел
+    ],
+    ids=["двойники", "ударение", "дефис", "мягкий перенос", "буквы через пробел"],
+)
+def test_a_private_name_is_caught_through_the_same_unicode_tricks(srd, adventure, vera_idea):
+    # Нормализация общая для фрагментов и имён: имя сестры Бориса не проходит ни в каком виде.
+    shown = rest_ideas.printable_line(vera_idea, rest_ideas.IDEA_MAX_CHARS)
+
+    assert probe_guard(srd, adventure).leaks("vera", shown)
+
+
+def test_the_own_and_the_shared_ideas_of_the_probe_still_reach_their_heroes(srd, adventure):
+    mixed = {
+        "boris": ["Расскажи, как ты сбежал из дома после пожара и ищешь пропавшего брата."],
+        "vera": ["Расскажи, как ты выросла при храме в горах."],
+    }
+
+    assert probe_guard(srd, adventure).screen(mixed) == (mixed, 0)
+
+
+def test_a_name_the_addressee_knows_from_her_own_story_is_not_a_leak(srd, adventure):
+    # Имя собственное из чужой предыстории, которое есть и в личных текстах самой Веры, — её
+    # собственное знание: идею с ним фильтр не снимает (находка N1 — меньше ложных срабатываний).
+    guard = probe_guard(srd, adventure, vera_backstory="Росла при храме с подругой Миррой.")
+
+    assert not guard.leaks("vera", "Спроси, помнит ли Мирра твой храм.")
+    assert guard.leaks("alice", "Спроси, помнит ли Мирра твой храм.")  # Алисе имя чужое
+
+
+def test_a_name_of_a_hero_of_the_party_in_a_private_story_is_not_a_leak(srd, adventure):
+    # Имя героя отряда в чужой предыстории — общее: его знают все за костром.
+    state = camp_state(srd, adventure, {key: f"user-{key}" for key in HEROES})
+    state.party["boris"].persona.backstory = "Однажды Вера вытащила его из реки."
+    guard = rest_ideas.idea_guard(state, adventure, srd, list(HEROES), [])
+
+    assert not guard.leaks("alice", "Спроси, что Вера помнит о храме.")
+
+
+@pytest.mark.parametrize(
+    "idea",
+    [
+        "Расскажи, как ты выросла при храме в горах.",
+        "Вспомни молитву, которой тебя научили в детстве.",
+        "Спроси Алису, где она научилась так держать меч.",
+        "У костра тихо: расскажи, о какой святыне ты мечтаешь.",
+        "Расскажи, что ты чувствуешь, глядя на листья в огне.",
+        "Спроси Бориса, бывшего стражника, о его пути.",
+    ],
+)
+def test_ordinary_ideas_are_not_taken_for_the_private_details_of_another_hero(srd, adventure, idea):
+    # Обычные идеи у костра проходят через оба набора личных сведений Бориса из тестов фильтра.
+    for guard in (probe_guard(srd, adventure), names_guard(srd, adventure)):
+        assert not guard.leaks("vera", idea)
+
+
+def test_a_forged_backstory_does_not_stall_the_guard_and_its_names_still_count(srd, adventure):
+    # Дополнение B11 §5 п. 4 (S1): тысяча знаков «!» и много слов с заглавной в предыстории
+    # (до 1500 знаков) не должны подвешивать цикл событий на каждом привале. Поиск конца
+    # предложения идёт за один проход; порог по времени щадящий, обычный фильтр — миллисекунды.
+    forged = ("!" * 1000 + " Аб" * 200)[:1500]
+    state = camp_state(srd, adventure, {key: f"user-{key}" for key in HEROES})
+    boris_opens_up(state)
+    state.party["boris"].persona.backstory = forged
+    ideas = [
+        "Спроси Бориса про Аба.",
+        "Расскажи о храме, где ты выросла.",
+        "Вспомни первый бой отряда.",
+        "Спроси, что видели на верфи.",
+        "Расскажи, кого ты ищешь.",
+    ]
+
+    started = time.perf_counter()
+    guard = rest_ideas.idea_guard(state, adventure, srd, list(HEROES), [])
+    verdicts = [guard.leaks("vera", idea) for idea in ideas]
+    spent = time.perf_counter() - started
+
+    assert spent < 0.3, f"фильтр строился и проверял идеи {spent:.3f} с"
+    # Поведение прежнее: «Аб» в середине предложения — имя собственное Бориса, первое после «!» —
+    # начало предложения; идеи без него проходят.
+    assert verdicts == [True, False, False, False, False]
+
+
+def test_the_guard_compares_an_idea_only_with_what_its_hero_does_not_know(
+    srd, adventure, monkeypatch
+):
+    # Дополнение B11 §7 п. 2 (S4): что адресат знает сам и что знают все, не зависит от идеи и
+    # считается один раз при сборке фильтра. Проверка идеи — только сверка с её словами, поэтому
+    # число дорогих сверок `_mentions` не растёт с числом имён в чужой предыстории. Тест считает
+    # вызовы, а не время: под `-n auto` часы ненадёжны.
+    letters = "абвгдежзиклмнопрстуф"
+    names = [f"Б{a}{b}" for a in letters for b in letters][:375]  # разные слова с заглавной
+    forged = ("и " + " ".join(names))[:1500]
+    stories = [" ".join(["тихая ночь у костра и долгий путь"] * 19)] * 3  # около 400 слов общего
+    state = camp_state(srd, adventure, {key: f"user-{key}" for key in HEROES})
+    boris_opens_up(state)
+    state.party["boris"].persona.backstory = forged
+    guard = rest_ideas.idea_guard(state, adventure, srd, list(HEROES), stories)
+    ideas = {
+        "alice": ["Расскажи о первом бое."],
+        "vera": ["Спроси Бориса, видел ли он Бав.", "Вспомни храм, которому ты служишь."],
+        "boris": ["Расскажи, как ты встретил Бав у реки."],  # своё имя Борису можно
+    }
+    calls: list[int] = []
+    real_mentions = rest_ideas._mentions
+
+    def counted(*args):
+        calls.append(1)
+        return real_mentions(*args)
+
+    monkeypatch.setattr(rest_ideas, "_mentions", counted)
+
+    kept, dropped = guard.screen(ideas)
+
+    # Поведение прежнее: чужое имя «Бав» снимает идею Веры, остальное проходит.
+    assert dropped == 1
+    assert kept == {
+        "alice": ["Расскажи о первом бое."],
+        "vera": ["Вспомни храм, которому ты служишь."],
+        "boris": ["Расскажи, как ты встретил Бав у реки."],
+    }
+    # Сверок `_mentions` — по числу имён из связей, а не по 375 именам предыстории.
+    assert len(calls) < 50, len(calls)

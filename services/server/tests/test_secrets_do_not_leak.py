@@ -60,6 +60,7 @@ def test_a_successful_generation_prints_and_writes_no_secret(
     secret_env, monkeypatch, tmp_path, capsys
 ):
     monkeypatch.setenv("FAKE_LLM_SCENARIO", str(DEMO_SCENARIO))
+    monkeypatch.setenv("APP_ENV", "dev")  # тестовый мастер собирается только в dev
     out = tmp_path / "chapel"
 
     code = main([*CLI_ARGS, "--out", str(out)])

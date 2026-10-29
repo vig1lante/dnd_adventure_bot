@@ -38,6 +38,7 @@ from dnd_server.db.models import (
     GamePlayer,
     PlayerCharacter,
     User,
+    iso_utc,
     new_id,
     utcnow,
 )
@@ -217,16 +218,17 @@ async def _players(session: AsyncSession, game_id: str) -> list[GamePlayer]:
 
 
 async def _game_outs(session: AsyncSession, games: Sequence[Game]) -> list[GameOut]:
-    """Сводки игр одним запросом игроков на всех."""
+    """Сводки игр одним запросом игроков на всех; имя героя берётся из JSON персонажа в базе."""
     players_by_game: dict[str, list[PlayerOut]] = defaultdict(list)
     if games:
         rows = await session.execute(
-            select(GamePlayer, User.name)
+            select(GamePlayer, User.name, PlayerCharacter.data["name"].as_string())
             .join(User, User.id == GamePlayer.user_id)
+            .outerjoin(PlayerCharacter, PlayerCharacter.id == GamePlayer.character_id)
             .where(GamePlayer.game_id.in_([game.id for game in games]))
             .order_by(GamePlayer.joined_order)
         )
-        for player, name in rows:
+        for player, name, hero_name in rows:
             players_by_game[player.game_id].append(
                 PlayerOut(
                     user_id=player.user_id,
@@ -234,6 +236,7 @@ async def _game_outs(session: AsyncSession, games: Sequence[Game]) -> list[GameO
                     is_host=player.is_host,
                     ready=player.ready,
                     has_character=player.character_id is not None,
+                    hero_name=hero_name,
                 )
             )
     return [
@@ -253,6 +256,7 @@ async def _game_outs(session: AsyncSession, games: Sequence[Game]) -> list[GameO
             short_rest_seconds=game.short_rest_seconds,
             profanity=game.profanity,
             players=players_by_game[game.id],
+            created_at=iso_utc(game.created_at),
         )
         for game in games
     ]
@@ -526,10 +530,13 @@ async def kick_player(
     *,
     locks: GameLocks,
     broadcaster: Broadcaster,
+    cut_off: Callable[[str], object],
 ) -> GameOut:
     """Хост исключает игрока из лобби: тот теряет персонажа и его выбор, место свободно.
 
-    Исключённый может войти снова по коду как новичок: списка запретов в срезе нет."""
+    `cut_off(user_id)` снимает соединения исключённого (`Hub.kick_user`) — после коммита, но до
+    рассылки `lobby`: новый состав лобби до исключённого не доходит, он узнаёт только об
+    исключении. Исключённый может войти снова по коду как новичок: списка запретов в срезе нет."""
     async with locks.lock(game_id):
         game, me = await _membership(session, game_id, host)
         if not me.is_host:
@@ -542,6 +549,7 @@ async def kick_player(
             raise NotFound("Такого игрока нет в этой игре.")
         await _remove_player(session, game_id, target_user_id)
         await session.commit()
+        cut_off(target_user_id)
         return await _announce(session, game, broadcaster)
 
 

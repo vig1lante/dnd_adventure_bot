@@ -5,6 +5,7 @@
 персонажи, снимки `GameState` с версией схемы, остальные таблицы хода и их ограничения.
 """
 
+import ast
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -506,3 +507,134 @@ async def test_time_without_a_zone_is_refused(db, adventure):
         session.add(make_game(adventure, deadline_at=datetime(2026, 10, 19, 12, 0)))
         with pytest.raises(StatementError, match="часовым поясом"):
             await session.commit()
+
+
+# --- фаза хода и момент её начала (DND-2 B11, дополнение §1 п. 1) ---
+
+SERVER_SRC = Path(__file__).resolve().parents[2] / "src" / "dnd_server"
+
+
+def turn_phase_assignments(source: str) -> list[int]:
+    """Строки, где коду присваивают атрибут `turn_phase` напрямую (`x.turn_phase = …`)."""
+    lines = []
+    for node in ast.walk(ast.parse(source)):
+        targets = (
+            node.targets
+            if isinstance(node, ast.Assign)
+            else [node.target]
+            if isinstance(node, ast.AugAssign | ast.AnnAssign)
+            else []
+        )
+        lines += [
+            node.lineno
+            for target in targets
+            if isinstance(target, ast.Attribute) and target.attr == "turn_phase"
+        ]
+    return lines
+
+
+def test_the_search_for_direct_assignments_sees_every_form_of_them():
+    sample = "game.turn_phase = None\nx.turn_phase: int = 1\ngame.set_turn_phase(None, now)\n"
+
+    assert turn_phase_assignments(sample) == [1, 2]
+
+
+def test_the_turn_phase_is_changed_only_together_with_the_moment_it_started():
+    # Каждая смена фазы хода пишет `phase_since` той же транзакцией (`Game.set_turn_phase`):
+    # прямое присваивание `turn_phase` в коде сервера пропустило бы его.
+    found = {
+        str(path.relative_to(SERVER_SRC)): lines
+        for path in SERVER_SRC.rglob("*.py")
+        if (lines := turn_phase_assignments(path.read_text(encoding="utf-8")))
+    }
+
+    assert set(found) == {"db/models.py"}  # только внутри самого `set_turn_phase`
+    assert len(found["db/models.py"]) == 1
+
+
+async def test_a_new_turn_phase_records_its_start_and_the_same_one_keeps_it(db, adventure):
+    await save_host_and_game(db, adventure)
+    first = datetime(2026, 10, 29, 12, 0, tzinfo=UTC)
+
+    async with db() as session:
+        game = await session.get(Game, "game-1")
+        assert (game.turn_phase, game.phase_since) == (None, None)  # лобби: фазы хода нет
+        game.set_turn_phase(TurnPhase.DISCUSSION, first)
+        game.set_turn_phase(TurnPhase.DISCUSSION, first + timedelta(minutes=1))
+        await session.commit()
+    async with db() as session:
+        game = await session.get(Game, "game-1")
+        stored = (game.turn_phase, game.phase_since)
+        game.set_turn_phase(TurnPhase.COLLECTING, first + timedelta(minutes=2))
+        await session.commit()
+    async with db() as session:
+        game = await session.get(Game, "game-1")
+
+    assert stored == (TurnPhase.DISCUSSION, first)
+    assert (game.turn_phase, game.phase_since) == (
+        TurnPhase.COLLECTING,
+        first + timedelta(minutes=2),
+    )
+
+
+def bypassing_phase_writes(source: str) -> list[int]:
+    """Строки, где фазу хода пишут в обход `set_turn_phase` иначе, чем `x.turn_phase = …`:
+    распаковкой (`game.turn_phase, x = …`), через `setattr(…, "turn_phase", …)`, SQL-обновлением
+    (`.values(turn_phase=…)`, в том числе `**{"turn_phase": …}`) или конструктором `Game(…)`."""
+    lines = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Tuple | ast.List):
+                    lines += [
+                        node.lineno
+                        for part in ast.walk(target)
+                        if isinstance(part, ast.Attribute) and part.attr == "turn_phase"
+                    ]
+        if not isinstance(node, ast.Call):
+            continue
+        name = (
+            node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+        )
+        if name == "setattr" and any(
+            isinstance(arg, ast.Constant) and arg.value == "turn_phase" for arg in node.args
+        ):
+            lines.append(node.lineno)
+        if name in ("values", "Game"):
+            named = {keyword.arg for keyword in node.keywords}
+            unpacked = {
+                key.value
+                for keyword in node.keywords
+                if keyword.arg is None and isinstance(keyword.value, ast.Dict)
+                for key in keyword.value.keys
+                if isinstance(key, ast.Constant)
+            }
+            if "turn_phase" in named | unpacked:
+                lines.append(node.lineno)
+    return lines
+
+
+def test_the_search_for_bypassing_writes_sees_unpacking_setattr_sql_and_the_constructor():
+    sample = (
+        "game.turn_phase, game.deadline_at = phase, None\n"
+        'setattr(game, "turn_phase", phase)\n'
+        "update(Game).values(turn_phase=phase)\n"
+        'update(Game).values(**{"turn_phase": phase})\n'
+        "Game(id=game_id, turn_phase=phase)\n"
+        "GameOut(turn_phase=game.turn_phase)\n"  # ответ API читает фазу, а не пишет её
+        "game.set_turn_phase(phase, now)\n"
+    )
+
+    assert bypassing_phase_writes(sample) == [1, 2, 3, 4, 5]
+
+
+def test_no_server_code_writes_the_turn_phase_around_the_moment_it_started():
+    # Дополнение B11 §1 п. 1: `phase_since` пишется только вместе с фазой. Прямое присваивание
+    # ловит тест выше, а этот — остальные пути в обход `Game.set_turn_phase`.
+    found = {
+        str(path.relative_to(SERVER_SRC)): lines
+        for path in SERVER_SRC.rglob("*.py")
+        if (lines := bypassing_phase_writes(path.read_text(encoding="utf-8")))
+    }
+
+    assert found == {}

@@ -29,7 +29,7 @@ from dnd_server.config import Settings
 from dnd_server.db.models import Game, GamePhase, TurnPhase
 from dnd_server.dm.camp_flow import RestKind
 from dnd_server.realtime.hub import EVENT_TYPES
-from dnd_server.realtime.views import rest_view
+from dnd_server.realtime.views import IDLE, SETTLED_STATUS, WRITING, rest_view
 from dnd_server.turns.api import RestIn
 
 # tests/flows/test_client_routes.py -> flows -> tests -> server -> services
@@ -342,6 +342,63 @@ def test_the_field_reader_takes_nested_objects_as_one_field():
     assert "str" not in interface_fields("Character")
 
 
+def request_bodies(spec: dict) -> dict[str, list[dict]]:
+    """Схемы тел запросов приложения по «МЕТОД адрес»: ссылки и `anyOf`/`oneOf` раскрыты."""
+    schemas = spec["components"]["schemas"]
+
+    def resolved(schema: dict) -> list[dict]:
+        if "$ref" in schema:
+            name = schema["$ref"].rsplit("/", 1)[-1]
+            return [{"title": name, **schemas[name]}]
+        return [
+            part
+            for key in ("anyOf", "oneOf")
+            for item in schema.get(key, [])
+            for part in resolved(item)
+        ]
+
+    found: dict[str, list[dict]] = {}
+    for path, operations in spec["paths"].items():
+        for method, operation in operations.items():
+            for media in operation.get("requestBody", {}).get("content", {}).values():
+                found.setdefault(f"{method.upper()} {path}", []).extend(resolved(media["schema"]))
+    return found
+
+
+# Тело без запрета лишних полей: dev-вход (только `APP_ENV=dev`, вне контракта клиента Mini App).
+LOOSE_BODIES = {"DevLoginIn"}
+
+
+def test_every_request_body_of_the_api_refuses_unknown_fields(settings):
+    # Дополнение B11 §2: схемы запросов — `extra="forbid"`, лишнее поле — 422, а не молча
+    # отброшенный ввод. Сверка по описанию API ловит и новую схему, которую забыли закрыть.
+    bodies = request_bodies(create_app(settings).openapi())
+    loose = {
+        f"{route}: {schema['title']}"
+        for route, schemas in bodies.items()
+        for schema in schemas
+        if schema.get("additionalProperties") is not False and schema["title"] not in LOOSE_BODIES
+    }
+
+    assert {"POST /api/games", "POST /api/games/join", "POST /api/games/{game_id}/ready"} <= set(
+        bodies
+    )
+    assert loose == set(), "схемы запросов без запрета лишних полей"
+
+
+def test_the_client_sends_only_the_fields_the_closed_lobby_schemas_know():
+    # С `extra="forbid"` поле клиента, которого нет у сервера, — 422 при создании, входе и
+    # готовности. Вход и готовность клиент шлёт литералами `{ code }` и `{ ready }`.
+    client = client_text("client.ts")
+    lobby = "dnd_server.games.schemas"
+
+    assert interface_fields("CreateGameBody") <= model_fields(f"{lobby}.CreateGameIn")
+    assert re.search(r'post<GameSummary>\("/api/games/join", \{ code \}\)', client)
+    assert re.search(r"post<GameSummary>\(`\$\{gamePath\(gameId\)\}/ready`, \{ ready \}\)", client)
+    assert model_fields(f"{lobby}.JoinIn") == {"code"}
+    assert model_fields(f"{lobby}.ReadyIn") == {"ready"}
+
+
 def test_the_comparison_notices_a_field_that_one_side_does_not_have():
     # Контроль сверки полей: разные по составу модель и интерфейс не выдают себя за одинаковые.
     assert model_fields("dnd_server.auth.api.UserOut") != interface_fields("LoginResult")
@@ -443,10 +500,23 @@ def test_the_sections_of_the_journal_are_the_same_in_the_engine_and_in_the_clien
     assert set(SECTIONS.values()) == engine
 
 
+def test_the_client_knows_exactly_the_public_statuses_the_server_gives():
+    # Решение D17 блока B11: значения статуса игрока на проводе совпадают буква в букву.
+    union = re.search(r"export type PlayerStatus = ([^;]+);", client_text("types.ts"))
+    assert union is not None, "тип PlayerStatus в types.ts не найден"
+
+    client = set(re.findall(r'"(\w+)"', union.group(1)))
+
+    assert (
+        client == {IDLE, WRITING, *SETTLED_STATUS.values()} == {"idle", "writing", "ready", "pass"}
+    )
+
+
 def test_every_frame_the_server_builds_passes_the_contract_of_the_hub():
     # Хаб рассылает только кадры из `EVENT_TYPES`, а кадр другого вида молча не уходит (только
-    # ошибка в журнале сервера). Снимок и `pong` идут своему соединению мимо хаба.
-    built = set(server_events()) - {"snapshot", "pong"}
+    # ошибка в журнале сервера). Снимок, `pong` и `kicked` (блок B11) идут своему соединению мимо
+    # хаба.
+    built = set(server_events()) - {"snapshot", "pong", "kicked"}
 
     assert {"journal_entry", "journal"} <= built
     assert built <= EVENT_TYPES, f"кадры вне контракта хаба: {sorted(built - EVENT_TYPES)}"

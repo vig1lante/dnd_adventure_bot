@@ -160,7 +160,9 @@ async def test_event_sent_while_the_snapshot_is_being_prepared_follows_it_and_is
             async with asyncio.timeout(TIMEOUT_S):
                 while not server.hub.connections(table.game_id):
                     await asyncio.sleep(0.005)
-            await server.hub.send(table.game_id, phase_event(game, table.state))
+            await server.hub.send(
+                table.game_id, phase_event(game, table.state, can_regenerate=False)
+            )
             released.set()
 
             assert (await recv(ws))["type"] == "snapshot"
@@ -378,7 +380,7 @@ async def test_two_tabs_of_one_player_both_get_the_events(server, table, db):
         await recv(tab_1)
         await recv(tab_2)
 
-        await server.hub.send(table.game_id, phase_event(game, table.state))
+        await server.hub.send(table.game_id, phase_event(game, table.state, can_regenerate=False))
 
         assert [e["type"] for e in await drain(tab_1)] == ["phase"]
         assert [e["type"] for e in await drain(tab_2)] == ["phase"]
@@ -530,17 +532,80 @@ async def test_a_player_kicked_from_the_lobby_is_closed_and_cannot_come_back_to_
             headers={"Authorization": f"Bearer {alice.token}"},
         )
         host_events = await drain(sockets["alice"])
+        frames = []
         with pytest.raises(ConnectionClosed) as closed:
             async with asyncio.timeout(TIMEOUT_S):
                 while True:
-                    await sockets["boris"].recv()  # кадров игры исключённому больше нет
+                    frames.append(json.loads(await sockets["boris"].recv()))
         connections_left = server.hub.connections(lobby_table.game_id)
 
     assert kicked.status_code == 200
+    # Исключённому — кадр `kicked` и закрытие 4403 с причиной `kicked` (дополнение B11 §2): клиент
+    # говорит «Хост исключил вас». Кадров игры после исключения ему нет, хосту — ничего нового.
+    assert frames == [{"type": "kicked"}]
+    assert (closed.value.rcvd.code, closed.value.rcvd.reason) == (4403, "kicked")
     assert [e["type"] for e in host_events] == ["lobby"]
-    assert closed.value.rcvd.code == 1013  # «переподключитесь»: вход уже закрыт
     assert connections_left == 1  # остался только хост
     assert await close_code(server.url(lobby_table.game_id, boris.token)) == 4403
+
+
+async def test_every_socket_of_a_kicked_player_hears_it_and_the_others_hear_no_kick(
+    server, lobby_table
+):
+    boris, alice = lobby_table.boris, lobby_table.alice
+    async with (
+        watching(server, lobby_table, "alice", "vera") as sockets,
+        connect(server.url(lobby_table.game_id, boris.token)) as first,
+        connect(server.url(lobby_table.game_id, boris.token)) as second,
+        server.http() as http,
+    ):
+        for socket in (first, second):
+            assert json.loads(await socket.recv())["type"] == "snapshot"
+        await http.post(
+            f"/api/games/{lobby_table.game_id}/players/{boris.user_id}/kick",
+            headers={"Authorization": f"Bearer {alice.token}"},
+        )
+        heard = {key: await drain(socket) for key, socket in sockets.items()}
+        closings = []
+        for socket in (first, second):
+            frames = []
+            with pytest.raises(ConnectionClosed) as closed:
+                async with asyncio.timeout(TIMEOUT_S):
+                    while True:
+                        frames.append(json.loads(await socket.recv()))
+            closings.append((frames, closed.value.rcvd.code, closed.value.rcvd.reason))
+
+    assert closings == [([{"type": "kicked"}], 4403, "kicked")] * 2
+    assert {key: [e["type"] for e in events] for key, events in heard.items()} == {
+        "alice": ["lobby"],
+        "vera": ["lobby"],
+    }
+
+
+async def test_a_player_who_leaves_the_lobby_is_closed_as_before_without_the_kick(
+    server, lobby_table
+):
+    # Выход — не исключение (решение D6): кадра `kicked` нет, сокет закрывается «переподключитесь».
+    boris = lobby_table.boris
+    async with (
+        watching(server, lobby_table, "alice", "boris") as sockets,
+        server.http() as http,
+    ):
+        left = await http.post(
+            f"/api/games/{lobby_table.game_id}/leave",
+            headers={"Authorization": f"Bearer {boris.token}"},
+        )
+        frames = []
+        with pytest.raises(ConnectionClosed) as closed:
+            async with asyncio.timeout(TIMEOUT_S):
+                while True:
+                    frames.append(json.loads(await sockets["boris"].recv()))
+        host_events = await drain(sockets["alice"])
+
+    assert left.status_code == 204
+    assert {"type": "kicked"} not in frames
+    assert closed.value.rcvd.code == 1013
+    assert [e["type"] for e in host_events] == ["lobby"]
 
 
 # --- привал: идея для рассказа только своему игроку (блок B9 DND-2) ---

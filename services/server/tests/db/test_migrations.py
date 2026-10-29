@@ -8,7 +8,8 @@
 добавляет играм флажок мата `profanity`: обязательный, у старых игр — «разрешён»; 0005 (DND-2
 B4.1, спека §10.2) заводит таблицы конструктора: черновики, задания генерации и опубликованное;
 0006 (DND-2 B9, привалы) добавляет играм срок короткого привала `short_rest_seconds` (у старых игр
-120 с) и личные идеи привала `rest_ideas` (JSON, пусто, пока привала нет).
+120 с) и личные идеи привала `rest_ideas` (JSON, пусто, пока привала нет); 0007 (DND-2 B11)
+добавляет играм момент начала текущей фазы хода `phase_since` (пусто у игр, записанных до неё).
 
 Правило на будущее: каждая следующая миграция добавляет тест «игра с состоянием, сохранённая
 до миграции, читается после `upgrade`» (база на предыдущей ревизии, строки игры, `upgrade head`,
@@ -48,7 +49,8 @@ COLUMNS = {
     "games": (
         "id code adventure_id host_user_id adventure_data phase turn_phase deadline_at "
         "state_version current_turn_id provider model collect_seconds hurry_seconds camp_seconds "
-        "started_at active_seconds clock_at profanity created_at short_rest_seconds rest_ideas"
+        "started_at active_seconds clock_at profanity created_at short_rest_seconds rest_ideas "
+        "phase_since"
     ),
     "game_players": "game_id user_id character_id is_host ready joined_order joined_at",
     "characters": "id game_id user_id data choices",
@@ -85,7 +87,8 @@ UNIQUE = {"users": ["tg_id", "dev_login"], "games": ["code"]}
 NULLABLE = {
     "users": "tg_id dev_login",
     "games": (
-        "turn_phase deadline_at current_turn_id provider model started_at clock_at rest_ideas"
+        "turn_phase deadline_at current_turn_id provider model started_at clock_at rest_ideas "
+        "phase_since"
     ),
     "game_players": "character_id",
     "characters": "choices",
@@ -186,7 +189,7 @@ def test_migration_history_is_a_single_line_from_0001():
     script = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
 
     assert script.get_bases() == ["0001"]
-    assert script.get_heads() == ["0006"]
+    assert script.get_heads() == ["0007"]
 
 
 # --- ревизия 0002: отметка часов игры ---
@@ -289,6 +292,60 @@ async def test_downgrade_to_the_first_revision_drops_the_column_and_keeps_the_ga
         # Откат не потерял ограничения таблицы: фаза вне списка по-прежнему отвергается.
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute("UPDATE games SET phase = 'bogus'")
+
+
+# Часы идущей игры после её первой паузы: `clock_at` уже не время старта, а момент паузы или
+# её снятия. Повтор 0002 не должен вернуть их к старту — время игры пошло бы заново.
+LATER = "2026-10-01 13:30:00.000000"
+
+
+async def test_the_second_revision_is_repeated_when_its_column_was_added_but_not_recorded(
+    settings, migrate
+):
+    # SQLite выполняет ADD COLUMN сразу и насовсем: процесс убит после колонки, до записи ревизии.
+    await migrate("upgrade", "0002")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    paused = insert_minimal_game(path, phase="playing", started_at=NOW, number=1)
+    fresh = insert_minimal_game(path, phase="weaving", started_at=NOW, number=2)
+    lobby = insert_minimal_game(path, phase="lobby", started_at=None, number=3)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("UPDATE games SET clock_at = ? WHERE id = ?", (LATER, paused))
+        connection.execute("UPDATE games SET clock_at = NULL WHERE id = ?", (fresh,))
+        connection.commit()
+    set_recorded_revision(path, "0001")
+
+    await migrate("upgrade", "0002")
+
+    assert recorded_revision(path) == "0002"
+    with closing(sqlite3.connect(path)) as connection:
+        clocks = dict(connection.execute("SELECT id, clock_at FROM games"))
+        seconds = dict(connection.execute("SELECT id, active_seconds FROM games"))
+    # Часы, которые уже шли, не тронуты; игра без часов заводит их со старта, лобби — без часов.
+    assert clocks == {paused: LATER, fresh: NOW, lobby: None}
+    assert set(seconds.values()) == {40}
+
+
+async def test_the_second_revision_can_be_applied_again_after_a_downgrade(settings, migrate):
+    await migrate("upgrade", "0002")
+    after_first = await reflect(settings, schema_signature)
+    await migrate("downgrade", "0001")
+    await migrate("upgrade", "0002")
+
+    assert await reflect(settings, schema_signature) == after_first
+
+
+def test_the_second_revision_prints_its_steps_in_sql_mode_without_a_database(
+    monkeypatch, capsys, settings, tmp_path
+):
+    monkeypatch.setenv("DATABASE_URL", settings.database_url)
+    get_settings.cache_clear()
+
+    command.upgrade(Config(str(ALEMBIC_INI)), "0001:0002", sql=True)
+    printed = capsys.readouterr().out
+
+    assert "ALTER TABLE games ADD COLUMN clock_at DATETIME" in printed
+    assert "WHERE clock_at IS NULL" in printed
+    assert not (tmp_path / "data").exists()
 
 
 # --- ревизия 0003: выбор игрока при создании героя, таблицы pending_rolls больше нет ---
@@ -1039,6 +1096,111 @@ def test_the_sixth_revision_prints_its_steps_in_sql_mode_without_a_database(
     assert not (tmp_path / "data").exists()
 
 
+# --- ревизия 0007: момент начала фазы хода (DND-2 B11) ---
+
+
+async def test_the_seventh_revision_only_adds_the_nullable_phase_since_column_to_games(
+    settings, migrate
+):
+    await migrate("upgrade", "0006")
+    before = await reflect(settings, schema_signature)
+    await migrate("upgrade", "0007")
+    after = await reflect(settings, schema_signature)
+    games = await reflect(settings, game_columns)
+
+    assert set(after) == set(before)
+    for table in before:
+        extra = set(after[table]["columns"]) - set(before[table]["columns"])
+        assert extra == ({"phase_since"} if table == "games" else set()), table
+        assert {key: value for key, value in after[table].items() if key != "columns"} == {
+            key: value for key, value in before[table].items() if key != "columns"
+        }, table
+    assert games["phase_since"]["nullable"] is True
+    assert games["phase_since"]["default"] is None
+
+
+async def test_games_saved_on_the_sixth_revision_have_no_phase_start_and_keep_everything(
+    settings, migrate
+):
+    await migrate("upgrade", "0006")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+
+    await migrate("upgrade", "0007")
+
+    with closing(sqlite3.connect(path)) as connection:
+        rows = list(connection.execute("SELECT id, phase_since FROM games"))
+    assert rows == [("game-1", None)]  # клиент такой игры ждёт «Повторить» по своим часам
+    assert saved_lobby(path) == saved
+
+
+async def test_downgrade_to_the_sixth_revision_drops_the_column_and_keeps_the_games(
+    settings, migrate
+):
+    await migrate("upgrade", "0006")
+    at_sixth = await reflect(settings, schema_signature)
+    await migrate("upgrade", "head")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("UPDATE games SET phase_since = ?", (NOW,))
+        connection.commit()
+    saved = saved_lobby(path)
+
+    await migrate("downgrade", "0006")
+
+    assert await reflect(settings, schema_signature) == at_sixth
+    assert saved_lobby(path) == saved
+
+
+async def test_the_seventh_revision_is_repeated_when_its_column_was_added_but_not_recorded(
+    settings, migrate
+):
+    await migrate("upgrade", "0006")
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    insert_lobby_with_heroes(path, with_roll=False)
+    saved = saved_lobby(path)
+    await migrate("upgrade", "0007")
+    done = await reflect(settings, schema_signature)
+    set_recorded_revision(path, "0006")  # процесс убит после ADD COLUMN, до записи ревизии
+
+    await migrate("upgrade", "0007")
+
+    assert recorded_revision(path) == "0007"
+    assert await reflect(settings, schema_signature) == done
+    assert saved_lobby(path) == saved
+
+
+async def test_downgrade_of_the_seventh_revision_is_repeated_when_made_but_not_recorded(
+    settings, migrate
+):
+    await migrate("upgrade", "0006")
+    at_sixth = await reflect(settings, schema_signature)
+    path = Path(settings.database_url.removeprefix("sqlite+aiosqlite:///"))
+    set_recorded_revision(path, "0007")  # откат сделан, запись о нём не появилась
+
+    await migrate("downgrade", "0006")
+
+    assert recorded_revision(path) == "0006"
+    assert await reflect(settings, schema_signature) == at_sixth
+
+
+def test_the_seventh_revision_prints_its_steps_in_sql_mode_without_a_database(
+    monkeypatch, capsys, settings, tmp_path
+):
+    monkeypatch.setenv("DATABASE_URL", settings.database_url)
+    get_settings.cache_clear()
+    printed = {}
+    for name, revisions in (("upgrade", "0006:0007"), ("downgrade", "0007:0006")):
+        getattr(command, name)(Config(str(ALEMBIC_INI)), revisions, sql=True)
+        printed[name] = capsys.readouterr().out
+
+    assert "ALTER TABLE games ADD COLUMN phase_since DATETIME" in printed["upgrade"]
+    assert "ALTER TABLE games DROP COLUMN phase_since" in printed["downgrade"]
+    assert not (tmp_path / "data").exists()
+
+
 # --- миграция совпадает с моделями и планом ---
 
 
@@ -1117,4 +1279,4 @@ def test_alembic_command_line_works_from_the_repo_root_and_the_service_folder(
         tables = {name for (name,) in connection.execute("SELECT name FROM sqlite_master")}
         [(revision,)] = connection.execute("SELECT version_num FROM alembic_version")
     assert tables >= TABLES
-    assert revision == "0006"
+    assert revision == "0007"

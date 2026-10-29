@@ -502,6 +502,70 @@ def test_non_roll_events_are_left_untouched(make_ctx):
     assert ctx.events[-1] == FlagEvent(name="seen", value=True)
 
 
+class LabelledArgs(ToolArgs):
+    labels: list[str] = Field(max_length=4)
+    author: str | None = Field(default=None, max_length=20)
+
+
+def roll_labelled(ctx: ToolContext, args: LabelledArgs) -> dict[str, Any]:
+    """Тестовый инструмент: бросок к20 героя pc-1 с каждой из подписей."""
+    for label in args.labels:
+        result = roll("1d20", rng=ctx.rng, reason=label)
+        ctx.events.append(RollEvent(actor_id="pc-1", label=label, roll=result))
+    return {}
+
+
+def call_labelled(
+    ctx: ToolContext, *labels: str, public: tuple[str, ...] = (), **authors: str
+) -> ToolOutcome:
+    """Вызов тестового инструмента, который объявил общими броски с подписями `public`."""
+    spec = ToolSpec(
+        name="roll_labelled",
+        description="Тестовый инструмент: броски с подписями.",
+        args_model=LabelledArgs,
+        handler=roll_labelled,
+        author_fields=("author",),
+        public_roll_labels=public,
+    )
+    registry = ToolRegistry()
+    registry.register(spec)
+    return registry.call(ctx, "roll_labelled", {"labels": list(labels)} | authors)
+
+
+def label_audiences(ctx: ToolContext) -> list[tuple[str, str]]:
+    return [(e.label, e.audience) for e in ctx.events if isinstance(e, RollEvent)]
+
+
+def test_a_roll_with_a_public_label_of_the_tool_is_seen_by_everyone_even_from_a_secret_actor(
+    make_ctx,
+):
+    # Инициатива начала боя всегда общая (спека §15): инструмент объявляет её подпись, а
+    # остальные броски того же вызова закрыты, как прежде.
+    ctx = make_ctx(secret_actors={"pc-1"})
+
+    call_labelled(ctx, "Инициатива", "Спасбросок от смерти", public=("Инициатива",))
+
+    assert label_audiences(ctx) == [("Инициатива", "all"), ("Спасбросок от смерти", "pc-1")]
+
+
+def test_a_public_label_stays_public_in_the_call_of_a_secret_author(make_ctx):
+    ctx = make_ctx(secret_actors={"pc-1", "pc-2"})
+
+    call_labelled(ctx, "Инициатива", "Проверка", public=("Инициатива",), author="pc-2")
+
+    assert label_audiences(ctx) == [("Инициатива", "all"), ("Проверка", "pc-1")]
+
+
+def test_the_same_label_in_a_tool_that_did_not_declare_it_stays_closed(make_ctx):
+    # Подпись броска бывает и из данных приключения (имя действия монстра, против которого
+    # тайный герой делает спасбросок): открывает объявление инструмента, а не совпадение текста.
+    ctx = make_ctx(secret_actors={"pc-1"})
+
+    call_labelled(ctx, "Инициатива")
+
+    assert label_audiences(ctx) == [("Инициатива", "pc-1")]
+
+
 # --- вдохновение: одноразово, источник правды — Character.inspiration ---
 
 

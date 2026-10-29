@@ -91,7 +91,7 @@ from dnd_server.llm.base import (
 )
 from dnd_server.llm.fake import FakeProvider, load_scenario
 from dnd_server.prompts import load
-from dnd_server.realtime.views import snapshot_for
+from dnd_server.realtime.views import can_regenerate, snapshot_for
 
 # tests/dm/test_chronicle_spotlight.py -> dm -> tests -> server -> services -> корень репозитория
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -973,6 +973,28 @@ async def test_regenerating_the_next_turn_returns_to_the_squeezed_chronicle(monk
     assert state.chronicle.summary == "Сводка."
     assert state.chronicle.entries == ["Запись хода 3."]  # не 21 запись заново, не повторное сжатие
     assert len(brain.json_requests) == 1
+
+
+async def test_the_squeeze_after_the_turn_keeps_the_regenerate_flag_of_its_phase_true(
+    monkeypatch, world
+):
+    # Дополнение B11 §1 п. 11: кадр фазы с `can_regenerate` уходит после коммита хода, а сжатие
+    # летописи пишет новую версию состояния уже после него. Признак остаётся правдой: сжатие
+    # переносит начало следующего хода на сжатую версию, и «Перегенерировать» проходит.
+    brain = Brain("Сводка.")
+    use_provider(monkeypatch, brain)
+    await world.run()
+    [*_, (phase, _who)] = [(p, who) for p, who in world.recorder.sent if p["type"] == "phase"]
+    await world.settle()
+    async with world.db() as session:
+        game = await session.get(Game, world.game_id)
+        version, flag = game.state_version, await can_regenerate(session, game)
+
+    outcome = await world.regenerate()
+
+    assert phase["phase"]["can_regenerate"] is True
+    assert (version, flag) == (3, True)  # версия 3 — сжатая летопись поверх хода
+    assert outcome.status == TurnStatus.DONE
 
 
 async def test_the_squeeze_leaves_no_trace_in_the_feed_the_snapshots_or_the_journal(

@@ -94,6 +94,13 @@ async function openPlayer(
 const button = (page: Page, name: string) =>
   page.getByRole("button", { name, exact: true });
 
+/** «Герой: …» в строке игрока `login` в лобби (B11, §1 п. 3: имя героя видят все). */
+const heroLine = (page: Page, login: string) =>
+  page
+    .getByRole("listitem")
+    .filter({ has: page.getByText(login, { exact: true }) })
+    .getByText(/^Герой: /);
+
 /** Ответ сервера на запрос, который выполнит `action`. */
 async function responseTo(
   page: Page,
@@ -876,51 +883,67 @@ test("три способа создать героя на настоящем с
         return taken.character;
       });
 
-    await test.step("Случайный герой выбора не хранит: «Изменить» объясняет это, потом быстрый герой", async () => {
-      const { page } = friend;
-      const stored = await responseTo(page, "GET", "/characters/mine", () =>
-        button(page, "Изменить").click(),
-      );
-      expect(await stored.json()).toMatchObject({
-        mode: "random",
-        choices: null,
-        character: { id: friendHero.id },
-      });
-      await expect(
-        page.getByText(/создан случайно, поэтому прежнего выбора нет/),
-      ).toBeVisible();
-      await expect(button(page, "Создать заново")).toHaveCount(0);
+    const quickHeroName =
+      await test.step("Случайный герой выбора не хранит: «Изменить» объясняет это, потом быстрый герой", async () => {
+        const { page } = friend;
+        const stored = await responseTo(page, "GET", "/characters/mine", () =>
+          button(page, "Изменить").click(),
+        );
+        expect(await stored.json()).toMatchObject({
+          mode: "random",
+          choices: null,
+          character: { id: friendHero.id },
+        });
+        await expect(
+          page.getByText(/создан случайно, поэтому прежнего выбора нет/),
+        ).toBeVisible();
+        await expect(button(page, "Создать заново")).toHaveCount(0);
 
-      // Быстрый герой: класс и раса — листанием карточек, как в подробном создании.
-      await button(page, "Быстро").click();
-      await pickInCarousel(page, "Класс", "Плут");
-      await pickInCarousel(page, "Раса", "Полурослик");
-      await page.getByLabel("Опиши героя одной строкой").fill(FRIEND_CONCEPT);
-      await expectFitsPhone(page, "форма «Быстро»");
-      await expectNoFeet(page.locator("main"), "форма «Быстро»");
-      // С карточек ушли id выбранных вариантов: карусель выбирает то же, что прежний список.
-      const quick = await requestOf(page, "POST", "/characters", () =>
-        button(page, "Создать героя").click(),
-      );
-      expect(quick.postDataJSON()).toEqual({
-        mode: "quick",
-        class_id: "rogue",
-        species: "halfling",
-        concept: FRIEND_CONCEPT,
-      });
-      await expect(page.getByText("Ваш герой")).toBeVisible();
+        // Быстрый герой: класс и раса — листанием карточек, как в подробном создании.
+        await button(page, "Быстро").click();
+        await pickInCarousel(page, "Класс", "Плут");
+        await pickInCarousel(page, "Раса", "Полурослик");
+        await page.getByLabel("Опиши героя одной строкой").fill(FRIEND_CONCEPT);
+        await expectFitsPhone(page, "форма «Быстро»");
+        await expectNoFeet(page.locator("main"), "форма «Быстро»");
+        // С карточек ушли id выбранных вариантов: карусель выбирает то же, что прежний список.
+        const quick = await requestOf(page, "POST", "/characters", () =>
+          button(page, "Создать героя").click(),
+        );
+        expect(quick.postDataJSON()).toEqual({
+          mode: "quick",
+          class_id: "rogue",
+          species: "halfling",
+          concept: FRIEND_CONCEPT,
+        });
+        const quickHero = (
+          (await (await quick.response())?.json()) as { character: HeroJson }
+        ).character;
+        await expect(page.getByText("Ваш герой")).toBeVisible();
 
-      // Теперь выбор есть: форма «Быстро» открывается заполненной (имя не давали — пусто),
-      // карусели — на прежних классе и расе.
-      await button(page, "Изменить").click();
-      await button(page, "Изменить").click();
-      await expect(page.getByLabel("Опиши героя одной строкой")).toHaveValue(
-        FRIEND_CONCEPT,
-      );
-      await expectPicked(page, "Класс", "Плут");
-      await expectPicked(page, "Раса", "Полурослик");
-      await expect(page.getByLabel("Имя (необязательно)")).toHaveValue("");
-      await button(page, "Назад в лобби").click();
+        // Теперь выбор есть: форма «Быстро» открывается заполненной (имя не давали — пусто),
+        // карусели — на прежних классе и расе.
+        await button(page, "Изменить").click();
+        await button(page, "Изменить").click();
+        await expect(page.getByLabel("Опиши героя одной строкой")).toHaveValue(
+          FRIEND_CONCEPT,
+        );
+        await expectPicked(page, "Класс", "Плут");
+        await expectPicked(page, "Раса", "Полурослик");
+        await expect(page.getByLabel("Имя (необязательно)")).toHaveValue("");
+        await button(page, "Назад в лобби").click();
+        return quickHero.name;
+      });
+
+    // Финальное покрытие B11 (контракт, §1 п. 3): имя героя игрока в лобби видят все.
+    await test.step("Лобби: имя героя каждого игрока видят оба, строки с именами помещаются на телефоне", async () => {
+      for (const { page } of players) {
+        await expect(heroLine(page, "dev-1")).toHaveText(`Герой: ${HOST_NAME}`);
+        // Имя быстрого героя дал мастер уже после рассылки лобби: что оно доходит до открытого
+        // лобби, проверяет отдельный тест ниже (найденный дефект сервера B11).
+        await expect(heroLine(page, "dev-2")).toBeVisible();
+      }
+      await expectFitsPhone(host.page, "лобби: имена героев в строках игроков");
     });
 
     await test.step("Тайны выбора: чужой выбор и чужой лист не доходят ни по сокету, ни по REST", async () => {
@@ -928,12 +951,20 @@ test("три способа создать героя на настоящем с
         [...player.frames, ...player.bodies].join("\n");
       const mineOf = (player: Player) =>
         player.bodies.filter((text) => text.includes('"choices"'));
+      // Имя героя по контракту B11 (§1 п. 3) приходит всем полем `hero_name` сводки лобби; вне
+      // этого поля имени чужого героя на проводе быть не должно.
+      const heroNameField = (name: string) =>
+        new RegExp(`"hero_name":\\s*"${name}"`);
+      const withoutHeroNames = (text: string) =>
+        text.replace(/"hero_name":\s*"[^"]*"/g, "");
 
-      // Замысел и имя одного игрока не встречаются ни в одном ответе другому.
+      // Замысел одного игрока не встречается ни в одном ответе другому, имя — только в hero_name.
       expect(wireOf(friend)).not.toContain("ЗАМЫСЕЛ-ТОРГРИМА");
-      expect(wireOf(friend)).not.toContain(HOST_NAME);
+      expect(wireOf(friend)).toMatch(heroNameField(HOST_NAME));
+      expect(withoutHeroNames(wireOf(friend))).not.toContain(HOST_NAME);
       expect(wireOf(host)).not.toContain("ЗАМЫСЕЛ-ПЛУТА");
-      expect(wireOf(host)).not.toContain(NAME_FROM_MASTER);
+      expect(withoutHeroNames(wireOf(host))).not.toContain(NAME_FROM_MASTER);
+      expect(withoutHeroNames(wireOf(host))).not.toContain(quickHeroName);
       // Выбор приходит только в ответе `characters/mine` и только свой.
       expect(mineOf(host).length).toBeGreaterThan(0);
       expect(mineOf(friend).length).toBeGreaterThan(0);
@@ -955,6 +986,74 @@ test("три способа создать героя на настоящем с
       expect(wireOf(host)).not.toContain(friendHero.id);
       expect(wireOf(friend)).not.toContain(hostHero.id);
     });
+  } finally {
+    await Promise.all(players.map((player) => player.context.close()));
+  }
+});
+
+// Дефект сервера, найденный финальным покрытием B11 и исправленный в fix-раунде. Быстрому герою
+// без имени имя даёт мастер: сервер сохраняет героя с именем-заглушкой и рассылает кадр `lobby`,
+// а записав описание с именем от мастера, рассылает ещё один кадр `lobby`. Открытое лобби у всех
+// (и у самого игрока в строке «Герой: …») показывает имя от мастера, а не «Безымянный странник».
+test("быстрый герой без имени: имя от мастера доходит до открытого лобби других игроков", async ({
+  browser,
+  baseURL,
+  request,
+}) => {
+  if (baseURL === undefined) throw new Error("baseURL не задан");
+  const players: Player[] = [];
+  try {
+    const host = await openPlayer(browser, baseURL, "dev-1");
+    players.push(host);
+    const code = await createGameAndInvite(host);
+    const friend = await openPlayer(browser, baseURL, "dev-2");
+    players.push(friend);
+    const { page } = friend;
+    await page.getByLabel("Код приглашения").fill(code);
+    await button(page, "Войти").click();
+    await expect(page.getByText("Ваш герой")).toBeVisible();
+
+    await button(page, "Создать персонажа").click();
+    await button(page, "Быстро").click();
+    await pickInCarousel(page, "Класс", "Плут");
+    await pickInCarousel(page, "Раса", "Полурослик");
+    await page.getByLabel("Опиши героя одной строкой").fill(FRIEND_CONCEPT);
+    const sent = await requestOf(page, "POST", "/characters", () =>
+      button(page, "Создать героя").click(),
+    );
+    const created = (await (await sent.response())?.json()) as {
+      character: HeroJson;
+      flavor_error: string | null;
+    };
+    expect(created.flavor_error).toBeNull();
+    expect(created.character.name).toBe(NAME_FROM_MASTER);
+    await expect(page.getByText("Ваш герой")).toBeVisible();
+
+    // Контроль: сервер имя знает — свежая сводка игры отдаёт его в hero_name.
+    const login = await request.post("/api/auth/dev", {
+      data: { login: "dev-1" },
+    });
+    const { token } = (await login.json()) as { token: string };
+    const games = (await (
+      await request.get("/api/games", {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+    ).json()) as {
+      code: string;
+      players: { name: string; hero_name: string | null }[];
+    }[];
+    const game = games.find((item) => item.code === code);
+    expect(
+      game?.players.find((player) => player.name === "dev-2")?.hero_name,
+    ).toBe(NAME_FROM_MASTER);
+
+    // Открытое лобби обоих должно получить это имя кадром lobby — здесь дефект.
+    for (const player of players) {
+      await expect(heroLine(player.page, "dev-2")).toHaveText(
+        `Герой: ${NAME_FROM_MASTER}`,
+        { timeout: 5_000 },
+      );
+    }
   } finally {
     await Promise.all(players.map((player) => player.context.close()));
   }

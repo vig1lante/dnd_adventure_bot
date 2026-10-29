@@ -586,10 +586,10 @@ const playing = (turn_phase: GameSummary["turn_phase"]) =>
 
 /** Снимки игр по id: подмена сокета превью отдаёт снимок той игры, к которой подключились. */
 export const SNAPSHOTS: Record<string, Snapshot> = {
-  // Сбор ходов: игроки пишут, у Лиры черновик хода.
+  // Сбор ходов: у Лиры черновик хода («Пишет»), третий игрок ход ещё не начал — без значка.
   "g-story": snapshot(playing("collecting"), {
     phase: phase({ turn_phase: "collecting", deadline_at: deadlineIn(87) }),
-    statuses: { u1: "writing", u2: "ready", u3: "writing", u4: "pass" },
+    statuses: { u1: "writing", u2: "ready", u3: "idle", u4: "pass" },
     action: {
       text: "Спускаюсь по лестнице первой, тихо, держа кинжал наготове.",
       secret: false,

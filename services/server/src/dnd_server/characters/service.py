@@ -23,11 +23,11 @@
 отменяют персонажа: клиент получает его без описания и с `flavor_error`. Ответ 409 остаётся только
 тому запросу, чей персонаж уже заменён другим.
 
-Случайный герой создаётся двумя способами. Прежний (`mode: random` без `preview_id`) бросает героя
-и сразу сохраняет. Новый идёт в два шага (решение владельца R1): `random_preview` бросает героя и
-запоминает его (`RandomPreviews`), ничего не записывая и не зовя модель, а `mode: random` с
-`preview_id` («Беру») создаёт персонажа ровно из запомненного героя и дописывает описание, как
-обычно. Числа второго шага не бросаются заново.
+Случайный герой создаётся только в два шага (решение владельца R1, спека DND-2 §15):
+`random_preview` бросает героя и запоминает его (`RandomPreviews`), ничего не записывая и не зовя
+модель, а `mode: random` с `preview_id` («Беру») создаёт персонажа ровно из запомненного героя и
+дописывает описание, как обычно. Числа второго шага не бросаются заново; прежнего пути «бросить и
+сразу сохранить» нет (без `preview_id` маршрут отвечает 422).
 
 Вызовы модели из действий игрока платные, поэтому они ограничены (`ModelCalls`): у игрока в игре
 одновременно не больше одного вызова (второй запрос — 429 до любых изменений) и не больше
@@ -615,7 +615,6 @@ class Slot:
     """Что известно под блокировкой игры о месте нового персонажа."""
 
     character_id: str
-    taken_classes: set[str]  # классы персонажей других игроков
 
 
 class CreatedOut(BaseModel):
@@ -745,10 +744,7 @@ async def _store_new(
         game = await get_game(session, user, game_id)
         _require_lobby(game)
         player = await session.get(GamePlayer, (game_id, user.id))
-        slot = Slot(
-            character_id=new_character_id(),
-            taken_classes=await _taken_classes(session, game_id, user.id),
-        )
+        slot = Slot(character_id=new_character_id())
         try:
             built = build(slot)
         except CharacterValidationError as error:
@@ -836,22 +832,16 @@ async def create_random(
     game_id: str,
     deps: Deps,
     *,
-    preview_id: str | None = None,
+    preview_id: str,
 ) -> CreatedOut:
-    """Случайный режим: персонаж из свободного класса, модель его описывает.
+    """Случайный режим («Беру»): герой, которого сервер показал этому игроку в `random_preview`,
+    модель его описывает. Броска нет, числа те же. Предпросмотр расходуется под блокировкой игры в
+    момент сборки, после проверок игры и места под вызов модели; отказ раньше (игра не в лобби,
+    429) его не тратит. Если сохранение в базу после этого оборвётся (500), игрок бросит судьбу
+    ещё раз."""
 
-    Без `preview_id` движок бросает героя тут же (прежнее поведение). С `preview_id` («Беру»)
-    создаётся герой, которого сервер показал этому игроку в `random_preview`: броска нет, числа те
-    же. Предпросмотр расходуется под блокировкой игры в момент сборки, после проверок игры и места
-    под вызов модели; отказ раньше (игра не в лобби, 429) его не тратит. Если сохранение в базу
-    после этого оборвётся (500), игрок бросит судьбу ещё раз."""
-
-    def build(slot: Slot) -> Character:
-        if preview_id is not None:
-            return deps.previews.take(game_id, user.id, preview_id)
-        return random_character(
-            deps.rng, deps.srd, taken_classes=slot.taken_classes, character_id=slot.character_id
-        )
+    def build(_slot: Slot) -> Character:
+        return deps.previews.take(game_id, user.id, preview_id)
 
     return await _create(
         session, user, game_id, deps, build, _stored_choice("random", None), describe=True
@@ -995,7 +985,11 @@ async def _save_description(
     (`populate_existing`). Игра, ушедшая из лобби, описание не принимает (`False`): персонаж у
     игрока остаётся прежним. Заменённому персонажу возвращать нечего, это `Conflict`; замена
     проверяется первой, потому что она важнее: её персонаж уже не тот, что сохранён. Игроку,
-    которого исключили или который вышел за это время, тоже `Conflict`: его персонаж удалён."""
+    которого исключили или который вышел за это время, тоже `Conflict`: его персонаж удалён.
+
+    Записанное описание меняет имя героя в лобби (`hero_name`: модель придумала имя быстрому
+    герою), поэтому после коммита и под той же блокировкой всем уходит новый кадр `lobby`, как
+    при сохранении героя. Отказы кадра не шлют: в лобби ничего не изменилось."""
     async with deps.locks.lock(game_id):
         game = await session.get(Game, game_id, populate_existing=True)
         player = await session.get(GamePlayer, (game_id, user.id), populate_existing=True)
@@ -1008,6 +1002,9 @@ async def _save_description(
         row = await session.get(PlayerCharacter, character.id, populate_existing=True)
         row.data = character.model_dump(mode="json")
         await session.commit()
+        await send_to_game(
+            deps.broadcaster, game_id, lobby_event(await get_game(session, user, game_id))
+        )
         return True
 
 

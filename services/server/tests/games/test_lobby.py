@@ -14,6 +14,7 @@ import logging
 import re
 import shutil
 from collections import Counter
+from datetime import UTC
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -69,8 +70,9 @@ GAME_FIELDS = {
     "short_rest_seconds",
     "profanity",
     "players",
+    "created_at",
 }
-PLAYER_FIELDS = {"user_id", "name", "is_host", "ready", "has_character"}
+PLAYER_FIELDS = {"user_id", "name", "is_host", "ready", "has_character", "hero_name"}
 
 
 # --- приложение, регистраторы, игроки ---
@@ -1197,6 +1199,105 @@ async def test_my_games_lists_only_the_games_i_am_in_newest_first(lobby):
     assert nobodys_games.json() == []
 
 
+# --- что видно о игре в списке и лобби (B11.2) ---
+
+
+async def test_a_game_tells_when_it_was_created_in_utc_everywhere_it_is_shown(lobby):
+    host = await add_host(lobby)
+    created = await new_game(lobby, host)
+    stored = await stored_game(lobby.db, created["id"])
+    expected = stored.created_at.astimezone(UTC).isoformat()
+
+    await joined_friend(lobby, created)
+    listed = (await lobby.http.get("/api/games", headers=host.headers)).json()
+    one = (await lobby.http.get(f"/api/games/{created['id']}", headers=host.headers)).json()
+
+    # Без пояса браузер прочёл бы время как местное; пояс UTC всегда явный.
+    assert expected.endswith("+00:00")
+    assert created["created_at"] == expected
+    assert [game["created_at"] for game in listed] == [expected]
+    assert one["created_at"] == expected
+    [(_game_id, event, _audience)] = lobby.broadcaster.sent
+    assert event["game"]["created_at"] == expected
+
+
+async def test_every_player_sees_the_names_of_the_heroes_in_the_lobby(lobby):
+    host = await add_host(lobby)
+    game = await new_game(lobby, host)
+    friend = await joined_friend(lobby, game)
+    await give_character(lobby.db, game["id"], host)
+
+    seen_by_friend = (
+        await lobby.http.get(f"/api/games/{game['id']}", headers=friend.headers)
+    ).json()
+    listed_by_host = (await lobby.http.get("/api/games", headers=host.headers)).json()
+
+    # У хоста герой есть, у друга — ещё нет: имя героя видят все, его отсутствие — `null`.
+    heroes = {player["user_id"]: player["hero_name"] for player in seen_by_friend["players"]}
+    assert heroes == {host.id: host.name, friend.id: None}
+    assert {p["user_id"]: p["hero_name"] for p in listed_by_host[0]["players"]} == heroes
+
+
+async def test_every_answer_and_frame_with_a_game_carries_its_creation_time_and_hero_names(lobby):
+    # Финальное покрытие B11: `GameOut` отдают не только список и карточка игры, но и вход,
+    # готовность, исключение и старт, а с ними — кадры `lobby`. Время создания везде одно и то же,
+    # имя героя — у всех игроков, у игрока без героя `null`.
+    host = await add_host(lobby)
+    game = await new_game(lobby, host)
+    expected = game["created_at"]
+    friend, stranger = await add_friend(lobby), await add_friend(lobby)
+    await give_character(lobby.db, game["id"], host)
+
+    answers = {
+        "вход": await join(lobby, friend, game["code"]),
+        "вход второго": await join(lobby, stranger, game["code"]),
+        "готовность": await mark_ready(lobby, game["id"], host),
+    }
+    answers["исключение"] = await lobby.http.post(
+        f"/api/games/{game['id']}/players/{stranger.id}/kick", headers=host.headers
+    )
+    await ready_with_character(lobby, game["id"], friend)
+    answers["старт"] = await lobby.http.post(f"/api/games/{game['id']}/start", headers=host.headers)
+
+    for name, response in answers.items():
+        assert response.status_code == 200, (name, response.text)
+        assert response.json()["created_at"] == expected, name
+    heroes = {p["user_id"]: p["hero_name"] for p in answers["готовность"].json()["players"]}
+    assert heroes == {host.id: host.name, friend.id: None, stranger.id: None}
+    started = {p["user_id"]: p["hero_name"] for p in answers["старт"].json()["players"]}
+    assert started == {host.id: host.name, friend.id: friend.name}
+    frames = [p for _game, p, _who in lobby.broadcaster.sent if p["type"] == "lobby"]
+    assert len(frames) >= len(answers) and all(
+        frame["game"]["created_at"] == expected for frame in frames
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        pytest.param("", {"adventure_id": "demo-crypt", "rules": "свои"}, id="создание"),
+        pytest.param("/join", {"code": "ABC123", "is_host": True}, id="вход"),
+        pytest.param("/{game}/ready", {"ready": False, "force": True}, id="готовность"),
+    ],
+)
+async def test_a_lobby_request_with_an_unknown_field_is_422_and_changes_nothing(lobby, path, body):
+    host = await add_host(lobby)
+    game = await new_game(lobby, host)
+    body = {key: game["code"] if key == "code" else value for key, value in body.items()}
+
+    response = await lobby.http.post(
+        "/api/games" + path.format(game=game["id"]), headers=host.headers, json=body
+    )
+
+    assert response.status_code == 422
+    [unknown] = [key for key in body if key not in ("adventure_id", "code", "ready")]
+    assert response.json() == {"detail": f"Некорректные данные запроса: проверьте {unknown}."}
+    assert await count_games(lobby.db) == 1
+    [row] = await stored_players(lobby.db, game["id"])
+    assert (row.user_id, row.is_host, row.ready) == (host.id, True, False)
+    assert lobby.broadcaster.sent == []
+
+
 # --- готовность ---
 
 
@@ -1529,18 +1630,55 @@ async def test_leaving_races_with_the_start_under_the_game_lock(lobby):
 
     stored = await stored_game(lobby.db, game["id"])
     members = [row.user_id for row in await stored_players(lobby.db, game["id"])]
-    if start.status_code == 200:  # старт успел раньше: выйти уже нельзя
-        assert (left.status_code, stored.phase, friend.id in members) == (
-            409,
-            GamePhase.WEAVING,
-            True,
-        )
-    else:  # выход успел раньше: игра осталась в лобби без вышедшего
-        assert (left.status_code, stored.phase, friend.id in members) == (
-            204,
-            GamePhase.LOBBY,
-            False,
-        )
+    # Старт удаётся в любом порядке: оставшиеся готовы. Под блокировкой игры решается только, с
+    # кем он начат. Ветку выбирает исход выхода, а не старта: оба запроса могут получить успех.
+    assert start.status_code == 200, start.text
+    assert stored.phase == GamePhase.WEAVING
+    if left.status_code == 409:  # старт успел раньше: выйти уже нельзя
+        assert friend.id in members
+        assert friend.id in [p["user_id"] for p in start.json()["players"]]
+    else:  # выход успел раньше: игра началась без вышедшего
+        assert left.status_code == 204, left.text
+        assert friend.id not in members
+        assert friend.id not in [p["user_id"] for p in start.json()["players"]]
+
+
+async def test_the_kicked_player_is_cut_off_before_the_lobby_hears_of_the_kick(lobby, monkeypatch):
+    # Дополнение B11 §5 п. 6 (S3): соединения исключённого снимаются после коммита и до рассылки
+    # `lobby`, поэтому новый состав лобби до него не доходит — он получает только `kicked`.
+    game, host, (target, _stayer) = await ready_lobby(lobby)
+    order: list[object] = []
+    hub = lobby.app.state.hub
+    real_kick_user, real_send = hub.kick_user, lobby.broadcaster.send
+
+    def kick_user(game_id: str, user_id: str) -> int:
+        order.append(("снят", user_id, game_id))
+        return real_kick_user(game_id, user_id)
+
+    async def send(game_id: str, payload: dict[str, Any], audience: str = "all") -> None:
+        order.append(payload["type"])
+        await real_send(game_id, payload, audience)
+
+    monkeypatch.setattr(hub, "kick_user", kick_user)
+    monkeypatch.setattr(lobby.broadcaster, "send", send)
+
+    response = await kick(lobby, game["id"], host, target.id)
+
+    assert response.status_code == 200
+    assert order == [("снят", target.id, game["id"]), "lobby"]
+    assert target.id not in [row.user_id for row in await stored_players(lobby.db, game["id"])]
+
+
+async def test_a_refused_kick_cuts_nobody_off(lobby, monkeypatch):
+    game, host, (target, _stayer) = await ready_lobby(lobby)
+    cut: list[str] = []
+    monkeypatch.setattr(lobby.app.state.hub, "kick_user", lambda _game, user: cut.append(user))
+    await lobby.http.post(f"/api/games/{game['id']}/start", headers=host.headers)
+
+    refused = await kick(lobby, game["id"], host, target.id)
+
+    assert refused.status_code == 409
+    assert cut == []
 
 
 async def test_the_host_kicks_a_player_with_his_character_and_his_choice(lobby):

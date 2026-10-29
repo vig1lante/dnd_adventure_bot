@@ -1078,6 +1078,48 @@ def test_card_texts_of_hero_creation_have_no_latin_letters(species, backgrounds,
     assert [owner for owner, text in texts.items() if LATIN.search(text)] == []
 
 
+# Служебные пометки авторов данных: игрок видит summary в карточке «Подробнее», а «id» и «поля»
+# данных ему ничего не говорят (carry_over B7: «Это эффект на id заклинания: полями он не описан.»).
+# B11.coverage: кроме «id» и «полями» — и другие обороты о данных и коде («в данных», «не описан»,
+# «движок», имена форматов и полей).
+DATA_JARGON = re.compile(
+    r"\bid\b|полями|в данных|не описан|\bдвиж(?:ок|ка|ком|ке)\b|\b(?:yaml|json|summary|todo)\b",
+    re.IGNORECASE,
+)
+
+
+def test_the_jargon_detector_notices_the_notes_once_found_in_the_data():
+    # Страховка от пустой проверки ниже: прежние пометки SRD (заклинания и статблок монстра)
+    # узнаются, а обычный текст карточки — нет.
+    notes = [
+        "Это эффект на id заклинания: полями он не описан.",
+        "Выбор состояния — на id заклинания: полями он не описан.",
+        "Две атаки скимитаром; в данных — две атаки скимитаром.",
+        "Эффект считает движок.",
+    ]
+
+    assert [note for note in notes if not DATA_JARGON.search(note)] == []
+    assert not DATA_JARGON.search("Каждое попадание наносит ещё 1к6 урона силовым полем.")
+
+
+def test_card_summaries_speak_to_the_player_and_not_about_the_data(
+    classes, species, backgrounds, feats, skills, items, spells
+):
+    # Все тексты SRD, которые сервер отдаёт в карточки создания героя и «Подробнее» как есть.
+    texts = {f"spell {spell.id}": spell.summary for spell in spells.values()}
+    texts |= {f"item {item.id}": item.summary for item in items.values()}
+    texts |= {f"feat {feat.id}": feat.summary for feat in feats.values()}
+    texts |= {f"skill {skill_id}": skill.summary for skill_id, skill in skills.items()}
+    texts |= {f"species {kind.id} description": kind.description for kind in species.values()}
+    texts |= {f"background {item.id} tool": item.tool for item in backgrounds.values()}
+    for cls in classes.values():
+        texts |= {f"{cls.id}.{feature.id}": feature.summary for feature in cls.features}
+    for kind in species.values():
+        texts |= {f"{kind.id}.{trait.id}": trait.summary for trait in kind.traits}
+
+    assert [owner for owner, text in texts.items() if DATA_JARGON.search(text)] == []
+
+
 # --- полная загрузка встроенных данных ---
 
 

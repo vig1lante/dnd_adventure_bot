@@ -19,7 +19,7 @@ import {
 import type { BadgeProps } from "../ui";
 import { CreateGameForm } from "./CreateGameForm";
 import { TextField } from "./fields";
-import { AdventuresHome } from "./authoring/AdventuresHome";
+import { AdventuresHome, momentText } from "./authoring/AdventuresHome";
 import { useAction, useLoaded } from "./hooks";
 import "./screens.css";
 import "./authoring/authoring.css";
@@ -85,21 +85,29 @@ function JoinForm() {
   );
 }
 
+/**
+ * Строка игры: название, фаза, число игроков и дата создания. Игры одного приключения различаются
+ * датой — она же описывает кнопку «Открыть» для читалки. Сервер до B11 даты не присылает.
+ */
 function GameRow({ game }: { game: GameSummary }) {
   const show = useGame((state) => state.show);
+  const metaId = useId();
   const phase = PHASES[game.phase];
+  const created = momentText(game.created_at ?? "");
   return (
     <li className="games-item">
       <div className="games-item__main">
         <span className="games-item__title">{game.adventure_title}</span>
-        <div className="games-item__meta">
+        <div id={metaId} className="games-item__meta">
           <Badge tone={phase.tone}>{phase.label}</Badge>
           <span>Игроков: {game.players.length}</span>
+          {created !== "" && <span>создана {created}</span>}
         </div>
       </div>
       <Button
         variant="secondary"
         aria-label={`Открыть: ${game.adventure_title}`}
+        aria-describedby={metaId}
         onClick={() => show({ screen: screenFor(game.phase), gameId: game.id })}
       >
         Открыть

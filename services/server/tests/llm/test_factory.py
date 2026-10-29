@@ -34,6 +34,7 @@ BOT_TOKEN = "123456:bot-factory-secret"
 ALL_SECRETS = (ANTHROPIC_KEY, COMPAT_KEY, SESSION_SECRET, BOT_TOKEN)
 INTERNAL_URL = "http://127.0.0.1:8000"
 CLAUDE_DEV_ONLY = "claude_code_cli доступен только в dev-режиме"
+FAKE_DEV_ONLY = "тестовый мастер fake доступен только в dev-режиме"
 
 SCENARIO = """\
 turns:
@@ -187,9 +188,11 @@ def cli_settings(**overrides: Any) -> Settings:
 
 
 def fake_settings(tmp_path, text: str = SCENARIO, **overrides: Any) -> Settings:
+    """Тестовый мастер со сценарием из `text`; он собирается только в dev (спека §15)."""
     scenario = tmp_path / "scenario.yaml"
     scenario.write_text(text, encoding="utf-8")
-    return make_settings(**({"llm_provider": "fake", "fake_llm_scenario": scenario} | overrides))
+    values = {"llm_provider": "fake", "fake_llm_scenario": scenario, "app_env": "dev"}
+    return make_settings(**(values | overrides))
 
 
 class RecordingTools:
@@ -232,13 +235,50 @@ async def test_fake_providers_of_different_games_have_own_turn_queues(tmp_path):
     assert second_tools.calls == [("request_check", {"character_id": "b2"})]
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"app_env": "prod"}, id="APP_ENV=prod"),
+        pytest.param({"app_env": None}, id="без APP_ENV"),
+    ],
+)
+def test_fake_is_refused_in_prod_even_with_a_scenario(tmp_path, overrides):
+    # Сценарий задан и читается, но в боевом режиме тестового мастера нет (спека §15): без
+    # APP_ENV сервер работает как prod. Ни пути, ни содержимого сценария в тексте нет.
+    values = {key: value for key, value in overrides.items() if value is not None}
+    scenario = fake_settings(tmp_path).fake_llm_scenario
+    settings = make_settings(llm_provider="fake", fake_llm_scenario=scenario, **values)
+
+    with pytest.raises(ConfigError) as error:
+        make_provider(settings, pc_ids=["pc-a", "pc-b"])
+
+    assert str(error.value) == FAKE_DEV_ONLY
+    assert str(tmp_path) not in str(error.value) and "request_check" not in str(error.value)
+
+
+def test_fake_game_override_is_refused_in_prod(tmp_path):
+    settings = anthropic_settings(fake_llm_scenario=fake_settings(tmp_path).fake_llm_scenario)
+
+    with pytest.raises(ConfigError, match=FAKE_DEV_ONLY):
+        make_provider(settings, provider="fake")
+
+
+def test_fake_without_scenario_is_refused_in_prod_before_the_scenario_is_looked_for():
+    with pytest.raises(ConfigError) as error:
+        make_provider(make_settings(llm_provider="fake"))
+
+    assert str(error.value) == FAKE_DEV_ONLY
+
+
 def test_fake_without_scenario_is_config_error():
     with pytest.raises(ConfigError, match="FAKE_LLM_SCENARIO"):
-        make_provider(make_settings(llm_provider="fake"))
+        make_provider(make_settings(llm_provider="fake", app_env="dev"))
 
 
 def test_fake_with_missing_scenario_file_is_config_error(tmp_path):
-    settings = make_settings(llm_provider="fake", fake_llm_scenario=tmp_path / "нет.yaml")
+    settings = make_settings(
+        llm_provider="fake", fake_llm_scenario=tmp_path / "нет.yaml", app_env="dev"
+    )
 
     with pytest.raises(ConfigError, match="FAKE_LLM_SCENARIO"):
         make_provider(settings)
@@ -285,7 +325,7 @@ def test_scenario_file_content_never_reaches_the_config_error(tmp_path, content)
     scenario.write_bytes(content)
 
     with pytest.raises(ConfigError, match="FAKE_LLM_SCENARIO") as error:
-        make_provider(make_settings(llm_provider="fake", fake_llm_scenario=scenario))
+        make_provider(make_settings(llm_provider="fake", fake_llm_scenario=scenario, app_env="dev"))
 
     story = "".join(traceback.format_exception(error.value)) + repr(error.value)
     assert SCENARIO_SECRET not in story
@@ -365,7 +405,7 @@ def test_scenario_over_the_size_limit_is_a_config_error_that_names_the_limit(tmp
 def test_scenario_that_is_a_folder_is_a_config_error_that_names_the_reason(tmp_path):
     folder = tmp_path / "scenario.yaml"
     folder.mkdir()
-    settings = make_settings(llm_provider="fake", fake_llm_scenario=folder)
+    settings = make_settings(llm_provider="fake", fake_llm_scenario=folder, app_env="dev")
 
     with pytest.raises(ConfigError, match="FAKE_LLM_SCENARIO") as error:
         make_provider(settings)

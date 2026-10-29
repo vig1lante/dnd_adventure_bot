@@ -460,32 +460,115 @@ def audiences_of_rolls(events: list[Event]) -> dict[str, str]:
     return {e.actor_id: e.audience for e in events if isinstance(e, RollEvent)}
 
 
-def test_a_secret_move_in_the_turn_hides_only_the_initiative_of_the_secret_actor(
-    make_scene, call_tool
-):
-    # Начало боя — вызов без автора: чужие броски инициативы тайный ход не закрывает.
+def test_the_initiative_of_a_secret_actor_is_public_like_everyone_elses(make_scene, call_tool):
+    # Спека §15: инициатива всегда общая — она и так видна всем в порядке хода. Тайный ход от
+    # этого не перестаёт быть тайным: закрыты остальные броски тайного героя.
     ctx = make_scene(secret=(HERO,))
     first_new = len(ctx.events)
 
     assert call_tool(ctx, "start_combat", encounter_id="risen-bones").error is None
 
     audiences = audiences_of_rolls(ctx.events[first_new:])
-    assert audiences[HERO] == HERO
     assert set(audiences) >= {HERO, ALLY, WIZARD, "skeleton-1"}
-    assert {a for who, a in audiences.items() if who != HERO} == {"all"}
+    assert set(audiences.values()) == {"all"}
 
 
-def test_each_secret_actor_sees_only_their_own_initiative_and_the_rest_is_public(
-    make_scene, call_tool
-):
-    ctx = make_scene(secret=(HERO, ALLY))
+def test_the_initiative_of_several_secret_actors_is_public_too(make_scene, call_tool):
+    ctx = make_scene(secret=(HERO, ALLY, WIZARD))
     first_new = len(ctx.events)
 
     assert call_tool(ctx, "start_combat", encounter_id="risen-bones").error is None
 
-    audiences = audiences_of_rolls(ctx.events[first_new:])
-    assert (audiences[HERO], audiences[ALLY]) == (HERO, ALLY)
-    assert {a for who, a in audiences.items() if who not in {HERO, ALLY}} == {"all"}
+    rolls = [e for e in ctx.events[first_new:] if isinstance(e, RollEvent)]
+    assert {roll.label for roll in rolls} == {"Инициатива"}
+    assert {roll.audience for roll in rolls} == {"all"}
+
+
+def test_the_death_save_of_a_secret_actor_who_starts_the_fight_stays_closed(make_scene, call_tool):
+    # Общая только инициатива: лежащий на 0 HP тайный герой ходит первым и в том же вызове
+    # бросает спасбросок от смерти — это его собственный бросок, его видит только он.
+    ctx = make_scene(first=HERO, secret=(HERO,))
+    ctx.state.party[HERO].hp = 0
+    ctx.rng = ScriptedRng([20, 19, 18, 2, 1, 1, 1, 1, 10])  # инициатива, затем спасбросок
+    first_new = len(ctx.events)
+
+    assert call_tool(ctx, "start_combat", encounter_id="risen-bones").error is None
+
+    rolls = [e for e in ctx.events[first_new:] if isinstance(e, RollEvent)]
+    death_saves = [roll for roll in rolls if roll.label == "Спасбросок от смерти"]
+    assert [(roll.actor_id, roll.audience) for roll in death_saves] == [(HERO, HERO)]
+    assert {roll.audience for roll in rolls if roll.label == "Инициатива"} == {"all"}
+
+
+# --- B11.coverage: общая инициатива на стыках (спека DND-2 §15, дополнение B11 §3) ---
+
+# Кубы начала боя для трёх героев и пяти монстров «Встающих костей», затем спасбросок от смерти
+# первого бойца (10 — успех, без натуральной 20 и без лечения).
+START_WITH_A_DEATH_SAVE = [20, 19, 18, 2, 1, 1, 1, 1, 10]
+
+
+def start_rolls(ctx, call_tool) -> list[tuple[str, str, str]]:
+    """Начинает бой «Встающие кости» и возвращает броски вызова: (кто, подпись, аудитория)."""
+    first_new = len(ctx.events)
+
+    assert call_tool(ctx, "start_combat", encounter_id="risen-bones").error is None
+
+    return [
+        (e.actor_id, e.label, e.audience)
+        for e in ctx.events[first_new:]
+        if isinstance(e, RollEvent)
+    ]
+
+
+def test_only_start_combat_declares_rolls_that_everyone_sees(tool_registry):
+    # Правило тайны закрыто по умолчанию, исключение одно — инициатива начала боя. Новый инструмент
+    # с общими бросками должен появиться здесь осознанно, а не открыть тайные броски молча.
+    declared = {
+        spec.name: spec.public_roll_labels
+        for spec in tool_registry.specs()
+        if spec.public_roll_labels
+    }
+
+    assert declared == {"start_combat": ("Инициатива",)}
+
+
+def test_with_several_secret_heroes_the_death_save_at_the_start_goes_to_its_own_hero(
+    make_scene, call_tool
+):
+    # У начала боя нет автора: правило «первый тайный по id» тут ни при чём. Лежащая Лира ходит
+    # первой и бросает спасбросок от смерти — его видит она, а не Брон, хотя его id меньше.
+    ctx = make_scene(first=ALLY, secret=(HERO, ALLY))
+    ctx.state.party[ALLY].hp = 0
+    ctx.rng = ScriptedRng(START_WITH_A_DEATH_SAVE)
+
+    rolls = start_rolls(ctx, call_tool)
+
+    assert [roll for roll in rolls if roll[1] != "Инициатива"] == [
+        (ALLY, "Спасбросок от смерти", ALLY)
+    ]
+    assert {audience for _, label, audience in rolls if label == "Инициатива"} == {"all"}
+    assert len(rolls) == len(START_WITH_A_DEATH_SAVE)  # инициатива каждого и один спасбросок
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [(), (ALLY,), (ALLY, WIZARD)],
+    ids=["без тайных", "тайный другой герой", "двое тайных других"],
+)
+def test_a_fight_started_by_an_open_hero_on_the_ground_shows_every_roll_to_everyone(
+    make_scene, call_tool, secret
+):
+    # Открытый лежащий Брон ходит первым: его спасбросок от смерти общий, как и вся инициатива,
+    # даже если в раунде тайно ходят другие.
+    ctx = make_scene(first=HERO, secret=secret)
+    ctx.state.party[HERO].hp = 0
+    ctx.rng = ScriptedRng(START_WITH_A_DEATH_SAVE)
+
+    rolls = start_rolls(ctx, call_tool)
+
+    assert (HERO, "Спасбросок от смерти", "all") in rolls
+    assert len(rolls) == len(START_WITH_A_DEATH_SAVE)
+    assert {audience for _, _, audience in rolls} == {"all"}
 
 
 def test_the_saving_throw_of_a_spell_target_is_hidden_with_the_secret_caster(make_scene, call_tool):

@@ -1047,6 +1047,23 @@ def _check_locations(adventure: Adventure) -> list[Issue]:
     return issues
 
 
+def _check_journal_texts(adventure: Adventure) -> list[Issue]:
+    """Улика без описания и предмет без названия и `public`: дневнику отряда нечего о них
+    написать — запись о сущности без текста не делается (дополнение контракта B8 §11 п. 1)."""
+    issues: list[Issue] = []
+    for revelation in adventure.revelations.values():
+        for clue in revelation.clues:
+            if not clue.description.strip():
+                ref = f"revelation:{revelation.id}/clue:{clue.id}"
+                message = "у улики нет описания: дневник отряда не расскажет о находке"
+                issues.append(_warning("clue_without_description", ref, message))
+    for item in adventure.items.values():
+        if not (item.name.strip() or item.public.strip()):
+            message = "у предмета нет ни названия, ни public: дневник отряда не расскажет о нём"
+            issues.append(_warning("item_without_text", f"item:{item.id}", message))
+    return issues
+
+
 def _check_npcs(adventure: Adventure) -> list[Issue]:
     """Без мотива предупреждаем любого NPC, без связей — тех, кто важен: со статблоком или
     названный в уликах. Связи берутся из общего графа, NPC может стоять на любом её конце."""
@@ -1111,6 +1128,7 @@ def validate(adventure: Adventure, content: SrdContent) -> Report:
         *_check_revelations(adventure),
         *_check_encounters(adventure, content),
         *_check_locations(adventure),
+        *_check_journal_texts(adventure),
         *_check_npcs(adventure),
         *_check_duration(adventure, estimated),
     ]

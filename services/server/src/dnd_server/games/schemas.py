@@ -6,7 +6,7 @@
 
 from typing import Annotated
 
-from pydantic import BaseModel, Field, StrictBool, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator
 
 from dnd_server.db.models import GamePhase, TurnPhase
 
@@ -22,7 +22,13 @@ CampSeconds = Annotated[StrictInt, Field(ge=30, le=900)]
 ShortRestSeconds = Annotated[StrictInt, Field(ge=30, le=600)]
 
 
-class CreateGameIn(BaseModel):
+class _Request(BaseModel):
+    """Тело запроса лобби: лишнее поле — ошибка клиента (422), а не молча отброшенный ввод."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CreateGameIn(_Request):
     adventure_id: str = Field(min_length=1, max_length=64)
     # Имена провайдера и модели ограничены по составу и длине: они уходят в базу, журналы и запросы
     # к провайдеру. Квадратные скобки схема пускает только ради псевдонимов CLI (`sonnet[1m]`):
@@ -38,7 +44,7 @@ class CreateGameIn(BaseModel):
     profanity: StrictBool = True
 
 
-class JoinIn(BaseModel):
+class JoinIn(_Request):
     code: Annotated[str, Field(pattern=r"^[A-Z0-9]{6}$")]
 
     @field_validator("code", mode="before")
@@ -48,7 +54,7 @@ class JoinIn(BaseModel):
         return value.strip().upper() if isinstance(value, str) else value
 
 
-class ReadyIn(BaseModel):
+class ReadyIn(_Request):
     ready: StrictBool
 
 
@@ -58,6 +64,8 @@ class PlayerOut(BaseModel):
     is_host: bool
     ready: bool
     has_character: bool
+    # Имя героя игрока; его видят все (имена героев и так видны в отряде). Нет героя — `None`.
+    hero_name: str | None
 
 
 class GameOut(BaseModel):
@@ -76,3 +84,4 @@ class GameOut(BaseModel):
     short_rest_seconds: int
     profanity: bool  # флажок мата игры: его видят мастер, служебные роли и лобби
     players: list[PlayerOut]
+    created_at: str  # ISO 8601 с `+00:00` (`iso_utc`): дата игры в «Мои игры»

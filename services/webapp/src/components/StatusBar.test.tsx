@@ -3,6 +3,7 @@ import type {
   GamePhase,
   GameSummary,
   PhaseView,
+  PlayerStatus,
   RestView,
   TurnPhase,
 } from "../api/types";
@@ -20,7 +21,7 @@ function renderBar(
     phase?: GamePhase;
     deadline?: string | null;
     remaining?: number | null;
-    statuses?: Record<string, "writing" | "ready" | "pass">;
+    statuses?: Record<string, PlayerStatus>;
     connection?: LiveConnection;
     /** Привал из снимка (контракт B9, §3); по умолчанию его нет. */
     rest?: RestView | null;
@@ -128,6 +129,27 @@ describe("значки игроков", () => {
       expect(screen.queryByRole("listitem")).toBeNull();
     },
   );
+
+  test("«idle» — ход ещё не начат (D17): у игрока имя без значка, «Пишет» только у набирающего черновик", () => {
+    renderBar("discussion", {
+      statuses: { u1: "idle", u2: "writing", u3: "idle" },
+    });
+
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(within(chip("Вика")).queryByText(/Пишет|Готов|Пас/)).toBeNull();
+    expect(within(chip("Мила")).queryByText(/Пишет|Готов|Пас/)).toBeNull();
+    expect(within(chip("Борис")).getByText("Пишет")).toBeInTheDocument();
+    expect(screen.getAllByText("Пишет")).toHaveLength(1);
+  });
+
+  test("начало раунда: у всех «idle» — «Пишет» не горит ни у кого", () => {
+    renderBar("discussion", {
+      statuses: { u1: "idle", u2: "idle", u3: "idle" },
+    });
+
+    expect(screen.queryByText(/Пишет|Готов|Пас/)).toBeNull();
+    expect(screen.queryByText("idle")).toBeNull();
+  });
 
   test("игрок без статуса — имя без значка статуса", () => {
     renderBar("discussion", { statuses: { u1: "ready" } });

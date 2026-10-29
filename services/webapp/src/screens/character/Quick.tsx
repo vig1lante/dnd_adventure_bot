@@ -15,6 +15,10 @@ import { ClassBriefCarousel, RaceCarousel } from "./OptionCards";
 import { CreatedNotice } from "./shared";
 import type { CharacterFormProps } from "./shared";
 
+/** Вариант с этим id есть в правилах сервера. */
+const known = (list: readonly { id: string }[], id: string) =>
+  list.some((option) => option.id === id);
+
 /**
  * Быстрый герой: класс, раса и строка о герое; имя и описание пишет мастер. Класс и раса
  * выбираются листанием карточек; карточка класса короткая (подробности — по «Подробнее»),
@@ -36,7 +40,12 @@ export function Quick({
   const [name, setName] = useState(initial?.name ?? "");
   const [created, setCreated] = useState<CreatedCharacter | null>(null);
 
-  const ready = classId !== "" && species !== "" && concept.trim() !== "";
+  // Прежний выбор («Изменить героя») мог исчезнуть из правил: такой вариант не показан выбранным,
+  // и форма ждёт видимого выбора, а не уходит на сервер с невидимым id.
+  const shownClass = known(options.classes, classId) ? classId : null;
+  const shownSpecies = known(options.species, species) ? species : null;
+  const ready =
+    shownClass !== null && shownSpecies !== null && concept.trim() !== "";
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -68,7 +77,7 @@ export function Quick({
           <p className="form-legend">Класс</p>
           <ClassBriefCarousel
             options={options}
-            value={classId || null}
+            value={shownClass}
             onChange={setClassId}
           />
         </div>
@@ -76,7 +85,7 @@ export function Quick({
           <p className="form-legend">Раса</p>
           <RaceCarousel
             options={options}
-            value={species || null}
+            value={shownSpecies}
             onChange={setSpecies}
           />
         </div>

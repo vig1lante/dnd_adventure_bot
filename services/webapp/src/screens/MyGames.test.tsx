@@ -98,6 +98,60 @@ describe("список игр", () => {
     expect(within(row!).getByText(label)).toBeInTheDocument();
   });
 
+  test("у игры видна дата создания по часам телефона; кнопка «Открыть» описана ею", async () => {
+    // Время в часовом поясе теста: строка списка показывает местное время.
+    const created_at = new Date(2026, 9, 29, 19, 5).toISOString();
+    renderMyGames({ games: [{ ...CRYPT, created_at }] });
+
+    const row = (await screen.findByText("Склеп забытого короля")).closest(
+      "li",
+    );
+    expect(
+      within(row!).getByText("создана 29 октября 2026, 19:05"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Открыть: Склеп забытого короля" }),
+    ).toHaveAccessibleDescription(/создана 29 октября 2026, 19:05/);
+  });
+
+  test("две игры одного приключения различаются датой", async () => {
+    renderMyGames({
+      games: [
+        gameSummary({
+          id: "g2",
+          created_at: new Date(2026, 9, 29, 19, 5).toISOString(),
+        }),
+        gameSummary({
+          id: "g1",
+          created_at: new Date(2026, 9, 22, 8, 40).toISOString(),
+        }),
+      ],
+    });
+
+    await screen.findAllByText("Склеп");
+    const items = screen
+      .getAllByRole("listitem")
+      .map((item) => item.textContent ?? "");
+    expect(items).toEqual([
+      expect.stringContaining("создана 29 октября 2026, 19:05"),
+      expect.stringContaining("создана 22 октября 2026, 08:40"),
+    ]);
+  });
+
+  test("сервер без даты (до B11) или с непонятной датой: строка как раньше, без «создана»", async () => {
+    const { created_at: _dropped, ...old } = gameSummary({
+      id: "g2",
+      adventure_title: "Старая",
+    });
+    renderMyGames({
+      games: [old, gameSummary({ created_at: "вчера" })],
+    });
+
+    await screen.findByText("Старая");
+    expect(screen.queryByText(/создана/)).toBeNull();
+    expect(screen.getAllByText(/Игроков: 0/)).toHaveLength(2);
+  });
+
   test("несколько игр идут в порядке сервера", async () => {
     renderMyGames({
       games: [

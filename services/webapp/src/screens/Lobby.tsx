@@ -5,6 +5,7 @@ import { connectionLost } from "../components/access";
 import { ReconnectingNote } from "../components/StatusBar";
 import {
   RETRY_PATIENCE_MS,
+  phaseStartedAt,
   useStaysFor,
   useThinking,
 } from "../components/waiting";
@@ -38,6 +39,16 @@ function weavingTurnPhase(view: GameView): GameSummary["turn_phase"] {
     : view.game.turn_phase;
 }
 
+/**
+ * Серверное начало фазы хода вплетения (`phase.phase_since`); пока блок фазы ещё не о вплетении
+ * или сервер начала не знает — `null`.
+ */
+function weavingSince(view: GameView): string | null {
+  return view.phase.phase === "weaving"
+    ? (view.phase.phase_since ?? null)
+    : null;
+}
+
 const isReady = (player: PlayerSummary) => player.ready && player.has_character;
 
 function statusOf(player: PlayerSummary): {
@@ -56,22 +67,27 @@ interface WeavingProps {
   gameId: string;
   game: GameSummary;
   turnPhase: GameSummary["turn_phase"];
+  /** Серверное начало фазы хода (ISO); `null` — неизвестно, ждём с показа экрана. */
+  since: string | null;
   isHost: boolean;
 }
 
 /**
  * Начало игры: мастер вплетает героев в мир. Пока он думает — то же «Мастер думает…», что и в
  * игре (фраза и время ожидания); через минуту хост получает «Повторить» в той же карточке. Сбой
- * мастера — сообщение и «Повторить» хосту сразу.
+ * мастера — сообщение и «Повторить» хосту сразу. Минута и счётчик идут от серверного начала фазы:
+ * перезагрузка страницы их не перезапускает.
  */
-function Weaving({ gameId, game, turnPhase, isHost }: WeavingProps) {
+function Weaving({ gameId, game, turnPhase, since, isHost }: WeavingProps) {
   const api = useApi();
   const { busy, error, run } = useAction();
+  const clockOffsetMs = useGame((state) => state.live.clockOffsetMs);
   const failed = turnPhase === "dm_failed";
-  // Сменилась фаза хода — ожидание (и минута до «Повторить») начинается заново.
-  const waitKey = failed ? null : (turnPhase ?? "none");
-  const waitedLong = useStaysFor(waitKey, RETRY_PATIENCE_MS);
-  const thinking = useThinking(waitKey);
+  // Сменилась фаза хода или её начало — ожидание (и минута до «Повторить») начинается заново.
+  const waitKey = failed ? null : `${turnPhase ?? "none"}@${since ?? ""}`;
+  const startedAt = phaseStartedAt(since, clockOffsetMs);
+  const waitedLong = useStaysFor(waitKey, RETRY_PATIENCE_MS, startedAt);
+  const thinking = useThinking(waitKey, startedAt);
   const canRetry = isHost && (failed || waitedLong);
 
   const retry = (
@@ -213,11 +229,19 @@ function PlayerRow({
   onKick,
 }: PlayerRowProps) {
   const status = statusOf(player);
+  // Имя героя видят все (контракт B11, §1 п. 3); сервер до B11 его не присылает.
+  const heroName = player.hero_name ?? "";
   return (
     <li className="lobby-player">
       <Avatar name={player.name} decorative />
       <span className="lobby-player__name">{player.name}</span>
       {isMe && <span className="screen-muted">(вы)</span>}
+      {heroName !== "" && (
+        // Класс имени переносит длинное слово, а не растягивает строку на узком экране.
+        <span className="lobby-player__name screen-muted">
+          Герой: {heroName}
+        </span>
+      )}
       <span className="lobby-player__tags">
         {player.is_host && <Badge tone="amber">Хост</Badge>}
         <Badge tone={status.tone}>{status.label}</Badge>
@@ -429,6 +453,7 @@ export function Lobby() {
           gameId={gameId}
           game={view.game}
           turnPhase={weavingTurnPhase(view)}
+          since={weavingSince(view)}
           isHost={isHost}
         />
       )}

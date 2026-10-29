@@ -9,6 +9,11 @@
 Код закрытия 4401 или 4403 клиент видит, только если рукопожатие принято, поэтому эндпоинт сначала
 принимает сокет и лишь потом проверяет игрока: до проверки он ничего не отправляет.
 
+Когда хаб снял соединение, эндпоинт закрывает сокет. Исключённому хостом (`Hub.kick_user`) он сам
+шлёт кадр `{"type": "kicked"}` и закрывает сокет кодом 4403 с причиной `kicked` (контракт B11 §2):
+клиент говорит «Хост исключил вас», а не «игра недоступна». Остальным — 1013 «переподключитесь»:
+вышедший из лобби при переподключении получит обычный 4403.
+
 От клиента принимается один вид сообщений — `{"type": "ping"}`, на который идёт `pong`. Всё
 остальное игнорируется: ходы и кнопки хоста идут через REST (сервер проверяет игрока и фазу игры),
 а подделанное «событие» из сокета никому не рассылается.
@@ -46,6 +51,8 @@ CLOSE_TIMEOUT_S = 1.0
 MAX_CLIENT_TEXT = 128
 
 PONG = json.dumps({"type": "pong"})
+KICKED = json.dumps({"type": "kicked"})
+KICKED_REASON = "kicked"
 SNAPSHOT_ERROR = json.dumps(
     {"type": "error", "detail": "Не удалось загрузить игру. Попробуйте переподключиться позже."},
     ensure_ascii=False,
@@ -83,11 +90,20 @@ async def listen(websocket: WebSocket, connection: Connection) -> None:
             connection.offer(PONG)  # через очередь соединения: один писатель, порядок кадров
 
 
-async def close_quietly(websocket: WebSocket, code: int) -> None:
+async def close_quietly(websocket: WebSocket, code: int, reason: str | None = None) -> None:
     """Закрывает сокет, если получится: клиент мог уйти, а мог просто не читать."""
     with contextlib.suppress(Exception):
         async with asyncio.timeout(CLOSE_TIMEOUT_S):
-            await websocket.close(code=code)
+            await websocket.close(code=code, reason=reason)
+
+
+async def say_kicked(websocket: WebSocket) -> None:
+    """Последний кадр исключённому и закрытие 4403 `kicked`; писатель соединения уже остановлен,
+    поэтому кадр идёт прямо в сокет и ничего не обгоняет."""
+    with contextlib.suppress(Exception):
+        async with asyncio.timeout(CLOSE_TIMEOUT_S):
+            await websocket.send_text(KICKED)
+    await close_quietly(websocket, CLOSE_NOT_A_MEMBER, KICKED_REASON)
 
 
 async def snapshot_text(websocket: WebSocket, user: User, game_id: str, srd: SrdContent) -> str:
@@ -138,8 +154,10 @@ async def game_socket(
         done, _ = await asyncio.wait({connection.task, reader}, return_when=asyncio.FIRST_COMPLETED)
         if reader in done:
             reader.result()  # клиент ушёл (тишина) или чтение упало (ошибка уйдёт в журнал)
+        elif connection.kicked:
+            await say_kicked(websocket)
         else:
-            # Писатель закончил раньше: клиент не читает или сокет уже закрыт.
+            # Писатель закончил раньше: клиент не читает, сокет уже закрыт или игрок вышел.
             await close_quietly(websocket, CLOSE_TRY_AGAIN_LATER)
     finally:
         if reader is not None:

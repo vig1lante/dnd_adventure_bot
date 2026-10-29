@@ -15,6 +15,8 @@
 
 Предпросмотр случайного героя (`random-preview`) модель не зовёт: он отвечает 409 вне лобби и 429
 при слишком частых бросках, а «Беру» с чужим, устаревшим или уже взятым `preview_id` — 409.
+Случайный герой создаётся только по предпросмотру (спека DND-2 §15): `mode: random` без
+`preview_id` — 422 с подсказкой, что сначала нужен предпросмотр.
 """
 
 from typing import Annotated, Literal
@@ -123,10 +125,17 @@ class QuickIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=NAME_MAX_CHARS)
 
 
+# Отказ случайному герою без предпросмотра: прежнего пути «бросить и сразу сохранить» нет.
+RANDOM_NEEDS_PREVIEW = (
+    "Случайного героя сначала покажите предпросмотром: «Бросить судьбу», затем «Беру»."
+)
+
+
 class RandomIn(BaseModel):
-    """Случайный режим. Без `preview_id` герой бросается и сохраняется сразу (прежнее поведение);
-    с ним («Беру») создаётся герой, которого сервер показал в `random-preview`. Героя, чисел и
-    броска в теле нет, лишние поля отвергаются."""
+    """Случайный режим («Беру»): создаётся герой, которого сервер показал в `random-preview`.
+    Героя, чисел и броска в теле нет, лишние поля отвергаются. Поле `preview_id` в схеме
+    необязательное только ради понятного отказа: без него маршрут отвечает 422 своим текстом,
+    а не общим «проверьте preview_id»."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -226,10 +235,10 @@ async def create_character(
                 concept=body.concept,
                 name=body.name,
             )
-        case RandomIn():
-            return await service.create_random(
-                session, user, game_id, deps, preview_id=body.preview_id
-            )
+        case RandomIn(preview_id=None):
+            raise service.Invalid(RANDOM_NEEDS_PREVIEW)
+        case RandomIn(preview_id=str() as preview_id):
+            return await service.create_random(session, user, game_id, deps, preview_id=preview_id)
 
 
 @router.post("/games/{game_id}/characters/backstory-help")

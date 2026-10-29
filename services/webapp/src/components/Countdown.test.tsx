@@ -199,6 +199,120 @@ describe("воск и очистка", () => {
     expect((wax as HTMLElement).style.width).toBe("50%");
   });
 
+  describe("после «+1 мин» (контракт B11, §1 п. 16)", () => {
+    const waxOf = (container: HTMLElement) =>
+      (container.querySelector(".ui-countdown__wax > span") as HTMLElement)
+        .style.width;
+
+    test("остаток больше настроенного срока: свеча полная и тает до конца от него, а не стоит полной", () => {
+      const { container, rerender } = render(
+        <Countdown
+          phase={phaseOf("collecting", { deadline_at: at(90) })}
+          clockOffsetMs={0}
+          totalSeconds={120}
+        />,
+      );
+      expect(waxOf(container)).toBe("75%");
+
+      // «+1 мин»: до срока 150 с — больше настроенных 120 с.
+      rerender(
+        <Countdown
+          phase={phaseOf("collecting", { deadline_at: at(150) })}
+          clockOffsetMs={0}
+          totalSeconds={120}
+        />,
+      );
+      expect(waxOf(container)).toBe("100%");
+
+      tick(75_000);
+      expect(waxOf(container)).toBe("50%"); // 75 из 150, а не 75 из 120
+      tick(75_000);
+      expect(waxOf(container)).toBe("0%");
+    });
+
+    test("продление, после которого остаток не больше срока, — доля по-прежнему от настроенного", () => {
+      const { container, rerender } = render(
+        <Countdown
+          phase={phaseOf("collecting", { deadline_at: at(30) })}
+          clockOffsetMs={0}
+          totalSeconds={120}
+        />,
+      );
+
+      rerender(
+        <Countdown
+          phase={phaseOf("collecting", { deadline_at: at(90) })}
+          clockOffsetMs={0}
+          totalSeconds={120}
+        />,
+      );
+
+      expect(waxOf(container)).toBe("75%"); // 90 из 120
+    });
+
+    // Финальное покрытие B11: продление не одно, и снимок после обрыва приносит тот же срок.
+    test("два «+1 мин» подряд: каждый раз свеча снова полная и тает от нового остатка", () => {
+      const props = (deadline: number) => ({
+        phase: phaseOf("collecting", { deadline_at: at(deadline) }),
+        clockOffsetMs: 0,
+        totalSeconds: 120,
+      });
+      const { container, rerender } = render(<Countdown {...props(90)} />);
+
+      rerender(<Countdown {...props(150)} />); // первое «+1 мин»
+      tick(30_000);
+      expect(waxOf(container)).toBe("80%"); // 120 из 150
+
+      // Второе «+1 мин» через 30 с: до срока 180 с от этого мига (срок — 210 с от начала).
+      rerender(<Countdown {...props(210)} />);
+      expect(waxOf(container)).toBe("100%");
+      tick(90_000);
+      expect(waxOf(container)).toBe("50%"); // 90 из 180, а не из 150 или 120
+    });
+
+    test("снимок после обрыва с тем же сроком долю не сбрасывает: свеча не становится снова полной", () => {
+      const props = () => ({
+        // Каждый снимок — новый объект фазы, но срок тот же.
+        phase: phaseOf("collecting", { deadline_at: at(150) }),
+        clockOffsetMs: 0,
+        totalSeconds: 120,
+      });
+      const { container, rerender } = render(<Countdown {...props()} />);
+      tick(75_000);
+      expect(waxOf(container)).toBe("50%");
+
+      rerender(<Countdown {...props()} />);
+
+      expect(waxOf(container)).toBe("50%"); // по-прежнему 75 из 150
+    });
+
+    test("на паузе после продления остаток больше срока — свеча полная; после «Продолжить» тает от остатка", () => {
+      const { container, rerender } = render(
+        <Countdown
+          phase={phaseOf("collecting", {
+            phase: "paused",
+            deadline_at: null,
+            remaining_seconds: 160,
+          })}
+          clockOffsetMs={0}
+          totalSeconds={120}
+        />,
+      );
+      expect(waxOf(container)).toBe("100%");
+
+      rerender(
+        <Countdown
+          phase={phaseOf("collecting", { deadline_at: at(160) })}
+          clockOffsetMs={0}
+          totalSeconds={120}
+        />,
+      );
+      tick(80_000);
+
+      expect(waxOf(container)).toBe("50%"); // 80 из 160
+    });
+  });
+
   test("без полного срока полосы воска нет", () => {
     const { container } = render(
       <Countdown

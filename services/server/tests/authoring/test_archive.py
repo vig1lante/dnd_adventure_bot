@@ -44,6 +44,8 @@ from dnd_engine.adventure.schema import Clue
 from dnd_engine.content import load_srd
 from dnd_server.adventures import load_catalog
 from dnd_server.authoring import archive, service
+from dnd_server.authoring.api import DRAIN_LIMIT_BYTES
+from dnd_server.authoring.archive import MAX_BODY_BYTES
 from dnd_server.authoring.draft import AuthoringDraft, from_adventure, to_adventure
 
 DEMO_DIR = Path(__file__).resolve().parents[4] / "content" / "adventures" / "demo-crypt"
@@ -602,21 +604,86 @@ async def import_raw(stand: Stand, who: Author, body: Any, **headers: str) -> ht
     )
 
 
-async def test_a_declared_length_over_the_limit_is_refused_before_the_body_is_read(stand, scratch):
-    # Тело маленькое и годное, но заголовок обещает больше 2 МиБ: отказ — до чтения тела.
-    author = await stand.author()
-    body = zip_of(demo_files())
-    pulled: list[int] = []
+def counted(chunk: bytes, times: int, pulled: list[int]):
+    """Тело потоком из `times` кусков `chunk`; `pulled` — сколько кусков сервер забрал."""
 
     async def chunks():
-        pulled.append(len(body))
-        yield body
+        for _ in range(times):
+            pulled.append(len(chunk))
+            yield chunk
 
-    response = await import_raw(stand, author, chunks(), **{"Content-Length": str(2 * MIB + 1)})
+    return chunks()
+
+
+async def test_a_declared_length_over_the_limit_is_refused_after_the_body_is_read_out(
+    stand, scratch
+):
+    # Заголовок обещает больше 2 МиБ: отказ 413, но сначала тело дочитывается и выбрасывается.
+    # Иначе uvicorn закрыл бы соединение, пока прокси Vite ещё передаёт тело, и клиент получил бы
+    # 502 вместо 413 (R14, дополнение B11 §1 п. 9). Разбора и записи нет.
+    author = await stand.author()
+    pulled: list[int] = []
+    body = counted(zip_of(demo_files()), 1, pulled)
+
+    response = await import_raw(stand, author, body, **{"Content-Length": str(2 * MIB + 1)})
+
+    assert_error(response, 413, "too_large")
+    assert len(pulled) == 1  # дочитано до конца
+    assert await count_drafts(stand.db) == 0
+
+
+async def test_a_declared_length_far_over_the_limit_is_refused_without_reading_the_body(
+    stand, scratch
+):
+    # Дочитывать без конца сервер не станет: больше `DRAIN_LIMIT_BYTES` — отказ сразу.
+    author = await stand.author()
+    pulled: list[int] = []
+    body = counted(zip_of(demo_files()), 1, pulled)
+    declared = str(DRAIN_LIMIT_BYTES + 1)
+
+    response = await import_raw(stand, author, body, **{"Content-Length": declared})
 
     assert_error(response, 413, "too_large")
     assert pulled == []
+    assert DRAIN_LIMIT_BYTES == 4 * MAX_BODY_BYTES
+
+
+async def test_a_declared_length_right_at_the_drain_limit_is_still_read_out(stand, scratch):
+    # Граница предела дочитывания: заявлено ровно `DRAIN_LIMIT_BYTES` — тело ещё дочитывается
+    # (413 без 502), на байт больше — отказ без чтения (тест выше).
+    author = await stand.author()
+    pulled: list[int] = []
+    body = counted(zip_of(demo_files()), 1, pulled)
+
+    response = await import_raw(stand, author, body, **{"Content-Length": str(DRAIN_LIMIT_BYTES)})
+
+    assert_error(response, 413, "too_large")
+    assert len(pulled) == 1
     assert await count_drafts(stand.db) == 0
+
+
+async def test_a_streamed_body_over_the_limit_is_read_out_before_the_refusal(stand, scratch):
+    author = await stand.author()
+    pulled: list[int] = []
+
+    response = await import_zip(stand, author, counted(os.urandom(256 * KIB), 12, pulled))
+
+    assert_error(response, 413, "too_large")
+    assert len(pulled) == 12  # 3 МиБ дочитаны целиком, хотя предел — 2 МиБ
+    assert await count_drafts(stand.db) == 0
+
+
+async def test_a_huge_streamed_body_is_read_out_only_up_to_the_drain_limit(stand, scratch):
+    author = await stand.author()
+    pulled: list[int] = []
+    chunk = os.urandom(512 * KIB)
+    times = 3 * DRAIN_LIMIT_BYTES // len(chunk)
+
+    response = await import_zip(stand, author, counted(chunk, times, pulled))
+
+    assert_error(response, 413, "too_large")
+    assert DRAIN_LIMIT_BYTES < sum(pulled) <= DRAIN_LIMIT_BYTES + len(chunk)
+    assert len(pulled) < times
 
 
 async def test_a_declared_length_smaller_than_the_body_does_not_let_a_big_body_through(

@@ -529,6 +529,43 @@ describe("список черновиков: дата правки и разли
     expect(opens[1]).toHaveAccessibleDescription(/27 октября 2026, 09:03/);
   });
 
+  test("опубликованный черновик помечен «опубликовано», и кнопка «Открыть» описана этим", async () => {
+    renderHome([
+      summaryOf({
+        id: "d2",
+        title: "Маяк",
+        adventure_id: "crow-lighthouse",
+        published_id: "crow-lighthouse",
+        published_at: "2026-10-28T18:00:00+00:00",
+      }),
+      summaryOf({ id: "d1", title: "Гавань", adventure_id: "foggy-harbor" }),
+    ]);
+
+    await screen.findByText("Маяк");
+    const [published, draft] = within(
+      screen.getByRole("list", { name: "Черновики" }),
+    ).getAllByRole("listitem");
+    expect(within(published).getByText("опубликовано")).toBeInTheDocument();
+    expect(within(draft).queryByText("опубликовано")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Открыть: Маяк" }),
+    ).toHaveAccessibleDescription(/опубликовано/);
+  });
+
+  test("сервер без полей публикации (до B11): пометки нет, список как раньше", async () => {
+    const {
+      published_id: _id,
+      published_at: _at,
+      ...old
+    } = summaryOf({
+      title: "Гавань",
+    });
+    renderHome([old]);
+
+    expect(await screen.findByText("Гавань")).toBeInTheDocument();
+    expect(screen.queryByText("опубликовано")).toBeNull();
+  });
+
   test("сбой загрузки — единая ошибка «Не удалось загрузить черновики»", async () => {
     renderHome([], {
       "GET /api/drafts": { status: 500, json: { detail: "База недоступна." } },

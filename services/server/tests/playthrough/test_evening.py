@@ -167,6 +167,9 @@ class Story:
                 "deadline_at": None,
                 "remaining_seconds": None,
                 "scene": {"type": "exploration", "day": 1, "part": "morning"},
+                # Обсуждение началось с записью открытия; открытие можно перегенерировать.
+                "phase_since": iso(server.scheduler.now()),
+                "can_regenerate": True,
             }
             assert self.told(key) == [game_started_text()]
         assert self.calls.turns == 1 and self.calls.json == ["weaving"]
@@ -175,10 +178,11 @@ class Story:
         server = self.server
         assert server.scheduler.pending() == {}
         statuses = view_of(server, "alice")["statuses"]
+        # Алиса пишет черновик, Борис сдал тайный ход, Вера ещё ничего не написала (значка нет).
         assert {key: statuses[self.user(key)] for key, _ in CAST} == {
             "alice": "writing",
             "boris": "ready",
-            "vera": "writing",
+            "vera": "idle",
         }
         # Тайный сданный ход лежит в ленте и в снимке только у автора.
         assert BORIS_SECRET_ACTION in self.texts("boris", "action")
@@ -208,6 +212,8 @@ class Story:
             "deadline_at": iso(deadline),
             "remaining_seconds": None,
             "scene": self.phase()["scene"],
+            "phase_since": iso(server.scheduler.now()),  # сбор начат «сейчас» по часам стенда
+            "can_regenerate": False,  # сбор начат: откатывать прошлый ход уже нельзя
         }
         assert server.scheduler.pending() == {server.game_id: deadline}
         # Звали только того, кто ещё пишет и не ведёт игру.
@@ -247,7 +253,7 @@ class Story:
         }
         for key in ("alice", "boris", "vera"):
             statuses = view_of(server, key)["statuses"]
-            assert set(statuses.values()) == {"writing"}  # у нового хода все снова пишут
+            assert set(statuses.values()) == {"idle"}  # новый ход: «Пишет» ни у кого не горит
             assert self.told(key)[-1] == game_continues_text()
         assert PUBLIC_ACTION in self.texts("vera", "action")  # автосдача видна всем
         # Тайный бросок и личное сообщение — только Борису, общий бросок и урон — всем.
@@ -516,4 +522,5 @@ async def test_every_private_thing_of_the_evening_reaches_only_its_owner_on_ever
                     assert set(fighter) == MONSTER_KEYS  # у монстров слова, а не числа здоровья
         for status in (f for f in watcher.frames if f["type"] == "player_status"):
             assert set(status) == {"type", "user_id", "status"}
-            assert status["status"] in {"writing", "ready", "pass"}  # тайный ход статусом не виден
+            # Тайный ход статусом не виден.
+            assert status["status"] in {"idle", "writing", "ready", "pass"}

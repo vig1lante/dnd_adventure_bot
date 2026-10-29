@@ -1,13 +1,18 @@
 import { useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
-import type { FeedItem, SceneView, TurnPhase } from "../api/types";
+import type {
+  FeedItem,
+  PlayerStatus,
+  SceneView,
+  TurnPhase,
+} from "../api/types";
 import { Countdown } from "../components/Countdown";
 import { phaseLabel } from "../components/phases";
 import { RollCard } from "../components/RollCard";
 import { Switch, TextAreaField } from "../screens/fields";
 import type { GameView } from "../store/game";
 import { Avatar, Badge, Button, Card, Icon, Panel, SealedNote } from "../ui";
-import type { IconName } from "../ui";
+import type { BadgeProps, IconName } from "../ui";
 import { classNames } from "../ui/classNames";
 
 // Черновики элементов «как будет» для макетов B10.1. Это предложение для обсуждения с владельцем,
@@ -133,11 +138,14 @@ const COUNTDOWN_LABELS: Partial<Record<TurnPhase, string>> = {
   camp: "До конца привала",
 };
 
-const STATUS_BADGES = {
+// У `idle` (ход ещё не начат) значка нет, как в строке статуса игры (решение D17).
+const STATUS_BADGES: Partial<
+  Record<PlayerStatus, { label: string; tone: BadgeProps["tone"] }>
+> = {
   writing: { label: "Пишет", tone: "amber" },
   ready: { label: "Готов", tone: "cloth" },
   pass: { label: "Пас", tone: "neutral" },
-} as const;
+};
 
 /** Строка статуса: фаза, день и часть суток, отсчёт (тот же, что сейчас) и значки игроков. */
 export function DraftStatusLine({
@@ -180,14 +188,14 @@ export function DraftStatusLine({
         <ul className="game-players" aria-label="Игроки">
           {game.players.map((player) => {
             const status = statuses[player.user_id];
+            const badge =
+              status === undefined ? undefined : STATUS_BADGES[status];
             return (
               <li key={player.user_id} className="game-players__item">
                 <Avatar name={player.name} size="sm" decorative />
                 <span className="game-players__name">{player.name}</span>
-                {status !== undefined && (
-                  <Badge tone={STATUS_BADGES[status].tone}>
-                    {STATUS_BADGES[status].label}
-                  </Badge>
+                {badge !== undefined && (
+                  <Badge tone={badge.tone}>{badge.label}</Badge>
                 )}
               </li>
             );

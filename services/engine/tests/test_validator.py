@@ -4,8 +4,10 @@
 ошибок, ни предупреждений, а каждый тест вносит в него одну правку и ждёт один код.
 """
 
+import json
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, get_args
 
 import pytest
@@ -17,6 +19,7 @@ from dnd_engine.adventure.budget import (
     encounter_xp,
     party_budget,
 )
+from dnd_engine.adventure.loader import adventure_from_data, load_adventure
 from dnd_engine.adventure.schema import Adventure
 from dnd_engine.adventure.validator import (
     DAMAGE_TYPES,
@@ -30,6 +33,7 @@ from dnd_engine.content import SrdContent, load_srd
 from dnd_engine.tools.narrative import DamageType
 
 FieldPath = tuple[str | int, ...]
+FIXTURES = Path(__file__).parent / "fixtures"  # в том числе приключения прежнего формата v1
 
 
 @pytest.fixture(scope="module")
@@ -2348,6 +2352,122 @@ def test_an_empty_read_aloud_text_is_a_warning(srd, text):
         "warning",
         "location:village",
     )
+
+
+@pytest.mark.parametrize("description", ["", "  \n"])
+def test_a_clue_without_a_description_is_a_warning(srd, description):
+    # Найденная улика без описания не попадёт в дневник, а игроки не узнают, что нашли.
+    adventure = with_value(("revelations", "kidnapper", "clues", 1, "description"), description)
+
+    issue = only_issue(validate(adventure, srd))
+
+    assert (issue.code, issue.severity, issue.ref) == (
+        "clue_without_description",
+        "warning",
+        "revelation:kidnapper/clue:clue-marta",
+    )
+    assert "дневник" in issue.message
+
+
+@pytest.mark.parametrize(("name", "public"), [("", ""), (" ", "\n")])
+def test_an_item_without_a_name_and_public_text_is_a_warning(srd, name, public):
+    # Запись дневника о предмете — его `public`, а без него — название: без обоих записи нет.
+    data = adventure_data()
+    data["items"]["key"] |= {"name": name, "public": public}
+
+    issue = only_issue(validate(Adventure.model_validate(data), srd))
+
+    assert (issue.code, issue.severity, issue.ref) == ("item_without_text", "warning", "item:key")
+    assert "дневник" in issue.message
+
+
+@pytest.mark.parametrize(("name", "public"), [("Ржавый ключ", ""), ("", "Ключ от люка.")])
+def test_an_item_with_a_name_or_public_text_is_not_warned(srd, name, public):
+    data = adventure_data()
+    data["items"]["key"] |= {"name": name, "public": public}
+
+    assert validate(Adventure.model_validate(data), srd).issues == []
+
+
+# --- B11.coverage: текст для дневника на границах (дополнение контракта B11 §3) ---
+
+JOURNAL_TEXT_CODES = {"clue_without_description", "item_without_text"}
+# Пробелы, которые редактор или генератор оставляют вместо текста: табуляция, неразрывный,
+# широкий и идеографический пробелы.
+BLANK_TEXTS = ["\t", "\u00a0", "\u2003 \u3000", " \t\n\u00a0"]
+
+
+@pytest.mark.parametrize("description", BLANK_TEXTS)
+def test_a_clue_described_only_by_any_kind_of_spaces_is_a_warning(srd, description):
+    adventure = with_value(("revelations", "kidnapper", "clues", 0, "description"), description)
+
+    issue = only_issue(validate(adventure, srd))
+
+    assert (issue.code, issue.ref) == (
+        "clue_without_description",
+        "revelation:kidnapper/clue:clue-tracks",
+    )
+
+
+@pytest.mark.parametrize("blank", BLANK_TEXTS)
+def test_an_item_with_only_spaces_in_the_name_and_public_text_is_a_warning(srd, blank):
+    data = adventure_data()
+    data["items"]["potion"] |= {"name": blank, "public": blank[::-1]}
+
+    issue = only_issue(validate(Adventure.model_validate(data), srd))
+
+    assert (issue.code, issue.ref) == ("item_without_text", "item:potion")
+
+
+@pytest.mark.parametrize(
+    ("name", "public"),
+    [("Ржавый ключ", " \t\n"), ("\u00a0", "Ключ от люка."), ("\u3000", " Ключ ")],
+)
+def test_an_item_with_spaces_on_one_side_and_text_on_the_other_is_not_warned(srd, name, public):
+    data = adventure_data()
+    data["items"]["key"] |= {"name": name, "public": public}
+
+    assert validate(Adventure.model_validate(data), srd).issues == []
+
+
+def test_every_clue_and_item_without_text_gets_its_own_warning_and_nothing_blocks(srd):
+    # Предупреждения не останавливают игру: создатель видит каждую сущность, а балл падает на 3 за
+    # каждое предупреждение.
+    data = adventure_data()
+    clues = data["revelations"]["kidnapper"]["clues"]
+    clues[0]["description"] = ""
+    clues[2]["description"] = " "
+    for item in data["items"].values():
+        item |= {"name": "", "public": ""}
+
+    report = validate(Adventure.model_validate(data), srd)
+
+    assert sorted((issue.code, issue.severity, issue.ref) for issue in report.issues) == [
+        ("clue_without_description", "warning", "revelation:kidnapper/clue:clue-ledger"),
+        ("clue_without_description", "warning", "revelation:kidnapper/clue:clue-tracks"),
+        ("item_without_text", "warning", "item:key"),
+        ("item_without_text", "warning", "item:potion"),
+    ]
+    assert (report.blocking, report.score) == (False, 100 - 4 * 3)
+
+
+OLD_ADVENTURES = {
+    "старая папка v1": lambda: load_adventure(FIXTURES / "demo-crypt-v1"),
+    "копия игры DND-1": lambda: adventure_from_data(
+        json.loads((FIXTURES / "adventure_v1.json").read_text(encoding="utf-8"))
+    ),
+}
+
+
+@pytest.mark.parametrize("read_old", OLD_ADVENTURES.values(), ids=OLD_ADVENTURES.keys())
+def test_an_old_adventure_of_a_saved_game_gets_no_new_warnings_about_texts_for_the_journal(
+    srd, read_old
+):
+    # У старых приключений нет `public`, но у предметов есть названия, а у улик — описания:
+    # копия сохранённой игры не получает новых предупреждений и не теряет балла.
+    report = validate(read_old(), srd)
+
+    assert JOURNAL_TEXT_CODES.isdisjoint(codes(report)), report.issues
 
 
 def test_a_location_without_features_is_a_warning(srd):

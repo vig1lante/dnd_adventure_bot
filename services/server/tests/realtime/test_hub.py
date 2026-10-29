@@ -263,8 +263,11 @@ def test_event_types_are_those_of_the_plan():
         "rest_started",
         "rest_idea",
         "rest_ended",
+        "action_auto_submitted",  # блок B11: «Ход сдан» автору автосданного черновика
         "error",
     } == EVENT_TYPES
+    # Кадр исключения уходит прямо в сокет исключённого, а не рассылкой хаба (блок B11).
+    assert "kicked" not in EVENT_TYPES
 
 
 async def test_disconnect_forgets_the_socket_and_is_safe_to_repeat():
@@ -339,3 +342,21 @@ async def test_dropping_a_user_without_connections_or_in_an_unknown_game_is_harm
     assert hub.drop_user(GAME, "alice") == 1
     assert hub.drop_user(GAME, "alice") == 0  # повторный вызов безопасен
     assert hub.connections(GAME) == 0
+
+
+async def test_kicking_marks_and_drops_only_the_connections_of_the_kicked_player():
+    # Блок B11: исключённого эндпоинт закроет кадром `kicked` и кодом 4403, вышедшего — нет.
+    hub = Hub()
+    tab_1 = join(hub, GAME, "alice", FakeSocket())
+    tab_2 = join(hub, GAME, "alice", FakeSocket())
+    boris = join(hub, GAME, "boris", FakeSocket())
+    elsewhere = join(hub, OTHER_GAME, "alice", FakeSocket())
+    leaving = join(hub, OTHER_GAME, "vera", FakeSocket())
+
+    kicked = hub.kick_user(GAME, "alice")
+    hub.drop_user(OTHER_GAME, "vera")
+
+    assert kicked == 2
+    assert (tab_1.kicked, tab_2.kicked) == (True, True)
+    assert (boris.kicked, elsewhere.kicked, leaving.kicked) == (False, False, False)
+    assert (hub.connections(GAME), hub.connections(OTHER_GAME)) == (1, 1)
