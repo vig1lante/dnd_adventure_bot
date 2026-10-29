@@ -159,6 +159,52 @@ describe("форма быстрого героя", () => {
     expect(document.body.textContent).not.toMatch(OUTDATED_WORDS);
   });
 
+  test("карточка класса на телефоне короткая: главное и «Выбрать», остальное — по «Подробнее»", () => {
+    renderQuick();
+    const card = shown("Класс");
+
+    expect(card).toHaveTextContent(/Кость хитов\s*к10/);
+    expect(card).toHaveTextContent(/Основная характеристика\s*Сила/);
+    expect(card).not.toHaveTextContent("Доспехи");
+    expect(card).not.toHaveTextContent("Второе дыхание");
+    expect(
+      within(card).getByRole("button", { name: /^Выбра(ть|но)$/ }),
+    ).toBeInTheDocument();
+
+    const more = within(card).getByRole("button", { name: "Подробнее: Воин" });
+    expect(more).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(more);
+
+    expect(more).toHaveAttribute("aria-expanded", "true");
+    expect(card).toHaveTextContent(/Доспехи\s*Лёгкие доспехи/);
+    expect(card).toHaveTextContent("Второе дыхание");
+  });
+
+  test("подробности одного класса не раскрывают соседний: следующая карточка снова короткая", () => {
+    renderQuick();
+    fireEvent.click(
+      within(shown("Класс")).getByRole("button", { name: "Подробнее: Воин" }),
+    );
+
+    fireEvent.click(
+      within(carousel("Класс")).getByRole("button", { name: "Следующая" }),
+    );
+
+    expect(shown("Класс")).toHaveAccessibleName("Плут");
+    expect(shown("Класс")).not.toHaveTextContent("Доспехи");
+  });
+
+  test("«Подробнее» не выбирает класс и не отправляет форму", () => {
+    const { server } = renderQuick();
+
+    fireEvent.click(
+      within(shown("Класс")).getByRole("button", { name: "Подробнее: Воин" }),
+    );
+
+    expect(chosenIn("Класс")).toBeNull();
+    expect(posts(server)).toHaveLength(0);
+  });
+
   test("«Назад» возвращает к выбору способа", () => {
     const { onBack } = renderQuick();
 

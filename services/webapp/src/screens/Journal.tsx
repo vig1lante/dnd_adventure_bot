@@ -1,7 +1,6 @@
-import { useEffect, useId, useRef, useState } from "react";
-import type { KeyboardEvent } from "react";
+import { useEffect, useId, useState } from "react";
 import type { JournalEntry, JournalSection } from "../api/types";
-import { Badge, Card, EmptyState } from "../ui";
+import { Badge, Card, EmptyState, onTabKeyDown } from "../ui";
 import { classNames } from "../ui/classNames";
 import "./journal.css";
 
@@ -118,22 +117,6 @@ function useUnseen(
   return (entry) => isUnseen(entry, shownKnown);
 }
 
-/** Куда ведёт клавиша в наборе разделов: стрелки — по кругу, Home и End — к краям; иначе `null`. */
-function stepTo(key: string, index: number, count: number): number | null {
-  switch (key) {
-    case "ArrowRight":
-      return (index + 1) % count;
-    case "ArrowLeft":
-      return (index - 1 + count) % count;
-    case "Home":
-      return 0;
-    case "End":
-      return count - 1;
-    default:
-      return null;
-  }
-}
-
 /** Когда отряд узнал о записи; у места, где отряд уже был, — когда пришёл туда. */
 function whenText(entry: JournalEntry): string {
   if (entry.visited_turn !== null) {
@@ -146,6 +129,19 @@ function whenText(entry: JournalEntry): string {
     : `узнали в раунде ${entry.turn}`;
 }
 
+const squeezed = (text: string) => text.split(/\s+/).join(" ").trim();
+
+/**
+ * Абзацы записи. Дополнения приходят новыми абзацами через пустую строку. У записи без своего
+ * имени (короткий слух, улика) название — это её текст: такой первый абзац не повторяем.
+ */
+function paragraphsOf(entry: JournalEntry): string[] {
+  const paragraphs = entry.text.split("\n\n").filter((part) => part.trim());
+  return squeezed(paragraphs[0] ?? "") === squeezed(entry.title)
+    ? paragraphs.slice(1)
+    : paragraphs;
+}
+
 function EntryCard({
   entry,
   unseen,
@@ -153,8 +149,7 @@ function EntryCard({
   entry: JournalEntry;
   unseen: boolean;
 }) {
-  // Дополнения приходят новыми абзацами через пустую строку.
-  const paragraphs = entry.text.split("\n\n").filter((part) => part.trim());
+  const paragraphs = paragraphsOf(entry);
   return (
     <Card title={entry.title} headingLevel={3} className="journal-entry">
       {unseen && <Badge tone="amber">новое</Badge>}
@@ -178,7 +173,6 @@ function JournalBody({ storageKey, entries, active }: JournalBodyProps) {
   const base = useId();
   const [selected, setSelected] = useState<JournalSection>("main");
   const isUnseenNow = useUnseen(storageKey, entries, active ? selected : null);
-  const buttons = useRef<(HTMLButtonElement | null)[]>([]);
 
   const inSection = (section: JournalSection) =>
     entries.filter((entry) => entry.section === section);
@@ -188,14 +182,8 @@ function JournalBody({ storageKey, entries, active }: JournalBodyProps) {
   const shown = inSection(selected);
 
   // Клавиатура — как у вкладок игры: в порядке табуляции один выбранный раздел, к остальным
-  // ведут стрелки (по кругу), Home и End. Действие браузера (прокрутку) эти клавиши не делают.
-  const onKeyDown = (event: KeyboardEvent, index: number) => {
-    const next = stepTo(event.key, index, SECTIONS.length);
-    if (next === null) return;
-    event.preventDefault();
-    setSelected(SECTIONS[next][0]);
-    buttons.current[next]?.focus();
-  };
+  // ведут стрелки (по кругу), Home и End.
+  const pick = (index: number) => setSelected(SECTIONS[index][0]);
 
   return (
     <div className="journal">
@@ -211,9 +199,6 @@ function JournalBody({ storageKey, entries, active }: JournalBodyProps) {
           return (
             <button
               key={section}
-              ref={(node) => {
-                buttons.current[index] = node;
-              }}
               id={tabId(section)}
               type="button"
               role="tab"
@@ -227,7 +212,9 @@ function JournalBody({ storageKey, entries, active }: JournalBodyProps) {
                 current && "journal-section--active",
               )}
               onClick={() => setSelected(section)}
-              onKeyDown={(event) => onKeyDown(event, index)}
+              onKeyDown={(event) =>
+                onTabKeyDown(event, index, SECTIONS.length, pick)
+              }
             >
               <span className="journal-section__label">{label}</span>{" "}
               <span

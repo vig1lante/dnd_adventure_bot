@@ -34,7 +34,19 @@ import {
   snapshotOf,
 } from "../test-setup";
 import type { FakeReply, FakeSocket, RecordedCall } from "../test-setup";
+import { buzz } from "../theme/haptics";
 import { Game } from "./Game";
+
+// Вибрация Telegram подменена: тесты экрана проверяют, на какие события она зовётся; сам вызов
+// SDK (только внутри Telegram и по настройке) проверяет theme/haptics.test.ts.
+vi.mock("../theme/haptics", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../theme/haptics")>()),
+  buzz: vi.fn(),
+}));
+
+beforeEach(() => {
+  vi.mocked(buzz).mockClear();
+});
 
 // Подменяются только таймеры сокета и экрана: React и промисы работают как обычно.
 const FAKE_TIMERS: (
@@ -418,14 +430,14 @@ describe("обрыв связи на экране игры", () => {
 });
 
 describe("вкладки", () => {
-  test("четыре вкладки, «Дневник» сразу после «Рассказа»; открыта «Рассказ»", async () => {
+  test("четыре вкладки в порядке «В» (решение владельца): «Дневник» последней; открыта «Рассказ»", async () => {
     await openGame();
 
     expect(screen.getAllByRole("tab").map((node) => node.textContent)).toEqual([
       "Рассказ",
-      "Дневник",
       "Персонаж",
       "Отряд",
+      "Дневник",
     ]);
     expect(tab("Рассказ")).toHaveAttribute("aria-selected", "true");
     expect(tab("Персонаж")).toHaveAttribute("aria-selected", "false");
@@ -480,37 +492,46 @@ describe("вкладки", () => {
     await openGame();
 
     fireEvent.keyDown(tab("Рассказ"), { key: "ArrowRight" });
-    expect(tab("Дневник")).toHaveAttribute("aria-selected", "true");
-    fireEvent.keyDown(tab("Дневник"), { key: "ArrowRight" });
     expect(tab("Персонаж")).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(tab("Персонаж"), { key: "ArrowRight" });
     expect(tab("Отряд")).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(tab("Отряд"), { key: "ArrowRight" });
+    expect(tab("Дневник")).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(tab("Дневник"), { key: "ArrowRight" });
     expect(tab("Рассказ")).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(tab("Рассказ"), { key: "ArrowLeft" });
-    expect(tab("Отряд")).toHaveAttribute("aria-selected", "true");
+    expect(tab("Дневник")).toHaveAttribute("aria-selected", "true");
   });
 
-  test("выбранная вкладка в порядке табуляции, остальные нет; она же подсвечена", async () => {
+  test("Home и End ведут к первой и последней вкладке, фокус идёт за выбором", async () => {
+    await openGame();
+    fireEvent.click(tab("Персонаж"));
+
+    fireEvent.keyDown(tab("Персонаж"), { key: "End" });
+    expect(tab("Дневник")).toHaveAttribute("aria-selected", "true");
+    expect(tab("Дневник")).toHaveFocus();
+
+    fireEvent.keyDown(tab("Дневник"), { key: "Home" });
+    expect(tab("Рассказ")).toHaveAttribute("aria-selected", "true");
+    expect(tab("Рассказ")).toHaveFocus();
+  });
+
+  test("выбранная вкладка в порядке табуляции, остальные нет", async () => {
     await openGame();
 
     expect(tab("Рассказ")).toHaveAttribute("tabindex", "0");
-    expect(tab("Рассказ")).toHaveClass("game-tab--active");
     for (const other of ["Дневник", "Персонаж", "Отряд"]) {
       expect(tab(other)).toHaveAttribute("tabindex", "-1");
-      expect(tab(other)).not.toHaveClass("game-tab--active");
     }
 
     fireEvent.click(tab("Отряд"));
 
     expect(tab("Отряд")).toHaveAttribute("tabindex", "0");
-    expect(tab("Отряд")).toHaveClass("game-tab--active");
     expect(tab("Рассказ")).toHaveAttribute("tabindex", "-1");
-    expect(tab("Рассказ")).not.toHaveClass("game-tab--active");
   });
 
-  test.each(["Enter", "a", "ArrowDown", "Home", "Tab"])(
-    "клавиша «%s» вкладки не переключает: только стрелки вправо и влево",
+  test.each(["Enter", "a", "ArrowDown", "Tab"])(
+    "клавиша «%s» вкладки не переключает: только стрелки, Home и End",
     async (key) => {
       await openGame();
       fireEvent.click(tab("Персонаж"));
@@ -535,6 +556,80 @@ describe("вкладки", () => {
     fireEvent.click(tab("Отряд"));
 
     expect(screen.getByText("Обсуждение")).toBeVisible();
+  });
+});
+
+describe("имя героя в ленте открывает его лист (B10.3)", () => {
+  /** Лента с ходами своего героя (Лира, u1) и чужого (Борин, u2). */
+  const withActions = () =>
+    snapshotWith({
+      feed: [
+        feedEntry(1, { text: "Дверь склепа поддаётся с тихим вздохом." }),
+        feedEntry(2, {
+          kind: "action",
+          text: "осматривает дверь",
+          data: { actor_id: "pc_lira", actor: "Лира", secret: false },
+        }),
+        feedEntry(3, {
+          kind: "action",
+          text: "держит факел",
+          data: { actor_id: "pc_boris", actor: "Борин", secret: false },
+        }),
+      ],
+    });
+  const heroName = (name: string) =>
+    within(screen.getByRole("list", { name: "Лента" })).getByRole("button", {
+      name,
+    });
+
+  test("своё имя — вкладка «Персонаж» с листом, фокус на вкладке", async () => {
+    await openGame({ snapshot: withActions() });
+
+    fireEvent.click(heroName("Лира"));
+
+    expect(tab("Персонаж")).toHaveAttribute("aria-selected", "true");
+    expect(tab("Персонаж")).toHaveFocus();
+    expect(await screen.findByRole("heading", { name: "Лира" })).toBeVisible();
+  });
+
+  test("чужое имя — «Отряд», карточка этого героя выводится в видимость", async () => {
+    // В jsdom прокрутки нет: подменяем её и запоминаем, что выводилось в видимость.
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    onTestFinished(() => {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    });
+    await openGame({ snapshot: withActions() });
+    scrollIntoView.mockClear();
+
+    fireEvent.click(heroName("Борин"));
+
+    expect(tab("Отряд")).toHaveAttribute("aria-selected", "true");
+    expect(tab("Отряд")).toHaveFocus();
+    const meter = screen.getByRole("meter", { name: "Здоровье: Борин" });
+    expect(meter).toBeVisible();
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    const card = scrollIntoView.mock.contexts[0] as HTMLElement;
+    expect(card).toContainElement(meter);
+    expect(card).not.toHaveTextContent("Лира");
+  });
+
+  test("имя монстра или NPC — не кнопка: листа у них нет", async () => {
+    await openGame({
+      snapshot: snapshotWith({
+        feed: [
+          feedEntry(1, {
+            kind: "action",
+            text: "рычит",
+            data: { actor_id: "m_wolf", actor: "Волк" },
+          }),
+        ],
+      }),
+    });
+
+    expect(
+      within(screen.getByRole("list", { name: "Лента" })).queryByRole("button"),
+    ).toBeNull();
   });
 });
 
@@ -607,7 +702,9 @@ describe("«Повторить», пока мастер думает (решен
       snapshot: resolving(),
       routes: { [RETRY]: { json: phaseOf("resolving") } },
     });
-    expect(screen.getByText("Мастер думает…")).toBeVisible();
+    expect(
+      screen.getByRole("status", { name: "Мастер думает…" }),
+    ).toBeVisible();
 
     await wait(MINUTE - 1000);
     noButton("Повторить");
@@ -720,7 +817,7 @@ describe("ход игрока на экране игры", () => {
 
     await serve(ws.last(), { type: "phase", phase: phaseOf(turnPhase) });
 
-    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     expect(screen.getByLabelText("Что делает твой персонаж?")).toBeDisabled();
   });
 
@@ -839,18 +936,18 @@ describe("вкладка «Бой»", () => {
   test("без боя вкладки нет", async () => {
     await openGame();
 
-    expect(tabNames()).toEqual(["Рассказ", "Дневник", "Персонаж", "Отряд"]);
+    expect(tabNames()).toEqual(["Рассказ", "Персонаж", "Отряд", "Дневник"]);
   });
 
-  test("бой в снимке: вкладка «Бой» после «Рассказа» и «Дневника»", async () => {
+  test("бой в снимке: вкладка «Бой» сразу после «Рассказа»", async () => {
     await openGame({ snapshot: combatSnapshot() });
 
     expect(tabNames()).toEqual([
       "Рассказ",
-      "Дневник",
       "Бой",
       "Персонаж",
       "Отряд",
+      "Дневник",
     ]);
     expect(tab("Рассказ")).toHaveAttribute("aria-selected", "true");
   });
@@ -963,7 +1060,7 @@ describe("вкладка «Бой»", () => {
     await serve(ws.last(), { type: "phase", phase: phaseOf("resolving") });
     await serve(ws.last(), { type: "phase", phase: phaseOf("discussion") });
 
-    expect(tabNames()).toEqual(["Рассказ", "Дневник", "Персонаж", "Отряд"]);
+    expect(tabNames()).toEqual(["Рассказ", "Персонаж", "Отряд", "Дневник"]);
     expect(tab("Рассказ")).toHaveAttribute("aria-selected", "true");
     expect(screen.getByLabelText(FIELD)).toBeVisible();
   });
@@ -983,30 +1080,20 @@ describe("вкладка «Бой»", () => {
     await openGame({ snapshot: combatSnapshot() });
 
     fireEvent.keyDown(tab("Рассказ"), { key: "ArrowRight" });
-    expect(tab("Дневник")).toHaveAttribute("aria-selected", "true");
-    fireEvent.keyDown(tab("Дневник"), { key: "ArrowRight" });
     expect(tab("Бой")).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(tab("Бой"), { key: "ArrowRight" });
     expect(tab("Персонаж")).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(tab("Персонаж"), { key: "ArrowRight" });
     expect(tab("Отряд")).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(tab("Отряд"), { key: "ArrowRight" });
+    expect(tab("Дневник")).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(tab("Дневник"), { key: "ArrowRight" });
     expect(tab("Рассказ")).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(tab("Рассказ"), { key: "ArrowLeft" });
-    expect(tab("Отряд")).toHaveAttribute("aria-selected", "true");
+    expect(tab("Дневник")).toHaveAttribute("aria-selected", "true");
   });
 
-  test("при четырёх вкладках (вне боя) полоса обычная", async () => {
-    await openGame();
-    expect(screen.getByRole("tablist")).not.toHaveClass("game-tabs--dense");
-  });
-
-  test("в бою пять вкладок: полоса плотная, чтобы названия поместились на телефоне", async () => {
-    await openGame({ snapshot: combatSnapshot() });
-    expect(screen.getByRole("tablist")).toHaveClass("game-tabs--dense");
-  });
-
-  test("при шести вкладках (бой и привал) полоса тоже плотная", async () => {
+  test("при шести вкладках (бой и привал) оба раздела идут сразу за «Рассказом»", async () => {
     await openGame({
       snapshot: combatSnapshot("pc_lira", {
         phase: phaseOf("camp", { deadline_at: CAMP_DEADLINE }),
@@ -1015,13 +1102,12 @@ describe("вкладка «Бой»", () => {
 
     expect(tabNames()).toEqual([
       "Рассказ",
-      "Дневник",
       "Бой",
       "Привал",
       "Персонаж",
       "Отряд",
+      "Дневник",
     ]);
-    expect(screen.getByRole("tablist")).toHaveClass("game-tabs--dense");
   });
 
   test("поле хода и «Готов» в бою шлют ход", async () => {
@@ -1178,11 +1264,11 @@ describe("вкладка «Дневник»", () => {
     ["бой", () => combatSnapshot()],
     ["привал", () => campSnapshot()],
   ])(
-    "%s: вкладка «Дневник» второй, дневник открывается",
+    "%s: вкладка «Дневник» последней, дневник открывается",
     async (_name, make) => {
       await openGame({ snapshot: { ...make(), journal: startJournal() } });
 
-      expect(tabNames()[1]).toBe("Дневник");
+      expect(tabNames().at(-1)).toBe("Дневник");
       fireEvent.click(tab("Дневник"));
 
       expect(section("Места")).toHaveTextContent("Места 2");
@@ -1190,13 +1276,16 @@ describe("вкладка «Дневник»", () => {
     },
   );
 
-  test("привал без боя: пять вкладок — полоса плотная", async () => {
+  test("привал без боя: пять вкладок, «Привал» сразу после «Рассказа»", async () => {
     await openGame({ snapshot: campSnapshot() });
 
-    expect(tabNames()).toHaveLength(5);
-    expect(screen.getByRole("tablist", { name: "Разделы игры" })).toHaveClass(
-      "game-tabs--dense",
-    );
+    expect(tabNames()).toEqual([
+      "Рассказ",
+      "Привал",
+      "Персонаж",
+      "Отряд",
+      "Дневник",
+    ]);
   });
 
   test("дневник монтируется лениво и, открытый однажды, помнит выбранный раздел", async () => {
@@ -1491,10 +1580,10 @@ describe("вкладка «Привал»", () => {
 
     expect(tabNames()).toEqual([
       "Рассказ",
-      "Дневник",
       "Привал",
       "Персонаж",
       "Отряд",
+      "Дневник",
     ]);
     expect(screen.getByText("До конца привала")).toBeInTheDocument();
   });
@@ -1841,4 +1930,726 @@ describe("бой: очередь моего героя, но ходы сейча
       expect(story.queryByText(/Сейчас ваш ход/)).toBeNull();
     },
   );
+});
+
+// --- нижняя панель: бейджи, уведомления, «Мастер думает…» (B10.2) ---
+
+/** Отметка нового у вкладки: она стоит рядом с кнопкой вкладки и скрыта от читалки. */
+const badgeOf = (name: string): string | null => {
+  const cell = tab(name).parentElement;
+  const badge = cell?.querySelector("[aria-hidden='true'].ui-tabbar__badge");
+  return badge?.textContent ?? null;
+};
+
+const toastRegion = () =>
+  document.querySelector<HTMLElement>(".ui-toast-region");
+
+describe("бейджи вкладок", () => {
+  test("при входе в игру отметок нет: снимок — не событие", async () => {
+    await openGame({ snapshot: snapshotWith({ journal: startJournal() }) });
+
+    for (const name of tabNames()) expect(badgeOf(String(name))).toBeNull();
+  });
+
+  test("запись ленты, пока игрок на другой вкладке: отметка у «Рассказа», при открытии гаснет", async () => {
+    const { ws } = await openGame();
+    fireEvent.click(tab("Отряд"));
+
+    await serve(ws.last(), { type: "feed_item", item: feedEntry(3) });
+    await serve(ws.last(), { type: "feed_item", item: feedEntry(4) });
+
+    expect(badgeOf("Рассказ")).toBe("2");
+    expect(tab("Рассказ")).toHaveAccessibleName("Рассказ");
+    expect(tab("Рассказ")).toHaveAccessibleDescription("есть новое");
+
+    fireEvent.click(tab("Рассказ"));
+
+    expect(badgeOf("Рассказ")).toBeNull();
+    expect(tab("Рассказ")).not.toHaveAccessibleDescription("есть новое");
+  });
+
+  test("на открытой вкладке отметки нет: запись пришла, пока игрок читает рассказ", async () => {
+    const { ws } = await openGame();
+
+    await serve(ws.last(), { type: "feed_item", item: feedEntry(3) });
+
+    expect(badgeOf("Рассказ")).toBeNull();
+  });
+
+  test("запись дневника — отметка у «Дневника»; дополнение прежней записи тоже считается", async () => {
+    const { ws } = await openGame({
+      snapshot: snapshotWith({ journal: startJournal() }),
+    });
+
+    await serve(ws.last(), {
+      type: "journal_entry",
+      entry: journalEntry("location:crypt", { title: "Склеп", turn: 2 }),
+    });
+    const [first] = startJournal();
+    await serve(ws.last(), {
+      type: "journal_entry",
+      entry: { ...first, revision: first.revision + 1 },
+    });
+
+    expect(badgeOf("Дневник")).toBe("2");
+    fireEvent.click(tab("Дневник"));
+    expect(badgeOf("Дневник")).toBeNull();
+  });
+
+  test("тайное письмо: отметка — только число, текста нет ни у вкладки, ни в уведомлении", async () => {
+    const { ws } = await openGame();
+    fireEvent.click(tab("Персонаж"));
+
+    await serve(ws.last(), {
+      type: "feed_item",
+      item: feedEntry(3, {
+        kind: "private",
+        private: true,
+        text: "Ключ спрятан под третьей плитой.",
+      }),
+    });
+
+    expect(badgeOf("Рассказ")).toBe("1");
+    const bar = screen.getByRole("tablist", { name: "Разделы игры" });
+    expect(bar.parentElement).not.toHaveTextContent(/Ключ спрятан/);
+    expect(toastRegion()).not.toHaveTextContent(/Ключ спрятан/);
+  });
+
+  test("реплики у костра не считаются новым в рассказе: они на вкладке «Привал»", async () => {
+    const { ws } = await openGame({ snapshot: campSnapshot() });
+    fireEvent.click(tab("Отряд"));
+
+    await serve(ws.last(), {
+      type: "feed_item",
+      item: feedEntry(9, {
+        kind: "camp_line",
+        text: "Спою песню.",
+        data: { actor_id: "pc_boris", actor: "Борин" },
+      }),
+    });
+
+    expect(badgeOf("Рассказ")).toBeNull();
+  });
+
+  test("мой ход в бою, пока игрок не на «Бою»: отметка «!» у «Боя», открыл — погасла", async () => {
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+
+    expect(badgeOf("Бой")).toBe("!");
+    expect(tab("Бой")).toHaveAccessibleName("Бой");
+    fireEvent.click(tab("Бой"));
+    expect(badgeOf("Бой")).toBeNull();
+  });
+
+  test("бой кончился — отметка боя не переходит в следующий бой", async () => {
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+
+    await serve(ws.last(), { type: "combat", combat: null });
+    await serve(ws.last(), { type: "combat", combat: combatOf("skeleton-1") });
+
+    expect(badgeOf("Бой")).toBeNull();
+  });
+});
+
+describe("уведомления и вибрация", () => {
+  test("«Твой ход» в бою, пока игрок читает рассказ: тост с «К бою» и вибрация", async () => {
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    expect(buzz).not.toHaveBeenCalled();
+
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+
+    const toast = screen.getByRole("status", { name: "Твой ход" });
+    expect(toast).toHaveTextContent("Бой идёт: открой вкладку «Бой».");
+    expect(buzz).toHaveBeenCalledWith("your-turn");
+    expect(buzz).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(within(toast).getByRole("button", { name: "К бою" }));
+
+    expect(tab("Бой")).toHaveAttribute("aria-selected", "true");
+    expect(toastRegion()).toBeEmptyDOMElement();
+  });
+
+  test("игрок уже на «Бою»: тоста нет, вибрация есть", async () => {
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    fireEvent.click(tab("Бой"));
+
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+
+    expect(toastRegion()).toBeEmptyDOMElement();
+    expect(buzz).toHaveBeenCalledWith("your-turn");
+  });
+
+  test("тост «Твой ход» гаснет, если игрок сам открыл «Бой»", async () => {
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+
+    fireEvent.click(tab("Бой"));
+
+    expect(toastRegion()).toBeEmptyDOMElement();
+  });
+
+  test("тост уходит сам через несколько секунд", async () => {
+    vi.useFakeTimers({ toFake: FAKE_TIMERS });
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+    expect(toastRegion()).toHaveTextContent("Твой ход");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(7000);
+    });
+
+    expect(toastRegion()).toBeEmptyDOMElement();
+  });
+
+  test("ход сдан и мастер думает — «Твой ход» не повторяется на каждом кадре боя", async () => {
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+
+    expect(buzz).toHaveBeenCalledTimes(1);
+  });
+
+  test("«Хост собирает ходы»: игроку на другой вкладке — тост и вибрация", async () => {
+    const { ws } = await openGame({ as: "u2" });
+    fireEvent.click(tab("Отряд"));
+
+    await serve(ws.last(), { type: "phase", phase: phaseOf("collecting") });
+
+    expect(
+      screen.getByRole("status", { name: "Хост собирает ходы" }),
+    ).toBeInTheDocument();
+    expect(buzz).toHaveBeenCalledWith("collecting");
+  });
+
+  test("«Хост собирает ходы»: на «Рассказе» поле хода и отсчёт и так видны — только вибрация", async () => {
+    const { ws } = await openGame({ as: "u2" });
+
+    await serve(ws.last(), { type: "phase", phase: phaseOf("collecting") });
+
+    expect(toastRegion()).toBeEmptyDOMElement();
+    expect(buzz).toHaveBeenCalledWith("collecting");
+  });
+
+  test.each(["submitted", "auto_submitted", "pass", "auto_pass"] as const)(
+    "«Хост собирает ходы», а ход уже сдан (%s): ни тоста, ни вибрации — звать не к чему",
+    async (status) => {
+      const { ws } = await openGame({
+        as: "u2",
+        snapshot: snapshotWith({ action: myAction({ status, text: "Жду." }) }),
+      });
+      fireEvent.click(tab("Отряд"));
+
+      await serve(ws.last(), { type: "phase", phase: phaseOf("collecting") });
+
+      expect(toastRegion()).toBeEmptyDOMElement();
+      expect(buzz).not.toHaveBeenCalled();
+    },
+  );
+
+  test("«Хост собирает ходы», а ход ещё черновик: тост и вибрация", async () => {
+    const { ws } = await openGame({
+      as: "u2",
+      snapshot: snapshotWith({
+        action: myAction({ status: "draft", text: "Думаю…" }),
+      }),
+    });
+    fireEvent.click(tab("Отряд"));
+
+    await serve(ws.last(), { type: "phase", phase: phaseOf("collecting") });
+
+    expect(
+      screen.getByRole("status", { name: "Хост собирает ходы" }),
+    ).toBeInTheDocument();
+    expect(buzz).toHaveBeenCalledWith("collecting");
+  });
+
+  test("мой ход в бою прошёл без открытия «Боя» (время вышло): «!» и тост «Твой ход» гаснут", async () => {
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+    expect(badgeOf("Бой")).toBe("!");
+    expect(toastRegion()).toHaveTextContent("Твой ход");
+
+    await serve(ws.last(), { type: "combat", combat: combatOf("skeleton-1") });
+
+    expect(badgeOf("Бой")).toBeNull();
+    expect(toastRegion()).toBeEmptyDOMElement();
+  });
+
+  test("после пропущенного хода следующий мой ход снова зажигает «!» и зовёт тостом", async () => {
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+    await serve(ws.last(), { type: "combat", combat: combatOf("skeleton-1") });
+
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+
+    expect(badgeOf("Бой")).toBe("!");
+    expect(toastRegion()).toHaveTextContent("Твой ход");
+    expect(buzz).toHaveBeenCalledTimes(2);
+  });
+
+  test("мой ход кончился тем же кадром, что начался привал: виден тост «Привал», а не «Твой ход»", async () => {
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+
+    await serve(ws.last(), {
+      type: "phase",
+      phase: phaseOf("camp", { deadline_at: CAMP_DEADLINE }),
+    });
+
+    expect(toastRegion()).toHaveTextContent("Привал");
+    expect(toastRegion()).not.toHaveTextContent("Твой ход");
+    expect(badgeOf("Бой")).toBeNull();
+  });
+
+  test("хост сам нажал «Собрать ходы»: ни тоста, ни вибрации", async () => {
+    const { ws } = await openGame({ as: "u1" });
+    fireEvent.click(tab("Отряд"));
+
+    await serve(ws.last(), { type: "phase", phase: phaseOf("collecting") });
+
+    expect(toastRegion()).toBeEmptyDOMElement();
+    expect(buzz).not.toHaveBeenCalled();
+  });
+
+  test("«Привал»: тост, вибрация и отметка у новой вкладки", async () => {
+    const { ws } = await openGame();
+
+    await serve(ws.last(), {
+      type: "phase",
+      phase: phaseOf("camp", { deadline_at: CAMP_DEADLINE }),
+    });
+
+    expect(screen.getByRole("status", { name: "Привал" })).toHaveTextContent(
+      "«Привал»",
+    );
+    expect(buzz).toHaveBeenCalledWith("rest");
+    expect(badgeOf("Привал")).toBe("1");
+  });
+
+  test("уведомление не пересказывает тайный ход игрока", async () => {
+    const { ws } = await openGame({
+      snapshot: combatSnapshot("skeleton-1", {
+        action: myAction({
+          status: "submitted",
+          secret: true,
+          text: "Тайно режу верёвку моста.",
+        }),
+      }),
+    });
+
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+
+    expect(toastRegion()).toHaveTextContent("Твой ход");
+    expect(toastRegion()).not.toHaveTextContent(/верёвку/);
+  });
+});
+
+describe("«Мастер думает…» на «Рассказе»", () => {
+  test("одна формулировка, нейтральная фраза и сколько уже ждём", async () => {
+    await openGame({ snapshot: snapshotWith({ phase: phaseOf("resolving") }) });
+
+    const card = within(panel("Рассказ")).getByRole("status", {
+      name: "Мастер думает…",
+    });
+    expect(card).toHaveTextContent(/Ждём 0:00/);
+    expect(card.textContent).toMatch(/…/);
+  });
+
+  test("время ожидания идёт, фраза меняется по времени", async () => {
+    vi.useFakeTimers({ toFake: [...FAKE_TIMERS, "Date"] });
+    await openGame({ snapshot: snapshotWith({ phase: phaseOf("resolving") }) });
+    const card = () => screen.getByRole("status", { name: "Мастер думает…" });
+    const first = card().textContent;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9000);
+    });
+
+    expect(card()).toHaveTextContent("Ждём 0:09");
+    expect(card().textContent).not.toBe(first);
+  });
+
+  test("мастер ответил — карточки нет", async () => {
+    const { ws } = await openGame({
+      snapshot: snapshotWith({ phase: phaseOf("resolving") }),
+    });
+
+    await serve(ws.last(), { type: "phase", phase: phaseOf("discussion") });
+
+    expect(screen.queryByRole("status", { name: "Мастер думает…" })).toBeNull();
+  });
+
+  test("в обсуждении карточки нет", async () => {
+    await openGame();
+
+    expect(screen.queryByRole("status", { name: "Мастер думает…" })).toBeNull();
+  });
+});
+
+describe("клавиатура телефона прячет нижнюю панель", () => {
+  function stubTouchScreen() {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        media: query,
+        matches: query === "(pointer: coarse)",
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      })),
+    );
+  }
+
+  test("поле хода в фокусе на сенсорном экране — панели не видно, ушёл фокус — вернулась", async () => {
+    stubTouchScreen();
+    await openGame();
+    const field = screen.getByLabelText(FIELD);
+
+    act(() => field.focus());
+    expect(
+      screen.getByRole("tablist", { name: "Разделы игры", hidden: true }),
+    ).not.toBeVisible();
+
+    act(() => field.blur());
+    expect(screen.getByRole("tablist", { name: "Разделы игры" })).toBeVisible();
+  });
+
+  // B10.3.fix2 (M1): панель возвращается после касания, а не посреди него — иначе кнопка поля
+  // хода уезжает из-под пальца и первый тап теряется.
+  test("тап по «Готов», пока пишешь: панель не появляется посреди касания, ход уходит с первого тапа", async () => {
+    stubTouchScreen();
+    const { server } = await openGame();
+    const field = screen.getByLabelText(FIELD);
+    act(() => field.focus());
+    fireEvent.change(field, { target: { value: "Осматриваю дверь" } });
+    const ready = button("Готов");
+
+    fireEvent.pointerDown(ready);
+    act(() => ready.focus());
+    expect(
+      screen.getByRole("tablist", { name: "Разделы игры", hidden: true }),
+    ).not.toBeVisible();
+    fireEvent.click(ready);
+
+    expect(await screen.findByText("Ход сдан")).toBeInTheDocument();
+    expect(screen.getByRole("tablist", { name: "Разделы игры" })).toBeVisible();
+    expect(
+      server.calls.filter((call) => `${call.method} ${call.path}` === SUBMIT),
+    ).toHaveLength(1);
+  });
+});
+
+// B10.3.fix2 (N2): после кнопок перехода (тост, подсказка на «Рассказе») фокус не падает на
+// страницу: нажатая кнопка исчезает вместе с тостом или скрытой панелью.
+describe("фокус после кнопок перехода", () => {
+  test("«К бою» в подсказке на «Рассказе» — фокус на вкладке «Бой»", async () => {
+    await openGame({ snapshot: combatSnapshot("skeleton-1") });
+
+    fireEvent.click(
+      within(screen.getByRole("region", { name: "Идёт бой" })).getByRole(
+        "button",
+        { name: "К бою" },
+      ),
+    );
+
+    expect(tab("Бой")).toHaveAttribute("aria-selected", "true");
+    expect(tab("Бой")).toHaveFocus();
+  });
+
+  test("«К бою» — фокус на вкладке «Бой»", async () => {
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+    const toast = screen.getByRole("status", { name: "Твой ход" });
+
+    fireEvent.click(within(toast).getByRole("button", { name: "К бою" }));
+
+    expect(tab("Бой")).toHaveFocus();
+  });
+
+  test("«Скрыть» — фокус на открытой вкладке", async () => {
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+    const toast = screen.getByRole("status", { name: "Твой ход" });
+
+    fireEvent.click(within(toast).getByRole("button", { name: "Скрыть" }));
+
+    expect(toastRegion()).toBeEmptyDOMElement();
+    expect(tab("Рассказ")).toHaveFocus();
+  });
+
+  test("тост ушёл сам — фокус никуда не прыгает", async () => {
+    vi.useFakeTimers({ toFake: FAKE_TIMERS });
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(7000);
+    });
+
+    expect(toastRegion()).toBeEmptyDOMElement();
+    expect(tab("Рассказ")).not.toHaveFocus();
+  });
+});
+
+// --- финальное покрытие блока B10 (B10.coverage): пределы отметок, привал, вход и переподключение,
+// тайное в панели и тосте, переход к листу при «меньше движения» ---
+
+describe("отметки нового: пределы, привал и исчезнувшая вкладка", () => {
+  test("до девяти новых — число, с десятой — «9+»; имя вкладки остаётся словом", async () => {
+    const { ws } = await openGame();
+    fireEvent.click(tab("Отряд"));
+
+    for (let id = 3; id <= 11; id++) {
+      await serve(ws.last(), { type: "feed_item", item: feedEntry(id) });
+    }
+    expect(badgeOf("Рассказ")).toBe("9");
+
+    await serve(ws.last(), { type: "feed_item", item: feedEntry(12) });
+    expect(badgeOf("Рассказ")).toBe("9+");
+    expect(tab("Рассказ")).toHaveAccessibleName("Рассказ");
+  });
+
+  test("на привале новые реплики у костра и свои идеи — отметка у «Привала», а не у «Рассказа»", async () => {
+    const { ws } = await openGame({ snapshot: campSnapshot() });
+    fireEvent.click(tab("Отряд"));
+
+    await serve(ws.last(), {
+      type: "feed_item",
+      item: feedEntry(9, {
+        kind: "camp_line",
+        text: "Спою песню.",
+        data: { actor_id: "pc_boris", actor: "Борин" },
+      }),
+    });
+    await serve(ws.last(), { type: "rest_idea", text: "Вспомни дом." });
+
+    expect(badgeOf("Привал")).toBe("2");
+    expect(badgeOf("Рассказ")).toBeNull();
+    fireEvent.click(tab("Привал"));
+    expect(badgeOf("Привал")).toBeNull();
+  });
+
+  test("привал кончился — его отметка не переходит в следующий: там только начало нового привала", async () => {
+    const { ws } = await openGame({ snapshot: campSnapshot() });
+    fireEvent.click(tab("Отряд"));
+    await serve(ws.last(), {
+      type: "feed_item",
+      item: feedEntry(9, {
+        kind: "camp_line",
+        text: "Спою песню.",
+        data: { actor_id: "pc_boris", actor: "Борин" },
+      }),
+    });
+    expect(badgeOf("Привал")).toBe("1");
+
+    await serve(ws.last(), { type: "phase", phase: phaseOf("discussion") });
+    expect(tabNames()).not.toContain("Привал");
+    await serve(ws.last(), {
+      type: "phase",
+      phase: phaseOf("camp", { deadline_at: CAMP_DEADLINE }),
+    });
+
+    expect(badgeOf("Привал")).toBe("1");
+  });
+});
+
+describe("когда уведомлений нет: вход и переподключение", () => {
+  test("вход в игру, когда мой ход уже идёт: ни тоста, ни вибрации, ни отметки — снимок не событие", async () => {
+    await openGame({ snapshot: combatSnapshot("pc_lira") });
+
+    expect(toastRegion()).toBeEmptyDOMElement();
+    expect(buzz).not.toHaveBeenCalled();
+    expect(badgeOf("Бой")).toBeNull();
+  });
+
+  test("переподключение с тем же снимком: ни отметок, ни тоста, ни вибрации", async () => {
+    vi.useFakeTimers({ toFake: FAKE_TIMERS });
+    const { ws } = await openGame({ snapshot: combatSnapshot("skeleton-1") });
+    fireEvent.click(tab("Отряд"));
+
+    act(() => ws.last().drop(1006));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    await connect(ws.last(), combatSnapshot("skeleton-1"));
+
+    for (const name of tabNames()) expect(badgeOf(String(name))).toBeNull();
+    expect(toastRegion()).toBeEmptyDOMElement();
+    expect(buzz).not.toHaveBeenCalled();
+  });
+});
+
+/** Имена вкладок игры: ровно эти слова, без чисел и текстов событий. */
+const TABS_WORDS = ["Рассказ", "Бой", "Привал", "Персонаж", "Отряд", "Дневник"];
+
+describe("тайное не выходит в панель вкладок и уведомления", () => {
+  const SECRETS = [
+    "Ключ спрятан под третьей плитой",
+    "Тайно режу верёвку моста",
+    "Шёпот жреца у алтаря",
+  ];
+
+  /** Тексты и все атрибуты узла и его потомков: в них не должно быть тайного. */
+  const everything = (node: Element | null): string =>
+    node === null
+      ? ""
+      : [node, ...node.querySelectorAll("*")]
+          .flatMap((element) => [
+            element.textContent ?? "",
+            ...element
+              .getAttributeNames()
+              .map((name) => element.getAttribute(name) ?? ""),
+          ])
+          .join("\n");
+
+  test("личное письмо, тайный бросок и свой тайный ход: у вкладок только число или «!» и «есть новое»", async () => {
+    const { ws } = await openGame({
+      snapshot: combatSnapshot("skeleton-1", {
+        action: myAction({
+          status: "submitted",
+          secret: true,
+          text: SECRETS[1],
+        }),
+      }),
+    });
+    fireEvent.click(tab("Отряд"));
+
+    await serve(ws.last(), {
+      type: "feed_item",
+      item: feedEntry(3, { kind: "private", private: true, text: SECRETS[0] }),
+    });
+    await serve(ws.last(), {
+      type: "feed_item",
+      item: rollEntry(4, { reason: SECRETS[2] }, { private: true }),
+    });
+    await serve(ws.last(), {
+      type: "feed_item",
+      item: feedEntry(5, {
+        kind: "action",
+        private: true,
+        text: SECRETS[1],
+        data: { actor_id: "pc_lira", actor: "Лира", secret: true },
+      }),
+    });
+    await serve(ws.last(), { type: "combat", combat: combatOf("pc_lira") });
+
+    const bar = screen.getByRole("tablist", { name: "Разделы игры" });
+    const region = toastRegion();
+    expect(region).toHaveTextContent("Твой ход");
+    for (const node of within(bar).getAllByRole("tab")) {
+      expect(TABS_WORDS).toContain(node.textContent);
+      expect(node).toHaveAccessibleName(node.textContent ?? "");
+      // Описание — только «есть новое» (у вкладок с отметкой) или никакого.
+      expect(node).toHaveAccessibleDescription(/^(есть новое)?$/);
+    }
+    for (const name of tabNames()) {
+      const badge = badgeOf(String(name));
+      if (badge !== null) expect(badge).toMatch(/^(\d|9\+|!)$/);
+    }
+    // Отметки есть: три новые записи ленты и мой ход — проверка выше не пустая.
+    expect(badgeOf("Рассказ")).toBe("3");
+    expect(badgeOf("Бой")).toBe("!");
+    const shown = `${everything(bar.parentElement)}\n${everything(region)}`;
+    for (const secret of SECRETS) expect(shown).not.toContain(secret);
+    expect(
+      screen.getByRole("status", { name: "Твой ход" }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("имя героя → лист: прокрутка и записи без героя", () => {
+  /** «Меньше движения» в системе: только этот медиазапрос срабатывает. */
+  function stubReducedMotion(reduce: boolean) {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        media: query,
+        matches: query === "(prefers-reduced-motion: reduce)" && reduce,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      })),
+    );
+  }
+
+  /** В jsdom прокрутки нет: подменяем её и запоминаем, что и как выводилось в видимость. */
+  function spyScroll() {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    onTestFinished(() => {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+    });
+    return scrollIntoView;
+  }
+
+  const withActions = () =>
+    snapshotWith({
+      feed: [
+        feedEntry(1, {
+          kind: "action",
+          text: "осматривает дверь",
+          data: { actor_id: "pc_lira", actor: "Лира", secret: false },
+        }),
+        feedEntry(2, {
+          kind: "action",
+          text: "держит факел",
+          data: { actor_id: "pc_boris", actor: "Борин", secret: false },
+        }),
+      ],
+    });
+  const heroName = (name: string) =>
+    within(screen.getByRole("list", { name: "Лента" })).getByRole("button", {
+      name,
+    });
+
+  test.each([
+    [true, "auto"],
+    [false, "smooth"],
+  ] as const)(
+    "«меньше движения»: %s — свой лист к началу панели «Персонаж», прокрутка %s",
+    async (reduce, behavior) => {
+      stubReducedMotion(reduce);
+      const scrollIntoView = spyScroll();
+      await openGame({ snapshot: withActions() });
+      scrollIntoView.mockClear();
+
+      fireEvent.click(heroName("Лира"));
+
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView.mock.contexts[0]).toBe(panel("Персонаж"));
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "start", behavior });
+    },
+  );
+
+  test("«меньше движения»: карточка чужого героя выводится в центр без плавной прокрутки", async () => {
+    stubReducedMotion(true);
+    const scrollIntoView = spyScroll();
+    await openGame({ snapshot: withActions() });
+    scrollIntoView.mockClear();
+
+    fireEvent.click(heroName("Борин"));
+
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      block: "center",
+      behavior: "auto",
+    });
+  });
+
+  test("ход без actor_id (старая запись) — имя просто текст, кнопки нет", async () => {
+    await openGame({
+      snapshot: snapshotWith({
+        feed: [
+          feedEntry(1, {
+            kind: "action",
+            text: "ждёт у двери",
+            data: { actor: "Лира" },
+          }),
+        ],
+      }),
+    });
+
+    const feed = screen.getByRole("list", { name: "Лента" });
+    expect(within(feed).queryByRole("button")).toBeNull();
+    expect(within(feed).getByText("Лира:")).toBeInTheDocument();
+  });
 });

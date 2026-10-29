@@ -1,7 +1,7 @@
 import { useCallback, useId } from "react";
 import { useApi } from "../../api/context";
 import type { Draft, Finding } from "../../api/types";
-import { Alert, Button, Loading } from "../../ui";
+import { Button, ErrorState, Skeleton } from "../../ui";
 import { useLoaded } from "../hooks";
 import { FINDING_KINDS } from "./labels";
 import { screenLabel } from "./StepNav";
@@ -68,15 +68,21 @@ export function GoButton({ screen, onGo }: GoButtonProps) {
   );
 }
 
+/** Переход по ссылке находки: экран шага и, если есть, сущность (`ref` находки). */
+type FindingGo = (screen: EditorScreen, ref?: string) => void;
+
 interface FindingsProps {
   title: string;
   empty: string;
   findings: readonly Finding[];
   draft: Draft;
-  onGo: (screen: EditorScreen) => void;
+  onGo: FindingGo;
 }
 
-/** Список находок: текст сервера как есть, где найдена и переход к шагу, который за неё отвечает. */
+/**
+ * Список находок: текст сервера как есть, где найдена и переход к шагу, который за неё
+ * отвечает, — прямо к её сущности на экране шага (спека §10.1).
+ */
 function Findings({ title, empty, findings, draft, onGo }: FindingsProps) {
   const titleId = useId();
   return (
@@ -96,7 +102,10 @@ function Findings({ title, empty, findings, draft, onGo }: FindingsProps) {
                 <p className="screen-muted">{entityText(finding.ref, draft)}</p>
                 {finding.step !== null && (
                   <div>
-                    <GoButton screen={finding.step} onGo={onGo} />
+                    <GoButton
+                      screen={finding.step}
+                      onGo={(screen) => onGo(screen, finding.ref)}
+                    />
                   </div>
                 )}
               </div>
@@ -110,7 +119,7 @@ function Findings({ title, empty, findings, draft, onGo }: FindingsProps) {
 
 interface ReviewStepProps {
   draft: Draft;
-  onGo: (screen: EditorScreen) => void;
+  onGo: FindingGo;
 }
 
 /**
@@ -121,18 +130,13 @@ export function ReviewStep({ draft, onGo }: ReviewStepProps) {
   const [report, reload] = useDraftReport(draft.id);
 
   if (report.status === "loading") {
-    return <Loading label="Проверяем черновик…" />;
+    return <Skeleton label="Проверяем черновик…" rows={2} />;
   }
   if (report.status === "error") {
     return (
-      <div className="screen-stack">
-        <Alert>{report.message}</Alert>
-        <div>
-          <Button variant="secondary" onClick={reload}>
-            Повторить
-          </Button>
-        </div>
-      </div>
+      <ErrorState title="Не удалось проверить черновик" onRetry={reload}>
+        <p>{report.message}</p>
+      </ErrorState>
     );
   }
   const { errors, warnings, score, estimated_minutes, readiness_percent } =

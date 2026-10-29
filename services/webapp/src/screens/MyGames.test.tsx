@@ -65,6 +65,10 @@ describe("список игр", () => {
     const server = renderMyGames({ games: [CRYPT] });
 
     expect(screen.getByRole("status")).toHaveTextContent("Загружаем");
+    // Скелетон списка: строки той же формы, что у игр, экран не прыгает, когда список пришёл.
+    expect(
+      screen.getByRole("status").querySelectorAll(".ui-skeleton__row").length,
+    ).toBeGreaterThan(0);
     await screen.findByText("Склеп забытого короля");
     expect(screen.queryByRole("status")).toBeNull();
     const [call] = callsTo(server, "GET", "/api/games");
@@ -117,6 +121,16 @@ describe("список игр", () => {
     expect(screen.queryByRole("list")).toBeNull();
   });
 
+  test("игр нет — кнопка следующего шага ведёт к полю кода приглашения", async () => {
+    renderMyGames({ games: [] });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Ввести код приглашения" }),
+    );
+
+    expect(screen.getByLabelText("Код приглашения")).toHaveFocus();
+  });
+
   test.each([
     [true, "Создайте игру или войдите по коду приглашения."],
     [false, "Войдите в игру друзей по коду приглашения."],
@@ -138,9 +152,9 @@ describe("список игр", () => {
       },
     });
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "База недоступна.",
-    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Не удалось загрузить игры");
+    expect(alert).toHaveTextContent("База недоступна.");
     fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
 
     expect(
@@ -492,6 +506,40 @@ describe("вкладка «Приключения»: только для соз�
       await screen.findByText("Склеп забытого короля"),
     ).toBeInTheDocument();
     expect(screen.queryByText("Туманная гавань")).toBeNull();
+  });
+
+  test("разметка вкладок: панель связана с выбранной вкладкой, в порядке табуляции одна вкладка", async () => {
+    renderMyGames({ canCreate: true });
+    await screen.findByText("Пока нет игр");
+
+    const panel = screen.getByRole("tabpanel", { name: "Мои игры" });
+    expect(tab("Мои игры")).toHaveAttribute("aria-controls", panel.id);
+    expect(tab("Мои игры")).toHaveAttribute("tabindex", "0");
+    expect(tab("Приключения")).toHaveAttribute("tabindex", "-1");
+    expect(within(panel).getByText("Пока нет игр")).toBeInTheDocument();
+  });
+
+  test("стрелки, Home и End переключают вкладки, фокус идёт за выбором", async () => {
+    renderMyGames({
+      canCreate: true,
+      routes: { "GET /api/drafts": { json: [] } },
+    });
+    await screen.findByText("Пока нет игр");
+
+    fireEvent.keyDown(tab("Мои игры"), { key: "ArrowRight" });
+    expect(tab("Приключения")).toHaveAttribute("aria-selected", "true");
+    expect(tab("Приключения")).toHaveFocus();
+    expect(screen.getByRole("tabpanel", { name: "Приключения" })).toBeVisible();
+
+    fireEvent.keyDown(tab("Приключения"), { key: "Home" });
+    expect(tab("Мои игры")).toHaveAttribute("aria-selected", "true");
+    expect(tab("Мои игры")).toHaveFocus();
+
+    fireEvent.keyDown(tab("Мои игры"), { key: "End" });
+    expect(tab("Приключения")).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.keyDown(tab("Приключения"), { key: "ArrowRight" });
+    expect(tab("Мои игры")).toHaveAttribute("aria-selected", "true");
   });
 });
 

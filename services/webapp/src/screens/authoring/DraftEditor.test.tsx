@@ -303,13 +303,16 @@ describe("ответы сервера на запись", () => {
     expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
-  test("422: текст сервера и подробности списком", async () => {
+  test("422: текст сервера и подробности списком — путь поля словами формы", async () => {
     renderEditor(draftOf(), {
       [`PUT ${CONCEPT_PATH}`]: {
         status: 422,
         json: {
           detail: "Раздел не прошёл проверку.",
-          problems: ["party_size: не больше 6", "title: не длиннее 100 знаков"],
+          problems: [
+            "settings.party_size: не больше 6",
+            "settings.title: не длиннее 100 знаков",
+          ],
           code: "invalid_data",
         },
       },
@@ -320,8 +323,15 @@ describe("ответы сервера на запись", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Раздел не прошёл проверку.");
-    expect(within(alert).getAllByRole("listitem")).toHaveLength(2);
-    expect(alert).toHaveTextContent("party_size: не больше 6");
+    expect(
+      within(alert)
+        .getAllByRole("listitem")
+        .map((row) => row.textContent),
+    ).toEqual([
+      "Замысел → Игроков: не больше 6",
+      "Замысел → Название: не длиннее 100 знаков",
+    ]);
+    expect(alert).not.toHaveTextContent("party_size");
   });
 });
 
@@ -1075,7 +1085,7 @@ describe("ошибки записи: правки остаются", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Данные раздела не прошли проверку.");
-    expect(alert).toHaveTextContent("settings.title:");
+    expect(alert).toHaveTextContent("Замысел → Название:");
     expect(title()).toHaveValue("Очень длинное название");
     expect(screen.queryByRole("alertdialog")).toBeNull();
   });
@@ -1242,7 +1252,7 @@ describe("задание генерации: стыки с сервером", ()
     expect(jobPolls(server)).toHaveLength(0);
   });
 
-  test("черновик с упавшим заданием цели: текст сервера, «Повторить» шлёт шаг и цель, опрашивается только новое задание", async () => {
+  test("черновик с упавшим заданием цели, после которого правок не было: спокойная строка без тревоги, «Повторить» шлёт шаг и цель, опрашивается только новое задание", async () => {
     const failed = jobOf({
       id: "j1",
       step: "pantheon",
@@ -1265,11 +1275,14 @@ describe("задание генерации: стыки с сервером", ()
     );
     await settle();
 
-    const alert = screen.getByRole("alert");
-    expect(alert).toHaveTextContent("Не удалось сгенерировать шаг «Боги»");
-    expect(alert).toHaveTextContent(
-      "Генерация не удалась. Попробуйте ещё раз.",
-    );
+    // Сбой случился до открытия черновика: это не ошибка этого входа, а заметка о прошлом.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(
+      screen.getByText("Прошлая генерация шага «Боги» не удалась."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Генерация не удалась. Попробуйте ещё раз."),
+    ).toBeInTheDocument();
     await tick(4000);
     expect(jobPolls(server)).toHaveLength(0);
 
@@ -1284,6 +1297,69 @@ describe("задание генерации: стыки с сервером", ()
     await tick(2000);
     expect(callsTo(server, "GET", "/api/drafts/d1/jobs/j2")).toHaveLength(1);
     expect(callsTo(server, "GET", "/api/drafts/d1/jobs/j1")).toHaveLength(0);
+  });
+
+  // Ревью B4 (nit): старое упавшее задание («сервер перезапускался» неделю назад) не тревожит
+  // автора при каждом открытии черновика, если черновик с тех пор менялся.
+  test("черновик менялся после упавшего задания: ни ошибки, ни заметки — правка и генерация открыты", async () => {
+    const { server } = renderEditor(
+      draftOf({
+        deities: [deityOf()],
+        steps: stepsOf({
+          pantheon: { status: "draft", updated_at: "2026-10-26T09:00:00Z" },
+        }),
+        job: jobOf({
+          id: "j1",
+          step: "pantheon",
+          status: "failed",
+          error: "Сервер перезапускался во время генерации.",
+          finished_at: "2026-10-25T10:00:05+00:00",
+        }),
+      }),
+    );
+    await settle();
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/не удалась/)).toBeNull();
+    expect(screen.queryByText(/Сервер перезапускался/)).toBeNull();
+    expect(generateIn("Замысел")).toBeEnabled();
+    await tick(4000);
+    expect(jobPolls(server)).toHaveLength(0);
+  });
+
+  test("сбой задания, поставленного в этот вход, — по-прежнему ошибка с «Повторить», даже после правок", async () => {
+    renderEditor(
+      draftOf({
+        steps: stepsOf({
+          concept: { status: "draft", updated_at: "2026-10-26T09:00:00Z" },
+        }),
+      }),
+      {
+        "POST /api/drafts/d1/generate": {
+          status: 202,
+          json: jobOf({ id: "j1", step: "concept" }),
+        },
+        "GET /api/drafts/d1/jobs/j1": {
+          json: jobOf({
+            id: "j1",
+            step: "concept",
+            status: "failed",
+            error: "Нейронка не ответила.",
+            finished_at: "2026-10-25T10:00:05+00:00",
+          }),
+        },
+      },
+    );
+    await settle();
+
+    fireEvent.click(generateIn("Замысел"));
+    await settle();
+    await tick(2000);
+
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Не удалось сгенерировать шаг «Замысел»");
+    expect(alert).toHaveTextContent("Нейронка не ответила.");
+    expect(button("Повторить")).toBeEnabled();
   });
 });
 
@@ -1884,5 +1960,61 @@ describe("проверка и публикация говорят о несох�
     expect(panel("Проверка")).toHaveTextContent(
       "На экране «Боги» есть несохранённые правки: проверка и публикация их не видят.",
     );
+  });
+});
+
+// B10.4: конструктор говорит тем же языком состояний, что игра (скелетон, единая ошибка).
+describe("загрузка и ошибка черновика — как на остальных экранах", () => {
+  test("пока черновик идёт — скелетон «Загружаем черновик…»; сбой — «Не удалось открыть черновик», текст сервера и «Повторить»", async () => {
+    let reads = 0;
+    const { server } = renderEditor(draftOf(), {
+      "GET /api/drafts/d1": () =>
+        ++reads === 1
+          ? { status: 503, json: { detail: "Сервер перезапускается." } }
+          : { json: draftOf({ title: "Гавань" }) },
+    });
+
+    expect(screen.getByRole("status")).toHaveTextContent("Загружаем черновик…");
+    expect(document.querySelector(".ui-skeleton")).not.toBeNull();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Не удалось открыть черновик");
+    expect(alert).toHaveTextContent("Сервер перезапускается.");
+
+    fireEvent.click(button("Повторить"));
+
+    expect(await opened()).toBeInTheDocument();
+    expect(callsTo(server, "GET", "/api/drafts/d1")).toHaveLength(2);
+  });
+});
+
+// --- финальное покрытие блока B10 (B10.coverage): имя сущности в отказе — только текст ---
+
+describe("отказ записи словами формы: имя сущности автора — буквами", () => {
+  test("имя бога с разметкой в строке отказа выводится текстом, без элементов", async () => {
+    const hostile = '<img src=x onerror="alert(1)">';
+    const { form } = await openStep(
+      draftOf({ deities: [deityOf({ name: hostile })] }),
+      "Боги",
+      {
+        "PUT /api/drafts/d1/sections/deities": {
+          status: 422,
+          json: {
+            detail: "Данные раздела не прошли проверку.",
+            code: "invalid_data",
+            problems: ["deities.0.domains: нужен хотя бы один домен"],
+          },
+        },
+      },
+    );
+
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Сохранить раздел" }),
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByRole("listitem")).toHaveTextContent(
+      `Боги → «${hostile}» → Домены: нужен хотя бы один домен`,
+    );
+    expect(alert.querySelector("img")).toBeNull();
   });
 });

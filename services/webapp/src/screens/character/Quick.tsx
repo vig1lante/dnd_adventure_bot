@@ -11,13 +11,14 @@ import { ErrorAlert, TextField } from "../fields";
 import { useAction } from "../hooks";
 import "../screens.css";
 import { LIMITS } from "./draft";
-import { ClassCarousel, RaceCarousel } from "./OptionCards";
+import { ClassBriefCarousel, RaceCarousel } from "./OptionCards";
 import { CreatedNotice } from "./shared";
 import type { CharacterFormProps } from "./shared";
 
 /**
  * Быстрый герой: класс, раса и строка о герое; имя и описание пишет мастер. Класс и раса
- * выбираются листанием карточек. «Изменить героя» открывает форму с прежним выбором
+ * выбираются листанием карточек; карточка класса короткая (подробности — по «Подробнее»),
+ * чтобы на телефоне раса и поле героя не уходили далеко вниз. «Изменить героя» открывает форму с прежним выбором
  * (`initial`), иначе она пустая.
  */
 export function Quick({
@@ -65,7 +66,7 @@ export function Quick({
         {/* Карусели две, поэтому у каждой видимая подпись. */}
         <div>
           <p className="form-legend">Класс</p>
-          <ClassCarousel
+          <ClassBriefCarousel
             options={options}
             value={classId || null}
             onChange={setClassId}

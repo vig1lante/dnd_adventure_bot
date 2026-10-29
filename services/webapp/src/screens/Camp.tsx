@@ -181,13 +181,23 @@ function StoryIdeas({ ideas }: { ideas: readonly string[] }) {
 
 interface CampfireFormProps {
   gameId: string;
+  /** Вид привала; `null` — ещё не пришёл. */
+  kind: RestKind | null;
   /** Сколько реплик герой уже сказал за этот привал. */
   said: number;
   locked: string | null;
 }
 
+// Когда мастер ответит на реплику: долгий привал кончается утром, короткий — через час. Пока вид
+// привала не пришёл, «утра» не обещаем.
+const ANSWER_HINTS: Record<RestKind | "unknown", string> = {
+  short: "Реплику услышат все, а мастер ответит на неё в конце привала.",
+  long: "Реплику услышат все, а мастер ответит на неё утром.",
+  unknown: "Реплику услышат все, а мастер ответит на неё в конце привала.",
+};
+
 /** Поле «Сказать у костра»: одна реплика за раз, без лишних пробелов, с текстом отказа сервера. */
-function CampfireForm({ gameId, said, locked }: CampfireFormProps) {
+function CampfireForm({ gameId, kind, said, locked }: CampfireFormProps) {
   const api = useApi();
   const receive = useGame((state) => state.receive);
   const { busy, error, run } = useAction();
@@ -209,7 +219,7 @@ function CampfireForm({ gameId, said, locked }: CampfireFormProps) {
     <div className="camp__stack">
       <TextAreaField
         label="Сказать у костра"
-        hint="Реплику услышат все, а мастер ответит на неё утром."
+        hint={ANSWER_HINTS[kind ?? "unknown"]}
         rows={3}
         maxLength={CAMP_LINE_MAX_CHARS}
         value={text}
@@ -283,6 +293,7 @@ export function Camp({ gameId, view }: CampProps) {
       <Card title="Ваша реплика" icon="scroll">
         <CampfireForm
           gameId={gameId}
+          kind={rest?.kind ?? null}
           said={said}
           locked={lockReason(view, said, connection)}
         />

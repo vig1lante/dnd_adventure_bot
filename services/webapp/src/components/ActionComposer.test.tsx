@@ -215,6 +215,195 @@ describe("поле хода", () => {
   });
 });
 
+describe("поле хода над клавиатурой телефона (B10.3)", () => {
+  /** Сенсорный экран или мышь: экранная клавиатура бывает только у первого. */
+  function stubPointer(coarse: boolean) {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      media: query,
+      matches: query === "(pointer: coarse)" && coarse,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  }
+
+  /**
+   * Видимая часть окна над клавиатурой: iOS не сжимает окно, а только visualViewport, поэтому
+   * отступ поля — разница между высотой окна и видимой частью.
+   */
+  function stubViewport(height: number, offsetTop = 0) {
+    const listeners = new Map<string, () => void>();
+    const viewport = {
+      height,
+      offsetTop,
+      addEventListener: (type: string, listener: () => void) =>
+        listeners.set(type, listener),
+      removeEventListener: (type: string) => listeners.delete(type),
+    };
+    vi.stubGlobal("visualViewport", viewport);
+    vi.stubGlobal("innerHeight", 800);
+    return {
+      resize(next: number) {
+        viewport.height = next;
+        act(() => listeners.get("resize")?.());
+      },
+      listeners,
+    };
+  }
+
+  const dock = () => field().closest(".composer-dock");
+
+  test("сенсорный экран: пока игрок пишет, поле прижато к клавиатуре", () => {
+    stubPointer(true);
+    stubViewport(500);
+    renderComposer();
+    expect(dock()).not.toHaveClass("composer-dock--on");
+
+    act(() => field().focus());
+
+    expect(dock()).toHaveClass("composer-dock--on");
+    expect(
+      (dock() as HTMLElement).style.getPropertyValue("--keyboard-inset"),
+    ).toBe("300px");
+  });
+
+  test("клавиатура меняет высоту — поле следует за ней", () => {
+    stubPointer(true);
+    const viewport = stubViewport(500);
+    renderComposer();
+    act(() => field().focus());
+
+    viewport.resize(440);
+
+    expect(
+      (dock() as HTMLElement).style.getPropertyValue("--keyboard-inset"),
+    ).toBe("360px");
+  });
+
+  test("игрок закончил писать — поле возвращается на место, слежение снято", () => {
+    stubPointer(true);
+    const viewport = stubViewport(500);
+    renderComposer();
+    act(() => field().focus());
+
+    act(() => field().blur());
+
+    expect(dock()).not.toHaveClass("composer-dock--on");
+    expect(
+      (dock() as HTMLElement).style.getPropertyValue("--keyboard-inset"),
+    ).toBe("");
+    expect(viewport.listeners.size).toBe(0);
+  });
+
+  test("компьютер (мышь): клавиатуры на экране нет, поле стоит на месте", () => {
+    stubPointer(false);
+    stubViewport(500);
+    renderComposer();
+
+    act(() => field().focus());
+
+    expect(dock()).not.toHaveClass("composer-dock--on");
+  });
+
+  test("без visualViewport (старый WebView) поле прижато к низу окна", () => {
+    stubPointer(true);
+    vi.stubGlobal("visualViewport", undefined);
+    renderComposer();
+
+    act(() => field().focus());
+
+    expect(dock()).toHaveClass("composer-dock--on");
+    expect(
+      (dock() as HTMLElement).style.getPropertyValue("--keyboard-inset"),
+    ).toBe("0px");
+  });
+
+  // B10.3.fix2 (M1): тап по кнопке карточки забирает фокус у поля ещё до отпускания пальца.
+  // Поле не должно выйти из компактного вида посреди касания — иначе кнопка уезжает из-под
+  // пальца и нажатие теряется.
+  test("тап по «Тайно», пока пишешь: поле остаётся прижатым до конца касания, «Тайно» включается", () => {
+    stubPointer(true);
+    stubViewport(500);
+    renderComposer();
+    act(() => field().focus());
+    type("Крадусь к двери");
+    const secret = screen.getByRole("switch", { name: "Тайно" });
+
+    fireEvent.pointerDown(secret);
+    act(() => secret.focus());
+    expect(dock()).toHaveClass("composer-dock--on");
+    fireEvent.click(secret);
+
+    expect(secret).toBeChecked();
+    expect(dock()).not.toHaveClass("composer-dock--on");
+  });
+
+  test("тап по «Готов», пока пишешь: ход уходит ровно одним запросом", async () => {
+    stubPointer(true);
+    stubViewport(500);
+    const { server } = renderComposer();
+    act(() => field().focus());
+    type("Крадусь к двери");
+    const ready = button("Готов");
+
+    fireEvent.pointerDown(ready);
+    act(() => ready.focus());
+    expect(dock()).toHaveClass("composer-dock--on");
+    fireEvent.click(ready);
+    await vi.waitFor(() =>
+      expect(screen.getByText("Ход сдан")).toBeInTheDocument(),
+    );
+
+    expect(sent(server).filter((route) => route === SUBMIT)).toHaveLength(1);
+  });
+
+  test("фокус на «Тайно» — не ввод текста: поле не прижимается", () => {
+    stubPointer(true);
+    stubViewport(500);
+    renderComposer();
+
+    act(() => screen.getByRole("switch", { name: "Тайно" }).focus());
+
+    expect(dock()).not.toHaveClass("composer-dock--on");
+  });
+  // --- финальное покрытие блока B10 (B10.coverage) ---
+
+  test("видимую часть окна сдвинули прокруткой (offsetTop) — отступ меньше на этот сдвиг и следит за ней", () => {
+    stubPointer(true);
+    const listeners = new Map<string, () => void>();
+    const viewport = {
+      height: 500,
+      offsetTop: 100,
+      addEventListener: (type: string, listener: () => void) =>
+        listeners.set(type, listener),
+      removeEventListener: (type: string) => listeners.delete(type),
+    };
+    vi.stubGlobal("visualViewport", viewport);
+    vi.stubGlobal("innerHeight", 800);
+    renderComposer();
+    act(() => field().focus());
+    const inset = () =>
+      (dock() as HTMLElement).style.getPropertyValue("--keyboard-inset");
+    expect(inset()).toBe("200px");
+
+    viewport.offsetTop = 40;
+    act(() => listeners.get("scroll")?.());
+
+    expect(inset()).toBe("260px");
+  });
+
+  test("видимая часть не меньше окна (Android сжал окно сам) — отступ ноль, не отрицательный", () => {
+    stubPointer(true);
+    stubViewport(820);
+    renderComposer();
+
+    act(() => field().focus());
+
+    expect(
+      (dock() as HTMLElement).style.getPropertyValue("--keyboard-inset"),
+    ).toBe("0px");
+  });
+});
+
 describe("«Тайно» и «Вдохновение»", () => {
   test("«Тайно» всегда на месте и выключено", () => {
     renderComposer();

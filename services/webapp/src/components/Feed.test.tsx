@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { FeedItem } from "../api/types";
 import { feedEntry, rollEntry } from "./fixtures";
 import { Feed } from "./Feed";
@@ -215,6 +215,230 @@ describe("текст только как текст", () => {
     );
 
     expect(container.querySelector("b")).toBeNull();
+  });
+});
+
+// --- B10.3: лента для чтения вслух, имя героя ведёт к листу, кубик без лишнего движения ---
+
+describe("лента для чтения вслух", () => {
+  test("рассказ мастера подписан «Мастер» и набран крупно, с буквицей", () => {
+    const { container } = render(
+      <Feed items={[narration(1, "Утро выдалось серым.")]} />,
+    );
+
+    const entry = screen.getByRole("listitem");
+    expect(within(entry).getByText("Мастер")).toBeInTheDocument();
+    expect(entry).toHaveTextContent("Утро выдалось серым.");
+    expect(
+      container.querySelector(".ui-narration.ui-narration--dropcap"),
+    ).toHaveTextContent("Утро выдалось серым.");
+  });
+
+  test("подпись «Мастер» только у рассказа: у ходов, бросков и системных строк её нет", () => {
+    render(
+      <Feed
+        items={[
+          rollEntry(1),
+          feedEntry(2, { kind: "system", text: "Начался бой." }),
+          feedEntry(3, {
+            kind: "action",
+            text: "ждёт",
+            data: { actor_id: "pc_lira", actor: "Лира" },
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText("Мастер")).toBeNull();
+  });
+
+  test("ход героя — жетон с инициалами рядом с именем (жетон — украшение для читалки)", () => {
+    const { container } = render(
+      <Feed
+        items={[
+          feedEntry(1, {
+            kind: "action",
+            text: "крадётся к двери",
+            data: { actor_id: "pc_lira", actor: "Лира" },
+          }),
+        ]}
+      />,
+    );
+
+    const avatar = container.querySelector(".ui-avatar");
+    expect(avatar).toHaveTextContent("Л");
+    expect(avatar).toHaveAttribute("aria-hidden", "true");
+  });
+});
+
+describe("имя героя открывает его лист", () => {
+  const HEROES = new Set(["pc_lira", "pc_boris"]);
+  const action = (actorId: string, actor: string) =>
+    feedEntry(1, {
+      kind: "action",
+      text: "крадётся к двери",
+      data: { actor_id: actorId, actor, secret: false },
+    });
+
+  test("имя автора хода — кнопка; нажатие сообщает id героя", () => {
+    const onHero = vi.fn();
+    render(
+      <Feed
+        items={[action("pc_boris", "Борин")]}
+        heroIds={HEROES}
+        onHero={onHero}
+      />,
+    );
+
+    const name = screen.getByRole("button", { name: "Борин" });
+    expect(name).toHaveAccessibleDescription("Открыть лист героя");
+    fireEvent.click(name);
+
+    expect(onHero).toHaveBeenCalledWith("pc_boris");
+    // Строка читается как раньше: «Борин: крадётся к двери».
+    expect(screen.getByRole("listitem")).toHaveTextContent(
+      "Борин: крадётся к двери",
+    );
+  });
+
+  // B10.3.fix2 (N1): у короткого имени («Вера») кнопка шире слова (зона нажатия 44 px), и
+  // двоеточие снаружи отставало. Теперь двоеточие внутри кнопки, но не в её имени для читалки.
+  test("двоеточие стоит сразу за именем: внутри кнопки, но имя кнопки — ровно имя героя", () => {
+    render(
+      <Feed
+        items={[action("pc_boris", "Вера")]}
+        heroIds={HEROES}
+        onHero={vi.fn()}
+      />,
+    );
+
+    const name = screen.getByRole("button", { name: "Вера" });
+    expect(name).toHaveTextContent(/^Вера:$/);
+    expect(screen.getByRole("listitem")).toHaveTextContent(
+      "Вера: крадётся к двери",
+    );
+  });
+
+  test("реплика у костра — тоже с именем-кнопкой", () => {
+    const onHero = vi.fn();
+    render(
+      <Feed
+        items={[
+          feedEntry(1, {
+            kind: "camp_line",
+            text: "Холодает.",
+            data: { actor_id: "pc_lira", actor: "Лира" },
+          }),
+        ]}
+        heroIds={HEROES}
+        onHero={onHero}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Лира" }));
+
+    expect(onHero).toHaveBeenCalledWith("pc_lira");
+    expect(screen.getByRole("listitem")).toHaveTextContent("Лира: «Холодает.»");
+  });
+
+  test("не герой отряда (нет в списке, нет id) — имя просто текст", () => {
+    render(
+      <Feed
+        items={[
+          action("npc_guard", "Стражник"),
+          feedEntry(2, {
+            kind: "action",
+            text: "ждёт",
+            data: { actor: "Лира" },
+          }),
+        ]}
+        heroIds={HEROES}
+        onHero={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByText("Стражник:")).toBeInTheDocument();
+    expect(screen.getByText("Лира:")).toBeInTheDocument();
+  });
+
+  test("без обработчика (превью, старый экран) кнопок нет", () => {
+    render(<Feed items={[action("pc_lira", "Лира")]} heroIds={HEROES} />);
+
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByText("Лира:")).toBeInTheDocument();
+  });
+
+  test("имя в кнопке — только текст: разметка выводится буквами", () => {
+    const hostile = '<img src=x onerror="alert(1)">';
+    const { container } = render(
+      <Feed
+        items={[action("pc_lira", hostile)]}
+        heroIds={HEROES}
+        onHero={vi.fn()}
+      />,
+    );
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByRole("button", { name: hostile })).toBeInTheDocument();
+  });
+});
+
+describe("кубик и «меньше движения»", () => {
+  function stubReducedMotion(reduce: boolean) {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("prefers-reduced-motion") && reduce,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }));
+  }
+
+  test("«меньше движения»: новые рассказ и бросок появляются без анимации", () => {
+    stubReducedMotion(true);
+    const { container, rerender } = render(
+      <Feed items={[narration(1, "Старое.")]} />,
+    );
+
+    rerender(
+      <Feed
+        items={[narration(1, "Старое."), narration(2, "Новое."), rollEntry(3)]}
+      />,
+    );
+
+    expect(container.querySelector('[class*="ui-anim-"]')).toBeNull();
+  });
+
+  test("новый рассказ без «меньше движения» появляется мягко", () => {
+    stubReducedMotion(false);
+    const { rerender } = render(<Feed items={[narration(1, "Старое.")]} />);
+
+    rerender(
+      <Feed items={[narration(1, "Старое."), narration(2, "Новое.")]} />,
+    );
+
+    const entries = screen.getAllByRole("listitem");
+    expect(entries[0].querySelector(".ui-anim-appear")).toBeNull();
+    expect(entries[1].querySelector(".ui-anim-appear")).not.toBeNull();
+  });
+
+  test("кубик катится только с числом сервера: на грани выпавшее, других чисел нет", () => {
+    stubReducedMotion(false);
+    const { container, rerender } = render(
+      <Feed items={[narration(1, "Тихо.")]} />,
+    );
+
+    rerender(
+      <Feed
+        items={[
+          narration(1, "Тихо."),
+          rollEntry(2, { natural: 7, rolls: [7], kept: [7], total: 10 }),
+        ]}
+      />,
+    );
+
+    const die = container.querySelector(".ui-roll__die");
+    expect(die).toHaveClass("ui-anim-roll");
+    expect(die).toHaveTextContent(/^7$/);
   });
 });
 

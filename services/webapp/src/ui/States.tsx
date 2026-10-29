@@ -1,6 +1,8 @@
+import { useId } from "react";
 import type { ReactNode } from "react";
 import { useMotionClass } from "../theme/motion";
 import { classNames } from "./classNames";
+import { formatClock } from "./format";
 import { Icon } from "./icons";
 import type { IconName } from "./icon-names";
 
@@ -46,6 +48,47 @@ export function Loading({ label = "Загрузка…" }: { label?: string }) {
       </span>
       <span>{label}</span>
     </div>
+  );
+}
+
+export interface WaitingProps {
+  /** Что происходит («Мастер думает…»). */
+  title: string;
+  /** Нейтральная фраза ожидания; выбирает её экран по прошедшему времени. */
+  phrase: string;
+  /** Сколько уже ждём, секунды. */
+  seconds: number;
+  /** Пояснения и действия (например, «Повторить» хосту). */
+  children?: ReactNode;
+}
+
+/**
+ * Долгое ожидание: свеча, что происходит, нейтральная фраза и сколько уже ждём. Живая область
+ * объявляет смену фразы, а счётчик каждую секунду не зачитывает — он скрыт от читалки.
+ */
+export function Waiting({ title, phrase, seconds, children }: WaitingProps) {
+  const titleId = useId();
+  const flicker = useMotionClass("ui-anim-flicker");
+  return (
+    <section
+      role="status"
+      aria-labelledby={titleId}
+      className="ui-card ui-waiting"
+    >
+      <Icon
+        name="candle"
+        size={44}
+        className={classNames("ui-waiting__candle", flicker)}
+      />
+      <div className="ui-waiting__body">
+        <h3 id={titleId}>{title}</h3>
+        <p className="ui-waiting__phrase">{phrase}</p>
+        <p className="ui-waiting__time" aria-hidden="true">
+          Ждём {formatClock(seconds)}
+        </p>
+        {children}
+      </div>
+    </section>
   );
 }
 

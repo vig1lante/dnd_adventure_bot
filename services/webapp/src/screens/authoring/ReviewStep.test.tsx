@@ -1,16 +1,21 @@
 import { fireEvent, screen, within } from "@testing-library/react";
-import type { Draft, DraftReport } from "../../api/types";
+import type { Draft, DraftReport, Finding } from "../../api/types";
 import type { Routes } from "./fixtures";
 import {
   callsTo,
+  clueOf,
   draftOf,
+  exitOf,
+  featureOf,
   findingOf,
   itemOf,
   locationOf,
   monsterOf,
   npcOf,
   openStep,
+  relationOf,
   reportOf,
+  revelationOf,
 } from "./fixtures";
 
 const VALIDATE = "/api/drafts/d1/validate";
@@ -303,5 +308,167 @@ describe("где найдено: сущность словами по ссылк
     ).getAllByRole("listitem");
     expect(key).toHaveTextContent("предмет «Ключ от склепа»");
     expect(marta).toHaveTextContent("персонаж «Марта»");
+  });
+});
+
+// Ревью B6 R6 / спека §10.1: ссылка находки ведёт не только на шаг, но и к сущности — экран
+// раскрывает её (на «Наполнении» — выбирает локацию, на «Связях» — снимает фильтр) и
+// прокручивает к ней, фокус — на её группе полей.
+describe("ссылка находки раскрывает и прокручивает к сущности", () => {
+  let scrolled: Element[] = [];
+
+  beforeEach(() => {
+    scrolled = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this);
+    };
+  });
+
+  afterEach(() => {
+    Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+  });
+
+  const HALL = locationOf({ id: "hall", name: "Зал" });
+
+  async function follow(
+    target: Draft,
+    finding: { ref: string; step: Finding["step"] },
+    label: string,
+  ) {
+    const { form } = await openStep(target, "Проверка", {
+      [`POST ${VALIDATE}`]: {
+        json: reportOf({
+          errors: [
+            findingOf({ code: "some_error", message: "ошибка", ...finding }),
+          ],
+        }),
+      },
+    });
+    const errors = await within(form).findByRole("list", { name: "Ошибки" });
+    fireEvent.click(
+      within(errors).getByRole("button", { name: `Перейти к шагу «${label}»` }),
+    );
+    return screen.getByRole("region", { name: label });
+  }
+
+  test("выход локации на «Карте»: прокрутка и фокус — на группе этого выхода", async () => {
+    const panel = await follow(
+      draftOf({
+        locations: [
+          HALL,
+          locationOf({
+            id: "crypt",
+            name: "Склеп",
+            exits: [exitOf({ id: "down", direction: "вниз", to: "hall" })],
+          }),
+        ],
+      }),
+      { ref: "location:crypt/exit:down", step: "locations" },
+      "Карта",
+    );
+
+    const exit = within(
+      within(panel).getByRole("group", { name: "Склеп" }),
+    ).getByRole("group", { name: "вниз → Зал" });
+    expect(document.activeElement).toBe(exit);
+    expect(scrolled.at(-1)).toBe(exit);
+  });
+
+  test("деталь второй локации на «Наполнении»: экран выбирает её локацию и ведёт к детали", async () => {
+    const panel = await follow(
+      draftOf({
+        locations: [
+          HALL,
+          locationOf({
+            id: "crypt",
+            name: "Склеп",
+            features: [featureOf({ id: "coffin", name: "Гроб" })],
+          }),
+        ],
+      }),
+      { ref: "location:crypt/feature:coffin", step: "location_contents" },
+      "Наполнение",
+    );
+
+    expect(
+      within(panel).getByRole("combobox", { name: "Локация" }),
+    ).toHaveValue("crypt");
+    const coffin = within(panel).getByRole("group", { name: "Гроб" });
+    expect(document.activeElement).toBe(coffin);
+    expect(scrolled.at(-1)).toBe(coffin);
+  });
+
+  test("улика откровения на «Уликах»: фокус на улике внутри своего откровения", async () => {
+    const panel = await follow(
+      draftOf({
+        revelations: [
+          revelationOf({ id: "first", clues: [clueOf({ id: "ash" })] }),
+          revelationOf({
+            id: "smuggler",
+            clues: [clueOf({ id: "torn-letter" }), clueOf({ id: "seal" })],
+          }),
+        ],
+      }),
+      { ref: "revelation:smuggler/clue:seal", step: "clues" },
+      "Улики",
+    );
+
+    const seal = within(
+      within(panel).getByRole("group", { name: "Откровение smuggler" }),
+    ).getByRole("group", { name: "Улика seal" });
+    expect(document.activeElement).toBe(seal);
+  });
+
+  test("связь, скрытая фильтром «Связей», снова видна и в фокусе", async () => {
+    const target = draftOf({
+      npcs: [
+        npcOf({ id: "marta", name: "Марта" }),
+        npcOf({ id: "fabian", name: "Фабиан" }),
+        npcOf({ id: "olaf", name: "Олаф" }),
+      ],
+      relations: [relationOf({ id: "debt", a: "npc:fabian", b: "npc:marta" })],
+    });
+    const { form } = await openStep(target, "Связи", {
+      [`POST ${VALIDATE}`]: {
+        json: reportOf({
+          errors: [
+            findingOf({
+              ref: "relation:debt",
+              step: "relations",
+              message: "ошибка",
+            }),
+          ],
+        }),
+      },
+    });
+    const filter = () =>
+      within(form).getByRole("combobox", { name: "Показать связи" });
+    // Фильтр по Олафу прячет связь Фабиана и Марты.
+    await within(filter()).findByRole("option", { name: "Олаф (персонаж)" });
+    fireEvent.change(filter(), { target: { value: "npc:olaf" } });
+    const debt = () => document.querySelector('[data-ref="relation:debt"]');
+    expect(debt()?.closest("[hidden]")).not.toBeNull();
+
+    fireEvent.click(nav().getByRole("button", { name: /^Проверка/ }));
+    const errors = await screen.findByRole("list", { name: "Ошибки" });
+    fireEvent.click(
+      within(errors).getByRole("button", { name: "Перейти к шагу «Связи»" }),
+    );
+
+    expect(filter()).toHaveValue("");
+    expect(debt()?.closest("[hidden]")).toBeNull();
+    expect(document.activeElement).toBe(debt());
+    expect(scrolled.at(-1)).toBe(debt());
+  });
+
+  test("сущности на экране нет — прокрутка к началу экрана шага, фокус на нём", async () => {
+    const panel = await follow(
+      draftOf({ locations: [HALL] }),
+      { ref: "location:gone/exit:down", step: "locations" },
+      "Карта",
+    );
+
+    expect(document.activeElement).toBe(panel);
+    expect(scrolled.at(-1)).toBe(panel);
   });
 });

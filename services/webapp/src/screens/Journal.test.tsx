@@ -146,6 +146,59 @@ describe("карточка записи", () => {
     expect(elder.getByText("узнали в раунде 3")).toBeVisible();
   });
 
+  test("короткий слух: текст совпадает с названием — фраза не стоит в карточке дважды", () => {
+    const rumor = "Граф Мортен велел похоронить с собой всё своё золото.";
+    renderJournal({
+      entries: [journalEntry("rumor:1", { title: rumor, text: rumor })],
+    });
+
+    open("Слухи");
+
+    expect(screen.getAllByText(rumor)).toHaveLength(1);
+    expect(
+      within(card(rumor)).getByText("известно с начала игры"),
+    ).toBeVisible();
+  });
+
+  test("совпадение с названием сверяется без лишних пробелов, а дополнения остаются", () => {
+    renderJournal({
+      entries: [
+        journalEntry("clue:mud", {
+          title: "Следы грязи на пороге.",
+          text: "Следы  грязи\nна пороге.\n\nГрязь — с болота за кладбищем.",
+          turn: 2,
+        }),
+      ],
+    });
+
+    open("Улики");
+
+    const clue = within(card("Следы грязи на пороге."));
+    expect(
+      clue.queryByText(/Следы\s+грязи\s+на/, { selector: "p" }),
+    ).toBeNull();
+    expect(clue.getByText("Грязь — с болота за кладбищем.")).toBeVisible();
+  });
+
+  test("длинная запись с началом-названием («…») показывает текст целиком", () => {
+    renderJournal({
+      entries: [
+        journalEntry("rumor:2", {
+          title: "В старом склепе по ночам горит свет, и…",
+          text: "В старом склепе по ночам горит свет, и сторож боится туда ходить.",
+        }),
+      ],
+    });
+
+    open("Слухи");
+
+    expect(
+      screen.getByText(
+        "В старом склепе по ночам горит свет, и сторож боится туда ходить.",
+      ),
+    ).toBeVisible();
+  });
+
   test("известное с начала игры так и подписано, без «раунда 0»", () => {
     renderJournal();
 

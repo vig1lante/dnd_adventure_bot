@@ -1,9 +1,12 @@
 import { useId } from "react";
+import { ApiError } from "../../api/client";
 import { useApi } from "../../api/context";
 import type { Draft } from "../../api/types";
 import { Button } from "../../ui";
 import { ErrorAlert } from "../fields";
 import { useAction } from "../hooks";
+import { archiveEntryNames, archiveProblems } from "./archive";
+import { formProblem } from "./problems";
 
 // Сколько держать ссылку на скачанный файл: Safari (и вебвью Telegram на iOS) не успевает начать
 // скачивание, если отпустить ссылку сразу после щелчка.
@@ -48,9 +51,30 @@ export function ExportButton({ draft }: { draft: Draft }) {
           Скачать архив
         </Button>
       </div>
-      <ErrorAlert error={error} problems={problems} />
+      <ErrorAlert
+        error={error}
+        problems={problems.map((line) => formProblem(line, draft))}
+      />
     </div>
   );
+}
+
+/**
+ * Отказ импорта словами автора: одна строка на повторяющуюся причину, номер записи архива вместо
+ * пути файла (имена записей читаются из самого выбранного файла).
+ */
+async function readableRefusal(
+  failure: unknown,
+  archive: Blob,
+): Promise<unknown> {
+  if (!(failure instanceof ApiError) || failure.problems === undefined) {
+    return failure;
+  }
+  const problems = archiveProblems(
+    failure.problems,
+    await archiveEntryNames(archive).catch(() => null),
+  );
+  return new ApiError(failure.status, failure.detail, problems, failure.code);
 }
 
 /**
@@ -86,7 +110,13 @@ export function ImportButton({
             // Поле очищается сразу: тот же файл можно выбрать снова, исправив его.
             input.value = "";
             if (file !== undefined) {
-              void run(async () => onImported(await api.importArchive(file)));
+              void run(async () => {
+                try {
+                  onImported(await api.importArchive(file));
+                } catch (failure) {
+                  throw await readableRefusal(failure, file);
+                }
+              });
             }
           }}
         />

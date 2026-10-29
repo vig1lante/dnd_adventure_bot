@@ -144,6 +144,29 @@ async function openPlayer(
   return { hero, context, page, frames, bodies };
 }
 
+// Ход Веры на «телефоне» с касанием (шаг 10): тайный, сдаётся тапом при открытой клавиатуре.
+const TOUCH_ACTION = "Тихо проверяю, не следит ли кто-то за лагерем.";
+
+/**
+ * Второе окно игрока — «телефон» с касанием (`hasTouch`, `isMobile`): страница видит сенсорный
+ * экран (`pointer: coarse`), и фокус в поле ввода считается открытой экранной клавиатурой.
+ */
+async function openTouchPlayer(browser: Browser, baseURL: string, hero: Hero) {
+  const context = await browser.newContext({
+    baseURL,
+    locale: "ru-RU",
+    colorScheme: "dark",
+    reducedMotion: "reduce",
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const page = await context.newPage();
+  await page.goto(`/?dev=${hero.login}`);
+  await expect(page.getByText(`Вы вошли как ${hero.login}.`)).toBeVisible();
+  return { context, page };
+}
+
 /** Быстрый герой: класс и раса каруселями, строка о герое и имя. */
 async function createQuickHero(player: Player): Promise<void> {
   const { page, hero } = player;
@@ -169,6 +192,55 @@ async function hpOf(page: Page, heroName: string) {
   const max = Number(await meter.getAttribute("aria-valuemax"));
   await tabOf(page, "Рассказ").click();
   return { now, max };
+}
+
+// Ключи хранилища браузера, которые вправе оставить Mini App (B10): настройки интерфейса этого
+// телефона и отметки прочтения дневника. Токена сессии и initData там быть не должно.
+const STORAGE_KEY =
+  /^(dnd-ui-(text-size|contrast|vibration)|dnd-journal-seen:.+)$/;
+
+/** Выбор в панели настроек: сами радиокнопка и переключатель скрыты стилем, щёлкают по подписи. */
+async function pickSettings(page: Page, size: string, contrast: boolean) {
+  await button(page, "Настройки").click();
+  const panel = page.getByRole("region", { name: "Настройки", exact: true });
+  await expect(panel).toBeVisible();
+  await panel
+    .getByRole("radiogroup", { name: "Размер текста" })
+    .locator("label", { hasText: new RegExp(`^${size}$`) })
+    .click();
+  const highContrast = panel.getByRole("switch", { name: "Высокий контраст" });
+  if ((await highContrast.isChecked()) !== contrast) {
+    await panel.locator("label", { hasText: "Высокий контраст" }).click();
+  }
+  await expect(highContrast).toBeChecked({ checked: contrast });
+}
+
+/**
+ * «Очень крупный» текст и высокий контраст на экране игры (финальное покрытие B10): панель
+ * настроек и сам экран помещаются на телефоне, в хранилище — только ключи настроек. Потом всё
+ * возвращается к обычному виду: дальше сценарий меряет экраны как есть.
+ */
+async function expectLargeTextFits(page: Page, layoutName: string) {
+  const root = page.locator("html");
+  await pickSettings(page, "Очень крупный", true);
+  await expect(root).toHaveAttribute("data-text-size", "huge");
+  await expect(root).toHaveAttribute("data-contrast", "high");
+  await expectFitsPhone(page, `${layoutName}: панель настроек`);
+  await button(page, "Готово").click();
+  await expectFitsPhone(page, `${layoutName}: «Очень крупный» и контраст`);
+
+  const keys = (await page.evaluate(
+    "Object.keys(window.localStorage)",
+  )) as string[];
+  expect(keys).toEqual(
+    expect.arrayContaining(["dnd-ui-text-size", "dnd-ui-contrast"]),
+  );
+  for (const key of keys) expect(key).toMatch(STORAGE_KEY);
+
+  await pickSettings(page, "Обычный", false);
+  await button(page, "Готово").click();
+  await expect(root).not.toHaveAttribute("data-text-size");
+  await expect(root).not.toHaveAttribute("data-contrast");
 }
 
 /** Хост начинает привал: кнопка вида, вопрос «Начать привал?» и «Да, начать привал». */
@@ -378,6 +450,8 @@ test("привалы по кнопке хоста: короткий с кост�
       }
       // Панель хоста в обсуждении с двумя новыми кнопками привалов (финальное покрытие B9).
       await expectFitsPhone(alisa.page, "обсуждение: кнопки привалов у хоста");
+      // Настройки интерфейса на экране игры у игрока (финальное покрытие B10).
+      await expectLargeTextFits(vera.page, "обсуждение у игрока");
     });
 
     await test.step("3. Короткий привал по кнопке хоста: у всех экран привала, «+1 мин» сдвигает срок", async () => {
@@ -587,6 +661,54 @@ test("привалы по кнопке хоста: короткий с кост�
         expect(await meter.getAttribute("aria-valuenow")).toBe(
           await meter.getAttribute("aria-valuemax"),
         );
+      }
+    });
+
+    await test.step("10. Телефон с касанием: пока открыта клавиатура, «Тайно» и «Готов» срабатывают с первого тапа", async () => {
+      // B10.3.fix2 (M1): тап по кнопке под полем забирал фокус у поля, панель вкладок
+      // возвращалась, поле выходило из компактного вида — кнопка уезжала из-под пальца, и первый
+      // тап терялся. Вера открывает игру на «телефоне» с касанием (второе окно того же игрока).
+      const touch = await openTouchPlayer(browser, baseURL, vera.hero);
+      touch.page.on("pageerror", (error) => pageErrors.push(error.message));
+      try {
+        const { page } = touch;
+        await button(page, /^Открыть: /).click();
+        await expect(
+          page.getByText("Обсуждение", { exact: true }),
+        ).toBeVisible();
+        const field = page.getByLabel("Что делает твой персонаж?");
+        await field.tap();
+        await field.fill(TOUCH_ACTION);
+        // Клавиатура «открыта»: панели вкладок нет, поле прижато к низу.
+        await expect(
+          page.getByRole("tablist", { name: "Разделы игры" }),
+        ).toBeHidden();
+        await expect(page.locator(".composer-dock--on")).toHaveCount(1);
+
+        const secret = page.getByRole("switch", { name: "Тайно" });
+        await secret.tap();
+        await expect(secret).toBeChecked();
+
+        const submits: string[] = [];
+        page.on("request", (request) => {
+          if (
+            request.method() === "POST" &&
+            request.url().endsWith("/action/submit")
+          ) {
+            submits.push(request.url());
+          }
+        });
+        await field.tap();
+        await button(page, "Готов").tap();
+        await expect(page.getByText("Ход сдан", { exact: true })).toBeVisible();
+        await expect(
+          page.getByRole("region", { name: "Ход сдан" }).getByText("Тайно"),
+        ).toBeVisible();
+        // Второго запроса нет: ход ушёл ровно одним нажатием.
+        await page.waitForTimeout(500);
+        expect(submits, "запросы «Готов»").toHaveLength(1);
+      } finally {
+        await touch.context.close();
       }
     });
 

@@ -227,7 +227,9 @@ describe("шаг «Улики»", () => {
               json: {
                 detail: "Раздел не прошёл проверку.",
                 code: "invalid_data",
-                problems: ["0.clues.0.where: деталь, персонаж или предмет"],
+                problems: [
+                  "revelations.0.clues.0.where: деталь, персонаж или предмет",
+                ],
               },
             }
           : {
@@ -238,8 +240,11 @@ describe("шаг «Улики»", () => {
 
     typeIn(group(form, "Откровение smuggler"), "Вывод", "Фабиан лжёт");
     save(form);
+    // Путь поля — словами формы: раздел, откровение, улика и подпись поля.
     expect(
-      await screen.findByText("0.clues.0.where: деталь, персонаж или предмет"),
+      await screen.findByText(
+        /^Откровения → «smuggler» → Улики → .+ → Где лежит: деталь, персонаж или предмет$/,
+      ),
     ).toBeInTheDocument();
 
     save(form);

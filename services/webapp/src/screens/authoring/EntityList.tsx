@@ -19,6 +19,11 @@ interface EntityListProps<T extends object> {
    * на сервер как есть. Новая сущность из `create` должна быть видна.
    */
   visible?: (item: T) => boolean;
+  /**
+   * Ссылка сущности, как её пишет проверка черновика (`location:crypt/exit:down`): по ней
+   * ссылка находки «Проверки» находит группу полей сущности и прокручивает к ней.
+   */
+  refOf?: (item: T) => string;
   /** Поля сущности; `update` меняет только переданные поля. */
   children: (item: T, update: (patch: Partial<T>) => void) => ReactNode;
 }
@@ -35,6 +40,7 @@ export function EntityList<T extends object>({
   itemLabel,
   actions,
   visible = everything,
+  refOf,
   children,
 }: EntityListProps<T>) {
   // Ключи строк живут здесь: у новой сущности id ещё нет, а без своего ключа после удаления
@@ -65,7 +71,7 @@ export function EntityList<T extends object>({
             const label = itemLabel(item, index);
             return (
               <li key={keys[index]} hidden={!visible(item)}>
-                <fieldset className="authoring-entity">
+                <fieldset className="authoring-entity" data-ref={refOf?.(item)}>
                   <legend className="authoring-entity__title">{label}</legend>
                   <div className="authoring-entity__actions">
                     {actions?.(item, label)}

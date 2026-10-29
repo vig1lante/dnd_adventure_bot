@@ -31,6 +31,11 @@ export interface SectionWrite {
 /** Что форма шага получает от редактора. */
 export interface StepFormProps {
   draft: Draft;
+  /**
+   * Ключ данных разделов экрана. Правка начинается заново с черновиком сервера, когда он
+   * меняется; после частичной записи (B6 R7) он прежний, и несохранённое остаётся в форме.
+   */
+  contentKey: string;
   /** Справочник ссылок; грузится только для экранов, где есть выбор ссылок. */
   refs: DraftRefs;
   /** Справочник монстров SRD; грузится, когда его впервые открывает экран боёв. */
@@ -55,6 +60,12 @@ export interface StepFormProps {
   onDirtyChange: (dirty: boolean) => void;
   /** Предупреждение о несохранённых правках другого экрана того же раздела; `null` — их нет. */
   unsavedElsewhere: string | null;
+  /**
+   * Сущность, к которой ведёт ссылка находки «Проверки» (только у экрана её шага). Экран, у
+   * которого есть состояние вида (выбор локации, фильтр связей), раскрывает её; прокрутку и
+   * фокус делает редактор. Новый объект — новый переход, даже к той же сущности.
+   */
+  focus?: FocusTarget | null;
 }
 
 /** Подсказка формы с «Перегенерировать» при несохранённых правках. */
@@ -298,4 +309,39 @@ export function AlertDialog({ title, children, actions }: AlertDialogProps) {
       <div className="screen-actions">{actions}</div>
     </div>
   );
+}
+
+interface ConflictDialogProps {
+  onRefresh: () => void;
+  onCancel: () => void;
+}
+
+/**
+ * «Черновик изменился, обновить?» — ответ на 409 `version_conflict`: записи раздела, замка,
+ * пожелания и публикации. «Обновить» перечитывает черновик, «Отмена» оставляет правки.
+ */
+export function ConflictDialog({ onRefresh, onCancel }: ConflictDialogProps) {
+  return (
+    <AlertDialog
+      title="Черновик изменился, обновить?"
+      actions={
+        <>
+          <Button onClick={onRefresh}>Обновить</Button>
+          <Button variant="secondary" onClick={onCancel}>
+            Отмена
+          </Button>
+        </>
+      }
+    >
+      <p className="screen-muted">
+        Его успели поменять в другой вкладке или генерацией. Обновление заменит
+        несохранённые правки.
+      </p>
+    </AlertDialog>
+  );
+}
+
+/** Куда ведёт ссылка находки «Проверки»: экран шага и сущность на нём (`<вид>:<id>/…`). */
+export interface FocusTarget {
+  ref: string;
 }

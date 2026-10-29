@@ -69,6 +69,7 @@ export function NpcsStep({
         create={newNpc}
         addLabel="Добавить персонажа"
         itemLabel={(npc, index) => npc.name || `Персонаж ${index + 1}`}
+        refOf={(npc) => `npc:${npc.id}`}
         actions={(npc, label) =>
           savedIds.has(npc.id) && (
             <>

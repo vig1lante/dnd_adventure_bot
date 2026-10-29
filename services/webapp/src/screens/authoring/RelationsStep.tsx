@@ -23,13 +23,20 @@ const needsNote = (relation: Relation) =>
  * Сохранённую связь можно закрепить и перегенерировать.
  *
  * Фильтр живёт над формой: после записи форма начинается заново с данными сервера, а фильтр
- * остаётся. Он только показывает: скрытые им связи сохраняются как есть.
+ * остаётся. Он только показывает: скрытые им связи сохраняются как есть. Ссылка находки
+ * «Проверки» снимает фильтр: связь, к которой она ведёт, должна быть видна.
  */
 export function RelationsStep(props: StepFormProps) {
+  const { focus = null } = props;
   const [filter, setFilter] = useState("");
+  const [followed, setFollowed] = useState(focus);
+  if (focus !== followed) {
+    setFollowed(focus);
+    if (focus !== null) setFilter("");
+  }
   return (
     <RelationsForm
-      key={JSON.stringify(props.draft.relations)}
+      key={props.contentKey}
       {...props}
       filter={filter}
       onFilter={setFilter}
@@ -112,6 +119,7 @@ function RelationsForm({
         })}
         addLabel="Добавить связь"
         itemLabel={sentence}
+        refOf={(relation) => `relation:${relation.id}`}
         visible={shown}
         actions={(relation, label) =>
           savedIds.has(relation.id) && (

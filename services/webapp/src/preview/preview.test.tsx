@@ -203,6 +203,37 @@ describe("превью только в dev-сборке", () => {
     expect(screen.queryByRole("heading", { name: PREVIEW_TITLE })).toBeNull();
   });
 
+  test("dev и ?preview=screens: открываются макеты экранов, сервер не нужен", async () => {
+    const stub = server();
+    vi.stubGlobal("fetch", stub.fetch);
+
+    await openApp("?preview=screens");
+
+    expect(
+      await screen.findByRole("heading", {
+        level: 1,
+        name: "Макеты экранов: как есть и как будет",
+      }),
+    ).toBeInTheDocument();
+    expect(stub.calls).toHaveLength(0);
+  });
+
+  test("не dev (прод-сборка) с ?preview=screens: макетов нет, приложение работает", async () => {
+    vi.stubEnv("DEV", false);
+    const stub = server();
+    vi.stubGlobal("fetch", stub.fetch);
+
+    await openApp("?preview=screens&screen=story&variant=next");
+
+    expect(
+      await screen.findByText("Откройте приложение из Telegram"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: /Макеты экранов/ }),
+    ).toBeNull();
+    expect(stub.calls.map((call) => call.path)).toContain("/api/config");
+  });
+
   test("не dev (прод-сборка) с ?preview=style: превью нет, приложение работает", async () => {
     vi.stubEnv("DEV", false);
     const stub = server();

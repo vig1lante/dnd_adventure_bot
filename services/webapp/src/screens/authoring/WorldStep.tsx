@@ -66,6 +66,7 @@ export function WorldStep({
         create={newRegion}
         addLabel="Добавить край"
         itemLabel={(region, index) => region.name || `Край ${index + 1}`}
+        refOf={(region) => `region:${region.id}`}
       >
         {(region, update) => (
           <>

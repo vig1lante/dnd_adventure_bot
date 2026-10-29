@@ -83,6 +83,13 @@ const TEXT_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ["--color-accent-text", "--color-surface"],
   ["--color-seal-text", "--color-bg"],
   ["--color-seal-text", "--color-surface"],
+  // Нижняя панель вкладок, день в строке статуса и тост (B10.2).
+  ["--color-text-muted", "--color-header"],
+  ["--color-accent-text", "--color-header"],
+  ["--color-accent-text", "--color-surface-sunken"],
+  ["--color-text", "--color-surface-raised"],
+  ["--color-text-muted", "--color-surface-raised"],
+  ["--color-heading", "--color-surface-raised"],
   ["--color-on-accent", "--color-accent"],
   ["--color-on-cloth", "--color-cloth"],
   ["--color-on-seal", "--color-seal"],
@@ -173,6 +180,162 @@ describe("токены цвета", () => {
     const css = withoutComments(tokensCss);
     expect(css).toMatch(/color-scheme:\s*dark/);
     expect(css).toMatch(/color-scheme:\s*light/);
+  });
+});
+
+// --- настройки интерфейса (B10.3): размер текста и высокий контраст — атрибуты на корне ---
+
+/** Тело правила с ровно таким списком селекторов (пробелы не важны). */
+function ruleOf(css: string, selectors: readonly string[]): string {
+  const escaped = selectors
+    .map((selector) => selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(",\\s*");
+  return ruleBody(css, new RegExp(`(?:^|\\})\\s*${escaped}\\s*\\{([^}]*)\\}`));
+}
+
+const highContrast = {
+  тёмная: customProperties(
+    ruleOf(tokensCss, [
+      '[data-contrast="high"][data-theme="dark"]',
+      '[data-contrast="high"] [data-theme="dark"]',
+    ]),
+  ),
+  светлая: customProperties(
+    ruleOf(tokensCss, [
+      '[data-contrast="high"][data-theme="light"]',
+      '[data-contrast="high"] [data-theme="light"]',
+    ]),
+  ),
+};
+
+/** Палитра темы с включённым высоким контрастом: переопределения поверх обычных пар. */
+const withHighContrast = (theme: keyof typeof highContrast) =>
+  new Map([
+    ...(theme === "тёмная" ? darkTokens : lightTokens),
+    ...highContrast[theme],
+  ]);
+
+const ratioIn = (tokens: Map<string, string>, [fg, bg]: readonly string[]) =>
+  contrast(tokens.get(fg)!, tokens.get(bg)!);
+
+const READING_SURFACES = [
+  ...SURFACES,
+  "--color-header",
+  "--color-surface-raised",
+] as const;
+
+/** Текст на фонах: при высоком контрасте — не ниже 7:1 (WCAG AAA). */
+const HIGH_TEXT_PAIRS = [
+  "--color-text",
+  "--color-text-muted",
+  "--color-heading",
+  "--color-accent-text",
+  "--color-seal-text",
+].flatMap((fg) => READING_SURFACES.map((bg) => [fg, bg] as const));
+
+const HIGH_THEMES = [
+  ["тёмная", darkTokens],
+  ["светлая", lightTokens],
+] as const;
+
+describe("высокий контраст (data-contrast=high)", () => {
+  test("обе темы переопределяют один и тот же набор токенов", () => {
+    expect([...highContrast.светлая.keys()].sort()).toEqual(
+      [...highContrast.тёмная.keys()].sort(),
+    );
+    expect(highContrast.тёмная.size).toBeGreaterThan(0);
+  });
+
+  test.each(HIGH_THEMES)(
+    "%s тема: меняются только текст, линии и фокус — фоны и акценты прежние (третьей палитры нет)",
+    (theme) => {
+      for (const [name, value] of highContrast[theme]) {
+        expect(name).toMatch(
+          /^--color-(text|heading|accent-text|seal-text|border|focus)/,
+        );
+        expect(value, name).toMatch(/^#[0-9a-f]{6}$/i);
+      }
+    },
+  );
+
+  test.each(HIGH_THEMES)(
+    "%s тема: ни одна пара не стала слабее, а переопределённые — сильнее",
+    (theme, tokens) => {
+      const high = withHighContrast(theme);
+      for (const pair of [...TEXT_PAIRS, ...NON_TEXT_PAIRS]) {
+        const before = ratioIn(tokens, pair);
+        const after = ratioIn(high, pair);
+        expect(after, pair.join(" на ")).toBeGreaterThanOrEqual(before);
+        if (highContrast[theme].has(pair[0])) {
+          expect(after, pair.join(" на ")).toBeGreaterThan(before);
+        }
+      }
+    },
+  );
+
+  test.each(HIGH_THEMES)(
+    "%s тема: текст на любом фоне — не ниже 7:1 (WCAG AAA)",
+    (theme) => {
+      const high = withHighContrast(theme);
+      for (const pair of HIGH_TEXT_PAIRS) {
+        expect(ratioIn(high, pair), pair.join(" на ")).toBeGreaterThanOrEqual(
+          7,
+        );
+      }
+    },
+  );
+
+  test.each(HIGH_THEMES)(
+    "%s тема: тонкие линии видны (≥ 3:1), контуры и фокус — ≥ 4.5:1",
+    (theme) => {
+      const high = withHighContrast(theme);
+      for (const bg of READING_SURFACES) {
+        expect(
+          ratioIn(high, ["--color-border", bg]),
+          bg,
+        ).toBeGreaterThanOrEqual(3);
+        for (const fg of ["--color-border-strong", "--color-focus"]) {
+          expect(
+            ratioIn(high, [fg, bg]),
+            `${fg} на ${bg}`,
+          ).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    },
+  );
+});
+
+/** Число rem из значения токена кегля. */
+const rem = (value: string | undefined) =>
+  Number(/^([\d.]+)rem$/.exec(value ?? "")?.[1]);
+
+describe("размер текста (data-text-size)", () => {
+  const base = customProperties(ruleBody(themeCss, /:root\s*\{([^}]*)\}/));
+  const large = customProperties(
+    ruleOf(themeCss, [':root[data-text-size="large"]']),
+  );
+  const huge = customProperties(
+    ruleOf(themeCss, [':root[data-text-size="huge"]']),
+  );
+
+  test("«Крупный» и «Очень крупный» меняют одни и те же токены --text-*, включая базу и рассказ", () => {
+    expect([...large.keys()].sort()).toEqual([...huge.keys()].sort());
+    expect([...large.keys()]).toEqual(
+      expect.arrayContaining(["--text-base", "--text-narration"]),
+    );
+    for (const name of large.keys()) expect(name).toMatch(/^--text-/);
+  });
+
+  test("каждая ступень крупнее предыдущей", () => {
+    for (const name of large.keys()) {
+      expect(rem(large.get(name)), name).toBeGreaterThan(rem(base.get(name)));
+      expect(rem(huge.get(name)), name).toBeGreaterThan(rem(large.get(name)));
+    }
+  });
+
+  test("область нажатия от размера текста не зависит: --tap-size не переопределён", () => {
+    expect(large.has("--tap-size")).toBe(false);
+    expect(huge.has("--tap-size")).toBe(false);
   });
 });
 
@@ -318,6 +481,52 @@ describe("движение", () => {
 });
 
 describe("мобильная вёрстка", () => {
+  const ui = withoutComments(uiCss);
+  const rule = (selector: string) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return (
+      ui.match(new RegExp(`(?:^|\\})\\s*${escaped}\\s*\\{([^}]*)\\}`))?.[1] ??
+      ""
+    );
+  };
+
+  test("вкладка нижней панели не меньше области нажатия, панель учитывает вырез снизу", () => {
+    expect(rule(".ui-tabbar__tab")).toMatch(/min-width:\s*var\(--tap-size\)/);
+    expect(rule(".ui-tabbar__tab")).toMatch(/min-height:\s*3\.5rem/);
+    expect(rule(".ui-tabbar")).toMatch(/position:\s*fixed/);
+    expect(rule(".ui-tabbar")).toMatch(/env\(safe-area-inset-bottom/);
+  });
+
+  test("под нижней панелью страница оставляет место: последний блок не прячется за ней", () => {
+    expect(ui).toMatch(
+      /\.app:has\(\.ui-tabbar:not\(\[hidden\]\)\)\s*\{[^}]*padding-bottom:/,
+    );
+  });
+
+  test("настройки: вариант размера текста и переключатель — не меньше области нажатия", () => {
+    expect(rule(".ui-settings__size-option")).toMatch(
+      /min-height:\s*var\(--tap-size\)/,
+    );
+    expect(rule(".ui-settings__switch")).toMatch(
+      /min-height:\s*var\(--tap-size\)/,
+    );
+    expect(rule(".ui-settings-button.ui-button")).toMatch(
+      /width:\s*var\(--tap-size\)/,
+    );
+  });
+
+  test("«Скрыть» у тоста — квадрат области нажатия: тексту уведомления остаётся больше места", () => {
+    const close = rule(".ui-toast__close.ui-button");
+    expect(close).toMatch(/width:\s*var\(--tap-size\)/);
+    expect(close).toMatch(/padding:\s*0\s*;/);
+    // Высота — от общей кнопки (.ui-button: min-height var(--tap-size)), её не уменьшаем.
+    expect(close).not.toMatch(/(?:min-)?height:/);
+  });
+
+  test("бейдж вкладки не перехватывает нажатия", () => {
+    expect(rule(".ui-tabbar__badge")).toMatch(/pointer-events:\s*none/);
+  });
+
   test("область нажатия не меньше 44 px", () => {
     const tap = themeCss.match(/--tap-size:\s*([\d.]+)(px|rem)/);
     const pixels = Number(tap?.[1]) * (tap?.[2] === "rem" ? 16 : 1);

@@ -10,7 +10,7 @@ import type {
   SpellOption,
 } from "../../api/types";
 import { Button, Carousel, DetailCard } from "../../ui";
-import type { CarouselItem } from "../../ui";
+import type { CarouselItem, DetailFact } from "../../ui";
 import "./character.css";
 import { nameIn, namesIn } from "./names";
 
@@ -63,35 +63,86 @@ function magicLine(
     .join("; ");
 }
 
+/** Факты карточки класса по порядку: от кости хитов до магии. */
+function classFacts(cls: ClassOption, options: CreationOptions): DetailFact[] {
+  const { details } = cls;
+  return [
+    { label: "Кость хитов", value: `к${details.hit_die}` },
+    {
+      label: "Основная характеристика",
+      value: nameIn(options.abilities, details.primary),
+    },
+    {
+      label: "Спасброски",
+      value: namesLine(options.abilities, details.saves),
+    },
+    { label: "Доспехи", value: details.armor.join(", ") || "Нет" },
+    { label: "Оружие", value: details.weapons.join(", ") || "Нет" },
+    {
+      label: "Навыки",
+      value: `${details.skill_choices.count} на выбор: ${namesLine(options.skills, details.skill_choices.from)}`,
+    },
+    { label: "Магия", value: magicLine(details.spellcasting, options) },
+  ];
+}
+
+const classSections = (cls: ClassOption) => [
+  { title: "Особенности", entries: cls.details.features },
+];
+
 export function ClassCard({
   cls,
   options,
   actions,
 }: CardProps & { cls: ClassOption; options: CreationOptions }) {
-  const { details } = cls;
   return (
     <DetailCard
       title={cls.name}
-      facts={[
-        { label: "Кость хитов", value: `к${details.hit_die}` },
-        {
-          label: "Основная характеристика",
-          value: nameIn(options.abilities, details.primary),
-        },
-        {
-          label: "Спасброски",
-          value: namesLine(options.abilities, details.saves),
-        },
-        { label: "Доспехи", value: details.armor.join(", ") || "Нет" },
-        { label: "Оружие", value: details.weapons.join(", ") || "Нет" },
-        {
-          label: "Навыки",
-          value: `${details.skill_choices.count} на выбор: ${namesLine(options.skills, details.skill_choices.from)}`,
-        },
-        { label: "Магия", value: magicLine(details.spellcasting, options) },
-      ]}
-      sections={[{ title: "Особенности", entries: details.features }]}
+      facts={classFacts(cls, options)}
+      sections={classSections(cls)}
       actions={actions}
+    />
+  );
+}
+
+/** Что видно на короткой карточке класса: с этим выбирают, остальное — по «Подробнее». */
+const BRIEF_FACTS: ReadonlySet<string> = new Set([
+  "Кость хитов",
+  "Основная характеристика",
+  "Магия",
+]);
+
+/**
+ * Короткая карточка класса для быстрой формы: полная на телефоне длиной в несколько экранов,
+ * и раса с полем героя уходят далеко вниз. Здесь главное и «Выбрать» рядом, а доспехи,
+ * оружие, навыки и особенности раскрывает «Подробнее».
+ */
+function ClassBriefCard({
+  cls,
+  options,
+  actions,
+}: CardProps & { cls: ClassOption; options: CreationOptions }) {
+  const [open, setOpen] = useState(false);
+  const facts = classFacts(cls, options);
+  return (
+    <DetailCard
+      title={cls.name}
+      facts={open ? facts : facts.filter((fact) => BRIEF_FACTS.has(fact.label))}
+      sections={open ? classSections(cls) : []}
+      actions={
+        <>
+          {actions}
+          <Button
+            variant="secondary"
+            className="char-more__toggle"
+            aria-label={`Подробнее: ${cls.name}`}
+            aria-expanded={open}
+            onClick={() => setOpen(!open)}
+          >
+            Подробнее
+          </Button>
+        </>
+      }
     />
   );
 }
@@ -269,6 +320,27 @@ export function ClassCarousel({ options, value, onChange }: PickProps) {
       onChange={onChange}
       card={(cls, choose) => (
         <ClassCard cls={cls} options={options} actions={choose} />
+      )}
+    />
+  );
+}
+
+/** Листание классов в быстрой форме: короткие карточки, чтобы раса и поле героя были рядом. */
+export function ClassBriefCarousel({ options, value, onChange }: PickProps) {
+  return (
+    <PickCarousel
+      label="Класс"
+      items={options.classes}
+      value={value}
+      onChange={onChange}
+      card={(cls, choose) => (
+        // Ключ — класс: раскрытые подробности одного не переходят к соседнему.
+        <ClassBriefCard
+          key={cls.id}
+          cls={cls}
+          options={options}
+          actions={choose}
+        />
       )}
     />
   );

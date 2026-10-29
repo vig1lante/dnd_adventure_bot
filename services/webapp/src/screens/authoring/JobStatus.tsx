@@ -9,6 +9,8 @@ export const isActive = (job: Job) =>
 
 interface JobStatusProps {
   job: Job | null;
+  /** Задание упало ещё до открытия черновика: это заметка о прошлом, а не ошибка этого входа. */
+  past?: boolean;
   /** Опрос задания сорвался: статус неизвестен, нужен свежий черновик. */
   pollError: string | null;
   busy: boolean;
@@ -16,9 +18,13 @@ interface JobStatusProps {
   onRefresh: () => void;
 }
 
-/** Индикатор задания: «Генерирую…», а при сбое — текст сервера и «Повторить». */
+/**
+ * Индикатор задания: «Генерирую…», а при сбое — текст сервера и «Повторить». Сбой, случившийся
+ * до открытия черновика, — спокойной заметкой без тревоги.
+ */
 export function JobStatus({
   job,
+  past = false,
   pollError,
   busy,
   onRetry,
@@ -44,6 +50,21 @@ export function JobStatus({
         <p className="screen-muted">
           Шаг «{stepLabel(job.step)}». Пока идёт генерация, правка недоступна.
         </p>
+      </div>
+    );
+  }
+  if (job.status === "failed" && past) {
+    return (
+      <div className="authoring-job">
+        <p className="screen-muted">
+          Прошлая генерация шага «{stepLabel(job.step)}» не удалась.
+        </p>
+        {job.error !== null && <p className="screen-muted">{job.error}</p>}
+        <div>
+          <Button variant="secondary" busy={busy} onClick={() => onRetry(job)}>
+            Повторить
+          </Button>
+        </div>
       </div>
     );
   }

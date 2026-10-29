@@ -473,3 +473,151 @@ describe("готовые приключения: копия открываетс
     expect(callsTo(server, "GET", "/api/drafts/d9")).toHaveLength(1);
   });
 });
+
+// --- B10.4: список черновиков и отказы импорта словами автора ---
+
+/** Время в часовом поясе теста: строка списка показывает местное время. */
+const localIso = (month: number, day: number, hours: number, minutes: number) =>
+  new Date(2026, month - 1, day, hours, minutes).toISOString();
+
+describe("список черновиков: дата правки и различимые копии", () => {
+  test("у строки — дата и время последней правки; кнопка «Открыть» описана ими", async () => {
+    renderHome([
+      summaryOf({
+        id: "d1",
+        title: "Гавань",
+        updated_at: localIso(10, 29, 7, 5),
+      }),
+    ]);
+
+    expect(
+      await screen.findByText("изменён 29 октября 2026, 07:05"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Открыть: Гавань" }),
+    ).toHaveAccessibleDescription(/изменён 29 октября 2026, 07:05/);
+  });
+
+  test("две копии одного приключения различаются датой правки", async () => {
+    renderHome([
+      summaryOf({
+        id: "d2",
+        title: "Маяк на Вороньем мысу",
+        adventure_id: "crow-lighthouse",
+        updated_at: localIso(10, 28, 21, 40),
+      }),
+      summaryOf({
+        id: "d1",
+        title: "Маяк на Вороньем мысу",
+        adventure_id: "crow-lighthouse",
+        updated_at: localIso(10, 27, 9, 3),
+      }),
+    ]);
+
+    await screen.findAllByText("Маяк на Вороньем мысу");
+    const rows = within(
+      screen.getByRole("list", { name: "Черновики" }),
+    ).getAllByRole("listitem");
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining("изменён 28 октября 2026, 21:40"),
+      expect.stringContaining("изменён 27 октября 2026, 09:03"),
+    ]);
+    const opens = screen.getAllByRole("button", {
+      name: "Открыть: Маяк на Вороньем мысу",
+    });
+    expect(opens[0]).toHaveAccessibleDescription(/28 октября 2026, 21:40/);
+    expect(opens[1]).toHaveAccessibleDescription(/27 октября 2026, 09:03/);
+  });
+
+  test("сбой загрузки — единая ошибка «Не удалось загрузить черновики»", async () => {
+    renderHome([], {
+      "GET /api/drafts": { status: 500, json: { detail: "База недоступна." } },
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Не удалось загрузить черновики");
+    expect(alert).toHaveTextContent("База недоступна.");
+    expect(document.querySelector(".ui-error")).not.toBeNull();
+  });
+});
+
+/** Архив zip из центрального каталога с этими именами (данных записей читатель не смотрит). */
+function zipFile(names: readonly string[]): File {
+  const encoded = names.map((name) => new TextEncoder().encode(name));
+  const size = encoded.reduce((sum, name) => sum + 46 + name.length, 0);
+  const bytes = new Uint8Array(size + 22);
+  const view = new DataView(bytes.buffer);
+  let at = 0;
+  for (const name of encoded) {
+    view.setUint32(at, 0x02014b50, true);
+    view.setUint16(at + 8, 0x800, true);
+    view.setUint16(at + 28, name.length, true);
+    bytes.set(name, at + 46);
+    at += 46 + name.length;
+  }
+  view.setUint32(at, 0x06054b50, true);
+  view.setUint16(at + 8, names.length, true);
+  view.setUint16(at + 10, names.length, true);
+  view.setUint32(at + 12, size, true);
+  return new File([bytes], "crow.zip", { type: "application/zip" });
+}
+
+describe("отказ импорта: одна строка на причину, номер записи вместо пути файла", () => {
+  test("18 одинаковых причин архива — одна строка", async () => {
+    renderHome([], {
+      [`POST ${IMPORT}`]: {
+        status: 422,
+        json: {
+          detail: "Архив не подходит для импорта.",
+          code: "archive_invalid",
+          problems: Array.from(
+            { length: 18 },
+            (_, index) =>
+              `архив, запись ${index + 1}: метод сжатия не поддерживается`,
+          ),
+        },
+      },
+    });
+    await screen.findByText("Пока нет приключений");
+
+    pickArchive(new File(["PK"], "bzip.zip"));
+
+    const alert = await screen.findByRole("alert");
+    expect(
+      within(alert)
+        .getAllByRole("listitem")
+        .map((row) => row.textContent),
+    ).toEqual(["архив, записи 1–18: метод сжатия не поддерживается"]);
+  });
+
+  test("путь файла из архива в отказе загрузчика — номер записи и вид сущности", async () => {
+    renderHome([], {
+      [`POST ${IMPORT}`]: {
+        status: 422,
+        json: {
+          detail: "Архив не подходит для импорта.",
+          code: "archive_invalid",
+          problems: [
+            "items/Тайна Мастера zzz.yaml: id «…» не совпадает с именем файла",
+          ],
+        },
+      },
+    });
+    await screen.findByText("Пока нет приключений");
+
+    pickArchive(
+      zipFile([
+        "crow/",
+        "crow/adventure.yaml",
+        "crow/items/",
+        "crow/items/Тайна Мастера zzz.yaml",
+      ]),
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByRole("listitem")).toHaveTextContent(
+      /^архив, запись 4 \(предмет\): id «…» не совпадает с именем файла$/,
+    );
+    expect(alert).not.toHaveTextContent("Тайна Мастера");
+  });
+});

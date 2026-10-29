@@ -1,10 +1,21 @@
-import { useCallback, useState } from "react";
+import { useCallback, useId, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { useApi } from "../api/context";
 import type { GamePhase, GameSummary } from "../api/types";
 import { parseJoinCode } from "../auth/session";
 import { useGame } from "../store/game";
-import { Alert, Badge, Button, Card, EmptyState, Loading } from "../ui";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  ErrorState,
+  Skeleton,
+  TabPanel,
+  onTabKeyDown,
+  tabIds,
+} from "../ui";
 import type { BadgeProps } from "../ui";
 import { CreateGameForm } from "./CreateGameForm";
 import { TextField } from "./fields";
@@ -104,26 +115,39 @@ const TABS: readonly { value: Tab; label: string }[] = [
   { value: "adventures", label: "Приключения" },
 ];
 
-function Tabs({
-  value,
-  onChange,
-}: {
+interface TabsProps {
   value: Tab;
   onChange: (tab: Tab) => void;
-}) {
+  /** Общая часть id вкладок и панели (как у `TabPanel`). */
+  idBase: string;
+}
+
+/** Вкладки «Мои игры» и «Приключения»: стрелки, Home и End, как у остальных наборов вкладок. */
+function Tabs({ value, onChange, idBase }: TabsProps) {
+  const pick = (index: number) => onChange(TABS[index].value);
   return (
     <div role="tablist" aria-label="Разделы" className="authoring-tabs">
-      {TABS.map((tab) => (
-        <Button
-          key={tab.value}
-          role="tab"
-          aria-selected={tab.value === value}
-          variant={tab.value === value ? "primary" : "secondary"}
-          onClick={() => onChange(tab.value)}
-        >
-          {tab.label}
-        </Button>
-      ))}
+      {TABS.map((tab, index) => {
+        const current = tab.value === value;
+        return (
+          <Button
+            key={tab.value}
+            id={tabIds(idBase, tab.value).tab}
+            role="tab"
+            aria-selected={current}
+            // Панель на экране одна — у выбранной вкладки; невыбранной управлять нечем.
+            aria-controls={
+              current ? tabIds(idBase, tab.value).panel : undefined
+            }
+            tabIndex={current ? 0 : -1}
+            variant={current ? "primary" : "secondary"}
+            onClick={() => onChange(tab.value)}
+            onKeyDown={(event) => onTabKeyDown(event, index, TABS.length, pick)}
+          >
+            {tab.label}
+          </Button>
+        );
+      })}
     </div>
   );
 }
@@ -135,24 +159,32 @@ function GamesTab({ canCreate }: { canCreate: boolean }) {
   const [creating, setCreating] = useState(false);
   const loadGames = useCallback(() => api.listGames(), [api]);
   const [games, reload] = useLoaded(loadGames);
+  const joinCard = useRef<HTMLDivElement>(null);
+
+  // Следующий шаг пустого списка — войти по коду: кнопка ведёт прямо в поле кода.
+  const focusJoinCode = () => joinCard.current?.querySelector("input")?.focus();
 
   return (
     <>
       <Card title="Мои игры" icon="scroll">
         <p className="screen-muted">Вы вошли как {userName}.</p>
-        {games.status === "loading" && <Loading label="Загружаем игры…" />}
+        {games.status === "loading" && <Skeleton label="Загружаем игры…" />}
         {games.status === "error" && (
-          <div className="screen-stack">
-            <Alert>{games.message}</Alert>
-            <div>
-              <Button variant="secondary" onClick={reload}>
-                Повторить
-              </Button>
-            </div>
-          </div>
+          <ErrorState title="Не удалось загрузить игры" onRetry={reload}>
+            <p>{games.message}</p>
+            <p>Ваши игры никуда не делись.</p>
+          </ErrorState>
         )}
         {games.status === "ready" && games.data.length === 0 && (
-          <EmptyState icon="candle" title="Пока нет игр">
+          <EmptyState
+            icon="candle"
+            title="Пока нет игр"
+            action={
+              <Button variant="secondary" onClick={focusJoinCode}>
+                Ввести код приглашения
+              </Button>
+            }
+          >
             {canCreate
               ? "Создайте игру или войдите по коду приглашения."
               : "Войдите в игру друзей по коду приглашения."}
@@ -168,7 +200,9 @@ function GamesTab({ canCreate }: { canCreate: boolean }) {
       </Card>
 
       <Card title="Войти по коду" icon="shield">
-        <JoinForm />
+        <div ref={joinCard}>
+          <JoinForm />
+        </div>
       </Card>
 
       {canCreate &&
@@ -193,15 +227,28 @@ export function MyGames() {
   );
   const notice = useGame((state) => state.notice);
   const [tab, setTab] = useState<Tab>("games");
+  const base = useId();
+
+  const body =
+    canCreate && tab === "adventures" ? (
+      <AdventuresHome />
+    ) : (
+      <GamesTab canCreate={canCreate} />
+    );
 
   return (
     <>
       {notice !== null && <Alert>{notice}</Alert>}
-      {canCreate && <Tabs value={tab} onChange={setTab} />}
-      {canCreate && tab === "adventures" ? (
-        <AdventuresHome />
+      {canCreate ? (
+        <>
+          <Tabs value={tab} onChange={setTab} idBase={base} />
+          {/* Панель одна — у выбранной вкладки: невыбранный раздел не держит опросов и запросов. */}
+          <TabPanel idBase={base} id={tab} selected>
+            {body}
+          </TabPanel>
+        </>
       ) : (
-        <GamesTab canCreate={canCreate} />
+        body
       )}
     </>
   );

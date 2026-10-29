@@ -55,6 +55,7 @@ export function DeitiesStep({
         create={newDeity}
         addLabel="Добавить бога"
         itemLabel={(deity, index) => deity.name || `Бог ${index + 1}`}
+        refOf={(deity) => `deity:${deity.id}`}
         actions={(deity, label) =>
           savedIds.has(deity.id) && (
             <LockToggle

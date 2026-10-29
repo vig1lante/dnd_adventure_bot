@@ -124,6 +124,37 @@
   --noise-opacity: 0.1; /* сила бумажного шума */
 }
 
+/*
+ * Настройка «Высокий контраст» (атрибут data-contrast="high" на корне, src/theme/settings.ts):
+ * усиливает пары текущей темы — текст ярче (не ниже 7:1, WCAG AAA), линии и контуры чётче.
+ * Фоны, свеча, сукно и сургуч не меняются: третьей палитры нет. Состав переопределений в двух
+ * темах совпадает, а пары проверяет styles.test.ts. Вложенный [data-theme] (превью двух тем
+ * рядом) тоже получает свою усиленную пару.
+ */
+[data-contrast="high"][data-theme="dark"],
+[data-contrast="high"] [data-theme="dark"] {
+  --color-text: #fff6e2;
+  --color-text-muted: #e6d5b8;
+  --color-heading: #ffe0a6;
+  --color-accent-text: #ffc978;
+  --color-seal-text: #ffbcb0;
+  --color-border: #9a7b58;
+  --color-border-strong: #d2ad7e;
+  --color-focus: #ffe7b0;
+}
+
+[data-contrast="high"][data-theme="light"],
+[data-contrast="high"] [data-theme="light"] {
+  --color-text: #1f140a;
+  --color-text-muted: #3d2c1b;
+  --color-heading: #3e2208;
+  --color-accent-text: #5e3606;
+  --color-seal-text: #6e1f19;
+  --color-border: #7d6244;
+  --color-border-strong: #4f3a24;
+  --color-focus: #4a2500;
+}
+
 /* Запасной вариант до запуска JS и если тему не выбрали: следуем системной настройке. */
 @media (prefers-color-scheme: light) {
   :root:not([data-theme]) {

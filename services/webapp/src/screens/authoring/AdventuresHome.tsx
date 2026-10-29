@@ -1,13 +1,49 @@
-import { useCallback, useState } from "react";
+import { useCallback, useId, useState } from "react";
 import { useApi } from "../../api/context";
 import type { AdventureSummary, DraftSummary } from "../../api/types";
-import { Alert, Button, Card, EmptyState, Loading } from "../../ui";
+import {
+  Alert,
+  Button,
+  Card,
+  EmptyState,
+  ErrorState,
+  Skeleton,
+} from "../../ui";
 import { useAction, useLoaded } from "../hooks";
 import { DraftEditor } from "./DraftEditor";
 import { ImportButton } from "./ImportExport";
 import "../screens.css";
 import "./authoring.css";
 
+const MONTHS = [
+  "января",
+  "февраля",
+  "марта",
+  "апреля",
+  "мая",
+  "июня",
+  "июля",
+  "августа",
+  "сентября",
+  "октября",
+  "ноября",
+  "декабря",
+];
+
+/** Время правки черновика по часам телефона: «изменён 29 октября 2026, 07:05». */
+function editedText(iso: string): string {
+  const moment = new Date(iso);
+  if (Number.isNaN(moment.getTime())) return "";
+  const time = [moment.getHours(), moment.getMinutes()]
+    .map((part) => String(part).padStart(2, "0"))
+    .join(":");
+  return `изменён ${moment.getDate()} ${MONTHS[moment.getMonth()]} ${moment.getFullYear()}, ${time}`;
+}
+
+/**
+ * Строка черновика: название, id приключения и время правки. Копии одного приключения с тем же
+ * названием различаются временем правки — оно же описывает кнопку «Открыть» для читалки.
+ */
 function DraftRow({
   draft,
   onOpen,
@@ -15,18 +51,21 @@ function DraftRow({
   draft: DraftSummary;
   onOpen: () => void;
 }) {
+  const metaId = useId();
   const title = draft.title || "Без названия";
   return (
     <li className="games-item">
       <div className="games-item__main">
         <span className="games-item__title">{title}</span>
-        {draft.adventure_id !== null && (
-          <span className="games-item__meta">{draft.adventure_id}</span>
-        )}
+        <div id={metaId} className="games-item__meta">
+          {draft.adventure_id !== null && <span>{draft.adventure_id}</span>}
+          <span>{editedText(draft.updated_at)}</span>
+        </div>
       </div>
       <Button
         variant="secondary"
         aria-label={`Открыть: ${title}`}
+        aria-describedby={metaId}
         onClick={onOpen}
       >
         Открыть
@@ -79,20 +118,15 @@ function Catalog({ onOpen }: { onOpen: (draftId: string) => void }) {
         её можно править и опубликовать под своим id.
       </p>
       {catalog.status === "loading" && (
-        <Loading label="Загружаем приключения…" />
+        <Skeleton label="Загружаем приключения…" rows={2} />
       )}
       {catalog.status === "error" && (
-        <div className="screen-stack">
-          <Alert>{catalog.message}</Alert>
-          <div>
-            <Button variant="secondary" onClick={reload}>
-              Повторить
-            </Button>
-          </div>
-        </div>
+        <ErrorState title="Не удалось загрузить приключения" onRetry={reload}>
+          <p>{catalog.message}</p>
+        </ErrorState>
       )}
       {catalog.status === "ready" && catalog.data.length === 0 && (
-        <p className="screen-muted">Готовых приключений пока нет.</p>
+        <EmptyState icon="candle" title="Готовых приключений пока нет" />
       )}
       {catalog.status === "ready" && catalog.data.length > 0 && (
         <ul className="games-list">
@@ -147,17 +181,13 @@ export function AdventuresHome() {
           нейронку.
         </p>
         {drafts.status === "loading" && (
-          <Loading label="Загружаем черновики…" />
+          <Skeleton label="Загружаем черновики…" />
         )}
         {drafts.status === "error" && (
-          <div className="screen-stack">
-            <Alert>{drafts.message}</Alert>
-            <div>
-              <Button variant="secondary" onClick={reload}>
-                Повторить
-              </Button>
-            </div>
-          </div>
+          <ErrorState title="Не удалось загрузить черновики" onRetry={reload}>
+            <p>{drafts.message}</p>
+            <p>Ваши черновики никуда не делись.</p>
+          </ErrorState>
         )}
         {drafts.status === "ready" && drafts.data.length === 0 && (
           <EmptyState icon="candle" title="Пока нет приключений">
@@ -165,7 +195,7 @@ export function AdventuresHome() {
           </EmptyState>
         )}
         {drafts.status === "ready" && drafts.data.length > 0 && (
-          <ul className="games-list">
+          <ul className="games-list" aria-label="Черновики">
             {drafts.data.map((draft) => (
               <DraftRow
                 key={draft.id}

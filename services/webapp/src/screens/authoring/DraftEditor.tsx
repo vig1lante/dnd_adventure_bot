@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType } from "react";
+import { flushSync } from "react-dom";
 import { ApiError, errorText } from "../../api/client";
 import { useApi } from "../../api/context";
-import type { AuthoringStep, Draft, DraftSection, Job } from "../../api/types";
-import { Alert, Button, Card, Loading } from "../../ui";
+import type {
+  AuthoringStep,
+  Draft,
+  DraftSection,
+  Job,
+  StepState,
+} from "../../api/types";
+import { useReducedMotion } from "../../theme/motion";
+import { Button, Card, ErrorState, Skeleton } from "../../ui";
 import { ErrorAlert } from "../fields";
 import { useAction, useLoaded } from "../hooks";
 import { CluesStep } from "./CluesStep";
@@ -11,9 +19,10 @@ import { ContentsStep } from "./ContentsStep";
 import { DeitiesStep } from "./DeitiesStep";
 import { EncountersStep } from "./EncountersStep";
 import { FactionsStep } from "./FactionsStep";
-import { AlertDialog } from "./fields";
+import { ConflictDialog, sameData } from "./fields";
 import type {
   DraftRefs,
+  FocusTarget,
   SectionWrite,
   SrdMonsters,
   StepFormProps,
@@ -24,6 +33,7 @@ import { JobStatus, isActive } from "./JobStatus";
 import { MapStep } from "./MapStep";
 import { NpcsStep } from "./NpcsStep";
 import { PlotStep } from "./PlotStep";
+import { formProblem } from "./problems";
 import { PublishStep } from "./PublishStep";
 import { RelationsStep } from "./RelationsStep";
 import { ReviewStep } from "./ReviewStep";
@@ -51,10 +61,10 @@ interface StepForm {
   /** Подсказка у «Сгенерировать шаг»: что генерация заменит на другом экране. */
   generateNote?: string;
   /**
-   * Содержимое черновика, которое показывает форма: она начинается заново, только когда оно
-   * поменялось. `null` — форма начинается заново сама (у неё есть состояние вида над правкой).
+   * У формы есть состояние вида над правкой (выбор локации, фильтр): она остаётся, а заново по
+   * `contentKey` начинается только правка внутри. Остальные формы начинаются заново целиком.
    */
-  content: (draft: Draft) => unknown;
+  ownKey?: true;
   Form: ComponentType<StepFormProps>;
   /** В форме есть выбор ссылок: на этом экране нужен справочник сервера. */
   refs?: true;
@@ -69,81 +79,90 @@ const STEP_FORMS: Record<EditorStep, StepForm> = {
     generates: ["settings", "revelations"],
     generateNote:
       "Генерация Замысла заменит и незакреплённые откровения с уликами на шаге «Улики»: закрепите нужные.",
-    content: (draft) => [
-      draft.title,
-      draft.journal_intro,
-      draft.adventure_id,
-      draft.settings,
-    ],
     Form: SettingsStep,
   },
-  world: {
-    sections: ["world"],
-    content: (draft) => draft.world,
-    Form: WorldStep,
-  },
-  pantheon: {
-    sections: ["deities"],
-    content: (draft) => draft.deities,
-    Form: DeitiesStep,
-  },
-  factions: {
-    sections: ["factions"],
-    content: (draft) => draft.factions,
-    Form: FactionsStep,
-  },
-  plot: { sections: ["plot"], content: (draft) => draft.plot, Form: PlotStep },
-  locations: {
-    sections: ["locations"],
-    content: (draft) => [
-      draft.locations,
-      draft.start_location,
-      draft.finale_location,
-    ],
-    Form: MapStep,
-  },
+  world: { sections: ["world"], Form: WorldStep },
+  pantheon: { sections: ["deities"], Form: DeitiesStep },
+  factions: { sections: ["factions"], Form: FactionsStep },
+  plot: { sections: ["plot"], Form: PlotStep },
+  locations: { sections: ["locations"], Form: MapStep },
   // «Наполнение» пишет и `locations`, и `items` (предметы локаций) — своими записями. Эта форма
   // и «Связи» начинаются заново сами: выбор локации и фильтр переживают запись.
   location_contents: {
     sections: ["locations", "items"],
     generates: ["locations"],
-    content: () => null,
+    ownKey: true,
     Form: ContentsStep,
     refs: true,
   },
-  npcs: {
-    sections: ["npcs"],
-    content: (draft) => draft.npcs,
-    Form: NpcsStep,
-    refs: true,
-  },
+  npcs: { sections: ["npcs"], Form: NpcsStep, refs: true },
   relations: {
     sections: ["relations"],
-    content: () => null,
+    ownKey: true,
     Form: RelationsStep,
     refs: true,
   },
   // «Бои и боссы» пишут свои статблоки и бои — двумя записями, статблоки первыми.
   encounters: {
     sections: ["encounters", "monsters"],
-    content: (draft) => [draft.encounters, draft.monsters],
     Form: EncountersStep,
     refs: true,
     srd: true,
   },
-  items: {
-    sections: ["items"],
-    content: (draft) => draft.items,
-    Form: ItemsStep,
-    refs: true,
-  },
-  clues: {
-    sections: ["revelations"],
-    content: (draft) => draft.revelations,
-    Form: CluesStep,
-    refs: true,
-  },
+  items: { sections: ["items"], Form: ItemsStep, refs: true },
+  clues: { sections: ["revelations"], Form: CluesStep, refs: true },
 };
+
+// Данные раздела в черновике: то, что пишет `PUT .../sections/{section}`.
+const SECTION_CONTENT: Record<DraftSection, (draft: Draft) => unknown> = {
+  settings: (draft) => [
+    draft.title,
+    draft.journal_intro,
+    draft.adventure_id,
+    draft.settings,
+  ],
+  world: (draft) => draft.world,
+  deities: (draft) => draft.deities,
+  factions: (draft) => draft.factions,
+  plot: (draft) => draft.plot,
+  locations: (draft) => [
+    draft.locations,
+    draft.start_location,
+    draft.finale_location,
+  ],
+  npcs: (draft) => draft.npcs,
+  relations: (draft) => draft.relations,
+  items: (draft) => draft.items,
+  encounters: (draft) => draft.encounters,
+  monsters: (draft) => draft.monsters,
+  revelations: (draft) => draft.revelations,
+};
+
+/** Данные разделов экрана: форма начинается заново, только когда они поменялись. */
+const contentOf = (draft: Draft, screen: EditorStep) =>
+  STEP_FORMS[screen].sections.map((section) => SECTION_CONTENT[section](draft));
+
+/** Черновик с записываемыми данными разделов: по нему отказ называет сущности именами. */
+function withWrites(draft: Draft, writes: readonly SectionWrite[]): unknown {
+  return writes.reduce<Record<string, unknown>>(
+    (merged, { section, data }) =>
+      // Раздел «Карты» — сами поля черновика: локации, старт и финал.
+      section === "locations" && data !== null && typeof data === "object"
+        ? { ...merged, ...data }
+        : { ...merged, [section]: data },
+    { ...draft },
+  );
+}
+
+/** Менялся ли черновик после `moment`: позже ли запись какого-нибудь шага. */
+const changedAfter = (
+  steps: Record<string, StepState>,
+  moment: string,
+): boolean =>
+  Object.values(steps).some(
+    ({ updated_at }) =>
+      updated_at !== null && Date.parse(updated_at) > Date.parse(moment),
+  );
 
 /** Форма экрана; у проверки и публикации её нет. */
 const formOf = (screen: EditorScreen): StepForm | undefined =>
@@ -228,31 +247,14 @@ function useSrdMonsters(enabled: boolean): SrdMonsters {
 const isVersionConflict = (failure: unknown) =>
   failure instanceof ApiError && failure.code === "version_conflict";
 
-function ConflictDialog({
-  onRefresh,
-  onCancel,
-}: {
-  onRefresh: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <AlertDialog
-      title="Черновик изменился, обновить?"
-      actions={
-        <>
-          <Button onClick={onRefresh}>Обновить</Button>
-          <Button variant="secondary" onClick={onCancel}>
-            Отмена
-          </Button>
-        </>
-      }
-    >
-      <p className="screen-muted">
-        Его успели поменять в другой вкладке или генерацией. Обновление заменит
-        несохранённые правки.
-      </p>
-    </AlertDialog>
-  );
+/**
+ * Запись экрана оборвалась не на первом разделе: часть уже на сервере. Форма не начинается
+ * заново — держит прежний ключ (`key`) и свои правки, пока данные её разделов на сервере не
+ * поменяются ещё раз (`saved` — черновик после записанной части).
+ */
+interface HeldForm {
+  key: string;
+  saved: Draft;
 }
 
 interface EditorProps {
@@ -265,8 +267,37 @@ interface EditorProps {
 
 function Editor({ initial, step, onStep, onReload }: EditorProps) {
   const api = useApi();
+  const reducedMotion = useReducedMotion();
   const [draft, setDraft] = useState(initial);
   const [job, setJob] = useState(initial.job);
+  // Задание, которое упало ещё до открытия черновика, — не ошибка этого входа (ревью B4):
+  // спокойная заметка, а если черновик с тех пор менялся — ничего.
+  const [failedBefore] = useState(
+    initial.job?.status === "failed" ? initial.job.id : null,
+  );
+  const pastFailure = job !== null && job.id === failedBefore;
+  const outdatedFailure =
+    pastFailure && changedAfter(draft.steps, job.finished_at ?? job.created_at);
+  // Формы, чья запись оборвалась на втором разделе (B6 R7): правки остаются в форме.
+  const [held, setHeld] = useState<Partial<Record<EditorStep, HeldForm>>>({});
+  /**
+   * Ключ формы экрана — данные её разделов: форма начинается заново, когда они поменялись. После
+   * частичной записи — прежний ключ, пока сервер не поменял эти данные ещё раз.
+   */
+  const formKey = (screen: EditorStep): string => {
+    const hold = held[screen];
+    return hold !== undefined &&
+      sameData(contentOf(hold.saved, screen), contentOf(draft, screen))
+      ? hold.key
+      : JSON.stringify(contentOf(draft, screen));
+  };
+  // Данные последней записи разделов: по ним отказ сервера называет сущности именами.
+  const [written, setWritten] = useState<unknown>(null);
+  // Куда ведёт ссылка находки «Проверки»: экран шага и сущность на нём.
+  const [focus, setFocus] = useState<
+    (FocusTarget & { screen: EditorScreen }) | null
+  >(null);
+  const panels = useRef<Partial<Record<EditorScreen, HTMLElement | null>>>({});
   const [pollError, setPollError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   // Несколько записей подряд оборвались не на первой: часть правок уже на сервере.
@@ -369,6 +400,7 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
   const write = (action: () => Promise<void>) =>
     run(async () => {
       setPartial(null);
+      setWritten(null);
       try {
         await action();
       } catch (failure) {
@@ -377,23 +409,32 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
       }
     });
 
-  // Разделы пишутся по очереди: каждая запись — с версией, которую вернула предыдущая.
-  const save = (writes: SectionWrite[]) =>
+  // Разделы экрана пишутся по очереди: каждая запись — с версией, которую вернула предыдущая.
+  const save = (screen: EditorStep, writes: SectionWrite[]) =>
     write(async () => {
+      setWritten(withWrites(draft, writes));
+      const key = formKey(screen);
       let version = draft.version;
+      let saved: Draft | null = null;
       for (const [index, { section, data }] of writes.entries()) {
         try {
-          const saved = await api.saveSection(draft.id, version, section, data);
+          saved = await api.saveSection(draft.id, version, section, data);
           version = saved.version;
           setDraft(saved);
         } catch (failure) {
-          // Часть уже записана — автор узнаёт об этом и при конфликте версии (рядом с диалогом).
-          if (index > 0) {
+          // Часть уже записана — автор узнаёт об этом и при конфликте версии (рядом с диалогом),
+          // а форма не начинается заново: несохранённая часть правок остаётся в ней.
+          if (index > 0 && saved !== null) {
+            const kept = saved;
+            setHeld((current) => ({
+              ...current,
+              [screen]: { key, saved: kept },
+            }));
             const done = writes
               .slice(0, index)
               .map((w) => SECTION_LABELS[w.section]);
             setPartial(
-              `Сохранено: ${done.join(", ")}. Не сохранено: ${SECTION_LABELS[section]} — обновите черновик и повторите правку.`,
+              `Сохранено: ${done.join(", ")}. Не сохранено: ${SECTION_LABELS[section]} — правки остались в форме: исправьте и сохраните раздел снова или обновите черновик.`,
             );
           }
           throw failure;
@@ -427,6 +468,68 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
       );
     });
 
+  /**
+   * Переход по ссылке находки: экран её шага, затем прокрутка и фокус к сущности (`ref` —
+   * `location:crypt/exit:down`). Экран сначала раскрывает её (выбор локации, фильтр связей),
+   * поэтому переход отрисовывается сразу. Сущности нет — к началу экрана шага.
+   */
+  const go = (screen: EditorScreen, ref?: string) => {
+    if (ref === undefined) {
+      onStep(screen);
+      return;
+    }
+    flushSync(() => {
+      onStep(screen);
+      setFocus({ screen, ref });
+    });
+    const panel = panels.current[screen];
+    if (panel === null || panel === undefined) return;
+    const parts = ref.split("/");
+    const entities = [...panel.querySelectorAll<HTMLElement>("[data-ref]")];
+    const entity = parts
+      .map((_, index) => parts.slice(0, parts.length - index).join("/"))
+      .map((prefix) => entities.find((item) => item.dataset.ref === prefix))
+      .find((item) => item !== undefined);
+    const target =
+      entity ?? panel.querySelector<HTMLElement>(":scope > section");
+    if (target !== null) reveal(target);
+  };
+
+  /** Фокус и прокрутка к цели перехода. */
+  const reveal = (target: HTMLElement) => {
+    // Группа полей и раздел экрана фокусируются только ради перехода: с уходом фокуса — как были.
+    if (target.tabIndex < 0) {
+      target.setAttribute("tabindex", "-1");
+      target.addEventListener(
+        "blur",
+        () => target.removeAttribute("tabindex"),
+        { once: true },
+      );
+    }
+    target.focus({ preventScroll: true });
+    target.scrollIntoView?.({
+      block: "start",
+      behavior: reducedMotion ? "auto" : "smooth",
+    });
+  };
+
+  /**
+   * Переход к шагу кнопкой («Перейти к шагу «Замысел»» на «Публикации»): нажатая кнопка
+   * исчезает вместе с экраном, поэтому фокус уходит на поле, о котором речь (`field` — его
+   * подпись, например «id приключения»), а без него — на раздел шага, а не на страницу.
+   */
+  const goToStep = (screen: EditorScreen, field?: string) => {
+    flushSync(() => onStep(screen));
+    const panel = panels.current[screen];
+    if (panel === null || panel === undefined) return;
+    const label = [...panel.querySelectorAll("label")].find(
+      (item) => item.textContent === field,
+    );
+    const target =
+      label?.control ?? panel.querySelector<HTMLElement>(":scope > section");
+    if (target instanceof HTMLElement) reveal(target);
+  };
+
   const retry = (failed: Job) =>
     write(async () => {
       setJob(
@@ -449,7 +552,8 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
       )}
       <StepNav draft={draft} current={step} onSelect={onStep} />
       <JobStatus
-        job={job}
+        job={outdatedFailure ? null : job}
+        past={pastFailure}
         pollError={pollError}
         busy={busy}
         onRetry={(failed) => void retry(failed)}
@@ -463,24 +567,33 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
         disabled={activeJobId !== null || busy}
       >
         {EDITOR_STEPS.map(({ step: item, label }) => {
-          const { sections, generates, generateNote, content, Form } =
+          const { sections, generates, generateNote, ownKey, Form } =
             STEP_FORMS[item];
+          const contentKey = formKey(item);
           // Запись раздела и генерация шага задевают разные экраны: генерация Замысла — и «Улики».
           const savingElsewhere = unsavedIn(item, sections);
           const generatingElsewhere = unsavedIn(item, generates ?? sections);
           return (
-            <div key={item} hidden={item !== step}>
+            <div
+              key={item}
+              hidden={item !== step}
+              ref={(element) => {
+                panels.current[item] = element;
+              }}
+            >
               <Card title={label} headingLevel={3}>
                 <div className="screen-stack">
                   <Form
-                    key={JSON.stringify(content(draft))}
+                    key={ownKey ? "own" : contentKey}
+                    contentKey={contentKey}
                     draft={draft}
                     refs={refs}
                     srd={srd}
+                    focus={focus?.screen === item ? focus : null}
                     onSave={(data) =>
-                      void save([{ section: sections[0], data }])
+                      void save(item, [{ section: sections[0], data }])
                     }
-                    onSaveSections={(writes) => void save(writes)}
+                    onSaveSections={(writes) => void save(item, writes)}
                     onLock={(ref, locked) => void lock(ref, locked)}
                     onDirtyChange={markUnsaved[item]}
                     unsavedElsewhere={savingElsewhere}
@@ -535,23 +648,33 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
         {/* Проверка и публикация показываются, только пока открыты: так каждый вход на экран
             берёт свежий отчёт проверки по текущему черновику. */}
         {step === "review" && (
-          <Card title="Проверка" headingLevel={3}>
-            <div className="screen-stack">
-              {unsavedNote}
-              <ReviewStep draft={draft} onGo={onStep} />
-            </div>
-          </Card>
+          // Обёртка — панель шага, как у форм: к ней ведёт переход кнопкой с «Публикации».
+          <div
+            ref={(element) => {
+              panels.current.review = element;
+            }}
+          >
+            <Card title="Проверка" headingLevel={3}>
+              <div className="screen-stack">
+                {unsavedNote}
+                <ReviewStep draft={draft} onGo={go} />
+              </div>
+            </Card>
+          </div>
         )}
         {step === "publish" && (
           <Card title="Публикация" headingLevel={3}>
             <div className="screen-stack">
               {unsavedNote}
-              <PublishStep draft={draft} onGo={onStep} />
+              <PublishStep draft={draft} onGo={goToStep} onReload={onReload} />
             </div>
           </Card>
         )}
       </fieldset>
-      <ErrorAlert error={error} problems={problems} />
+      <ErrorAlert
+        error={error}
+        problems={problems.map((line) => formProblem(line, written ?? draft))}
+      />
       {partial !== null && (
         <div className="screen-stack">
           <p className="authoring-warning">{partial}</p>
@@ -580,23 +703,21 @@ export function DraftEditor({ draftId, onClose }: DraftEditorProps) {
   const [step, setStep] = useState<EditorScreen>("concept");
 
   return (
-    <Card title="Редактор приключения" icon="scroll">
+    <Card title="Редактор приключения" icon="scroll" className="authoring-card">
       <div className="screen-stack">
         <div>
           <Button variant="secondary" onClick={onClose}>
             К списку приключений
           </Button>
         </div>
-        {loaded.status === "loading" && <Loading label="Загружаем черновик…" />}
+        {loaded.status === "loading" && (
+          <Skeleton label="Загружаем черновик…" />
+        )}
         {loaded.status === "error" && (
-          <div className="screen-stack">
-            <Alert>{loaded.message}</Alert>
-            <div>
-              <Button variant="secondary" onClick={reload}>
-                Повторить
-              </Button>
-            </div>
-          </div>
+          <ErrorState title="Не удалось открыть черновик" onRetry={reload}>
+            <p>{loaded.message}</p>
+            <p>Черновик на сервере цел: попробуйте ещё раз.</p>
+          </ErrorState>
         )}
         {loaded.status === "ready" && (
           <Editor

@@ -1,5 +1,11 @@
 import { render, screen, within } from "@testing-library/react";
-import type { GamePhase, GameSummary, RestView, TurnPhase } from "../api/types";
+import type {
+  GamePhase,
+  GameSummary,
+  PhaseView,
+  RestView,
+  TurnPhase,
+} from "../api/types";
 import type { LiveConnection } from "../store/game";
 import { SERVER_TIME, gameView, phaseOf } from "./fixtures";
 import { StatusBar } from "./StatusBar";
@@ -65,9 +71,9 @@ describe("подпись фазы", () => {
     ["paused", "discussion", "Пауза"],
     ["paused", "collecting", "Пауза"],
     ["paused", "camp", "Пауза"],
-    // начало игры
-    ["weaving", null, "Мастер связывает ваши истории с миром…"],
-    ["weaving", "resolving", "Мастер связывает ваши истории с миром…"],
+    // начало игры: та же единая формулировка ожидания, что в лобби и при разборе хода
+    ["weaving", null, "Мастер думает…"],
+    ["weaving", "resolving", "Мастер думает…"],
     ["weaving", "dm_failed", "Мастер не справился с началом игры"],
     ["lobby", null, "Ожидание начала игры"],
     ["finished", null, "Игра завершена"],
@@ -339,5 +345,67 @@ describe("связь с игрой", () => {
       expect(container.querySelector("[class*='ui-anim']")).toBeNull();
       unmount();
     }
+  });
+});
+
+describe("день и часть суток (контракт B10, §1 п. 3)", () => {
+  const withScene = (scene: PhaseView["scene"], turnPhase: TurnPhase | null) =>
+    render(
+      <StatusBar
+        view={gameView({ phase: phaseOf(turnPhase, { scene }) })}
+        clockOffsetMs={0}
+        connection="open"
+      />,
+    );
+
+  test.each([
+    ["morning", "День 2, утро"],
+    ["day", "День 2, полдень"],
+    ["evening", "День 2, вечер"],
+    ["night", "День 2, ночь"],
+  ] as const)("%s → «%s» рядом с фазой", (part, text) => {
+    const { container } = withScene(
+      { type: "exploration", day: 2, part },
+      "discussion",
+    );
+
+    const bar = container.querySelector(".game-status");
+    expect(bar).toContainElement(screen.getByText(text));
+    expect(bar).toContainElement(screen.getByText("Обсуждение"));
+  });
+
+  test("без сцены (старый снимок) — только фаза", () => {
+    const { container } = withScene(null, "discussion");
+
+    expect(screen.getByText("Обсуждение")).toBeInTheDocument();
+    expect(container).not.toHaveTextContent(/День \d/);
+  });
+
+  test("день не читается вслух при каждой смене фазы: он вне живой области фазы", () => {
+    withScene({ type: "camp", day: 3, part: "night" }, "camp");
+
+    const phase = screen.getByText("Привал").closest("[role='status']");
+    expect(phase).not.toBeNull();
+    expect(phase).not.toHaveTextContent("День 3, ночь");
+  });
+
+  test("на привале таймер «До конца привала» остаётся в строке статуса рядом с днём", () => {
+    const view = gameView({
+      phase: phaseOf("camp", {
+        deadline_at: at(75),
+        scene: { type: "camp", day: 3, part: "night" },
+      }),
+    });
+
+    const { container } = render(
+      <StatusBar view={view} clockOffsetMs={0} connection="open" />,
+    );
+
+    const bar = container.querySelector(".game-status");
+    expect(bar).toContainElement(screen.getByRole("timer"));
+    expect(screen.getByRole("timer")).toHaveAccessibleName(
+      "До конца привала 1:15",
+    );
+    expect(bar).toContainElement(screen.getByText("День 3, ночь"));
   });
 });

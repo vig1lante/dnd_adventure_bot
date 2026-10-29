@@ -185,6 +185,10 @@ describe("подключение и состав лобби", () => {
     await openLobby({ game: null });
 
     expect(screen.getByRole("status")).toHaveTextContent("Подключаемся");
+    // Загрузка — скелетон экрана, а не одинокий кубик.
+    expect(
+      screen.getByRole("status").querySelectorAll(".ui-skeleton__row").length,
+    ).toBeGreaterThan(0);
     noButton("Начать");
   });
 
@@ -1025,7 +1029,9 @@ describe("герой и отметка «Готов»", () => {
 });
 
 describe("начало игры: вплетение", () => {
-  const WEAVING = "Мастер связывает ваши истории с миром…";
+  const WEAVING = "Мастер вплетает ваших героев в мир. Игра начнётся сама.";
+  const thinking = () =>
+    screen.queryByRole("status", { name: "Мастер думает…" });
   const RETRY = "/api/games/g1/host/retry";
   const weavingGame = (turn_phase: GameSummary["turn_phase"] = null) =>
     lobbyOf([host(), boris()], { phase: "weaving", turn_phase });
@@ -1075,6 +1081,21 @@ describe("начало игры: вплетение", () => {
 
     expect(screen.getByText(WEAVING)).toBeInTheDocument();
     expect(useGame.getState().screen).toBe("lobby");
+  });
+
+  test("пока мастер вплетает героев — единое «Мастер думает…» с нейтральной фразой и временем", async () => {
+    await openLobby({ game: weavingGame("resolving") });
+
+    const card = thinking();
+    expect(card).not.toBeNull();
+    expect(card).toHaveTextContent(/Ждём 0:00/);
+    expect(screen.queryByText(/связывает ваши истории/)).toBeNull();
+  });
+
+  test("мастер не справился — «Мастер думает…» не показывается", async () => {
+    await openLobby({ as: "u2", game: weavingGame("dm_failed") });
+
+    expect(thinking()).toBeNull();
   });
 
   test("мастер не справился: хост видит сообщение и «Повторить»", async () => {
@@ -1181,6 +1202,29 @@ describe("начало игры: вплетение", () => {
       await wait(MINUTE);
 
       expect(button("Повторить")).toBeInTheDocument();
+    });
+
+    test("время ожидания идёт в карточке «Мастер думает…», фраза меняется по времени", async () => {
+      vi.useFakeTimers({ toFake: [...FAKE_TIMERS, "Date"] });
+      await openLobby({ as: "u2", game: weavingGame("resolving") });
+      const first = thinking()?.textContent;
+
+      await wait(25_000);
+
+      expect(thinking()).toHaveTextContent("Ждём 0:25");
+      expect(thinking()?.textContent).not.toBe(first);
+    });
+
+    test("через минуту «Повторить» у хоста — в карточке «Мастер думает…»", async () => {
+      await openWithFakeTimers("resolving", "u1");
+
+      await wait(MINUTE);
+
+      expect(
+        within(thinking() as HTMLElement).getByRole("button", {
+          name: "Повторить",
+        }),
+      ).toBeInTheDocument();
     });
 
     test("через минуту хост видит и пояснение «Мастер думает дольше обычного»", async () => {

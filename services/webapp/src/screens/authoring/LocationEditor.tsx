@@ -97,6 +97,7 @@ export function LocationEditor({
         create={() => ({ id: "", name: "" })}
         addLabel="Добавить зону"
         itemLabel={(zone, index) => zone.name || `Зона ${index + 1}`}
+        refOf={(zone) => `location:${location.id}/zone:${zone.id}`}
       >
         {(zone, change) => (
           <>
@@ -121,6 +122,7 @@ export function LocationEditor({
         create={newFeature}
         addLabel="Добавить деталь"
         itemLabel={(feature, index) => feature.name || `Деталь ${index + 1}`}
+        refOf={(feature) => `location:${location.id}/feature:${feature.id}`}
       >
         {(feature, change) => (
           <FeatureEditor
@@ -138,6 +140,7 @@ export function LocationEditor({
         create={newSecret}
         addLabel="Добавить секрет"
         itemLabel={(_secret, index) => `Секрет ${index + 1}`}
+        refOf={(secret) => `location:${location.id}/secret:${secret.id}`}
       >
         {(secret, change) => <SecretEditor secret={secret} update={change} />}
       </EntityList>

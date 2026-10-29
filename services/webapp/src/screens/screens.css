@@ -350,3 +350,117 @@
   overflow-wrap: anywhere;
   user-select: all;
 }
+
+/*
+ * Лента для чтения вслух (B10.3, макет «как будет»): рассказ мастера — страница книги без
+ * рамки карточки, с подписью «Мастер» и янтарной кромкой; ходы героев — короткие строки с
+ * жетоном, имя героя — кнопка к его листу.
+ */
+.feed-read {
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  overflow-wrap: anywhere;
+  background: var(--color-surface);
+  border-left: 3px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+}
+
+.feed-read__who {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--color-accent-text);
+  text-transform: uppercase;
+}
+
+/* Строка читается удобно: не шире ~34 знаков на большом кегле рассказа. */
+.feed-read .ui-narration {
+  max-width: 34ch;
+}
+
+.feed-act {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  padding-inline: var(--space-2);
+  overflow-wrap: anywhere;
+}
+
+.feed-act .ui-avatar {
+  flex: none;
+}
+
+.feed-act__text {
+  min-width: 0;
+  padding-top: 0.125rem;
+}
+
+.feed-act__text > .ui-badge {
+  margin-right: var(--space-2);
+}
+
+.feed-act strong {
+  color: var(--color-accent-text);
+}
+
+/*
+ * Имя героя — кнопка к листу: выглядит словом, но палец в неё попадает (не меньше 44 px).
+ * Содержимое прижато к началу, двоеточие — внутри кнопки сразу за именем; подчёркнуто только
+ * имя.
+ */
+.feed-hero {
+  display: inline-flex;
+  align-items: center;
+  min-width: var(--tap-size);
+  min-height: var(--tap-size);
+  padding: 0;
+  font-weight: 700;
+  color: var(--color-accent-text);
+  vertical-align: middle;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+}
+
+.feed-hero__name {
+  text-decoration: underline dotted;
+  text-underline-offset: 0.2em;
+}
+
+/*
+ * Поле хода над клавиатурой телефона: пока игрок пишет, поле липнет к нижнему краю видимой
+ * части окна. На iOS окно под клавиатурой не сжимается, поэтому отступ снизу — высота
+ * клавиатуры (--keyboard-inset считает ActionComposer по visualViewport). Липкое положение не
+ * вынимает поле из потока: лента не прыгает, когда клавиатура закрывается.
+ */
+.composer-dock--on {
+  position: sticky;
+  bottom: var(--keyboard-inset, 0px);
+  z-index: 20;
+}
+
+/*
+ * Над клавиатурой поле компактное (как на макете): без заголовка карточки и подсказок, поле
+ * ввода ниже — видно ленту, а «Тайно» и «Готов» остаются под пальцем. Подсказки игрок уже
+ * видел до того, как начал писать.
+ */
+.composer-dock--on > .ui-card {
+  padding: var(--space-3);
+  box-shadow: 0 -0.25rem 0.75rem var(--color-shadow);
+}
+
+.composer-dock--on .ui-section__header,
+.composer-dock--on .form-field__hint {
+  display: none;
+}
+
+.composer-dock--on .form-field__input--area {
+  max-height: 5.5rem;
+}
+
+/* Переход к листу героя по имени: лист встаёт под липкую строку статуса, а не под неё. */
+.game-panel {
+  scroll-margin-top: 7rem;
+}

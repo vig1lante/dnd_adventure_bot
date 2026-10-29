@@ -101,6 +101,7 @@ export function MapStep({
         create={newLocation}
         addLabel="Добавить локацию"
         itemLabel={(location, index) => location.name || `Локация ${index + 1}`}
+        refOf={(location) => `location:${location.id}`}
         actions={(location, label) =>
           savedIds.has(location.id) && (
             <LockToggle
@@ -142,6 +143,7 @@ export function MapStep({
               create={newExit}
               addLabel="Добавить выход"
               itemLabel={exitLabel}
+              refOf={(exit) => `location:${location.id}/exit:${exit.id}`}
             >
               {(exit, change) => (
                 <>

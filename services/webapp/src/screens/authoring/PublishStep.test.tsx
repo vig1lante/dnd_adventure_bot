@@ -187,7 +187,7 @@ describe("экран «Публикация»", () => {
     );
   });
 
-  test("422 blocking_errors: текст сервера и список проблем", async () => {
+  test("422 blocking_errors: текст сервера и список проблем — подпись экрана вместо id шага", async () => {
     const { form } = await openPublish(ready(), reportOf(), {
       [`POST ${PUBLISH}`]: {
         status: 422,
@@ -205,9 +205,9 @@ describe("экран «Публикация»", () => {
     expect(await within(form).findByRole("alert")).toHaveTextContent(
       "Есть ошибки, которые мешают игре.",
     );
-    expect(form).toHaveTextContent(
-      "encounters: в приключении нет ни одного боя",
-    );
+    expect(
+      within(within(form).getByRole("alert")).getByRole("listitem"),
+    ).toHaveTextContent(/^Бои и боссы: в приключении нет ни одного боя$/);
   });
 
   test("409 id_taken: текст сервера и переход к «Замыслу», где меняют id", async () => {
@@ -250,6 +250,79 @@ describe("экран «Публикация»", () => {
     expect(
       within(form).queryByRole("button", { name: "Перейти к шагу «Замысел»" }),
     ).toBeNull();
+  });
+
+  // Перенесено из B6 в B10.4: отказы публикации ведут туда, где их исправляют.
+  test("409 version_conflict: диалог «Черновик изменился, обновить?»; «Обновить» перечитывает черновик", async () => {
+    let reads = 0;
+    const { server, form } = await openPublish(ready(), reportOf(), {
+      "GET /api/drafts/d1": () => ({
+        json: ready({ version: ++reads === 1 ? 9 : 10 }),
+      }),
+      [`POST ${PUBLISH}`]: {
+        status: 409,
+        json: {
+          detail: "Черновик изменился: обновите его и повторите правку.",
+          code: "version_conflict",
+        },
+      },
+    });
+    await checked(form);
+
+    fireEvent.click(publishButton(form));
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Черновик изменился, обновить?",
+    });
+    // Текст отказа не дублирует диалог.
+    expect(within(form).queryByRole("alert")).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Обновить" }));
+
+    await vi.waitFor(() =>
+      expect(callsTo(server, "GET", "/api/drafts/d1")).toHaveLength(2),
+    );
+    expect(
+      await screen.findByRole("region", { name: "Публикация" }),
+    ).toBeInTheDocument();
+  });
+
+  test("409 version_conflict: «Отмена» закрывает диалог, черновик не перечитывается", async () => {
+    const { server, form } = await openPublish(ready(), reportOf(), {
+      [`POST ${PUBLISH}`]: {
+        status: 409,
+        json: { detail: "Черновик изменился.", code: "version_conflict" },
+      },
+    });
+    await checked(form);
+
+    fireEvent.click(publishButton(form));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Отмена" }));
+
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(callsTo(server, "GET", "/api/drafts/d1")).toHaveLength(1);
+  });
+
+  test("422 adventure_id_locked: текст сервера и переход к «Замыслу»", async () => {
+    const { form } = await openPublish(ready(), reportOf(), {
+      [`POST ${PUBLISH}`]: {
+        status: 422,
+        json: {
+          detail: "Приключение уже опубликовано под этим id.",
+          code: "adventure_id_locked",
+        },
+      },
+    });
+    await checked(form);
+
+    fireEvent.click(publishButton(form));
+
+    expect(await within(form).findByRole("alert")).toHaveTextContent(
+      "Приключение уже опубликовано под этим id.",
+    );
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Перейти к шагу «Замысел»" }),
+    );
+    expect(screen.getByRole("region", { name: "Замысел" })).toBeInTheDocument();
   });
 
   test("id приключения не задан — публикация и архив закрыты, подсказка и переход к «Замыслу»", async () => {
@@ -337,7 +410,7 @@ describe("экспорт архива", () => {
     expect(await within(form).findByRole("alert")).toHaveTextContent(
       "Черновик не собирается в приключение.",
     );
-    expect(form).toHaveTextContent("locations: нет ни одной локации");
+    expect(form).toHaveTextContent("Локации: нет ни одной локации");
     expect(clicked).toEqual([]);
   });
 });
@@ -601,5 +674,39 @@ describe("«Публикация»: проверка видит только з�
     await checked(form);
 
     expect(form).not.toHaveTextContent(PARTIAL);
+  });
+});
+
+// --- B10.3.fix2 (N2): переход с «Публикации» к шагу не роняет фокус на страницу ---
+
+describe("фокус после перехода к шагу", () => {
+  test("«Перейти к шагу «Замысел»» без id — фокус на поле «id приключения»: его и нужно задать", async () => {
+    const { form } = await openPublish(ready({ adventure_id: null }));
+
+    fireEvent.click(
+      await within(form).findByRole("button", {
+        name: "Перейти к шагу «Замысел»",
+      }),
+    );
+
+    expect(
+      screen.getByRole("textbox", { name: "id приключения" }),
+    ).toHaveFocus();
+  });
+
+  test("«Перейти к шагу «Проверка»» — фокус на разделе «Проверка», а не на странице", async () => {
+    const { form } = await openPublish(
+      ready(),
+      reportOf({ errors: [findingOf()], readiness_percent: 99 }),
+    );
+
+    fireEvent.click(
+      await within(form).findByRole("button", {
+        name: "Перейти к шагу «Проверка»",
+      }),
+    );
+
+    const review = screen.getByRole("region", { name: "Проверка" });
+    expect(review).toHaveFocus();
   });
 });

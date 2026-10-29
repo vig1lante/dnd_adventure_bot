@@ -48,3 +48,25 @@
   /* Бумажный шум: серое зерно, сила задаётся --noise-opacity темы. */
   --texture-noise: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n' x='0' y='0'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
+
+/*
+ * Настройка «Размер текста» (src/theme/settings.ts ставит атрибут на корень): меняются только
+ * токены кегля, поэтому крупнее становится текст, а отступы и область нажатия (--tap-size)
+ * остаются прежними. Крайние кегли не меняются: самый мелкий (--text-xs — подписи вкладок
+ * нижней панели под значками, атрибуция), иначе на 360 px шесть вкладок не помещаются и
+ * «Персонаж» обрезается, и самый крупный (--text-xl — заголовок приложения), он и так крупный,
+ * а иначе название в шапке рядом с кнопкой настроек переносится.
+ */
+:root[data-text-size="large"] {
+  --text-sm: 1.0625rem;
+  --text-base: 1.1875rem;
+  --text-lg: 1.375rem;
+  --text-narration: 1.5rem;
+}
+
+:root[data-text-size="huge"] {
+  --text-sm: 1.1875rem;
+  --text-base: 1.3125rem;
+  --text-lg: 1.5rem;
+  --text-narration: 1.6875rem;
+}

@@ -294,6 +294,7 @@ export function MonsterEditor({ monster, update, srd }: MonsterEditorProps) {
         create={newAction}
         addLabel="Добавить действие"
         itemLabel={(action, index) => action.name || `Действие ${index + 1}`}
+        refOf={(action) => `monster:${monster.id}/action:${action.id}`}
       >
         {(action, change) => <ActionFields action={action} update={change} />}
       </EntityList>

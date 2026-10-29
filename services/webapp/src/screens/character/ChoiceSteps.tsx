@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import type { Skill, SpellOption } from "../../api/types";
 import { CheckList, ChoiceList, SelectField } from "../fields";
 import "../screens.css";
@@ -20,17 +21,21 @@ export function SkillsStep({ draft, options, update }: StepProps) {
   const skillName = (id: string) => nameIn(options.skills, id);
   const granted = grantedSkills(draft, options);
   const skillOption = (id: string) => ({ value: id, label: skillName(id) });
-  const skillChoice = (id: string) => {
+  /** «Подробнее» навыка — у списков с отметками и у навыка на выбор. */
+  const skillMore = (id: string) => {
     const skill = options.skills.find((item) => item.id === id);
-    return {
-      ...skillOption(id),
-      more: skill !== undefined && (
+    return (
+      skill !== undefined && (
         <MoreDetails name={skill.name}>
           <SkillCard skill={skill} options={options} />
         </MoreDetails>
-      ),
-    };
+      )
+    );
   };
+  const skillChoice = (id: string) => ({
+    ...skillOption(id),
+    more: skillMore(id),
+  });
 
   return (
     <div className="screen-stack">
@@ -50,22 +55,30 @@ export function SkillsStep({ draft, options, update }: StepProps) {
       <p className="char-note">{`Выбрано ${draft.skills.length} из ${cls.skill_choices}`}</p>
 
       {species.extra_skill && (
-        <SelectField
-          label="Навык на выбор (Умелость)"
-          placeholder="Выберите навык"
-          value={draft.extraSkill ?? ""}
-          options={options.skills
-            .filter(
-              (skill) =>
-                skill.id === draft.extraSkill ||
-                (!granted.includes(skill.id) &&
-                  !draft.skills.includes(skill.id)),
-            )
-            .map((skill) => skillOption(skill.id))}
-          onChange={(value) =>
-            update({ extraSkill: (value || null) as Skill | null })
-          }
-        />
+        <>
+          <SelectField
+            label="Навык на выбор (Умелость)"
+            placeholder="Выберите навык"
+            value={draft.extraSkill ?? ""}
+            options={options.skills
+              .filter(
+                (skill) =>
+                  skill.id === draft.extraSkill ||
+                  (!granted.includes(skill.id) &&
+                    !draft.skills.includes(skill.id)),
+              )
+              .map((skill) => skillOption(skill.id))}
+            onChange={(value) =>
+              update({ extraSkill: (value || null) as Skill | null })
+            }
+          />
+          {/* Ключ — навык: карточка другого навыка открывается свёрнутой. */}
+          {draft.extraSkill !== null && (
+            <Fragment key={draft.extraSkill}>
+              {skillMore(draft.extraSkill)}
+            </Fragment>
+          )}
+        </>
       )}
 
       {cls.expertise_picks > 0 && (
@@ -88,10 +101,10 @@ export function SkillsStep({ draft, options, update }: StepProps) {
             const style = options.fighting_styles.find(
               (item) => item.id === id,
             );
+            // Описание стиля — только в «Подробнее»: под названием оно повторялось бы слово в слово.
             return {
               value: id,
               label: style?.name ?? id,
-              description: style?.summary,
               more: style !== undefined && (
                 <MoreDetails name={style.name}>
                   <SummaryCard item={style} />

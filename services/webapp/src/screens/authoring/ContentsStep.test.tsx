@@ -519,9 +519,13 @@ describe("шаг «Наполнение»: предметы «лежит зде�
     ).toBeChecked();
   });
 
-  test("сбой второй записи: предметы сохранены — понятный текст и «Обновить»", async () => {
+  test("сбой второй записи: предметы сохранены — понятный текст и «Обновить», тайник остаётся в форме", async () => {
     const draft = mapped();
     const { server, form } = await openContents(draft, {
+      // Сервер отвечает как настоящий: в черновике — записанные предметы.
+      [`PUT ${ITEMS}`]: ({ body }) => ({
+        json: { ...draft, version: 5, items: (body as { data: unknown }).data },
+      }),
       [`PUT ${LOCATIONS}`]: {
         status: 422,
         json: {
@@ -545,13 +549,22 @@ describe("шаг «Наполнение»: предметы «лежит зде�
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Данные раздела не прошли проверку.");
-    expect(alert).toHaveTextContent("locations.1.features.0.id: неверный id");
+    expect(alert).toHaveTextContent(
+      /Локации → «Склеп» → Детали и тайники → .+ → Идентификатор: неверный id/,
+    );
     expect(
       screen.getByText(
-        "Сохранено: предметы. Не сохранено: локации — обновите черновик и повторите правку.",
+        "Сохранено: предметы. Не сохранено: локации — правки остались в форме: исправьте и сохраните раздел снова или обновите черновик.",
       ),
     ).toBeInTheDocument();
     expect(puts(server)).toEqual([ITEMS, LOCATIONS]);
+    // Ревью B6 R7: тайник не пропал — несохранённая часть формы осталась на месте.
+    expect(
+      within(group(form, "Предметы в тайнике")).getByRole("checkbox", {
+        name: "Ключ",
+      }),
+    ).toBeChecked();
+    expect(group(group(form, "Предметы"), "Ключ")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
 
@@ -670,7 +683,7 @@ describe("шаг «Наполнение»: сбои двух записей по
     expect(puts(server)).toEqual([ITEMS, LOCATIONS]);
     expect(
       screen.getByText(
-        "Сохранено: предметы. Не сохранено: локации — обновите черновик и повторите правку.",
+        "Сохранено: предметы. Не сохранено: локации — правки остались в форме: исправьте и сохраните раздел снова или обновите черновик.",
       ),
     ).toBeInTheDocument();
   });
@@ -690,7 +703,7 @@ describe("шаг «Наполнение»: сбои двух записей по
     save(form);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "items.0.id: неверный id",
+      "Предметы → «Ключ» → Идентификатор: неверный id",
     );
     expect(puts(server)).toEqual([ITEMS]);
     expect(screen.queryByText(/Сохранено:/)).toBeNull();

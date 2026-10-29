@@ -97,6 +97,7 @@ export function ItemsStep({
         create={newItem}
         addLabel="Добавить предмет"
         itemLabel={(item, index) => item.name || `Предмет ${index + 1}`}
+        refOf={(item) => `item:${item.id}`}
         actions={(item, label) =>
           savedIds.has(item.id) && (
             <>

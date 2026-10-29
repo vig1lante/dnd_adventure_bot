@@ -220,6 +220,25 @@ describe("«Сказать у костра»", () => {
     expect(say()).toBeEnabled();
   });
 
+  test.each([
+    ["short", /ответит на неё в конце привала/],
+    ["long", /ответит на неё утром/],
+  ] as const)(
+    "подсказка у поля по виду привала: %s — когда ответит мастер",
+    (kind, hint) => {
+      renderCamp({ view: { rest: restOf(kind) } });
+
+      expect(field()).toHaveAccessibleDescription(hint);
+    },
+  );
+
+  test("вид привала ещё не пришёл — подсказка не обещает «утро»", () => {
+    renderCamp({ view: { rest: null } });
+
+    expect(field()).toHaveAccessibleDescription(/в конце привала/);
+    expect(field()).not.toHaveAccessibleDescription(/утром/);
+  });
+
   test("счётчик знаков и реплик героя", () => {
     renderCamp();
 

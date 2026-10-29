@@ -6,6 +6,7 @@ import type {
   Response,
 } from "@playwright/test";
 import { pickQuickHero } from "./hero.ts";
+import { expectFitsPhone } from "./layout.ts";
 import { expect, test } from "./server.ts";
 
 // Конструктор приключений на настоящем сервере (финальное покрытие блоков 4 и 5 DND-2 и сквозной
@@ -22,7 +23,8 @@ import { expect, test } from "./server.ts";
 // перезапуска сервера и раунд мастера в ней. Последние четыре — финальное покрытие блока 6 на
 // копии встроенного приключения: ссылка ошибки на шаг и закрытая публикация, занятый id, 201/200 и
 // запрет смены id, архив туда и обратно с отказами импорта, публикация пустого черновика и пределы
-// боя.
+// боя. На ключевых шагах редактор измеряется на ширине телефона (B10.4, `expectFitsPhone`): все
+// шаги видны плашками, бейджи не обрезаны, горизонтальной прокрутки нет.
 
 const LOGIN = "dev-2";
 const STEPS = ["Замысел", "Мир", "Боги", "Фракции", "Сюжет"] as const;
@@ -96,6 +98,25 @@ const stepButton = (page: Page, label: ScreenLabel) =>
   page
     .getByRole("navigation", { name: "Шаги приключения" })
     .getByRole("button", { name: new RegExp(`^${label}`) });
+/** Подписи экранов редактора по id шага: так отказ публикации называет шаг на экране. */
+const STEP_LABELS: Record<string, string> = {
+  concept: "Замысел",
+  world: "Мир",
+  pantheon: "Боги",
+  factions: "Фракции",
+  plot: "Сюжет",
+  locations: "Карта",
+  location_contents: "Наполнение",
+  npcs: "Персонажи",
+  relations: "Связи",
+  encounters: "Бои и боссы",
+  items: "Предметы и награды",
+  clues: "Улики",
+};
+
+const escapeRegExp = (text: string) =>
+  text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /** Форма шага: скрытые шаги в дереве доступности не видны, поэтому регион один. */
 const stepPanel = (page: Page, label: ScreenLabel) =>
   page.getByRole("region", { name: label, exact: true });
@@ -410,11 +431,25 @@ test("конструктор: новый черновик, пять шагов �
       await expect(stepButton(page, label)).toContainText("готово");
     }
 
+    // B10.4 (manual B4 nit): на 390 и 360 px все шаги видны плашками, бейдж «закреплён» шага,
+    // закреплённого целиком, не обрезан, горизонтальной прокрутки нет.
+    await stepButton(page, "Сюжет").click();
+    const plotLocked = draftsResponse(page, "PUT", /^\/[0-9a-f]+\/locks$/);
+    await button(plot, "Закрепить раздел").click();
+    expect((await plotLocked).status()).toBe(200);
+    await expect(stepButton(page, "Сюжет")).toContainText("закреплён");
+    await expectFitsPhone(page, "редактор: полоска шагов с бейджами");
+
     // Черновик сохранён на сервере: в списке название и id из замысла, при открытии — замок.
     await button(page, "К списку приключений").click();
     const reopen = button(page, "Открыть: Маяк на Вороньем мысу");
     await expect(reopen).toBeVisible();
     await expect(page.getByText("crow-lighthouse")).toBeVisible();
+    // Строка черновика — с временем правки: копии одного приключения различимы.
+    await expect(reopen).toHaveAccessibleDescription(
+      /изменён \d+ [а-я]+ \d{4}, \d\d:\d\d/,
+    );
+    await expectFitsPhone(page, "список приключений");
     await reopen.click();
     await stepButton(page, "Боги").click();
     await expect(button(gods, "Закрепить: Сельмара")).toHaveAttribute(
@@ -578,6 +613,8 @@ test("конструктор II: карта из трёх локаций, пре
     );
     await expect(stepButton(page, "Карта")).toContainText("готово");
     await expect(stepButton(page, "Наполнение")).toContainText("пусто");
+    // Карта с выходами, замками и выбором «Куда» — на ширине телефона (финальное покрытие B10).
+    await expectFitsPhone(page, "редактор: «Карта» с выходами");
 
     // Наполнение всех трёх локаций шагом location_contents: по ответу на локацию в порядке карты.
     await stepButton(page, "Наполнение").click();
@@ -591,6 +628,7 @@ test("конструктор II: карта из трёх локаций, пре
     expect(filled.locations[2].read_aloud).toBe(LAMP_ROOM_CONTENTS);
     await expect(combobox(contents, "Локация")).toHaveValue("harbor");
     await expect(textbox(contents, "Текст вслух")).toHaveValue(FIRST_CONTENTS);
+    await expectFitsPhone(page, "редактор: «Наполнение»");
     // Проверку детали из ответа сервера форма показывает как есть: навык и Сл из таблицы.
     await combobox(contents, "Локация").selectOption("cliff-path");
     const marks = group(group(contents, "Детали и тайники"), "Пепельные следы");
@@ -854,6 +892,8 @@ test("конструктор II: карта из трёх локаций, пре
     await combobox(graph, "Показать связи").selectOption("deity:selmara");
     await expect(group(graph, "Ильза — поклоняется — Сельмара")).toBeVisible();
     await expect(group(graph, "Брам — соперник — Ильза")).toBeHidden();
+    // Связи с длинными подписями «кто — кем — кому» и фильтром (финальное покрытие B10).
+    await expectFitsPhone(page, "редактор: «Связи» с фильтром");
     await combobox(graph, "Показать связи").selectOption("");
 
     // Перегенерация одной связи: пояснение из ответа шага, тайная связь с богом не тронута.
@@ -1037,6 +1077,7 @@ test("конструктор III: двенадцать шагов на загл�
       const priest = group(fights, "Пепельный жрец");
       await expect(combobox(priest, "Опасность (cr)")).toHaveValue("3");
       await expect(textbox(priest, "Опыт (xp)")).toHaveValue("700");
+      await expectFitsPhone(page, "редактор: «Бои и боссы»");
     });
 
     await test.step("4. Предметы и награды: оба предмета у персонажей, а не в локациях", async () => {
@@ -1093,6 +1134,8 @@ test("конструктор III: двенадцать шагов на загл�
       await expect(
         combobox(group(revelation, "Улика clue-bram"), "Где лежит"),
       ).toHaveValue("npc:bram");
+      // Откровение с вложенными уликами (финальное покрытие B10).
+      await expectFitsPhone(page, "редактор: «Улики» откровения");
       for (const label of [...STEPS, ...MAP_STEPS, ...FIGHT_STEPS]) {
         await expect(stepButton(page, label)).toContainText("готово");
       }
@@ -1133,7 +1176,12 @@ test("конструктор III: двенадцать шагов на загл�
       await expect(
         review.getByText("в локации нет ни одного интересного места"),
       ).toBeVisible();
-      await expect(button(review, "Перейти к шагу «Наполнение»")).toBeVisible();
+      await expectFitsPhone(page, "редактор: «Проверка»");
+      // Ссылка находки ведёт к сущности (ревью B6 R6): «Наполнение» открывает гавань.
+      await button(review, "Перейти к шагу «Наполнение»").click();
+      const contents = stepPanel(page, "Наполнение");
+      await expect(combobox(contents, "Локация")).toHaveValue("harbor");
+      await expect(contents).toBeFocused();
     });
 
     await test.step("7. Публикация: что увидят игроки, «Опубликовать» и ответ 201", async () => {
@@ -1146,6 +1194,7 @@ test("конструктор III: двенадцать шагов на загл�
         "Предмет «Книга гавани»: Книга, в которую начальница гавани записывает корабли.",
       );
       await expect(panel).toContainText(`id приключения: ${ADVENTURE_ID}`);
+      await expectFitsPhone(page, "редактор: «Публикация»");
       // Предметы лежат у персонажей, поэтому подтверждения «лежат открыто» нет.
       const publish = button(panel, "Опубликовать");
       await expect(publish).toBeEnabled();
@@ -1677,7 +1726,16 @@ test("конструктор III: пустой черновик с id — «Пр
       "В приключении есть ошибки: исправьте их, потом публикуйте.",
     );
     await expect(alert.getByRole("listitem")).toHaveCount(problems.length);
-    await expect(alert.getByRole("listitem").first()).toHaveText(problems[0]);
+    // Строка отказа «<шаг>: <текст>» — с подписью экрана вместо id шага (manual B6, nit 3).
+    const colon = problems[0].indexOf(": ");
+    const step = problems[0].slice(0, colon);
+    const first = alert.getByRole("listitem").first();
+    await expect(first).toHaveText(
+      new RegExp(`^${escapeRegExp(STEP_LABELS[step] ?? step)}: `),
+    );
+    await expect(first).toContainText(
+      problems[0].slice(problems[0].lastIndexOf(": ") + 2),
+    );
     await expect(panel).not.toContainText("Приключение опубликовано");
   } finally {
     await context.close();
@@ -1718,8 +1776,13 @@ test("конструктор III: пределы боя на настоящем 
     });
     const alert = page.getByRole("alert");
     await expect(alert).toContainText("Данные раздела не прошли проверку.");
+    // Путь поля — словами формы (manual B4 nit): сообщение сервера как есть, без пути схемы.
     for (const problem of body.problems)
-      await expect(alert).toContainText(problem);
+      await expect(alert).toContainText(
+        problem.slice(problem.indexOf(": ") + 2),
+      );
+    await expect(alert).toContainText("Бои → «fabian-fight» → Монстры");
+    await expect(alert).not.toContainText("encounters.0");
     return body.problems;
   };
 

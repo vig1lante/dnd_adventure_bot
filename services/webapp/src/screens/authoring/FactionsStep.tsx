@@ -58,6 +58,7 @@ export function FactionsStep({
         create={newFaction}
         addLabel="Добавить фракцию"
         itemLabel={(faction, index) => faction.name || `Фракция ${index + 1}`}
+        refOf={(faction) => `faction:${faction.id}`}
         actions={(faction, label) =>
           savedIds.has(faction.id) && (
             <LockToggle

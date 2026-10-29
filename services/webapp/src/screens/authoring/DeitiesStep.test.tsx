@@ -256,7 +256,7 @@ describe("шаг «Боги»: пределы и снятие закреплен
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Данные раздела не прошли проверку.");
-    expect(alert).toHaveTextContent("deities: List should have at most 6");
+    expect(alert).toHaveTextContent("Боги: List should have at most 6");
     const sent = callsTo(server, "PUT", PATH)[0].body as { data: unknown[] };
     expect(sent.data).toHaveLength(7);
     expect(

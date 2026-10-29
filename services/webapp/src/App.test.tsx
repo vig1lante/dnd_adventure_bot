@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import type { ReactElement } from "react";
 import App from "./App";
@@ -519,11 +519,12 @@ describe("каркас экранов", () => {
       );
     });
 
+    // Порядок «В» нижней панели (решение владельца на B10.1.gate): «Дневник» последний.
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "Рассказ",
-      "Дневник",
       "Персонаж",
       "Отряд",
+      "Дневник",
     ]);
     expect(screen.getByText("Обсуждение")).toBeInTheDocument();
   });
@@ -634,5 +635,131 @@ describe("хранилище", () => {
     show({ screen: "create", gameId: "g1" });
 
     expect(useGame.getState().notice).toBeNull();
+  });
+});
+
+// --- настройки интерфейса (B10.3): кнопка в шапке и применение при запуске ---
+
+describe("настройки интерфейса", () => {
+  const root = document.documentElement;
+
+  afterEach(() => {
+    delete root.dataset.textSize;
+    delete root.dataset.contrast;
+  });
+
+  test("при запуске сохранённые размер текста и контраст сразу на корне страницы", async () => {
+    window.localStorage.setItem("dnd-ui-text-size", "huge");
+    window.localStorage.setItem("dnd-ui-contrast", "high");
+
+    renderApp(promptServer());
+    await screen.findByText(HINT);
+
+    expect(root.dataset.textSize).toBe("huge");
+    expect(root.dataset.contrast).toBe("high");
+  });
+
+  test("кнопка «Настройки» в шапке открывает панель на любом экране, даже до входа", async () => {
+    renderApp(promptServer());
+    await screen.findByText(HINT);
+    // Шапка лежит внутри main, поэтому ориентира banner у неё нет: ищем по самому элементу.
+    const header = document.querySelector<HTMLElement>(".app-header")!;
+    const open = within(header).getByRole("button", { name: "Настройки" });
+    expect(open).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("region", { name: "Настройки" })).toBeNull();
+
+    fireEvent.click(open);
+
+    const panel = screen.getByRole("region", { name: "Настройки" });
+    expect(open).toHaveAttribute("aria-expanded", "true");
+    expect(open).toHaveAttribute("aria-controls", panel.id);
+    expect(panel).toHaveFocus();
+    // Экран под панелью не пропал: игра и её сокет живут, пока игрок в настройках.
+    expect(screen.getByText(HINT)).toBeInTheDocument();
+  });
+
+  test("«Готово» закрывает панель и возвращает фокус на кнопку в шапке", async () => {
+    renderApp(promptServer());
+    await screen.findByText(HINT);
+    const open = screen.getByRole("button", { name: "Настройки" });
+    fireEvent.click(open);
+
+    fireEvent.click(screen.getByRole("button", { name: "Готово" }));
+
+    expect(screen.queryByRole("region", { name: "Настройки" })).toBeNull();
+    expect(open).toHaveAttribute("aria-expanded", "false");
+    expect(open).toHaveFocus();
+  });
+
+  test("выбор в панели действует сразу и переживает перезагрузку страницы", async () => {
+    const first = renderApp(promptServer());
+    await screen.findByText(HINT);
+    fireEvent.click(screen.getByRole("button", { name: "Настройки" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Крупный" }));
+    expect(root.dataset.textSize).toBe("large");
+
+    // «Перезагрузка»: страница новая, атрибутов нет, хранилище осталось.
+    first.unmount();
+    delete root.dataset.textSize;
+    renderApp(promptServer());
+    await screen.findByText(HINT);
+
+    expect(root.dataset.textSize).toBe("large");
+  });
+});
+
+// --- финальное покрытие блока B10 (B10.coverage): настройки до первой отрисовки и хранилище ---
+
+describe("настройки интерфейса: до первой отрисовки и что лежит в хранилище", () => {
+  const root = document.documentElement;
+  const SETTINGS_KEYS = [
+    "dnd-ui-contrast",
+    "dnd-ui-text-size",
+    "dnd-ui-vibration",
+  ];
+
+  afterEach(() => {
+    delete root.dataset.textSize;
+    delete root.dataset.contrast;
+  });
+
+  test("сохранённые размер и контраст стоят на корне раньше первых эффектов экранов", async () => {
+    window.localStorage.setItem("dnd-ui-text-size", "large");
+    window.localStorage.setItem("dnd-ui-contrast", "high");
+    // readInitData зовут эффекты приложения и экрана входа (useEffect). Эффекты идут после
+    // отрисовки, а layout-эффекты — до неё: атрибуты должны уже стоять при первом же вызове.
+    const seen: (string | undefined)[][] = [];
+
+    renderApp(promptServer(), {
+      readInitData: () => {
+        seen.push([root.dataset.textSize, root.dataset.contrast]);
+        return null;
+      },
+    });
+    await screen.findByText(HINT);
+
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen).toEqual(seen.map(() => ["large", "high"]));
+  });
+
+  test("после входа из Telegram и смены всех настроек в хранилище только ключи настроек: ни токена, ни initData", async () => {
+    const server = fakeServer({
+      "POST /api/auth/telegram": { json: login("Лира") },
+      "GET /api/games": NO_GAMES,
+    });
+    renderApp(server, { readInitData: () => INIT_DATA });
+    await screen.findByRole("heading", { name: "Мои игры" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Настройки" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Очень крупный" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Высокий контраст" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Вибрация" }));
+
+    expect(Object.keys(window.localStorage).sort()).toEqual(SETTINGS_KEYS);
+    expect(window.sessionStorage).toHaveLength(0);
+    const stored = JSON.stringify(Object.entries(window.localStorage));
+    expect(stored).not.toContain(login("Лира").token);
+    expect(stored).not.toContain("query_id");
+    expect(stored).not.toContain("hash=");
   });
 });

@@ -3,7 +3,11 @@ import { useApi } from "../api/context";
 import type { GameSummary, PlayerSummary } from "../api/types";
 import { connectionLost } from "../components/access";
 import { ReconnectingNote } from "../components/StatusBar";
-import { RETRY_PATIENCE_MS, useStaysFor } from "../components/waiting";
+import {
+  RETRY_PATIENCE_MS,
+  useStaysFor,
+  useThinking,
+} from "../components/waiting";
 import { followGame, gameStage, leavingGame, useGame } from "../store/game";
 import type { GameView } from "../store/game";
 import {
@@ -12,9 +16,9 @@ import {
   Badge,
   Button,
   Card,
-  EmptyState,
-  Loading,
   Panel,
+  Skeleton,
+  Waiting,
 } from "../ui";
 import type { BadgeProps } from "../ui";
 import { Switch } from "./fields";
@@ -55,49 +59,63 @@ interface WeavingProps {
   isHost: boolean;
 }
 
+/**
+ * Начало игры: мастер вплетает героев в мир. Пока он думает — то же «Мастер думает…», что и в
+ * игре (фраза и время ожидания); через минуту хост получает «Повторить» в той же карточке. Сбой
+ * мастера — сообщение и «Повторить» хосту сразу.
+ */
 function Weaving({ gameId, game, turnPhase, isHost }: WeavingProps) {
   const api = useApi();
   const { busy, error, run } = useAction();
   const failed = turnPhase === "dm_failed";
-  const waitedLong = useStaysFor(
-    failed ? null : (turnPhase ?? "none"),
-    RETRY_PATIENCE_MS,
-  );
+  // Сменилась фаза хода — ожидание (и минута до «Повторить») начинается заново.
+  const waitKey = failed ? null : (turnPhase ?? "none");
+  const waitedLong = useStaysFor(waitKey, RETRY_PATIENCE_MS);
+  const thinking = useThinking(waitKey);
   const canRetry = isHost && (failed || waitedLong);
 
-  return (
-    <Card title={game.adventure_title} icon="scroll">
-      <div role="status">
-        <EmptyState
-          icon="candle"
-          title="Мастер связывает ваши истории с миром…"
-          titleAs="h3"
+  const retry = (
+    <>
+      {error !== null && <Alert>{error}</Alert>}
+      {canRetry && (
+        <Button
+          busy={busy}
+          block
+          onClick={() => void run(() => api.hostAction(gameId, "retry"))}
         >
-          Это займёт немного времени: игра начнётся сама.
-        </EmptyState>
-      </div>
-      <div className="screen-stack">
-        {failed && (
-          <Alert>
-            Мастер не справился с началом игры.
-            {isHost ? " Попробуйте ещё раз." : " Хост может повторить попытку."}
-          </Alert>
-        )}
-        {!failed && waitedLong && isHost && (
-          <p className="screen-muted">Мастер думает дольше обычного.</p>
-        )}
-        {error !== null && <Alert>{error}</Alert>}
-        {canRetry && (
-          <Button
-            busy={busy}
-            block
-            onClick={() => void run(() => api.hostAction(gameId, "retry"))}
-          >
-            Повторить
-          </Button>
-        )}
-      </div>
-    </Card>
+          Повторить
+        </Button>
+      )}
+    </>
+  );
+
+  return (
+    <>
+      <Card title={game.adventure_title} icon="scroll">
+        <div className="screen-stack">
+          <p className="screen-muted">
+            Мастер вплетает ваших героев в мир. Игра начнётся сама.
+          </p>
+          {failed && (
+            <Alert>
+              Мастер не справился с началом игры.
+              {isHost
+                ? " Попробуйте ещё раз."
+                : " Хост может повторить попытку."}
+            </Alert>
+          )}
+          {failed && retry}
+        </div>
+      </Card>
+      {!failed && (
+        <Waiting {...thinking}>
+          {waitedLong && isHost && (
+            <p className="screen-muted">Мастер думает дольше обычного.</p>
+          )}
+          {retry}
+        </Waiting>
+      )}
+    </>
   );
 }
 
@@ -402,7 +420,7 @@ export function Lobby() {
         </Panel>
       )}
       {liveError !== null && <Alert>{liveError}</Alert>}
-      {view === null && <Loading label="Подключаемся к лобби…" />}
+      {view === null && <Skeleton label="Подключаемся к лобби…" />}
       {view !== null && gameId !== null && stage === "lobby" && (
         <LobbyBody gameId={gameId} game={view.game} />
       )}
@@ -414,7 +432,7 @@ export function Lobby() {
           isHost={isHost}
         />
       )}
-      {stage === "game" && <Loading label="Открываем игру…" />}
+      {stage === "game" && <Skeleton label="Открываем игру…" />}
     </>
   );
 }

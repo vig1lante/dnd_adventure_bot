@@ -671,7 +671,7 @@ describe("шаг «Бои и боссы»: запись двух раздело�
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Сохранено: свои монстры. Не сохранено: бои — обновите черновик и повторите правку.",
+        "Сохранено: свои монстры. Не сохранено: бои — правки остались в форме: исправьте и сохраните раздел снова или обновите черновик.",
       ),
     ).toBeInTheDocument();
   });
@@ -683,7 +683,7 @@ describe("шаг «Бои и боссы»: запись двух раздело�
         json: {
           detail: "Раздел не прошёл проверку.",
           code: "invalid_data",
-          problems: ["0.monsters.0.count: не больше 20"],
+          problems: ["encounters.0.monsters.0.count: не больше 20"],
         },
       },
     });
@@ -695,7 +695,9 @@ describe("шаг «Бои и боссы»: запись двух раздело�
       "Раздел не прошёл проверку.",
     );
     expect(
-      screen.getByText("0.monsters.0.count: не больше 20"),
+      screen.getByText(
+        "Бои → «crypt-ghouls» → Монстры → № 1 → Сколько: не больше 20",
+      ),
     ).toBeInTheDocument();
     expect(
       within(group(form, "Бой crypt-ghouls")).getByRole("textbox", {
@@ -946,7 +948,7 @@ describe("«Бои и боссы»: пределы сервера (B6 §5) — �
       "Данные раздела не прошли проверку.",
     );
     expect(
-      screen.getByText("monsters: не больше 6 элементов"),
+      screen.getByText("Свои монстры: не больше 6 элементов"),
     ).toBeInTheDocument();
     expect(puts(server)).toEqual([MONSTERS]);
     expect(screen.queryByText(/Сохранено:/)).toBeNull();
@@ -960,7 +962,7 @@ describe("«Бои и боссы»: пределы сервера (B6 §5) — �
     ).toHaveValue("Страж");
   });
 
-  test("отказ второй записи (пределы боя): все строки problems и текст «Сохранено: свои монстры…» с «Обновить»", async () => {
+  test("отказ второй записи (пределы боя): все строки problems словами формы, текст «Сохранено: свои монстры…» с «Обновить»; правка боёв остаётся, повтор пишет только бои", async () => {
     const problems = [
       "encounters.0.monsters: не больше 4 элементов",
       "encounters.0.monsters: всего монстров в бою — не больше 20",
@@ -988,11 +990,15 @@ describe("«Бои и боссы»: пределы сервера (B6 §5) — �
       within(alert)
         .getAllByRole("listitem")
         .map((row) => row.textContent),
-    ).toEqual(problems);
+    ).toEqual([
+      "Бои → «crypt-ghouls» → Монстры: не больше 4 элементов",
+      "Бои → «crypt-ghouls» → Монстры: всего монстров в бою — не больше 20",
+      "Бои: не больше 8 элементов",
+    ]);
     expect(puts(server)).toEqual([MONSTERS, ENCOUNTERS]);
     expect(
       screen.getByText(
-        "Сохранено: свои монстры. Не сохранено: бои — обновите черновик и повторите правку.",
+        "Сохранено: свои монстры. Не сохранено: бои — правки остались в форме: исправьте и сохраните раздел снова или обновите черновик.",
       ),
     ).toBeInTheDocument();
     expect(
@@ -1000,5 +1006,27 @@ describe("«Бои и боссы»: пределы сервера (B6 §5) — �
     ).toBeInTheDocument();
     // Диалога конфликта нет: это отказ данных, а не чужая версия.
     expect(screen.queryByRole("alertdialog")).toBeNull();
+
+    // Ревью B6 R7: несохранённая правка боёв не пропала, монстры — уже как на сервере.
+    const tactics = () =>
+      within(group(form, "Бой crypt-ghouls")).getByRole("textbox", {
+        name: "Тактика",
+      });
+    expect(tactics()).toHaveValue("Бегут");
+    expect(
+      within(group(form, "Страж")).getByRole("textbox", { name: "Название" }),
+    ).toHaveValue("Страж");
+
+    // Повтор: монстры уже записаны — уходят только бои, с версией после записи монстров.
+    typeIn(group(form, "Бой crypt-ghouls"), "Тактика", "Бегут к выходу");
+    save(form);
+    await vi.waitFor(() =>
+      expect(callsTo(server, "PUT", ENCOUNTERS)).toHaveLength(2),
+    );
+    expect(callsTo(server, "PUT", MONSTERS)).toHaveLength(1);
+    expect(callsTo(server, "PUT", ENCOUNTERS)[1].body).toMatchObject({
+      version: 4,
+      data: [{ ...GHOULS, tactics: "Бегут к выходу" }],
+    });
   });
 });

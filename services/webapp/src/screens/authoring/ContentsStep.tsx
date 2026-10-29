@@ -14,13 +14,24 @@ import { LockToggle } from "./LockToggle";
  * Выбор локации живёт над формой: после записи форма начинается заново с данными сервера, а
  * открытой остаётся та же локация. Локации здесь не добавляются, не удаляются и не
  * переименовываются (это «Карта»), а id сохранённых локаций не повторяются: выбор — по id.
+ * Ссылка находки «Проверки» (`location:<id>/…`) открывает локацию своей сущности.
  */
 export function ContentsStep(props: StepFormProps) {
-  const { draft } = props;
+  const { draft, focus = null } = props;
   const [selected, setSelected] = useState(draft.locations[0]?.id ?? "");
+  // Новый переход по ссылке выбирает локацию в том же рендере: редактор ищет сущность сразу
+  // после него.
+  const [followed, setFollowed] = useState(focus);
+  if (focus !== followed) {
+    setFollowed(focus);
+    const [kind, id] = focus?.ref.split("/")[0].split(":") ?? [];
+    if (kind === "location" && draft.locations.some((item) => item.id === id)) {
+      setSelected(id);
+    }
+  }
   return (
     <ContentsForm
-      key={JSON.stringify([draft.locations, draft.items])}
+      key={props.contentKey}
       {...props}
       selected={selected}
       onSelect={setSelected}

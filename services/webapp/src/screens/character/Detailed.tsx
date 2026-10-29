@@ -35,7 +35,8 @@ import { useBackstoryHelp } from "./useBackstoryHelp";
  * Подробное создание героя по шагам. Клиент только подсказывает (что ещё не выбрано,
  * сколько осталось очков); выбор целиком уходит на сервер, и его проверка — окончательная:
  * отказ правил (422) показывается списком проблем, выбор при этом не теряется.
- * Последний шаг — «Итог»: выбор по разделам с «Изменить» и кнопка создания.
+ * Последний шаг — «Итог»: выбор по разделам с «Изменить» и кнопка создания; после «Изменить»
+ * на шаге есть «К итогу» — вернуться без прохода по всем шагам.
  * «Изменить героя» открывает мастер сразу на «Итоге» с прежним выбором (`initial`),
  * иначе форма пустая и начинается с расы.
  */
@@ -56,6 +57,12 @@ export function Detailed({
   const [current, setCurrent] = useState<StepId>(
     initial === undefined ? "species" : "summary",
   );
+  // Игрок пришёл на шаг из «Итога» по «Изменить»: обратно — одной кнопкой «К итогу».
+  const [editing, setEditing] = useState(false);
+  const edit = (step: StepId) => {
+    setEditing(true);
+    setCurrent(step);
+  };
   const submit = useAction();
 
   const update = useCallback(
@@ -112,7 +119,7 @@ export function Detailed({
         draft={draft}
         options={options}
         steps={steps}
-        onEdit={setCurrent}
+        onEdit={edit}
       />
     ),
   };
@@ -156,12 +163,23 @@ export function Detailed({
               Создать героя
             </Button>
           ) : (
-            <Button
-              disabled={!canGoOn || busy}
-              onClick={() => setCurrent(steps[index + 1])}
-            >
-              Далее
-            </Button>
+            <>
+              {editing && (
+                <Button
+                  variant="secondary"
+                  disabled={!canGoOn || busy}
+                  onClick={() => setCurrent("summary")}
+                >
+                  К итогу
+                </Button>
+              )}
+              <Button
+                disabled={!canGoOn || busy}
+                onClick={() => setCurrent(steps[index + 1])}
+              >
+                Далее
+              </Button>
+            </>
           )}
         </div>
       </div>

@@ -990,6 +990,38 @@ describe("навыки и выборы класса", () => {
     ).toBeEnabled();
   });
 
+  test("у навыка на выбор (Умелость) есть «Подробнее» выбранного навыка, как у списков с отметками", () => {
+    // Воин: компетентности нет, а «Медицины» нет среди навыков класса — кнопка только у Умелости.
+    openSkills(/Человек/, /Воин/);
+    expect(
+      screen.queryByRole("button", { name: /^Подробнее: Медицина/ }),
+    ).toBeNull();
+
+    fireEvent.change(screen.getByLabelText(/Навык на выбор/), {
+      target: { value: "medicine" },
+    });
+    const more = screen.getAllByRole("button", { name: "Подробнее: Медицина" });
+    expect(more).toHaveLength(1);
+    fireEvent.click(more[0]);
+
+    const card = screen.getByRole("article", { name: "Медицина" });
+    expect(card).toHaveTextContent("Перевязать рану, узнать болезнь.");
+    expect(card).toHaveTextContent(/Характеристика\s*Мудрость/);
+  });
+
+  test("боевой стиль: подпись варианта — только название, описание одно — в «Подробнее»", () => {
+    openSkills(/Эльф/, /Воин/);
+    const styles = screen.getByRole("radiogroup", { name: "Боевой стиль" });
+    // Описание не повторяется: до «Подробнее» его на экране нет.
+    expect(styles).not.toHaveTextContent("+2 к дальним атакам.");
+
+    fireEvent.click(
+      within(styles).getByRole("button", { name: "Подробнее: Стрельба" }),
+    );
+
+    expect(within(styles).getAllByText("+2 к дальним атакам.")).toHaveLength(1);
+  });
+
   test("у эльфа поля навыка на выбор нет", () => {
     openSkills();
 
@@ -1368,6 +1400,48 @@ describe("итог", () => {
     expect(progress()).toHaveTextContent("Шаг 10 из 10: Итог");
     expect(section("Характер и внешность")).toHaveTextContent("Имя: Лира");
     expect(button("Создать героя")).toBeEnabled();
+  });
+
+  test("после «Изменить» — короткий путь «К итогу»: не нужно проходить все шаги заново", () => {
+    renderDetailed();
+    reachSummary();
+
+    editIn("Предыстория");
+    expect(progress()).toHaveTextContent("Шаг 3 из 10: Предыстория");
+    click("К итогу");
+
+    expect(progress()).toHaveTextContent("Шаг 10 из 10: Итог");
+    expect(section("Характер и внешность")).toHaveTextContent("Имя: Лира");
+    expect(button("Создать героя")).toBeEnabled();
+  });
+
+  test("«К итогу» ждёт законченного шага, как «Далее»", () => {
+    renderDetailed();
+    reachSummary();
+
+    editIn("Навыки и выборы класса");
+    expect(button("К итогу")).toBeEnabled();
+    tick(/Навыки класса/, /Акробатика/); // снял отметку: навыков меньше нормы
+
+    expect(button("К итогу")).toBeDisabled();
+    expect(button("Далее")).toBeDisabled();
+  });
+
+  test("при первом проходе «К итогу» нет: итога ещё не было", () => {
+    renderDetailed();
+    chooseOrigin();
+
+    expect(screen.queryByRole("button", { name: "К итогу" })).toBeNull();
+  });
+
+  test("«Изменить героя»: с «Итога» в раздел и сразу обратно", () => {
+    renderDetailed({}, OPTIONS, STORED_DETAILED);
+
+    editIn("Раса");
+    click("К итогу");
+
+    expect(progress()).toHaveTextContent("Шаг 10 из 10: Итог");
+    expect(section("Раса")).toHaveTextContent("Эльф");
   });
 
   test("правка через «Изменить» уходит на сервер", async () => {

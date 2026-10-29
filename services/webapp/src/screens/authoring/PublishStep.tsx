@@ -2,17 +2,23 @@ import { useId, useState } from "react";
 import { ApiError } from "../../api/client";
 import { useApi } from "../../api/context";
 import type { Draft, JournalFields, PublishResult } from "../../api/types";
-import { Alert, Button, Loading } from "../../ui";
+import { Button, ErrorState, Skeleton } from "../../ui";
 import { ErrorAlert } from "../fields";
 import { useAction } from "../hooks";
-import { AlertDialog } from "./fields";
+import { AlertDialog, ConflictDialog } from "./fields";
 import { ExportButton } from "./ImportExport";
 import { openItems } from "./ItemsStep";
+import { publishProblem } from "./problems";
 import { GoButton, useDraftReport } from "./ReviewStep";
 import type { EditorScreen } from "./StepNav";
 
-// Отказы публикации, которые исправляют на «Замысле»: id не задан или занят (B6 §6).
-const FIX_ON_CONCEPT = new Set(["no_adventure_id", "id_taken"]);
+// Отказы публикации, которые исправляют на «Замысле»: id не задан, занят или уже закреплён
+// прежней публикацией (B6 §6).
+const FIX_ON_CONCEPT = new Set([
+  "no_adventure_id",
+  "id_taken",
+  "adventure_id_locked",
+]);
 
 /** «Что знают игроки» сущностей с непустым полем: «Локация «Склеп»: …». */
 function publicRows(draft: Draft): string[] {
@@ -67,20 +73,29 @@ function PlayersSee({ draft }: { draft: Draft }) {
   );
 }
 
+/** Поле «Замысла», к которому ведут кнопки перехода «Публикации»: id задают там. */
+const ADVENTURE_ID_FIELD = "id приключения";
+
 interface PublishStepProps {
   draft: Draft;
-  onGo: (screen: EditorScreen) => void;
+  /** Переход к шагу; `field` — подпись поля, на которое встанет фокус. */
+  onGo: (screen: EditorScreen, field?: string) => void;
+  /** Перечитать черновик: публикация отвечает 409 `version_conflict`, если он изменился. */
+  onReload: () => void;
 }
 
 /**
  * Экран «Публикация»: что увидят игроки, «Опубликовать» (закрыта, пока проверка находит ошибки
  * или не задан id), подтверждение для предметов, лежащих открыто, ответы сервера и архив.
  */
-export function PublishStep({ draft, onGo }: PublishStepProps) {
+export function PublishStep({ draft, onGo, onReload }: PublishStepProps) {
   const api = useApi();
+  const toConcept = (screen: EditorScreen) => onGo(screen, ADVENTURE_ID_FIELD);
   const [report, reload] = useDraftReport(draft.id);
   const { busy, error, problems, run } = useAction();
   const [failure, setFailure] = useState<string | undefined>();
+  // Черновик изменился после чтения публикацией: диалог обновления, как у записи раздела.
+  const [conflict, setConflict] = useState(false);
   const [published, setPublished] = useState<PublishResult | null>(null);
   const [confirming, setConfirming] = useState(false);
   const open = openItems(draft);
@@ -91,12 +106,18 @@ export function PublishStep({ draft, onGo }: PublishStepProps) {
   const publish = () =>
     run(async () => {
       setConfirming(false);
+      setConflict(false);
       setFailure(undefined);
       setPublished(null);
       try {
         setPublished(await api.publish(draft.id));
       } catch (caught) {
-        setFailure(caught instanceof ApiError ? caught.code : undefined);
+        const code = caught instanceof ApiError ? caught.code : undefined;
+        if (code === "version_conflict") {
+          setConflict(true);
+          return;
+        }
+        setFailure(code);
         throw caught;
       }
     });
@@ -110,22 +131,20 @@ export function PublishStep({ draft, onGo }: PublishStepProps) {
             Сначала задайте id приключения на шаге «Замысел».
           </p>
           <div>
-            <GoButton screen="concept" onGo={onGo} />
+            <GoButton screen="concept" onGo={toConcept} />
           </div>
         </div>
       ) : (
         <p className="screen-muted">id приключения: {draft.adventure_id}</p>
       )}
-      {report.status === "loading" && <Loading label="Проверяем черновик…" />}
+      {report.status === "loading" && (
+        <Skeleton label="Проверяем черновик…" rows={1} />
+      )}
       {report.status === "error" && (
-        <div className="screen-stack">
-          <Alert>{report.message}</Alert>
-          <div>
-            <Button variant="secondary" onClick={reload}>
-              Повторить
-            </Button>
-          </div>
-        </div>
+        <ErrorState title="Не удалось проверить черновик" onRetry={reload}>
+          <p>{report.message}</p>
+          <p>Пока проверки нет, публикация закрыта.</p>
+        </ErrorState>
       )}
       {/* Проверка отбрасывает находки пустых шагов (B4 §8), публикация проверяет всё (B6 §6). */}
       {report.status === "ready" && report.data.readiness_percent < 100 && (
@@ -194,10 +213,16 @@ export function PublishStep({ draft, onGo }: PublishStepProps) {
           </p>
         </div>
       )}
-      <ErrorAlert error={error} problems={problems} />
+      {conflict && (
+        <ConflictDialog
+          onRefresh={onReload}
+          onCancel={() => setConflict(false)}
+        />
+      )}
+      <ErrorAlert error={error} problems={problems.map(publishProblem)} />
       {failure !== undefined && FIX_ON_CONCEPT.has(failure) && (
         <div>
-          <GoButton screen="concept" onGo={onGo} />
+          <GoButton screen="concept" onGo={toConcept} />
         </div>
       )}
       <ExportButton draft={draft} />

@@ -1,8 +1,13 @@
+import { useEffect, useId, useState } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type { PlayerAction } from "../api/types";
 import { TextAreaField, Switch } from "../screens/fields";
+import "../screens/screens.css";
 import { useGame } from "../store/game";
 import type { GameView } from "../store/game";
+import { useOnScreenKeyboardField } from "../theme/keyboard";
 import { Alert, Badge, Button, Card } from "../ui";
+import { classNames } from "../ui/classNames";
 import { composerAccess } from "./access";
 import "./game.css";
 import { useDraft } from "./useDraft";
@@ -27,6 +32,62 @@ function sealedLabel(action: PlayerAction | null): string | null {
 export interface ActionComposerProps {
   gameId: string;
   view: GameView;
+}
+
+/**
+ * Сколько пикселей снизу окна закрывает экранная клавиатура, пока `active`. iOS под клавиатуру
+ * окно не сжимает — сжимается только видимая часть (visualViewport), и прижатое к низу окна
+ * поле ушло бы под клавиатуру. Android окно сжимает сам: там отступ выходит нулевым. Без
+ * visualViewport (старый WebView) — ноль.
+ */
+function useKeyboardInset(active: boolean): number {
+  const [inset, setInset] = useState(0);
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!active || viewport == null) return;
+    const measure = () =>
+      setInset(
+        Math.max(
+          0,
+          Math.round(window.innerHeight - viewport.height - viewport.offsetTop),
+        ),
+      );
+    measure();
+    viewport.addEventListener("resize", measure);
+    viewport.addEventListener("scroll", measure);
+    return () => {
+      viewport.removeEventListener("resize", measure);
+      viewport.removeEventListener("scroll", measure);
+    };
+  }, [active]);
+  return active ? inset : 0;
+}
+
+/**
+ * Обёртка поля хода: пока игрок пишет на телефоне, она липнет к верхнему краю клавиатуры
+ * (стили — `.composer-dock--on` в screens.css). Прилипает, только когда клавиатуру открыло
+ * поле внутри этой обёртки, а не другое поле экрана. Состояние клавиатуры не меняется
+ * посреди касания (`useOnScreenKeyboardField`), поэтому тап по «Тайно» или «Готов» не
+ * сдвигает кнопку из-под пальца. Обёртка одна и та же в обоих видах карточки: фокус в поле
+ * не теряется, когда она прилипает.
+ */
+function ComposerDock({ children }: { children: ReactNode }) {
+  const id = useId();
+  const field = useOnScreenKeyboardField();
+  const docked = field?.closest(".composer-dock")?.id === id;
+  const inset = useKeyboardInset(docked);
+  const style = docked
+    ? ({ "--keyboard-inset": `${inset}px` } as CSSProperties)
+    : undefined;
+  return (
+    <div
+      id={id}
+      className={classNames("composer-dock", docked && "composer-dock--on")}
+      style={style}
+    >
+      {children}
+    </div>
+  );
 }
 
 /**
@@ -65,88 +126,92 @@ export function ActionComposer({ gameId, view }: ActionComposerProps) {
 
   if (sealed !== null && view.action !== null) {
     return (
-      <Card title={sealed} icon="scroll" className="composer">
-        <div className="composer__stack">
-          {view.action.secret && view.action.text !== "" && (
-            <p>
-              <Badge tone="seal" icon="seal">
-                Тайно
-              </Badge>
-            </p>
-          )}
-          {view.action.text !== "" && (
-            <p className="composer__sealed-text">{view.action.text}</p>
-          )}
-          {draft.error !== null && <Alert>{draft.error}</Alert>}
-          {canChange && (
-            <div className="composer__actions">
-              <Button
-                variant="secondary"
-                busy={draft.busy}
-                onClick={() => void draft.edit()}
-              >
-                Изменить
-              </Button>
-            </div>
-          )}
-        </div>
-      </Card>
+      <ComposerDock>
+        <Card title={sealed} icon="scroll" className="composer">
+          <div className="composer__stack">
+            {view.action.secret && view.action.text !== "" && (
+              <p>
+                <Badge tone="seal" icon="seal">
+                  Тайно
+                </Badge>
+              </p>
+            )}
+            {view.action.text !== "" && (
+              <p className="composer__sealed-text">{view.action.text}</p>
+            )}
+            {draft.error !== null && <Alert>{draft.error}</Alert>}
+            {canChange && (
+              <div className="composer__actions">
+                <Button
+                  variant="secondary"
+                  busy={draft.busy}
+                  onClick={() => void draft.edit()}
+                >
+                  Изменить
+                </Button>
+              </div>
+            )}
+          </div>
+        </Card>
+      </ComposerDock>
     );
   }
 
   const { values } = draft;
   const locked = !access.open;
   return (
-    <Card title="Твой ход" icon="d20" className="composer">
-      <div className="composer__stack">
-        <TextAreaField
-          label="Что делает твой персонаж?"
-          hint="Можно надиктовать с клавиатуры"
-          value={values.text}
-          maxLength={ACTION_MAX_CHARS}
-          disabled={locked}
-          onChange={(event) => draft.change({ text: event.target.value })}
-        />
-        <Switch
-          label="Тайно"
-          hint="Текст хода увидит только мастер."
-          checked={values.secret}
-          disabled={locked}
-          onChange={(secret) => draft.change({ secret })}
-        />
-        {hasInspiration && (
-          <Switch
-            label="Вдохновение"
-            hint="Потратить вдохновение на этот ход."
-            checked={values.inspiration}
+    <ComposerDock>
+      <Card title="Твой ход" icon="d20" className="composer">
+        <div className="composer__stack">
+          <TextAreaField
+            label="Что делает твой персонаж?"
+            hint="Можно надиктовать с клавиатуры"
+            value={values.text}
+            maxLength={ACTION_MAX_CHARS}
             disabled={locked}
-            onChange={(inspiration) => draft.change({ inspiration })}
+            onChange={(event) => draft.change({ text: event.target.value })}
           />
-        )}
-        {access.note !== null && (
-          <p role="status" className="composer__note">
-            {access.note}
-          </p>
-        )}
-        {draft.error !== null && <Alert>{draft.error}</Alert>}
-        <div className="composer__actions">
-          <Button
-            busy={draft.busy}
-            disabled={locked || values.text.trim() === ""}
-            onClick={() => void draft.submit()}
-          >
-            Готов
-          </Button>
-          <Button
-            variant="secondary"
-            busy={draft.busy}
+          <Switch
+            label="Тайно"
+            hint="Текст хода увидит только мастер."
+            checked={values.secret}
             disabled={locked}
-            onClick={() => void draft.pass()}
-          >
-            Пас
-          </Button>
+            onChange={(secret) => draft.change({ secret })}
+          />
+          {hasInspiration && (
+            <Switch
+              label="Вдохновение"
+              hint="Потратить вдохновение на этот ход."
+              checked={values.inspiration}
+              disabled={locked}
+              onChange={(inspiration) => draft.change({ inspiration })}
+            />
+          )}
+          {access.note !== null && (
+            <p role="status" className="composer__note">
+              {access.note}
+            </p>
+          )}
+          {draft.error !== null && <Alert>{draft.error}</Alert>}
+          <div className="composer__actions">
+            <Button
+              busy={draft.busy}
+              disabled={locked || values.text.trim() === ""}
+              onClick={() => void draft.submit()}
+            >
+              Готов
+            </Button>
+            <Button
+              variant="secondary"
+              busy={draft.busy}
+              disabled={locked}
+              onClick={() => void draft.pass()}
+            >
+              Пас
+            </Button>
+          </div>
         </div>
-      </div>
-    </Card>
+      </Card>
+    </ComposerDock>
   );
 }

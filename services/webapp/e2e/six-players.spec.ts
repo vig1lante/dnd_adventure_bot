@@ -701,10 +701,10 @@ test("шестеро друзей проходят вечер: игра, рау�
       expect(village.visited_turn, "деревня: были здесь").toBe(0);
       expect(cemetery.visited_turn, "кладбище: ещё не были").toBeNull();
 
-      // «Дневник» стоит сразу после «Рассказа».
+      // Нижняя панель в порядке «В» (решение владельца на B10.1.gate): «Дневник» последний.
       await expect(
         page.getByRole("tablist", { name: "Разделы игры" }).getByRole("tab"),
-      ).toHaveText(["Рассказ", "Дневник", "Персонаж", "Отряд"]);
+      ).toHaveText(["Рассказ", "Персонаж", "Отряд", "Дневник"]);
       await tabOf(page, "Дневник").click();
       const journal = journalOf(page);
       await expect(

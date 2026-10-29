@@ -1,15 +1,18 @@
 import type { PhaseView, RestKind, TurnPhase } from "../api/types";
+import { THINKING_TITLE } from "./waiting";
 
 const TURN_LABELS: Record<TurnPhase, string> = {
   discussion: "Обсуждение",
   collecting: "Сбор ходов",
-  resolving: "Мастер думает…",
+  resolving: THINKING_TITLE,
   dm_failed: "Мастер не справился",
   combat_wait: "Бой",
   camp: "Привал",
 };
 
-const WEAVING_LABEL = "Мастер связывает ваши истории с миром…";
+// Одна формулировка ожидания мастера на всех экранах (решение B10, §1 п. 7): и при разборе
+// хода, и при вплетении героев. Ветка нужна: кадры игры и фазы могут прийти не одновременно.
+const WEAVING_LABEL = THINKING_TITLE;
 
 /**
  * Подпись текущей фазы для строки статуса. Пауза и начало игры важнее фазы хода: на паузе

@@ -123,3 +123,43 @@ describe("липкая плашка обрыва связи (.screen-sticky)", (
     expect(rule).not.toMatch(/(?<![-\w])(transition|animation)(-[a-z]+)?\s*:/);
   });
 });
+
+// Лента для чтения вслух и поле хода над клавиатурой (B10.3): правила в общем screens.css.
+describe("лента и поле хода на телефоне", () => {
+  const screensCss = Object.fromEntries(styles)["../screens/screens.css"] ?? "";
+  const rule = (selector: string) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return (
+      new RegExp(`(?:^|\\})\\s*${escaped}\\s*\\{([^}]*)\\}`).exec(
+        screensCss,
+      )?.[1] ?? ""
+    );
+  };
+
+  test("имя героя в ленте — кнопка не меньше области нажатия в обе стороны", () => {
+    const body = rule(".feed-hero");
+    expect(body).toMatch(/min-height:\s*var\(--tap-size\)/);
+    expect(body).toMatch(/min-width:\s*var\(--tap-size\)/);
+  });
+
+  test("подчёркнуто только имя, не двоеточие; содержимое кнопки прижато к началу (без зазора перед «:»)", () => {
+    expect(rule(".feed-hero__name")).toMatch(
+      /text-decoration:\s*underline dotted/,
+    );
+    expect(rule(".feed-hero")).not.toMatch(/text-decoration:\s*underline/);
+    expect(rule(".feed-hero")).not.toMatch(/justify-content:\s*center/);
+  });
+
+  test("поле хода, пока игрок пишет, липнет к верхнему краю клавиатуры", () => {
+    const body = rule(".composer-dock--on");
+    expect(body).toMatch(/position:\s*sticky/);
+    expect(body).toMatch(/bottom:\s*var\(--keyboard-inset,\s*0px\)/);
+    expect(body).toMatch(/z-index:\s*\d+/);
+    // Движения нет: поле не «едет» за клавиатурой, а стоит над ней.
+    expect(body).not.toMatch(/(?<![-\w])(transition|animation)(-[a-z]+)?\s*:/);
+  });
+
+  test("при «меньше движения» переход к листу героя не плавный: прокрутка задаётся в коде", () => {
+    expect(screensCss).not.toMatch(/scroll-behavior:\s*smooth/);
+  });
+});

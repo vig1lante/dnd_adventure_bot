@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { ApiError, createApi, errorText } from "./api/client";
 import type { Api } from "./api/client";
 import { ApiContext } from "./api/context";
@@ -12,8 +19,18 @@ import { Game } from "./screens/Game";
 import { Lobby } from "./screens/Lobby";
 import { MyGames } from "./screens/MyGames";
 import { sessionToken, useGame } from "./store/game";
+import { applySavedSettings } from "./theme/settings";
 import { watchTelegramTheme } from "./theme/telegram";
-import { Alert, Button, Card, EmptyState, Icon, Loading } from "./ui";
+import {
+  Alert,
+  Button,
+  Card,
+  EmptyState,
+  Icon,
+  Loading,
+  Settings,
+  SettingsButton,
+} from "./ui";
 
 /** Внешний мир приложения; тесты подменяют его заглушками (сеть, Telegram SDK). */
 export interface AppDeps {
@@ -170,13 +187,34 @@ export default function App({ deps }: { deps?: Partial<AppDeps> }) {
     }
   }, [resolved]);
 
+  // Размер текста и контраст этого телефона — до первой отрисовки, чтобы экран не прыгал.
+  useLayoutEffect(applySavedSettings, []);
+
+  // Настройки открываются поверх текущего экрана, не заменяя его: игра и её сокет живут.
+  const settingsId = useId();
+  const settingsButtonId = useId();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const closeSettings = () => {
+    setSettingsOpen(false);
+    document.getElementById(settingsButtonId)?.focus();
+  };
+
   return (
     <ApiContext value={api}>
       <main className="app">
         <header className="app-header">
           <Icon name="d20" size={28} />
           <h1>DnD Adventure Bot</h1>
+          <SettingsButton
+            id={settingsButtonId}
+            expanded={settingsOpen}
+            controls={settingsId}
+            onClick={() =>
+              settingsOpen ? closeSettings() : setSettingsOpen(true)
+            }
+          />
         </header>
+        {settingsOpen && <Settings id={settingsId} onClose={closeSettings} />}
         <CurrentScreen api={api} deps={resolved} />
         {/* Лицензия SRD требует показать атрибуцию в приложении; английский текст помечен lang. */}
         <footer className="app-attribution" lang="en">

@@ -1,4 +1,4 @@
-import type { PlayerStatus, TurnPhase } from "../api/types";
+import type { PlayerStatus, SceneView, TurnPhase } from "../api/types";
 import type { GameView, LiveConnection } from "../store/game";
 import { Avatar, Badge, Icon, Panel } from "../ui";
 import type { BadgeProps } from "../ui";
@@ -52,6 +52,21 @@ function totalSecondsOf(view: GameView): number | undefined {
   return countdown === undefined ? undefined : game[countdown.seconds];
 }
 
+// «Полдень», а не «день»: иначе вышло бы «День 2, день» (решение B10.1.gate).
+const PARTS_OF_DAY: Record<SceneView["part"], string> = {
+  morning: "утро",
+  day: "полдень",
+  evening: "вечер",
+  night: "ночь",
+};
+
+/** «День 2, утро» из сцены снимка; без сцены (старый снимок) — ничего. */
+function dayPartOf(scene: SceneView | null): string | null {
+  return scene === null
+    ? null
+    : `День ${scene.day}, ${PARTS_OF_DAY[scene.part]}`;
+}
+
 /** Связь с игрой оборвалась и вернётся сама. Показывается и там, где строки статуса ещё нет. */
 export function ReconnectingNote() {
   return (
@@ -68,23 +83,28 @@ export interface StatusBarProps {
 }
 
 /**
- * Строка статуса: фаза игры и отсчёт до срока по серверным часам; она прилипает к верху
- * экрана. При обрыве связи «Переподключаемся…» стоит в ней же: игрок, прокрутивший ленту
- * вниз, видит обрыв там, где играет. Значки игроков («пишет», «готов», «пас») идут отдельным
- * рядом под ней.
+ * Строка статуса: фаза игры, день и часть суток и отсчёт до срока по серверным часам (в том
+ * числе «До конца привала»); она прилипает к верху экрана. День стоит вне живой области фазы:
+ * его не нужно зачитывать при каждой смене фазы. При обрыве связи «Переподключаемся…» стоит в
+ * ней же: игрок, прокрутивший ленту вниз, видит обрыв там, где играет. Значки игроков («пишет»,
+ * «готов», «пас») идут отдельным рядом под ней.
  */
 export function StatusBar({ view, clockOffsetMs, connection }: StatusBarProps) {
   const { phase, game, statuses } = view;
   const countdown =
     phase.turn_phase === null ? undefined : COUNTDOWNS[phase.turn_phase];
+  const day = dayPartOf(phase.scene);
 
   return (
     <>
       <Panel className="game-status">
-        <p className="game-status__phase" role="status">
-          <Icon name="hourglass" size={22} />
-          <span>{phaseLabel(phase)}</span>
-        </p>
+        <div className="game-status__head">
+          <p className="game-status__phase" role="status">
+            <Icon name="hourglass" size={22} />
+            <span>{phaseLabel(phase)}</span>
+          </p>
+          {day !== null && <span className="game-status__day">{day}</span>}
+        </div>
         <Countdown
           phase={phase}
           clockOffsetMs={clockOffsetMs}

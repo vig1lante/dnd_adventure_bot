@@ -295,7 +295,7 @@ describe("шаг «Замысел»: формат id приключения", ()
     );
     expect(
       screen.getByText(
-        "settings.adventure_id: только строчная латиница, цифры, «-» и «_», до 64 знаков",
+        "Замысел → id приключения: только строчная латиница, цифры, «-» и «_», до 64 знаков",
       ),
     ).toBeInTheDocument();
     expect(textbox(form, "id приключения")).toHaveValue("Foggy-Harbor");

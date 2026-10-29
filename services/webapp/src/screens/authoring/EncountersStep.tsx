@@ -129,6 +129,7 @@ export function EncountersStep({
         create={newEncounter}
         addLabel="Добавить бой"
         itemLabel={(encounter, index) => `Бой ${encounter.id || index + 1}`}
+        refOf={(encounter) => `encounter:${encounter.id}`}
         actions={(encounter, label) =>
           savedEncounters.has(encounter.id) && (
             <>
@@ -251,6 +252,7 @@ export function EncountersStep({
         itemLabel={(monster, index) =>
           monster.name || `Свой монстр ${index + 1}`
         }
+        refOf={(monster) => `monster:${monster.id}`}
         actions={(monster, label) =>
           savedMonsters.has(monster.id) && (
             <LockToggle

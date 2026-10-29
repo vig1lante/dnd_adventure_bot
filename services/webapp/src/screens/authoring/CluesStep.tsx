@@ -72,6 +72,7 @@ export function CluesStep({
         itemLabel={(revelation, index) =>
           `Откровение ${revelation.id || index + 1}`
         }
+        refOf={(revelation) => `revelation:${revelation.id}`}
         actions={(revelation, label) =>
           savedIds.has(revelation.id) && (
             <>
@@ -119,6 +120,7 @@ export function CluesStep({
               create={newClue}
               addLabel="Добавить улику"
               itemLabel={(clue, index) => `Улика ${clue.id || index + 1}`}
+              refOf={(clue) => `revelation:${revelation.id}/clue:${clue.id}`}
             >
               {(clue, change) => (
                 <>
