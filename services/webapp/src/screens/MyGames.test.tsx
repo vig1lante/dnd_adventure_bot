@@ -139,10 +139,8 @@ describe("список игр", () => {
   });
 
   test("сервер без даты (до B11) или с непонятной датой: строка как раньше, без «создана»", async () => {
-    const { created_at: _dropped, ...old } = gameSummary({
-      id: "g2",
-      adventure_title: "Старая",
-    });
+    const old = gameSummary({ id: "g2", adventure_title: "Старая" });
+    delete old.created_at;
     renderMyGames({
       games: [old, gameSummary({ created_at: "вчера" })],
     });

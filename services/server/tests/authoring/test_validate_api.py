@@ -13,9 +13,8 @@ from typing import Any
 
 import pytest
 from generator_fakes import v2_answers
-from test_drafts_api import (  # noqa: F401  (фикстуры стенда API черновиков)
+from test_drafts_api import (
     CREATOR_TG_ID,
-    HARBOR,
     LIGHTHOUSE,
     SECRET_INPUT,
     as_served,
@@ -29,9 +28,7 @@ from test_drafts_api import (  # noqa: F401  (фикстуры стенда API 
     put_draft,
     saved,
     served_section,
-    settings,
     settings_data,
-    stand,
     validate,
 )
 from test_jobs import generate

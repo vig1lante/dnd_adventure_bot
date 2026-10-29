@@ -23,8 +23,8 @@ from dnd_engine.content import MAX_PROBLEM_LENGTH, load_srd
 from dnd_server import adventures
 from dnd_server.adventures import blocking_problems, load_catalog
 from dnd_server.app import create_app
-from dnd_server.authoring.pipeline import check
 from dnd_server.auth.session import SessionSigner
+from dnd_server.authoring.pipeline import check
 from dnd_server.config import Settings
 from dnd_server.db.models import User
 
@@ -278,7 +278,8 @@ def test_a_folder_whose_secret_reveals_an_item_lying_elsewhere_is_blocking(conte
     crypt.write_text(
         crypt.read_text(encoding="utf-8").replace(
             "      - kind: flag\n        id: treasury-empty",
-            f"      - kind: flag\n        id: treasury-empty\n      - kind: item\n        id: {item}",
+            "      - kind: flag\n        id: treasury-empty\n"
+            f"      - kind: item\n        id: {item}",
         ),
         encoding="utf-8",
     )

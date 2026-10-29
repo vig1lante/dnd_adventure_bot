@@ -1,11 +1,8 @@
 import type { Job } from "../../api/types";
 import { Alert, Button, Loading } from "../../ui";
-import { stepLabel } from "./StepNav";
+import { isActive } from "./jobs";
+import { stepLabel } from "./steps";
 import "./authoring.css";
-
-/** Задание ещё идёт: пока так, черновик менять нельзя (сервер ответит 409 `job_running`). */
-export const isActive = (job: Job) =>
-  job.status === "queued" || job.status === "running";
 
 interface JobStatusProps {
   job: Job | null;

@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
-import { TabBar, TabPanel, tabKeyStep } from "./TabBar";
+import { TabBar, TabPanel } from "./TabBar";
 import type { TabBarItem } from "./TabBar";
+import { tabKeyStep } from "./tabs";
 
 type Id = "story" | "hero" | "journal";
 

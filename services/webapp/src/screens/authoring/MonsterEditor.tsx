@@ -9,7 +9,8 @@ import type {
 import { formatMeters } from "../../ui/format";
 import { SelectField, Switch, TextAreaField, TextField } from "../fields";
 import { EntityList } from "./EntityList";
-import { LinesField, NumberField, orNull, withCurrent } from "./fields";
+import { LinesField, NumberField } from "./fields";
+import { orNull, withCurrent } from "./fieldValues";
 import {
   ABILITY_OPTIONS,
   ACTION_KINDS,
@@ -44,31 +45,6 @@ function xpHint(srd: readonly SrdMonster[]): string {
     .map(([cr, xp]) => `${crText(cr)} — ${xp}`);
   const intro = "Опыт — как у монстров SRD той же опасности";
   return pairs.length === 0 ? `${intro}.` : `${intro}: ${pairs.join(", ")}.`;
-}
-
-/** Новый свой статблок; опасность и опыт — как у первого монстра справочника (такую пару примет проверка). */
-export function newMonster(srd: readonly SrdMonster[]): MonsterDef {
-  const first = srd.at(0);
-  return {
-    id: "",
-    name: "",
-    name_en: "",
-    cr: first?.cr ?? 0,
-    xp: first?.xp ?? 0,
-    ac: 10,
-    hp: 1,
-    hp_dice: "1d8",
-    speed: 30,
-    scores: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 },
-    saves: {},
-    skills: {},
-    resistances: [],
-    vulnerabilities: [],
-    immunities: [],
-    actions: [],
-    traits: [],
-    tags: [],
-  };
 }
 
 const newAction = (): MonsterAction => ({

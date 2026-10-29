@@ -2,17 +2,13 @@ import { useState } from "react";
 import type { Encounter, MonsterGroup } from "../../api/types";
 import { SelectField, Switch, TextAreaField, TextField } from "../fields";
 import { EntityList } from "./EntityList";
-import {
-  SAVE_FIRST_REGENERATE,
-  SectionForm,
-  hasBadNumber,
-  sameData,
-  withCurrent,
-} from "./fields";
+import { SAVE_FIRST_REGENERATE, SectionForm } from "./fields";
 import type { SectionWrite, StepFormProps } from "./fields";
+import { hasBadNumber, sameData, withCurrent } from "./fieldValues";
 import { ID_HINT, crText } from "./labels";
 import { LockToggle } from "./LockToggle";
-import { MonsterEditor, newMonster } from "./MonsterEditor";
+import { MonsterEditor } from "./MonsterEditor";
+import { newMonster } from "./monsters";
 import { RefPicker } from "./RefPicker";
 
 const LOCATION = "location:";

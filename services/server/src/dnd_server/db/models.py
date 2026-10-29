@@ -9,7 +9,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any
+from typing import Any, ClassVar
 
 from sqlalchemy import BigInteger, Enum, ForeignKey, Index, String, Text, text, true
 from sqlalchemy.orm import Mapped, mapped_column
@@ -103,7 +103,8 @@ def new_id() -> str:
 
 
 def new_hex_id() -> str:
-    """id черновика и задания конструктора: uuid4 в 32 шестнадцатеричных знаках (дополнение B4 §1)."""
+    """id черновика и задания конструктора: uuid4 в 32 шестнадцатеричных знаках
+    (дополнение B4 §1)."""
     return uuid.uuid4().hex
 
 
@@ -353,13 +354,14 @@ class AdventureDraft(Base):
     owner_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     title: Mapped[str]
     data: Mapped[dict[str, Any]]
-    # Время последней записи раздела каждого шага: `{шаг: ISO-время}` (`Draft.steps[шаг].updated_at`).
+    # Время последней записи раздела каждого шага: `{шаг: ISO-время}`
+    # (`Draft.steps[шаг].updated_at`).
     step_times: Mapped[dict[str, Any]] = mapped_column(default=dict)
     version: Mapped[int] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow)
 
-    __mapper_args__ = {"version_id_col": version}
+    __mapper_args__: ClassVar[dict[str, Any]] = {"version_id_col": version}
 
 
 class AuthoringJob(Base):

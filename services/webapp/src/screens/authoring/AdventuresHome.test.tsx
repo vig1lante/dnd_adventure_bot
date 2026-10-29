@@ -553,13 +553,9 @@ describe("список черновиков: дата правки и разли
   });
 
   test("сервер без полей публикации (до B11): пометки нет, список как раньше", async () => {
-    const {
-      published_id: _id,
-      published_at: _at,
-      ...old
-    } = summaryOf({
-      title: "Гавань",
-    });
+    const old = summaryOf({ title: "Гавань" });
+    delete old.published_id;
+    delete old.published_at;
     renderHome([old]);
 
     expect(await screen.findByText("Гавань")).toBeInTheDocument();

@@ -3,15 +3,15 @@ B4 и B5).
 
 Контракт для параллельной работы с webapp: формы `Draft`, `DraftSummary`, `DraftReport`, ошибки
 `{detail, code, problems?}`, версия черновика (409 `version_conflict`), разделы B4 и B5 и доступ
-(только создатели игр, чужой черновик — 404). Задания генерации — `test_jobs.py`, справочник ссылок —
-`test_refs.py`; они берут стенд и данные разделов отсюда.
+(только создатели игр, чужой черновик — 404). Задания генерации — `test_jobs.py`, справочник
+ссылок — `test_refs.py`; они берут отсюда класс стенда и данные разделов, а фикстуры стенда
+`settings` и `stand` — общие для папки, в её `conftest.py`.
 """
 
 import asyncio
 import json
 import re
 import sqlite3
-from collections.abc import AsyncIterator
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -22,7 +22,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from generator_fakes import V2_SCENARIO, v2_answers, v2_draft
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel
 from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -30,7 +30,6 @@ from dnd_engine.adventure.budget import XP_BUDGET_PER_CHARACTER
 from dnd_engine.adventure.loader import load_adventure
 from dnd_engine.adventure.schema import Item, Location, Npc, Relation
 from dnd_engine.modules import MODULES
-from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.authoring import cli, schemas, service
 from dnd_server.authoring.draft import STEPS, AuthoringDraft, from_adventure, seeded
@@ -134,28 +133,6 @@ class Stand:
         return response.json()
 
 
-@pytest.fixture
-def settings(settings: Settings) -> Settings:
-    """Dev-настройки conftest: секрет сессий, сценарий `fake` генератора v2, создатель из Telegram."""
-    return settings.model_copy(
-        update={
-            "session_secret": SecretStr(SESSION_SECRET),
-            "fake_llm_scenario": V2_SCENARIO,
-            "game_creator_tg_ids": (CREATOR_TG_ID,),
-        }
-    )
-
-
-@pytest.fixture
-async def stand(settings: Settings, db: async_sessionmaker[AsyncSession]) -> AsyncIterator[Stand]:
-    app = create_app(settings)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as http:
-        yield Stand(app, http, db)
-    await app.state.authoring_tasks.shutdown()
-    await app.state.engine.dispose()
-
-
 def settings_data(**changes: Any) -> dict[str, Any]:
     return {
         "title": "Маяк на Вороньем мысу",
@@ -187,7 +164,8 @@ def plot_data() -> dict[str, Any]:
 
 
 def as_served(model: type[BaseModel], entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Сущности в форме `Draft`: модель движка со всеми полями по умолчанию, как их отдаёт сервер."""
+    """Сущности в форме `Draft`: модель движка со всеми полями по умолчанию, как их отдаёт
+    сервер."""
     return [model.model_validate(entity).model_dump(mode="json") for entity in entities]
 
 
@@ -294,7 +272,8 @@ async def count_drafts(db: async_sessionmaker[AsyncSession]) -> int:
 
 
 def assert_error(response: httpx.Response, status: int, code: str | None) -> dict[str, Any]:
-    """Ошибка конструктора: `detail` строкой, `code` у 409/422, `problems` — только списком строк."""
+    """Ошибка конструктора: `detail` строкой, `code` у 409/422, `problems` — только списком
+    строк."""
     assert response.status_code == status, response.text
     body = response.json()
     assert isinstance(body["detail"], str) and body["detail"]
@@ -1191,7 +1170,8 @@ def test_the_limits_of_gods_and_factions_are_the_ones_of_the_contract():
 
 
 def test_the_limits_of_block_5_are_the_ones_of_the_model_answers():
-    # Дополнение B5 §4: пределы схем ответа модели — локаций и NPC ≤ 12, связей ≤ 24, предметов ≤ 20.
+    # Дополнение B5 §4: пределы схем ответа модели — локаций и NPC ≤ 12, связей ≤ 24,
+    # предметов ≤ 20.
     assert (schemas.MAX_LOCATIONS, schemas.MAX_NPCS) == (12, 12)
     assert (schemas.MAX_RELATIONS, schemas.MAX_ITEMS) == (24, 20)
 

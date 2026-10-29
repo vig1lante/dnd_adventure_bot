@@ -9,11 +9,14 @@ import type {
 import { Countdown } from "../components/Countdown";
 import { phaseLabel } from "../components/phases";
 import { RollCard } from "../components/RollCard";
+import { THINKING_PHRASES } from "../components/waiting";
 import { Switch, TextAreaField } from "../screens/fields";
 import type { GameView } from "../store/game";
+import type { TextSize } from "../theme/settings";
 import { Avatar, Badge, Button, Card, Icon, Panel, SealedNote } from "../ui";
 import type { BadgeProps, IconName } from "../ui";
 import { classNames } from "../ui/classNames";
+import { applyContrast, applyTextSize } from "./settings";
 
 // Черновики элементов «как будет» для макетов B10.1. Это предложение для обсуждения с владельцем,
 // а не боевые компоненты: их по итогам гейта делают B10.2+ (ui/TabBar, Skeleton, ErrorState,
@@ -126,7 +129,7 @@ const PARTS_OF_DAY: Record<SceneView["part"], string> = {
 };
 
 /** «День 2, утро» из сцены снимка; без сцены — ничего. */
-export function dayPartOf(scene: SceneView | null): string | null {
+function dayPartOf(scene: SceneView | null): string | null {
   return scene === null
     ? null
     : `День ${scene.day}, ${PARTS_OF_DAY[scene.part]}`;
@@ -303,18 +306,6 @@ export function DraftToast({
 }
 
 // --- «Мастер думает…» ---
-
-/**
- * Нейтральные фразы ожидания: говорят о мастере, а не о событиях игры, — ничего не обещают
- * и не раскрывают.
- */
-export const THINKING_PHRASES = [
-  "Листает свои заметки…",
-  "Перечитывает ваши ходы…",
-  "Сверяется с картой…",
-  "Подбирает слова…",
-  "Точит перо…",
-] as const;
 
 const PHRASE_SECONDS = 8;
 // После минуты хосту предлагают «Повторить» (как сейчас: RETRY_PATIENCE_MS).
@@ -500,24 +491,11 @@ export function DraftKeyboard() {
 
 // --- настройки ---
 
-export type TextSize = "normal" | "large" | "huge";
-
 const TEXT_SIZES: readonly (readonly [TextSize, string])[] = [
   ["normal", "Обычный"],
   ["large", "Крупный"],
   ["huge", "Очень крупный"],
 ];
-
-/** Размер текста и контраст ставятся атрибутами на корень страницы: они меняют токены темы. */
-export function applyTextSize(size: TextSize): void {
-  if (size === "normal") delete document.documentElement.dataset.textSize;
-  else document.documentElement.dataset.textSize = size;
-}
-
-function applyContrast(high: boolean): void {
-  if (high) document.documentElement.dataset.contrast = "high";
-  else delete document.documentElement.dataset.contrast;
-}
 
 /**
  * Настройки интерфейса: размер текста, высокий контраст, вибрация. Хранятся только на этом

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import type { LocationsSection } from "../../api/types";
 import { SelectField } from "../fields";
-import { SAVE_FIRST_REGENERATE, SectionForm, sameData } from "./fields";
+import { SAVE_FIRST_REGENERATE, SectionForm } from "./fields";
 import type { SectionWrite, StepFormProps } from "./fields";
+import { sameData } from "./fieldValues";
 import { LocationEditor } from "./LocationEditor";
 import { LockToggle } from "./LockToggle";
 

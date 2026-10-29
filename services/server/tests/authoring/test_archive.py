@@ -23,7 +23,7 @@ from typing import Any
 import httpx
 import pytest
 from pydantic import BaseModel
-from test_drafts_api import (  # noqa: F401  (фикстуры стенда API черновиков)
+from test_drafts_api import (
     CREATOR_TG_ID,
     Author,
     Stand,
@@ -35,8 +35,6 @@ from test_drafts_api import (  # noqa: F401  (фикстуры стенда API 
     put_draft,
     saved,
     served_section,
-    settings,
-    stand,
 )
 
 from dnd_engine.adventure.loader import load_adventure

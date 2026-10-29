@@ -177,10 +177,10 @@ _SECTION_OF_KIND = {kind: section for section, kind in SECTION_KINDS.items()}
 
 
 def refs_out(draft: AuthoringDraft) -> list[dict[str, str]]:
-    """Справочник ссылок `[{ref, kind, name}]` (дополнение B5 §6): виды по `REF_KINDS`, внутри вида —
-    порядок раздела. Имя — `name` сущности, у боя имени нет — его id, пустое имя — тоже id. Ничего,
-    кроме имени, в справочник не идёт: тайны (`secret`, `dm_notes`, тексты тайников) остаются в
-    черновике."""
+    """Справочник ссылок `[{ref, kind, name}]` (дополнение B5 §6): виды по `REF_KINDS`, внутри
+    вида — порядок раздела. Имя — `name` сущности, у боя имени нет — его id, пустое имя — тоже
+    id. Ничего, кроме имени, в справочник не идёт: тайны (`secret`, `dm_notes`, тексты тайников)
+    остаются в черновике."""
     return [
         {"ref": f"{kind}:{entity.id}", "kind": kind, "name": _ref_name(entity)}
         for kind in REF_KINDS

@@ -1006,7 +1006,8 @@ describe("«Перегенерировать» — только когда се�
 
   test("сервер до B11 без признака — кнопки нет, остальные кнопки на месте", () => {
     const view = viewFor({ turnPhase: "discussion" });
-    const { can_regenerate: _dropped, ...old } = view.phase;
+    const old = { ...view.phase };
+    delete old.can_regenerate;
     signInAs({ id: HOST, name: "Игрок" });
     const api = createApi(fakeServer(HOST_ROUTES).fetch, sessionToken);
     render(

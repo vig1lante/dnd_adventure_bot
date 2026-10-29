@@ -22,7 +22,7 @@ from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from test_drafts_api import (  # noqa: F401  (фикстуры стенда API черновиков)
+from test_drafts_api import (
     CREATOR_TG_ID,
     JOB_FIELDS,
     SECTIONS,
@@ -41,9 +41,7 @@ from test_drafts_api import (  # noqa: F401  (фикстуры стенда API 
     saved,
     section_data,
     served_section,
-    settings,
     settings_data,
-    stand,
     world_data,
 )
 
@@ -1297,7 +1295,8 @@ async def test_while_a_job_runs_the_draft_its_refs_and_the_check_stay_readable(s
     assert (await stand.draft(author, draft["id"]))["version"] == draft["version"] + 1
 
 
-# --- fix-раунд 1 блока 5: старт и финал из ответа модели, время шагов раздела (дополнение B5 §9) ---
+# --- fix-раунд 1 блока 5: старт и финал из ответа модели, время шагов раздела
+# (дополнение B5 §9) ---
 
 
 @pytest.mark.parametrize(

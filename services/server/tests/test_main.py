@@ -13,13 +13,12 @@ from pathlib import Path
 import httpx
 import pytest
 import uvicorn
-from uvicorn.config import LOGGING_CONFIG
-from websockets.asyncio.client import connect
-from websockets.exceptions import WebSocketException
-
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from uvicorn.config import LOGGING_CONFIG
+from websockets.asyncio.client import connect
+from websockets.exceptions import WebSocketException
 
 from dnd_server import __main__ as server_main
 from dnd_server.__main__ import LOG_CONFIG, main, mask_query_values

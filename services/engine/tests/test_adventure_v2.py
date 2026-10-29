@@ -361,7 +361,7 @@ def test_v2_data_with_npc_models_carrying_relations_is_rejected_too():
     data["npcs"]["marta"]["relations"] = [{"npc_id": "fabian", "kind": "debtor"}]
     data["npcs"] = {key: Npc.model_validate(npc) for key, npc in data["npcs"].items()}
 
-    with pytest.raises(ValidationError, match="relations.yaml"):
+    with pytest.raises(ValidationError, match=r"relations\.yaml"):
         Adventure.model_validate(data)
 
 

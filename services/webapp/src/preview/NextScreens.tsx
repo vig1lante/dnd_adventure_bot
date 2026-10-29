@@ -27,12 +27,12 @@ import {
   DraftTabBar,
   DraftThinking,
   DraftToast,
-  applyTextSize,
 } from "./drafts";
 import type { GameTab, TabOrder } from "./drafts";
 import type { PreviewScreen } from "./gate";
 import { PreviewShell } from "./PreviewShell";
 import { LOBBY_GAME, PREVIEW_USER } from "./screenData";
+import { applyTextSize } from "./settings";
 
 // «Как будет»: черновики предложений §1 дополнения B10 на тех же данных, что «как есть».
 // Где экран не меняется по существу, показан настоящий экран в новом каркасе (кнопка

@@ -1195,7 +1195,8 @@ async def test_the_model_of_the_game_reaches_the_cli_and_beats_the_environment(w
 @pytest.mark.parametrize(
     ("provider_name", "game_model", "cli_model", "expected"),
     [
-        # Игру создали без провайдера при LLM_PROVIDER=openai_compatible, потом владелец включил CLI.
+        # Игру создали без провайдера при LLM_PROVIDER=openai_compatible,
+        # потом владелец включил CLI.
         pytest.param(None, "qwen2.5:14b", "opus", "opus", id="модель другого провайдера"),
         pytest.param(None, "claude-opus-4@x", None, "claude-fake-subscription", id="без env"),
         # Игра DND-1 с provider=claude_code_cli и моделью, присланной прямо в API.
@@ -1771,9 +1772,11 @@ async def test_a_broken_adventure_copy_stops_the_turn_before_the_reserve_and_cha
     await world.act("alice", "Иду вперёд")
     messages_before = [message.id for message in await world.messages()]
 
-    with caplog.at_level(logging.ERROR, logger="dnd_server.dm.turn"):
-        with pytest.raises(Conflict) as failure:
-            await world.run()
+    with (
+        caplog.at_level(logging.ERROR, logger="dnd_server.dm.turn"),
+        pytest.raises(Conflict) as failure,
+    ):
+        await world.run()
 
     # Ход не начался: резерв откатился целиком, игра ждёт хоста в той же фазе.
     game = await world.game()

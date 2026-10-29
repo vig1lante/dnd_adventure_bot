@@ -53,9 +53,9 @@ import re
 import time
 import unicodedata
 from bisect import bisect_left
-from itertools import islice
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import islice, pairwise
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -167,8 +167,8 @@ def ideas_request(
 ) -> JsonRequest:
     """Запрос идей: вид привала, где отряд, герои (общее), адресаты (своё) и недавние события.
 
-    Тексты игроков и рассказы мастера идут строками JSON, как данные. `profanity` — флажок мата игры:
-    идею читает игрок, поэтому к роли добавлен общий блок стиля."""
+    Тексты игроков и рассказы мастера идут строками JSON, как данные. `profanity` — флажок мата
+    игры: идею читает игрок, поэтому к роли добавлен общий блок стиля."""
     lines = [
         "Приготовь идеи для рассказа у костра: каждому герою из раздела адресатов одну идею.",
         _KIND_LINES[rest_kind(state)],
@@ -351,11 +351,7 @@ def _fragments(texts: Iterable[str]) -> frozenset[Fragment]:
 
 def _fragments_of(words: Sequence[str]) -> set[Fragment]:
     triples = {(a, b, c) for a, b, c in zip(words, words[1:], words[2:], strict=False)}
-    pairs = {
-        (a, b)
-        for a, b in zip(words, words[1:], strict=False)
-        if min(len(a), len(b)) >= SIGNIFICANT_LETTERS
-    }
+    pairs = {(a, b) for a, b in pairwise(words) if min(len(a), len(b)) >= SIGNIFICANT_LETTERS}
     return triples | pairs
 
 

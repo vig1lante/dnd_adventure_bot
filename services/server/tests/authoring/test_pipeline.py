@@ -40,8 +40,8 @@ from dnd_engine.content import load_srd
 from dnd_server.authoring import steps
 from dnd_server.authoring.draft import STEPS, AuthoringDraft, Seeds, seeded
 from dnd_server.authoring.pipeline import (
-    MAX_REPAIR_ROUNDS,
     INAPPLICABLE_SECRET_REVEAL,
+    MAX_REPAIR_ROUNDS,
     check,
     generate,
     owner_step,
@@ -556,7 +556,7 @@ async def test_a_locked_relation_to_a_missing_npc_goes_to_the_npcs_step():
     assert not result.report.blocking
 
 
-async def test_seed_location_with_a_fight_link_into_the_void_gets_that_fight_from_the_encounters_step():
+async def test_seed_location_with_a_fight_link_into_the_void_gets_the_fight_from_encounters_step():
     answers = answers_linking_the_seed_well()
     first = answers["generator.encounters"]
     fixed = copy.deepcopy(first)

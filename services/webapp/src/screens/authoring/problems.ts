@@ -1,5 +1,5 @@
 import type { DraftSection } from "../../api/types";
-import { EDITOR_STEPS } from "./StepNav";
+import { EDITOR_STEPS } from "./steps";
 
 // Отказ сервера называет поле путём схемы: «encounters.0.monsters: не больше 4 элементов»
 // (контракт B4 §4 «<путь>: <сообщение>»). Автору он показывается словами формы: подписи

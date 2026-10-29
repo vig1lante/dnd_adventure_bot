@@ -2602,9 +2602,7 @@ def _channel_divinity_target(a: _Act) -> Combatant:
     """Цель Божественного канала в 9 м (расстояние не «далеко»)."""
     target = a.target()
     dist = distance(_active_combat(a.s), a.slot.id, target.id)
-    _require(
-        dist != "far", f"{target.name} вне дальности ({meters_text(CHANNEL_DIVINITY_RANGE)})"
-    )
+    _require(dist != "far", f"{target.name} вне дальности ({meters_text(CHANNEL_DIVINITY_RANGE)})")
     return target
 
 

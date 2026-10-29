@@ -9,7 +9,7 @@
 import json
 from typing import Any
 
-from test_drafts_api import (  # noqa: F401  (фикстуры стенда API черновиков)
+from test_drafts_api import (
     CREATOR_TG_ID,
     Author,
     Stand,
@@ -17,8 +17,6 @@ from test_drafts_api import (  # noqa: F401  (фикстуры стенда API 
     complete_draft,
     npcs_data,
     saved,
-    settings,
-    stand,
 )
 
 REF_FIELDS = {"ref", "kind", "name"}

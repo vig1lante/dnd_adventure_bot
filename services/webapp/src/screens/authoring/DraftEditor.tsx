@@ -19,7 +19,7 @@ import { ContentsStep } from "./ContentsStep";
 import { DeitiesStep } from "./DeitiesStep";
 import { EncountersStep } from "./EncountersStep";
 import { FactionsStep } from "./FactionsStep";
-import { ConflictDialog, sameData } from "./fields";
+import { ConflictDialog } from "./fields";
 import type {
   DraftRefs,
   FocusTarget,
@@ -27,9 +27,11 @@ import type {
   SrdMonsters,
   StepFormProps,
 } from "./fields";
+import { sameData } from "./fieldValues";
 import { GeneratePanel } from "./GeneratePanel";
 import { ItemsStep } from "./ItemsStep";
-import { JobStatus, isActive } from "./JobStatus";
+import { isActive } from "./jobs";
+import { JobStatus } from "./JobStatus";
 import { MapStep } from "./MapStep";
 import { NpcsStep } from "./NpcsStep";
 import { PlotStep } from "./PlotStep";
@@ -38,8 +40,9 @@ import { PublishStep } from "./PublishStep";
 import { RelationsStep } from "./RelationsStep";
 import { ReviewStep } from "./ReviewStep";
 import { SettingsStep } from "./SettingsStep";
-import { EDITOR_STEPS, StepNav } from "./StepNav";
-import type { EditorScreen, EditorStep } from "./StepNav";
+import { StepNav } from "./StepNav";
+import { EDITOR_STEPS } from "./steps";
+import type { EditorScreen, EditorStep } from "./steps";
 import { WorldStep } from "./WorldStep";
 import "./authoring.css";
 

@@ -2,14 +2,9 @@ import { useState } from "react";
 import type { Exit, Location, LocationsSection } from "../../api/types";
 import { SelectField, TextField } from "../fields";
 import { EntityList } from "./EntityList";
-import {
-  JournalFieldsEditor,
-  SectionForm,
-  orNull,
-  sameData,
-  withCurrent,
-} from "./fields";
+import { JournalFieldsEditor, SectionForm } from "./fields";
 import type { StepFormProps } from "./fields";
+import { orNull, sameData, withCurrent } from "./fieldValues";
 import { DC_OPTIONS, ID_HINT } from "./labels";
 import { LockToggle } from "./LockToggle";
 

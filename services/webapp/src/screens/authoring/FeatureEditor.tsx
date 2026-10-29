@@ -1,7 +1,7 @@
 import { useId } from "react";
 import type { Feature, Item } from "../../api/types";
 import { CheckList, Switch, TextAreaField, TextField } from "../fields";
-import { orNull } from "./fields";
+import { orNull } from "./fieldValues";
 import { CheckField, RevealsField } from "./FindingFields";
 import { ID_HINT } from "./labels";
 

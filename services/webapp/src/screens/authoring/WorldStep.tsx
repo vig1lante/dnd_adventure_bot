@@ -2,8 +2,9 @@ import { useState } from "react";
 import type { Region, Rumor, WorldInfo } from "../../api/types";
 import { Switch, TextAreaField, TextField } from "../fields";
 import { EntityList } from "./EntityList";
-import { JournalFieldsEditor, SectionForm, sameData } from "./fields";
+import { JournalFieldsEditor, SectionForm } from "./fields";
 import type { StepFormProps } from "./fields";
+import { sameData } from "./fieldValues";
 import { LockToggle } from "./LockToggle";
 import { ID_HINT } from "./labels";
 

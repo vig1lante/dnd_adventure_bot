@@ -1,19 +1,11 @@
-import { useCallback, useId } from "react";
-import { useApi } from "../../api/context";
+import { useId } from "react";
 import type { Draft, Finding } from "../../api/types";
 import { Button, ErrorState, Skeleton } from "../../ui";
-import { useLoaded } from "../hooks";
 import { FINDING_KINDS } from "./labels";
-import { screenLabel } from "./StepNav";
-import type { EditorScreen } from "./StepNav";
+import { screenLabel } from "./steps";
+import type { EditorScreen } from "./steps";
+import { useDraftReport } from "./useDraftReport";
 import "./authoring.css";
-
-/** Отчёт проверки черновика (`POST /validate`): запрашивается при показе экрана и по `reload`. */
-export function useDraftReport(draftId: string) {
-  const api = useApi();
-  const load = useCallback(() => api.validate(draftId), [api, draftId]);
-  return useLoaded(load);
-}
 
 // Сущности с именем: по ссылке находки показывается имя, остальные — своим id.
 const NAMED: Partial<

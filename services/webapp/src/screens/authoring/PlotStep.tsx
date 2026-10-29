@@ -2,8 +2,9 @@ import { useState } from "react";
 import type { Act, Plot } from "../../api/types";
 import { TextAreaField, TextField } from "../fields";
 import { EntityList } from "./EntityList";
-import { LinesField, SectionForm, orNull, sameData } from "./fields";
+import { LinesField, SectionForm } from "./fields";
 import type { StepFormProps } from "./fields";
+import { orNull, sameData } from "./fieldValues";
 import { LockToggle } from "./LockToggle";
 import { ID_HINT } from "./labels";
 

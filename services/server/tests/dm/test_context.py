@@ -1079,7 +1079,7 @@ def test_the_history_is_cut_only_past_its_limit_counted_in_letters_not_bytes(
 
 
 def test_a_blank_history_alone_gives_no_lore_section(srd, adventure):
-    blank = lore_adventure(adventure, world=WorldInfo(history=" \n\t  "))
+    blank = lore_adventure(adventure, world=WorldInfo(history=" \n\t\u2028 "))
 
     assert LORE not in context_of(srd, blank)
 

@@ -19,7 +19,8 @@ import {
 import type { BadgeProps } from "../ui";
 import { CreateGameForm } from "./CreateGameForm";
 import { TextField } from "./fields";
-import { AdventuresHome, momentText } from "./authoring/AdventuresHome";
+import { AdventuresHome } from "./authoring/AdventuresHome";
+import { momentText } from "./authoring/dates";
 import { useAction, useLoaded } from "./hooks";
 import "./screens.css";
 import "./authoring/authoring.css";

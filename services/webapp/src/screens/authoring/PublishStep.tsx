@@ -7,10 +7,11 @@ import { ErrorAlert } from "../fields";
 import { useAction } from "../hooks";
 import { AlertDialog, ConflictDialog } from "./fields";
 import { ExportButton } from "./ImportExport";
-import { openItems } from "./ItemsStep";
+import { openItems } from "./items";
 import { publishProblem } from "./problems";
-import { GoButton, useDraftReport } from "./ReviewStep";
-import type { EditorScreen } from "./StepNav";
+import { GoButton } from "./ReviewStep";
+import type { EditorScreen } from "./steps";
+import { useDraftReport } from "./useDraftReport";
 
 // Отказы публикации, которые исправляют на «Замысле»: id не задан, занят или уже закреплён
 // прежней публикацией (B6 §6).

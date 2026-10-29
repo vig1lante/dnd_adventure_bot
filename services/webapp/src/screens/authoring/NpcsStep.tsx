@@ -2,16 +2,15 @@ import { useState } from "react";
 import type { Npc } from "../../api/types";
 import { SelectField, TextAreaField, TextField } from "../fields";
 import { EntityList } from "./EntityList";
-import { ATTITUDES } from "./FactionsStep";
+import { ATTITUDES } from "./attitudes";
 import {
   JournalFieldsEditor,
   LinesField,
   SAVE_FIRST_REGENERATE,
   SectionForm,
-  orNull,
-  sameData,
 } from "./fields";
 import type { StepFormProps } from "./fields";
+import { orNull, sameData } from "./fieldValues";
 import { LockToggle } from "./LockToggle";
 import { RefPicker } from "./RefPicker";
 import { ID_HINT } from "./labels";

@@ -52,7 +52,8 @@ OptionalLine = Annotated[str, StringConstraints(strip_whitespace=True, max_lengt
 _ID_TAIL = ID_PATTERN[1:]  # шаблон id без «^»: хвост ссылки «вид:id»
 
 # Замок выхода и места — только предмет-ключ: важное запирается предметом, а не флагом. Замка
-# `flag:…` (в том числе `flag:encounter:…`, который открывается уже в начале боя) схема не пропускает.
+# `flag:…` (в том числе `flag:encounter:…`, который открывается уже в начале боя) схема не
+# пропускает.
 LockRef = Annotated[str, StringConstraints(pattern=rf"^item:{_ID_TAIL}")]
 # Держатель предмета в генераторе — локация или NPC; `gone` и персонажей в приключении нет.
 HolderRef = Annotated[str, StringConstraints(pattern=rf"^(location|npc):{_ID_TAIL}")]

@@ -19,11 +19,10 @@ from typing import Any
 import httpx
 import pytest
 from sqlalchemy import func, select
-from generator_fakes import V2_SCENARIO
-from pydantic import SecretStr
-from test_drafts_api import (  # noqa: F401  (фикстуры стенда API черновиков)
+from test_archive import _draft_of as draft_of
+from test_archive import crowded_cupboard, cupboard_finds
+from test_drafts_api import (
     CREATOR_TG_ID,
-    SESSION_SECRET,
     Author,
     Stand,
     assert_error,
@@ -33,11 +32,8 @@ from test_drafts_api import (  # noqa: F401  (фикстуры стенда API 
     put_draft,
     saved,
     served_section,
-    stand,
     validate,
 )
-from test_archive import _draft_of as draft_of
-from test_archive import cupboard_finds, crowded_cupboard
 from test_jobs import generate
 
 from dnd_engine.adventure.loader import adventure_from_data
@@ -60,17 +56,10 @@ PUBLISHED_FIELDS = {"adventure_id", "published_at"}
 
 @pytest.fixture
 def settings(settings: Settings, tmp_path: Path) -> Settings:
-    """Настройки стенда черновиков (`test_drafts_api`) и папка контента с демо-приключением."""
+    """Настройки стенда черновиков (`conftest.py` папки) и папка контента с демо-приключением."""
     content = tmp_path / "content"
     shutil.copytree(DEMO_DIR, content / "demo-crypt")
-    return settings.model_copy(
-        update={
-            "session_secret": SecretStr(SESSION_SECRET),
-            "fake_llm_scenario": V2_SCENARIO,
-            "game_creator_tg_ids": (CREATOR_TG_ID,),
-            "content_dir": content,
-        }
-    )
+    return settings.model_copy(update={"content_dir": content})
 
 
 def with_folders(stand: Stand) -> None:
@@ -132,7 +121,7 @@ async def test_a_valid_draft_is_published_into_the_table_and_the_catalog_in_plac
         draft["id"],
     )
     assert row.published_at.replace(tzinfo=None) == published_at.replace(tzinfo=None)
-    expected = to_adventure((await generated_draft()))
+    expected = to_adventure(await generated_draft())
     assert adventure_from_data(row.data) == expected
     # Каталог — тот же словарь, что был у приложения: его держат маршруты игр и бот.
     assert stand.app.state.adventures is catalog

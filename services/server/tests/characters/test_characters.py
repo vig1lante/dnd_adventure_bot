@@ -1752,7 +1752,7 @@ async def test_creating_again_replaces_the_character_and_resets_ready(world):
     assert (me["ready"], me["hero_name"]) == (False, FLAVOR_ANSWER["name"])
 
 
-async def test_the_lobby_event_goes_out_once_per_character_under_the_game_lock(world):
+async def test_the_lobby_events_of_each_character_go_out_under_the_game_lock(world):
     game, host, _ = await make_game(world)
     world.broadcaster.sent.clear()
     world.broadcaster.under_lock.clear()
@@ -1773,7 +1773,7 @@ async def test_the_lobby_event_goes_out_once_per_character_under_the_game_lock(w
 async def test_the_name_the_model_gave_a_quick_hero_reaches_the_lobby_of_everybody(world):
     # Дополнение B11 §5 п. 2 (R1): имя от модели приходит новым кадром `lobby` после записи
     # описания, а не остаётся заглушкой из первого кадра.
-    game, host, [friend] = await make_game(world, friends=1)
+    game, _host, [friend] = await make_game(world, friends=1)
     world.broadcaster.sent.clear()
     world.broadcaster.under_lock.clear()
 

@@ -1062,7 +1062,6 @@ async def test_a_short_rest_shows_its_kind_deadline_own_ideas_and_the_lines_of_t
 async def test_the_lines_of_an_earlier_camp_are_not_lines_of_this_one(db, srd, table):
     await camp_at(db, table, rest="long")
     async with db() as session:
-        game = await session.get(Game, table.game_id)
         earlier = Turn(game_id=table.game_id, number=1, kind=TurnKind.CAMP_END)
         session.add(earlier)
         await session.commit()

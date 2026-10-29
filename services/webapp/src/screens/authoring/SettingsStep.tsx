@@ -1,8 +1,9 @@
 import { useState } from "react";
 import type { SettingsSection } from "../../api/types";
 import { CheckList, Switch, TextAreaField, TextField } from "../fields";
-import { SectionForm, parseNumber, sameData } from "./fields";
+import { SectionForm } from "./fields";
 import type { StepFormProps } from "./fields";
+import { parseNumber, sameData } from "./fieldValues";
 import { LockToggle } from "./LockToggle";
 import { ADVENTURE_ID_HINT } from "./labels";
 

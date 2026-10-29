@@ -8,8 +8,9 @@ import type {
 import { TextAreaField, TextField } from "../fields";
 import { EntityList } from "./EntityList";
 import { FeatureEditor } from "./FeatureEditor";
-import { JournalFieldsEditor, orNull } from "./fields";
+import { JournalFieldsEditor } from "./fields";
 import type { DraftRefs } from "./fields";
+import { orNull } from "./fieldValues";
 import { RefPicker } from "./RefPicker";
 import { SecretEditor } from "./SecretEditor";
 import { ID_HINT } from "./labels";

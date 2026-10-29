@@ -310,7 +310,8 @@ describe("подключение и состав лобби", () => {
   });
 
   test("сервер без hero_name (до B11) — строка игрока как раньше", async () => {
-    const { hero_name: _dropped, ...old } = boris();
+    const old = boris();
+    delete old.hero_name;
     await openLobby({ game: lobbyOf([host(), old]) });
 
     expect(screen.queryByText(/Герой:/)).toBeNull();

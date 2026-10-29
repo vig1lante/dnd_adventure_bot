@@ -426,7 +426,8 @@ async def test_a_target_revelation_regenerates_only_its_clues():
     draft = await full_v2_draft()
     answers = v2_answers()
     [revelation] = answers["generator.clues"]["revelations"]
-    revelation["clues"] = revelation["clues"][:1] + [
+    revelation["clues"] = [
+        *revelation["clues"][:1],
         {
             "id": "clue-ring",
             "description": "Кольцо смотрителя в пепле.",

@@ -190,7 +190,8 @@ async def start_rest(game_id: str, body: RestIn, user: UserDep, flow: FlowDep) -
     return await game_flow.start_rest(flow, game_id, user.id, body.kind)
 
 
-# Те же кнопки привала, что `camp-*`, под путями привала любого вида (дополнение контракта B9 §1 п. 3).
+# Те же кнопки привала, что `camp-*`, под путями привала любого вида (дополнение контракта B9 §1
+# п. 3).
 @router.post("/{game_id}/host/rest-extend")
 async def rest_extend(game_id: str, user: UserDep, flow: FlowDep) -> dict[str, Any]:
     return await game_flow.camp_extend(flow, game_id, user.id)

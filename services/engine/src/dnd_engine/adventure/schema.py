@@ -472,7 +472,8 @@ def upgrade_v1(data: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _require_graph_relations(npcs: Any) -> None:
-    """В формате v2 связи лежат только в графе: связи внутри NPC — ошибка, а не молчаливый перенос."""
+    """В формате v2 связи лежат только в графе: связи внутри NPC — ошибка, а не молчаливый
+    перенос."""
     if not isinstance(npcs, Mapping):
         return
     owners = [

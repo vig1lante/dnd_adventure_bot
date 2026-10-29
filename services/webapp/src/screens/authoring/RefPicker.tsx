@@ -1,7 +1,8 @@
 import type { RefKind } from "../../api/types";
 import { SelectField } from "../fields";
-import { withCurrent } from "./fields";
-import type { DraftRefs, Option } from "./fields";
+import type { DraftRefs } from "./fields";
+import { withCurrent } from "./fieldValues";
+import type { Option } from "./fieldValues";
 import { REF_KINDS } from "./labels";
 
 interface RefPickerProps {

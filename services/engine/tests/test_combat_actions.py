@@ -2439,9 +2439,7 @@ def test_preserve_life_needs_a_use_and_the_feature(srd, make_cleric, make_hero):
     refused_act(srd, low, "preserve_life", "нет особенности", actor=CLERIC, target_id=HERO)
 
 
-def test_preserve_life_refuses_a_far_target_naming_the_range_in_meters(
-    srd, make_cleric, make_hero
-):
+def test_preserve_life_refuses_a_far_target_naming_the_range_in_meters(srd, make_cleric, make_hero):
     # Цель Сохранения жизни проверяется так же, как у Божественной искры: отказ — в метрах.
     state = battle(srd, [make_cleric(), make_hero(hp=2)])
     fighter(state, HERO).zone_id = "vault"

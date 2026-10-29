@@ -167,8 +167,8 @@ from dnd_server.realtime.views import (
     journal_events,
     phase_event,
     player_status_event,
-    rest_ended_event,
     regeneration,
+    rest_ended_event,
     rest_started_event,
     state_events,
 )

@@ -58,8 +58,8 @@ from dnd_engine.adventure.schema import (
     NpcRelation,
     Region,
     Relation,
-    Revelation,
     RevealRef,
+    Revelation,
     Rumor,
     WorldInfo,
 )

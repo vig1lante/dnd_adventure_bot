@@ -11,38 +11,11 @@ import {
   Skeleton,
 } from "../../ui";
 import { useAction, useLoaded } from "../hooks";
+import { momentText } from "./dates";
 import { DraftEditor } from "./DraftEditor";
 import { ImportButton } from "./ImportExport";
 import "../screens.css";
 import "./authoring.css";
-
-const MONTHS = [
-  "января",
-  "февраля",
-  "марта",
-  "апреля",
-  "мая",
-  "июня",
-  "июля",
-  "августа",
-  "сентября",
-  "октября",
-  "ноября",
-  "декабря",
-];
-
-/**
- * Момент по часам телефона: «29 октября 2026, 07:05»; непонятная строка — пусто. Им же «Мои игры»
- * подписывают дату создания игры.
- */
-export function momentText(iso: string): string {
-  const moment = new Date(iso);
-  if (Number.isNaN(moment.getTime())) return "";
-  const time = [moment.getHours(), moment.getMinutes()]
-    .map((part) => String(part).padStart(2, "0"))
-    .join(":");
-  return `${moment.getDate()} ${MONTHS[moment.getMonth()]} ${moment.getFullYear()}, ${time}`;
-}
 
 /** Время правки черновика: «изменён 29 октября 2026, 07:05». */
 function editedText(iso: string): string {

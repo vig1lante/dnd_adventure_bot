@@ -455,7 +455,8 @@ FAKE_REFUSAL = "Провайдер мастера не подходит: тес�
 
 async def test_in_prod_the_test_master_is_refused_by_the_bot_as_by_the_app(deps, db):
     # Спека DND-2 §15: `/newgame` выбирает провайдера по умолчанию (`fake` со сценарием), а в
-    # боевом режиме тестового мастера нет — тот же отказ, что у `POST /api/games`, без пути сценария.
+    # боевом режиме тестового мастера нет — тот же отказ, что у `POST /api/games`, без пути
+    # сценария.
     prod = deps.settings.model_copy(update={"app_env": "prod"})
 
     reply = await lobby_reply(BotDeps(prod, deps.sessionmaker, deps.catalog, None))

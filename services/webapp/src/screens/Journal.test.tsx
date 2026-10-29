@@ -301,10 +301,8 @@ describe("карточка записи", () => {
   });
 
   test("не дополнялась (null) или сервер до B11 без поля — строки «дополнено» нет", () => {
-    const { updated_turn: _dropped, ...old } = journalEntry("npc:smith", {
-      title: "Кузнец",
-      revision: 2,
-    });
+    const old = journalEntry("npc:smith", { title: "Кузнец", revision: 2 });
+    delete old.updated_turn;
     renderJournal({
       entries: [
         journalEntry("npc:elder", { title: "Староста Хорн", revision: 2 }),
