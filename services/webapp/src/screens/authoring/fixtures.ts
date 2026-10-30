@@ -1,7 +1,6 @@
-// Данные ТОЛЬКО для тестов конструктора. Формы — строго по контракту блоков 4–6 (спека §8,
-// §10.3 и дополнения dispatcher): живого сервера у тестов нет, заглушки отвечают как он.
-// Сущности блоков 5 и 6 — модели движка, как их отдаёт `model_dump(mode="json")`: все поля,
-// включая поля по умолчанию.
+// Данные ТОЛЬКО для тестов конструктора. Формы — строго по контракту сервера: живого сервера
+// у тестов нет, заглушки отвечают как он. Сущности черновика — модели движка, как их отдаёт
+// `model_dump(mode="json")`: все поля, включая поля по умолчанию.
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { createElement } from "react";
 import { createApi } from "../../api/client";
@@ -195,7 +194,7 @@ export function actOf(overrides: Partial<Act> = {}): Act {
   };
 }
 
-// --- сущности блока 5 ---
+// --- локации, персонажи, связи и предметы ---
 
 export function exitOf(overrides: Partial<Exit> = {}): Exit {
   return {
@@ -300,7 +299,7 @@ export function itemOf(overrides: Partial<Item> = {}): Item {
   };
 }
 
-// --- сущности блока 6 ---
+// --- бои, монстры, улики и проверка ---
 
 export function monsterGroupOf(
   overrides: Partial<MonsterGroup> = {},
@@ -391,7 +390,7 @@ export function revelationOf(overrides: Partial<Revelation> = {}): Revelation {
   };
 }
 
-/** Строка справочника `GET /api/srd/monsters`: только поля, которые есть в данных SRD (B6 §8). */
+/** Строка справочника `GET /api/srd/monsters`: только поля, которые есть в данных SRD. */
 export function srdMonsterOf(overrides: Partial<SrdMonster> = {}): SrdMonster {
   return {
     id: "skeleton",
@@ -403,7 +402,7 @@ export function srdMonsterOf(overrides: Partial<SrdMonster> = {}): SrdMonster {
   };
 }
 
-/** Находка проверки: по умолчанию — финал не выбран (текст сервера, B6 §3). */
+/** Находка проверки: по умолчанию — финал не выбран (текст сервера). */
 export function findingOf(overrides: Partial<Finding> = {}): Finding {
   return {
     code: "dangling_ref",
@@ -427,7 +426,7 @@ export function reportOf(overrides: Partial<DraftReport> = {}): DraftReport {
 }
 
 /**
- * Справочник ссылок `GET /api/drafts/{id}/refs`, как его собирает сервер (дополнение B5, §6):
+ * Справочник ссылок `GET /api/drafts/{id}/refs`, как его собирает сервер:
  * виды по порядку deity, faction, npc, location, item, encounter, внутри вида — порядок раздела;
  * имя — `name`, у боя — id, пустое имя — id.
  */
@@ -529,3 +528,28 @@ export const optionValues = (scope: HTMLElement, name: string) =>
   within(within(scope).getByRole("combobox", { name }))
     .getAllByRole("option")
     .map((option) => (option as HTMLOptionElement).value);
+
+/**
+ * Фокус уходит со страницы в `body`, как в браузере, когда кнопку с фокусом выключают на время
+ * запроса. jsdom оставляет фокус на выключенной кнопке, а `blur()` у неё ничего не делает, поэтому
+ * фокус переводится на временное поле, которое тут же убирается.
+ */
+export function dropFocus() {
+  const spare = document.createElement("input");
+  document.body.append(spare);
+  spare.focus();
+  spare.remove();
+}
+
+/**
+ * В jsdom прокрутки нет: подменяем её на время теста. `mock.contexts` — какие элементы и
+ * `mock.calls` — как выводились в видимость.
+ */
+export function spyScrollIntoView() {
+  const scrollIntoView = vi.fn();
+  Element.prototype.scrollIntoView = scrollIntoView;
+  onTestFinished(() => {
+    Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+  });
+  return scrollIntoView;
+}

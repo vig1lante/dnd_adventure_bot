@@ -1,4 +1,4 @@
-"""Контрактные тесты адаптера `openai_compatible` (план B5.3, спека §7, §12, §13).
+"""Контрактные тесты адаптера `openai_compatible`.
 
 Живой модели и сети здесь нет. Адаптер получает настоящий `AsyncOpenAI`, у которого вместо сети
 стоит `httpx2.MockTransport`: SDK сам собирает запрос и разбирает записанные JSON-ответы Chat
@@ -181,7 +181,7 @@ class StrictWeaving(BaseModel):
     hooks: list[str]
 
 
-# Имена лишних ключей из находки X1 security review: запись в буфер обмена (OSC 52) и стирание
+# Имена лишних ключей, найденные проверкой безопасности: запись в буфер обмена (OSC 52) и стирание
 # строки возвратом каретки. Модель или чужой сервер выбирает их сам.
 HOSTILE_KEYS = {
     "osc52-буфер-обмена": "\x1b]52;c;ZWNobyBwd25lZA==\x07",
@@ -891,5 +891,17 @@ async def test_cheap_request_without_cheap_model_uses_the_main_one():
     api = FakeApi(valid_json_reply())
 
     await api.make_provider().complete_json(make_json_request(cheap=True), Weaving)
+
+    assert api.requests[0]["model"] == "compat-model"
+
+
+async def test_a_request_on_the_model_of_the_game_goes_to_the_main_model():
+    # Идеи у костра просят модель игры (`game_model=True`, не дешёвый запрос): у API это основная
+    # модель, даже когда дешёвая модель задана.
+    api = FakeApi(valid_json_reply())
+    provider = api.make_provider(cheap_model="small-model")
+
+    request = make_json_request(purpose="campfire.ideas", game_model=True)
+    await provider.complete_json(request, Weaving)
 
     assert api.requests[0]["model"] == "compat-model"

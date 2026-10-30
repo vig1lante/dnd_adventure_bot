@@ -30,7 +30,7 @@ from dnd_server.bot import bot as bot_module
 from dnd_server.config import PORT, Settings, get_settings, set_serving_port
 from dnd_server.db.session import make_engine, make_sessionmaker
 
-# --- запрет живых вызовов во всех тестах сервера (спека §13, инвариант «и») ---
+# --- запрет живых вызовов во всех тестах сервера ---
 #
 # Тесты не ходят в сеть, к живым моделям и к настоящему `claude`. Разрешены: память процесса
 # (ASGI-транспорт `httpx`, `MockTransport` SDK), loopback (локальный uvicorn и мост MCP), три
@@ -197,12 +197,12 @@ def isolated_settings_sources(monkeypatch, tmp_path):
     get_settings.cache_clear()
 
 
-# --- таблица маршрутов приложения (финальное покрытие B6) ---
+# --- таблица маршрутов приложения ---
 #
-# Общие проверки блока обходят маршруты, которые приложение действительно подключило (REST,
-# WebSocket, внутренний API в dev), а не список роутеров из теста: маршрут, добавленный позже,
-# попадёт в обход сам. FastAPI не разворачивает подключённые роутеры в `app.routes`, поэтому
-# обход идёт через `iter_route_contexts`, как у самой схемы OpenAPI.
+# Общие проверки обходят маршруты, которые приложение действительно подключило (REST, WebSocket,
+# внутренний API в dev), а не список роутеров из теста: маршрут, добавленный позже, попадёт в обход
+# сам. FastAPI не разворачивает подключённые роутеры в `app.routes`, поэтому обход идёт через
+# `iter_route_contexts`, как у самой схемы OpenAPI.
 WEBSOCKET = "WEBSOCKET"
 # Маршруты, которые FastAPI добавляет сам (документация, только в dev): без зависимостей проекта.
 FRAMEWORK_PATHS = frozenset({"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"})
@@ -238,7 +238,7 @@ def route_table() -> Callable[[FastAPI], list[MountedRoute]]:
     return mounted_routes
 
 
-# --- база данных тестов (план B6.1) ---
+# --- база данных тестов ---
 #
 # Каждый тест работает со своим файлом SQLite во временном каталоге. Базу владельца
 # (`<корень>/data/`) тесты не трогают, и это не обещание, а запрет: любая попытка открыть файл
@@ -269,7 +269,7 @@ def owner_database_guard(monkeypatch, live_call_attempts: list[str]) -> None:
     monkeypatch.setattr(sqlite3, "connect", connect)
 
 
-# --- Telegram-бот в тестах (план B6.6) ---
+# --- Telegram-бот в тестах ---
 #
 # Приложение с заданным `telegram_bot_token` поднимает в `lifespan` задачу опроса Telegram. Без
 # подмены тест, который просто запускает приложение с токеном (вход через Telegram, проверка
@@ -310,7 +310,7 @@ def no_telegram_bot(monkeypatch, request) -> None:
     monkeypatch.setattr(bot_module, "make_bot", lambda _settings: None)
 
 
-# --- порт сервера в тестах (план B8.s2) ---
+# --- порт сервера в тестах ---
 #
 # `main()` занимает порт сервера до запуска uvicorn. Порт по умолчанию, 8000, — порт сервера
 # владельца: тест, который просто вызвал `main()`, не должен ни занять его, ни упасть, потому что он
@@ -339,7 +339,7 @@ def no_real_port_claim(monkeypatch, request) -> Iterator[list[tuple[str, int]]]:
         stub.close()
 
 
-# --- база сервера в тестах (B8.security.server.fix1) ---
+# --- база сервера в тестах ---
 #
 # `main()` блокирует файл базы до запуска uvicorn. База по умолчанию, `data/dnd.sqlite3` в корне
 # репозитория, — база владельца: тест, который просто вызвал `main()`, не должен ни создать рядом с
@@ -365,7 +365,7 @@ def no_real_database_lock(monkeypatch, request) -> Iterator[list[str]]:
     yield asked
 
 
-# --- ревизия базы при старте (DND-2 B11) ---
+# --- ревизия базы при старте ---
 #
 # `main()` сверяет ревизию базы с `head` до запуска uvicorn. База по умолчанию — база владельца:
 # тест, который просто вызвал `main()`, не должен её читать и не должен падать оттого, что её нет.
@@ -384,7 +384,7 @@ def no_real_revision_check(monkeypatch, request) -> Iterator[list[str]]:
     yield asked
 
 
-# --- журналы процесса при старте (DND-2 B11, находка N1) ---
+# --- журналы процесса при старте ---
 #
 # `main()` настраивает журналы (LOG_CONFIG) до проверок старта, чтобы их предупреждения шли с меткой
 # уровня. Настройка глобальна для процесса: у `dnd_server` она снимает передачу записей корневому

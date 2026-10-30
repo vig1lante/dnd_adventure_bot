@@ -5,6 +5,7 @@ import {
   callsTo,
   deityOf,
   draftOf,
+  dropFocus,
   factionOf,
   featureOf,
   findingOf,
@@ -16,6 +17,7 @@ import {
   reportOf,
   rumorOf,
   secretOf,
+  spyScrollIntoView,
 } from "./fixtures";
 
 const VALIDATE = "/api/drafts/d1/validate";
@@ -252,7 +254,7 @@ describe("экран «Публикация»", () => {
     ).toBeNull();
   });
 
-  // Перенесено из B6 в B10.4: отказы публикации ведут туда, где их исправляют.
+  // Отказы публикации ведут туда, где их исправляют.
   test("409 version_conflict: диалог «Черновик изменился, обновить?»; «Обновить» перечитывает черновик", async () => {
     let reads = 0;
     const { server, form } = await openPublish(ready(), reportOf(), {
@@ -283,6 +285,169 @@ describe("экран «Публикация»", () => {
     expect(
       await screen.findByRole("region", { name: "Публикация" }),
     ).toBeInTheDocument();
+  });
+
+  test("409 version_conflict: вопрос получает фокус и встаёт в середину экрана", async () => {
+    const scrollIntoView = spyScrollIntoView();
+    const { form } = await openPublish(ready(), reportOf(), {
+      [`POST ${PUBLISH}`]: {
+        status: 409,
+        json: { detail: "Черновик изменился.", code: "version_conflict" },
+      },
+    });
+    await checked(form);
+
+    fireEvent.click(publishButton(form));
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Черновик изменился, обновить?",
+    });
+
+    await vi.waitFor(() => expect(dialog).toHaveFocus());
+    expect(scrollIntoView.mock.contexts).toEqual([dialog]);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+  });
+
+  test("подтверждение «Предметы лежат открыто» — тот же вопрос: фокус и прокрутка к нему", async () => {
+    const scrollIntoView = spyScrollIntoView();
+    const { form } = await openPublish(ready({ items: [KEY] }));
+    await checked(form);
+
+    fireEvent.click(publishButton(form));
+    const confirm = within(form).getByRole("alertdialog", {
+      name: "Предметы лежат открыто",
+    });
+
+    expect(confirm).toHaveFocus();
+    expect(scrollIntoView.mock.contexts).toEqual([confirm]);
+  });
+
+  test("повторный 409 при открытом вопросе снова ведёт к нему: фокус и прокрутка", async () => {
+    const scrollIntoView = spyScrollIntoView();
+    const { server, form } = await openPublish(ready(), reportOf(), {
+      [`POST ${PUBLISH}`]: {
+        status: 409,
+        json: { detail: "Черновик изменился.", code: "version_conflict" },
+      },
+    });
+    await checked(form);
+    fireEvent.click(publishButton(form));
+    await vi.waitFor(() =>
+      expect(screen.getByRole("alertdialog")).toHaveFocus(),
+    );
+    // Автор не ответил на вопрос и снова нажимает «Опубликовать» внизу экрана.
+    publishButton(form).focus();
+    scrollIntoView.mockClear();
+
+    fireEvent.click(publishButton(form));
+
+    await vi.waitFor(() =>
+      expect(callsTo(server, "POST", PUBLISH)).toHaveLength(2),
+    );
+    await vi.waitFor(() =>
+      expect(
+        screen.getByRole("alertdialog", {
+          name: "Черновик изменился, обновить?",
+        }),
+      ).toHaveFocus(),
+    );
+    expect(scrollIntoView.mock.contexts).toEqual([
+      screen.getByRole("alertdialog"),
+    ]);
+  });
+
+  test("«Опубликовать всё равно» и 409: подтверждение уходит, фокус и прокрутка — у вопроса о конфликте", async () => {
+    const scrollIntoView = spyScrollIntoView();
+    const { form } = await openPublish(ready({ items: [KEY] }), reportOf(), {
+      [`POST ${PUBLISH}`]: {
+        status: 409,
+        json: { detail: "Черновик изменился.", code: "version_conflict" },
+      },
+    });
+    await checked(form);
+    fireEvent.click(publishButton(form));
+
+    fireEvent.click(
+      within(form).getByRole("button", { name: "Опубликовать всё равно" }),
+    );
+
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Черновик изменился, обновить?",
+    });
+    expect(
+      screen.queryByRole("alertdialog", { name: "Предметы лежат открыто" }),
+    ).toBeNull();
+    await vi.waitFor(() => expect(dialog).toHaveFocus());
+    expect(scrollIntoView.mock.contexts.at(-1)).toBe(dialog);
+  });
+
+  test("«Опубликовать» занята на время публикации и теряет фокус — после «Отмена» в вопросе о конфликте фокус снова на ней", async () => {
+    const { form } = await openPublish(ready(), reportOf(), {
+      [`POST ${PUBLISH}`]: {
+        status: 409,
+        json: { detail: "Черновик изменился.", code: "version_conflict" },
+      },
+    });
+    await checked(form);
+    publishButton(form).focus();
+
+    fireEvent.click(publishButton(form));
+    expect(publishButton(form)).toBeDisabled();
+    dropFocus();
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Черновик изменился, обновить?",
+    });
+    await vi.waitFor(() => expect(dialog).toHaveFocus());
+    fireEvent.click(within(dialog).getByRole("button", { name: "Отмена" }));
+
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(publishButton(form)).toHaveFocus();
+  });
+
+  test("«Опубликовать всё равно»: вопрос уходит, «Опубликовать» занята и без фокуса; после ответа фокус снова на ней", async () => {
+    const { form } = await openPublish(ready({ items: [KEY] }));
+    await checked(form);
+    publishButton(form).focus();
+    fireEvent.click(publishButton(form));
+    const anyway = within(form).getByRole("button", {
+      name: "Опубликовать всё равно",
+    });
+    anyway.focus();
+
+    fireEvent.click(anyway);
+
+    expect(within(form).queryByRole("alertdialog")).toBeNull();
+    expect(publishButton(form)).toBeDisabled();
+    expect(publishButton(form)).not.toHaveFocus();
+    expect(
+      await within(form).findByText(/Приключение опубликовано/),
+    ).toBeInTheDocument();
+    await vi.waitFor(() => expect(publishButton(form)).toHaveFocus());
+  });
+
+  test("«Опубликовать всё равно» и 409: после «Отмена» в вопросе о конфликте фокус на «Опубликовать»", async () => {
+    const { form } = await openPublish(ready({ items: [KEY] }), reportOf(), {
+      [`POST ${PUBLISH}`]: {
+        status: 409,
+        json: { detail: "Черновик изменился.", code: "version_conflict" },
+      },
+    });
+    await checked(form);
+    publishButton(form).focus();
+    fireEvent.click(publishButton(form));
+    const anyway = within(form).getByRole("button", {
+      name: "Опубликовать всё равно",
+    });
+    anyway.focus();
+
+    fireEvent.click(anyway);
+    dropFocus();
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Черновик изменился, обновить?",
+    });
+    await vi.waitFor(() => expect(dialog).toHaveFocus());
+    fireEvent.click(within(dialog).getByRole("button", { name: "Отмена" }));
+
+    expect(publishButton(form)).toHaveFocus();
   });
 
   test("409 version_conflict: «Отмена» закрывает диалог, черновик не перечитывается", async () => {
@@ -415,8 +580,6 @@ describe("экспорт архива", () => {
   });
 });
 
-// --- финальное покрытие блока 6 ---
-
 describe("«Публикация»: отчёт проверки и отказы сервера", () => {
   test("проверка не пришла — «Опубликовать» закрыта; «Повторить» с чистым отчётом её открывает", async () => {
     let attempt = 0;
@@ -440,7 +603,7 @@ describe("«Публикация»: отчёт проверки и отказы 
     expect(callsTo(server, "POST", VALIDATE)).toHaveLength(2);
   });
 
-  // Код отказа → нужен ли переход к «Замыслу» (там задают и меняют id, B6 §6).
+  // Код отказа → нужен ли переход к «Замыслу» (там задают и меняют id).
   test.each([
     {
       status: 422,
@@ -653,8 +816,6 @@ describe("«Лежат открыто»: держатель — локация, 
   });
 });
 
-// --- fix-раунд 1 блока 6 (дополнение B6, §11, R8) ---
-
 describe("«Публикация»: проверка видит только заполненные шаги", () => {
   const PARTIAL =
     "Проверка показывает находки только заполненных шагов; при публикации сервер проверит всё.";
@@ -677,7 +838,7 @@ describe("«Публикация»: проверка видит только з�
   });
 });
 
-// --- B10.3.fix2 (N2): переход с «Публикации» к шагу не роняет фокус на страницу ---
+// --- переход с «Публикации» к шагу не роняет фокус на страницу ---
 
 describe("фокус после перехода к шагу", () => {
   test("«Перейти к шагу «Замысел»» без id — фокус на поле «id приключения»: его и нужно задать", async () => {

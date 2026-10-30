@@ -1,4 +1,4 @@
-"""Чужая игра для игрока — несуществующая, на каждом маршруте и в сокете (инвариант «г»).
+"""Чужая игра для игрока — несуществующая, на каждом маршруте и в сокете.
 
 Тесты пунктов проверяют это по месту (лобби, персонажи, снимок). Здесь обход всех маршрутов, где в
 пути есть id игры: посторонний получает 404 с тем же телом, что и для игры, которой нет, и ничего в
@@ -8,7 +8,6 @@
 
 import pytest
 from sqlalchemy import func, select
-from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from dnd_server.db.models import GamePlayer, PlayerCharacter
@@ -110,7 +109,7 @@ async def test_a_stranger_is_turned_away_from_the_socket_the_same_way_for_any_ga
     game = await stand.new_game(host)
 
     async def close_code(game_id: str, token: str | None) -> int:
-        async with connect(stand.ws_url(game_id, token)) as ws:
+        async with stand.socket(game_id, token) as ws:
             with pytest.raises(ConnectionClosed) as closed:
                 await ws.recv()
         return closed.value.rcvd.code

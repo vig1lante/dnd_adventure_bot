@@ -34,7 +34,7 @@ const newExit = (): Exit => ({
   hidden_dc: null,
 });
 
-// Сервер принимает старт и финал только из этой же карты (дополнение B5, §1).
+// Сервер принимает старт и финал только из этой же карты.
 const OFF_MAP = "Такой локации нет на карте: выберите другую или «не выбран».";
 
 const sectionOf = (draft: StepFormProps["draft"]): LocationsSection => ({
@@ -45,7 +45,7 @@ const sectionOf = (draft: StepFormProps["draft"]): LocationsSection => ({
 
 /**
  * Шаг «Карта»: локации списком, выходы «откуда → куда», старт и финал. Раздел `locations` —
- * объект `{locations, start_location, finale_location}` (дополнение B5, §1); наполнение локаций
+ * объект `{locations, start_location, finale_location}`; наполнение локаций
  * правит шаг «Наполнение», здесь оно сохраняется как было.
  */
 export function MapStep({

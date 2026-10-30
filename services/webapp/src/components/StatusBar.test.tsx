@@ -5,6 +5,7 @@ import type {
   PhaseView,
   PlayerStatus,
   RestView,
+  SceneView,
   TurnPhase,
 } from "../api/types";
 import type { LiveConnection } from "../store/game";
@@ -23,7 +24,7 @@ function renderBar(
     remaining?: number | null;
     statuses?: Record<string, PlayerStatus>;
     connection?: LiveConnection;
-    /** Привал из снимка (контракт B9, §3); по умолчанию его нет. */
+    /** Привал из снимка; по умолчанию его нет. */
     rest?: RestView | null;
     /** Поправки к сводке игры (сроки отсчётов). */
     summary?: Partial<GameSummary>;
@@ -130,7 +131,7 @@ describe("значки игроков", () => {
     },
   );
 
-  test("«idle» — ход ещё не начат (D17): у игрока имя без значка, «Пишет» только у набирающего черновик", () => {
+  test("«idle» — ход ещё не начат: у игрока имя без значка, «Пишет» только у набирающего черновик", () => {
     renderBar("discussion", {
       statuses: { u1: "idle", u2: "writing", u3: "idle" },
     });
@@ -203,7 +204,7 @@ describe("отсчёт в строке статуса", () => {
     expect((wax as HTMLElement).style.width).toBe("25%"); // 75 из 300
   });
 
-  describe("привал: воск от срока его вида (контракт B9, §9 п. 5)", () => {
+  describe("привал: воск от срока его вида", () => {
     const rest = (kind: RestView["kind"]): RestView => ({
       kind,
       deadline_at: null,
@@ -370,7 +371,7 @@ describe("связь с игрой", () => {
   });
 });
 
-describe("день и часть суток (контракт B10, §1 п. 3)", () => {
+describe("день и часть суток", () => {
   const withScene = (scene: PhaseView["scene"], turnPhase: TurnPhase | null) =>
     render(
       <StatusBar
@@ -395,6 +396,26 @@ describe("день и часть суток (контракт B10, §1 п. 3)", 
     expect(bar).toContainElement(screen.getByText(text));
     expect(bar).toContainElement(screen.getByText("Обсуждение"));
   });
+
+  // Часы игры знает только мастер: игроку — день и часть суток, даже если сервер пришлёт час.
+  test.each([
+    [19, "evening", "День 2, вечер"],
+    [0, "night", "День 2, ночь"],
+    [8, "morning", "День 2, утро"],
+    [12, "day", "День 2, полдень"],
+  ] as const)(
+    "в сцене есть час %i — видно только «%s», без часов",
+    (hour, part, text) => {
+      const scene = { type: "exploration", day: 2, hour, part } as SceneView;
+      const { container } = withScene(scene, "discussion");
+
+      expect(screen.getByText(text)).toBeInTheDocument();
+      const bar = container.querySelector(".game-status");
+      expect(bar).not.toHaveTextContent(/\d{1,2}:\d{2}/);
+      expect(bar).not.toHaveTextContent(/час/i);
+      expect(bar?.textContent?.replace(text, "")).not.toContain(String(hour));
+    },
+  );
 
   test("без сцены (старый снимок) — только фаза", () => {
     const { container } = withScene(null, "discussion");

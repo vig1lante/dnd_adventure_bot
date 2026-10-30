@@ -1,6 +1,6 @@
-"""Общая часть сквозных тестов мастера (B7.coverage): настоящий сервер, вечер игры, клиент.
+"""Общая часть сквозных тестов мастера: настоящий сервер, вечер игры, клиент.
 
-Тесты пунктов B7.1–B7.8 держат каждую фазу по отдельности на подготовленных строках базы. Здесь вся
+Остальные тесты мастера держат каждую фазу по отдельности на подготовленных строках базы. Здесь вся
 игра идёт одним потоком, как у шестерых друзей за столом: лобби и герои, «Начать», вплетение,
 открытие, обсуждение и сбор ходов с отсчётом, разбор, бой с передачей хода движком и «Поторопить»,
 привал с репликами и продлением, длинный отдых, летопись. Сервер настоящий (приложение под uvicorn
@@ -31,6 +31,7 @@ from typing import Any
 import httpx
 import uvicorn
 from adventure_secrets import hidden_texts
+from game_socket import open_game_socket
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from websockets.asyncio.client import ClientConnection, connect
@@ -311,8 +312,8 @@ def evening_scenario(repeat_turn: int | None = None) -> dict[str, Any]:
         "json": {
             "weaving": {"hooks": hooks},
             "chronicle": {"summary": SUMMARY},
-            # Идеи для рассказа у костра (блок B9): привал мастера после хода 8 просит их фоновым
-            # вызовом; без ответа сценария вечер писал бы в журнал предупреждение о сбое идей.
+            # Идеи для рассказа у костра: привал мастера после хода 8 просит их фоновым вызовом; без
+            # ответа сценария вечер писал бы в журнал предупреждение о сбое идей.
             "campfire.ideas": {
                 "ideas": [
                     {"character_id": f"$pc{number}", "text": f"Расскажи о себе у костра, {name}."}
@@ -456,12 +457,16 @@ class Server:
 
     # --- сокеты ---
 
-    def ws_url(self, token: str) -> str:
-        return f"ws://127.0.0.1:{self.port}/ws/games/{self.game_id}?token={token}"
+    def ws_url(self) -> str:
+        return f"ws://127.0.0.1:{self.port}/ws/games/{self.game_id}"
+
+    def socket(self, token: str) -> connect:
+        """Сокет игры, как его открывает Mini App: токен — вторым подпротоколом, адрес без него."""
+        return open_game_socket(self.ws_url(), token)
 
     async def watch(self, who: str) -> Watcher:
         person = self.people[who]
-        ws = await connect(self.ws_url(person.token))
+        ws = await self.socket(person.token)
         watcher = Watcher(person, ws)
         self.watchers[who] = watcher
         await asyncio.wait_for(self._first_frame(watcher), TIMEOUT_S)
@@ -698,7 +703,7 @@ def client_view(frames: list[dict[str, Any]]) -> dict[str, Any]:
 
 async def fresh_snapshot(server: Server, who: str) -> dict[str, Any]:
     """Новый снимок игрока на новом сокете: то, что увидит переподключившийся клиент."""
-    async with connect(server.ws_url(server.people[who].token)) as ws:
+    async with server.socket(server.people[who].token) as ws:
         snapshot = json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S))
     assert snapshot["type"] == "snapshot"
     return snapshot
@@ -986,7 +991,7 @@ ROUTE_BODIES: dict[tuple[str, str], Any] = {
     ("POST", "/api/games/{game_id}/action/submit"): None,
     ("POST", "/api/games/{game_id}/action/pass"): None,
     ("POST", "/api/games/{game_id}/camp/line"): {"text": "Подкину дров."},
-    # Привалы по кнопке хоста (блок B9): начало привала хостом и кость хитов героя.
+    # Привалы по кнопке хоста: начало привала хостом и кость хитов героя.
     ("POST", "/api/games/{game_id}/host/rest"): {"kind": "short"},
     ("POST", "/api/games/{game_id}/rest/hit-dice"): None,
     ("POST", "/api/games/{game_id}/leave"): None,

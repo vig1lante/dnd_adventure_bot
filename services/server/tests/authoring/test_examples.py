@@ -1,5 +1,5 @@
-"""Примеры автора из репозитория: `content/examples/seeds_v2.yaml` и `wishes.yaml` (план DND-2 B3.2,
-решение dispatcher B3 examples_test; README «Генерация приключения»).
+"""Примеры автора из репозитория: `content/examples/seeds_v2.yaml` и `wishes.yaml` (README
+«Генерация приключения»).
 
 Примеры — рабочие шаблоны для владельца: они проходят чтение CLI, а полный прогон `dnd-generate`
 по сценарию `generator_v2_demo.yaml` с ними даёт приключение без блокирующих проблем, где всё
@@ -163,7 +163,7 @@ def test_a_run_with_the_examples_costs_what_the_readme_says(provider, tmp_path):
 
 
 def test_every_role_of_a_run_with_the_examples_may_use_profanity_by_default(provider, tmp_path):
-    # Флага мата у CLI нет (решение dispatcher B3 profanity): черновик берёт значение по умолчанию.
+    # Флага мата у CLI нет: черновик берёт значение по умолчанию.
     assert run_with_examples(tmp_path / "out") == 0
 
     assert provider.requests

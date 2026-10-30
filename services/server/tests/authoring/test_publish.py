@@ -1,4 +1,4 @@
-"""Публикация черновика в каталог (план B6.1; спека §10.2, §10.3; дополнение dispatcher B6 §2, §6).
+"""Публикация черновика в каталог.
 
 `POST /api/drafts/{id}/publish` проверяет черновик полным списком ошибок `pipeline.check` (без
 фильтра пустых шагов), пишет строку `authored_adventures` и кладёт приключение в каталог на месте —
@@ -146,9 +146,8 @@ async def test_the_published_adventure_is_listed_without_secrets(stand):
         location["dm_notes"] for location in draft["locations"] if location["dm_notes"]
     ]
     assert secrets and all(secret not in response.text for secret in secrets)
-    # Финальное покрытие B6: ни один текст разделов (тайны NPC и мест, откровения и улики, тактика
-    # боя, особенности своего статблока, цели фракций) не уходит в каталог — только название и
-    # завязка.
+    # Ни один текст разделов (тайны NPC и мест, откровения и улики, тактика боя, особенности своего
+    # статблока, цели фракций) не уходит в каталог — только название и завязка.
     texts = [
         text
         for section in (
@@ -274,7 +273,7 @@ async def test_two_publishes_of_one_id_at_once_give_one_success_and_one_conflict
     [row] = await rows(stand)
     winner = mine if row.owner_user_id == author.user_id else theirs
     assert row.source_draft_id == winner["id"]
-    # Финальное покрытие B6: проигравший не перетёр каталог — там приключение победителя.
+    # Проигравший не перетёр каталог — там приключение победителя.
     assert row.data["title"] == winner["title"]
     assert stand.app.state.adventures[ADVENTURE_ID].adventure.title == winner["title"]
 
@@ -297,8 +296,8 @@ async def test_a_draft_with_errors_is_not_published_and_the_problems_name_the_st
 
 
 async def test_an_error_hidden_by_the_empty_step_filter_still_blocks_the_publication(stand):
-    # Дополнение §6, Q-L: «Проверка» показывает находки заполненных шагов, а публикация смотрит на
-    # все ошибки. Откровения без единой улики — шаг улик пуст, его находки не видны в проверке.
+    # «Проверка» показывает находки заполненных шагов, а публикация смотрит на все ошибки.
+    # Откровения без единой улики — шаг улик пуст, его находки не видны в проверке.
     author = await stand.author()
     content = await generated_draft()
     bare = tuple(r.model_copy(update={"clues": ()}) for r in content.revelations)
@@ -359,7 +358,7 @@ async def test_publish_takes_an_empty_body_and_refuses_extra_fields(stand):
     assert without_body.status_code == 201, without_body.text
 
 
-# --- id после публикации закреплён (дополнение §2) ---
+# --- id после публикации закреплён ---
 
 
 async def test_the_adventure_id_of_a_published_draft_cannot_be_changed(stand):
@@ -387,7 +386,7 @@ async def test_the_adventure_id_of_a_published_draft_cannot_be_changed(stand):
     assert_error(emptied, 422, "adventure_id_locked")
     assert same.status_code == 200, same.text
     assert same.json()["adventure_id"] == ADVENTURE_ID
-    # Настройки без поля id (клиенты B4/B5) после публикации тоже пишутся: id не меняется.
+    # Настройки без поля id (старые клиенты) после публикации тоже пишутся: id не меняется.
     without_field = await stand.put_section(
         author, same.json(), "settings", settings_now | {"tone": "туман"}
     )
@@ -552,7 +551,7 @@ async def test_publications_of_the_table_count_one_row_per_adventure(stand):
     assert count == 1
 
 
-# --- финальное покрытие B6: порядок проверок публикации (отчёт B6.1, заметка 4) ---
+# --- порядок проверок публикации ---
 
 
 async def add_job(stand: Stand, draft: dict[str, Any]) -> None:
@@ -614,7 +613,7 @@ async def test_errors_of_the_check_are_named_before_a_taken_id(stand, taken_by):
     assert "locations: Старт не выбран" in body["problems"]
 
 
-# --- финальное покрытие B6: гонки и сбои публикации ---
+# --- гонки и сбои публикации ---
 
 
 async def test_a_double_click_on_publish_gives_one_row_and_no_server_error(stand):
@@ -663,7 +662,7 @@ async def test_a_publication_that_the_database_refuses_leaves_neither_a_row_nor_
     assert (await publish_draft(stand, author, draft)).status_code == 201
 
 
-# Дефект B6.coverage D1 исправлен в fix-раунде 1 B6 (R1/S5): xfail снят.
+# Известный дефект исправлен, xfail снят.
 async def test_an_id_change_landing_during_the_publication_does_not_split_the_draft(
     stand, settings, monkeypatch
 ):
@@ -696,7 +695,7 @@ async def test_an_id_change_landing_during_the_publication_does_not_split_the_dr
     assert published == {after["adventure_id"]}
 
 
-# --- финальное покрытие B6: удалённый черновик и старт сервера ---
+# --- удалённый черновик и старт сервера ---
 
 
 async def test_deleting_a_published_draft_keeps_the_adventure_and_freezes_its_id(stand):
@@ -795,8 +794,8 @@ async def test_a_row_skipped_at_start_comes_back_with_the_next_publication(
 
 
 async def test_another_creator_copies_a_published_adventure_into_a_draft_of_their_own(stand):
-    # Дополнение §8: копия — и папки, и опубликованного. Флажок мата — умолчание Р1, пожеланий нет;
-    # копия — черновик вызывающего, а опубликовать тот же id ему нельзя: строка чужая.
+    # Копия — и папки, и опубликованного. Флажок мата — по умолчанию, пожеланий нет; копия —
+    # черновик вызывающего, а опубликовать тот же id ему нельзя: строка чужая.
     author, other = await stand.author(), await stand.author()
     content = await generated_draft()
     original = await put_draft(
@@ -825,7 +824,7 @@ async def test_another_creator_copies_a_published_adventure_into_a_draft_of_thei
     assert_error(await publish_draft(stand, other, copy), 409, "id_taken")
 
 
-# --- fix-раунд 1 B6: гонка публикации (R1/S5), пределы разделов (S2) ---
+# --- гонка публикации, пределы разделов ---
 
 
 async def test_a_write_landing_during_the_publication_is_a_version_conflict(stand, monkeypatch):
@@ -947,7 +946,7 @@ async def test_the_published_id_of_a_draft_is_its_earliest_publication(stand):
 
 
 async def test_a_draft_over_the_limits_of_a_section_is_not_published(stand):
-    # S2: разделы, записанные мимо PUT (копия папки, данные до B6), публикация проверяет теми же
+    # Разделы, записанные мимо PUT (копия папки, старые данные), публикация проверяет теми же
     # пределами: строка «<шаг>: <раздел>.<путь>: <предел>», без значения поля.
     author = await stand.author()
     content = await generated_draft()
@@ -967,8 +966,8 @@ async def test_a_draft_over_the_limits_of_a_section_is_not_published(stand):
 
 
 async def test_a_copy_of_a_published_place_with_a_hidden_item_and_two_clues_is_published(stand):
-    # Дополнение §11 (по отчёту B6.1 att.002): опубликованное приключение собрано — у тайника
-    # находка-предмет и две находки-улики; копия этого приключения проходит пределы и публикуется.
+    # Опубликованное приключение собрано — у тайника находка-предмет и две находки-улики; копия
+    # этого приключения проходит пределы и публикуется.
     author = await stand.author()
     draft = await put_draft(stand, author, crowded_cupboard(await generated_draft()))
     assert (await publish_draft(stand, author, draft)).status_code == 201

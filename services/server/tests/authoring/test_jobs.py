@@ -1,5 +1,4 @@
-"""Задания генерации шага конструктора (планы B4.1, B5.1; спека Р6, §10.2, §10.3; дополнения
-dispatcher B4 §5 и B5 §2).
+"""Задания генерации шага конструктора.
 
 `POST /api/drafts/{id}/generate` проверяет вход до задания (шаг, пожелание, цель, закрепления),
 держит одно активное задание на черновик и выполняет его фоновой задачей через `run_step` тем же
@@ -144,7 +143,7 @@ async def test_a_generated_step_is_written_into_the_draft_and_raises_the_version
 
 
 @pytest.mark.parametrize("step", ["concept", "world", "pantheon", "factions", "plot"])
-async def test_each_step_of_block_4_is_generated(stand, step):
+async def test_each_world_step_is_generated(stand, step):
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -495,7 +494,7 @@ async def test_a_job_of_another_draft_is_404(stand):
     )
 
 
-# --- финальное покрытие блока 4: незавершённое задание закрывает правку ---
+# --- незавершённое задание закрывает правку ---
 
 
 async def add_job(stand: Stand, draft: dict[str, Any], status: JobStatus) -> None:
@@ -506,7 +505,7 @@ async def add_job(stand: Stand, draft: dict[str, Any], status: JobStatus) -> Non
 
 
 async def every_edit(stand: Stand, who: Author, draft: dict[str, Any]) -> list:
-    """Все записи черновика: разделы B4 и B5, закрепления, пожелание, удаление и запуск задания."""
+    """Все записи черновика: каждый раздел, закрепления, пожелание, удаление и запуск задания."""
     path = f"/api/drafts/{draft['id']}"
     sections = [
         await stand.put_section(who, draft, section, section_data(section)) for section in SECTIONS
@@ -633,7 +632,7 @@ async def test_a_result_is_not_written_over_a_change_landing_while_it_is_saved(
     assert job["status"] == "failed" and "изменился" in job["error"]
     saved = await stand.draft(author, draft["id"])
     assert (saved["version"], saved["title"], saved["adventure_id"]) == (2, "Ручное", None)
-    # Название «Ручное» — содержимое Замысла без id приключения: черновик (дополнение §3).
+    # Название «Ручное» — содержимое Замысла без id приключения: черновик.
     assert saved["steps"]["concept"] == {"status": "draft", "updated_at": None}
 
 
@@ -685,9 +684,9 @@ async def test_a_provider_that_is_not_configured_says_so_and_hides_the_setting(
 async def test_in_prod_the_test_master_does_not_write_a_step_of_the_constructor(
     stand, settings, caplog
 ):
-    # Спека DND-2 §15: в боевом режиме тестового мастера нет, даже со сценарием, — и у конструктора.
-    # Шаг не пишется по сценарию: задание падает с «не настроена», черновик прежний, а путь сценария
-    # не попадает ни в ответы, ни в журнал.
+    # В боевом режиме тестового мастера нет, даже со сценарием, — и у конструктора. Шаг не пишется
+    # по сценарию: задание падает с «не настроена», черновик прежний, а путь сценария не попадает ни
+    # в ответы, ни в журнал.
     stand.app.state.settings = settings.model_copy(update={"app_env": "prod"})
     author = await stand.author(tg_id=CREATOR_TG_ID)
     draft = await stand.new_draft(author)
@@ -909,7 +908,7 @@ async def test_a_job_of_another_authors_draft_is_404_through_ones_own_draft(stan
     assert set(body) == {"detail"} and started["id"] not in response.text
 
 
-# --- fix-раунд 1 блока 4: задание всегда заканчивается done или failed (дополнение §10) ---
+# --- задание всегда заканчивается done или failed ---
 
 
 def break_commits_of_jobs(monkeypatch, *statuses: JobStatus) -> None:
@@ -1041,10 +1040,10 @@ async def test_an_error_escaping_a_job_is_logged_as_one_of_the_constructor(
     assert "конструктора" in caplog.text and "хода" not in caplog.text
 
 
-# --- шаги блока 5: карта, наполнение, NPC, связи и одна сущность (дополнение B5 §2) ---
+# --- шаги: карта, наполнение, NPC, связи и одна сущность ---
 
 
-B5_STEPS = (["locations"], ["locations", "location_contents"], ["npcs"], ["relations"])
+MAP_STEPS = (["locations"], ["locations", "location_contents"], ["npcs"], ["relations"])
 
 
 async def run(stand: Stand, who: Author, draft: dict[str, Any], **body: Any) -> dict[str, Any]:
@@ -1069,9 +1068,9 @@ def by_id(entities: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 @pytest.mark.parametrize(
-    "steps", B5_STEPS, ids=["locations", "location_contents", "npcs", "relations"]
+    "steps", MAP_STEPS, ids=["locations", "location_contents", "npcs", "relations"]
 )
-async def test_each_step_of_block_5_is_generated(stand, steps):
+async def test_each_step_of_the_map_is_generated(stand, steps):
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -1203,7 +1202,7 @@ async def test_a_target_of_another_kind_or_missing_is_refused_before_any_job(sta
         (["relation:bram-rival-ilsa"], {"step": "relations", "target": "relation:bram-rival-ilsa"}),
     ],
 )
-async def test_a_locked_step_or_target_of_block_5_is_refused_before_any_job(stand, locks, body):
+async def test_a_locked_step_or_target_of_the_map_is_refused_before_any_job(stand, locks, body):
     author = await stand.author()
     draft = await stand.new_draft(author)
     for section in ("locations", "npcs", "relations"):
@@ -1236,7 +1235,7 @@ async def test_the_filling_takes_the_saved_wish_of_its_step(stand, monkeypatch):
     assert "Больше тумана" in prompt and "перегенерировать только location:harbor" in prompt
 
 
-# --- финальное покрытие блока 5: перегенерация карты целиком, чтение во время задания ---
+# --- перегенерация карты целиком, чтение во время задания ---
 
 
 async def test_regenerating_the_whole_map_keeps_the_filling_and_the_locked_location(stand):
@@ -1295,8 +1294,7 @@ async def test_while_a_job_runs_the_draft_its_refs_and_the_check_stay_readable(s
     assert (await stand.draft(author, draft["id"]))["version"] == draft["version"] + 1
 
 
-# --- fix-раунд 1 блока 5: старт и финал из ответа модели, время шагов раздела
-# (дополнение B5 §9) ---
+# --- старт и финал из ответа модели, время шагов раздела ---
 
 
 @pytest.mark.parametrize(
@@ -1343,7 +1341,7 @@ async def test_a_map_regenerated_with_a_start_off_the_map_keeps_the_start_of_the
 
 @pytest.mark.parametrize("step", ["locations", "location_contents"])
 async def test_a_job_marks_the_time_of_every_step_of_its_section(stand, step):
-    # Дополнение B5 §9 (B4 §3): время шага — последняя запись его раздела, ручная или генерацией.
+    # Время шага — последняя запись его раздела, ручная или генерацией.
     # Карту пишут оба шага, поэтому результат любого из них отмечает время обоих.
     author = await stand.author()
     draft = await stand.new_draft(author)
@@ -1360,7 +1358,7 @@ async def test_a_job_marks_the_time_of_every_step_of_its_section(stand, step):
     assert all(after[s]["updated_at"] is None for s in ("relations", "items", "concept"))
 
 
-# --- пределы результата задания (дополнение B6 §5) ---
+# --- пределы результата задания ---
 
 
 def custom_monsters(count: int) -> list[dict[str, Any]]:
@@ -1370,8 +1368,8 @@ def custom_monsters(count: int) -> list[dict[str, Any]]:
 
 
 async def test_a_result_over_the_limits_of_its_section_fails_and_leaves_the_draft(stand):
-    # Повторные цели боя не копят свои статблоки сверх предела черновика (security B3 att.002 I3):
-    # шесть своих статблоков и бой, чей новый ответ приносит седьмой.
+    # Повторные цели боя не копят свои статблоки сверх предела черновика: шесть своих статблоков и
+    # бой, чей новый ответ приносит седьмой.
     author = await stand.author()
     draft = await stand.new_draft(author)
     draft = await saved(stand, author, draft, "monsters", custom_monsters(6))
@@ -1410,9 +1408,9 @@ async def test_a_result_is_checked_only_in_the_sections_it_wrote(stand):
 async def test_a_generated_fight_of_more_than_twenty_monsters_fails_and_leaves_the_draft(
     stand, monkeypatch
 ):
-    # Финальное покрытие B6: схема ответа шага пускает четыре группы по 20, а в бою раздела — не
-    # больше 20 монстров. Результат шага проходит те же пределы, что ручная запись (дополнение
-    # B6 §5), даже когда ничего не накопилось: черновик и версия остаются прежними.
+    # Схема ответа шага пускает четыре группы по 20, а в бою раздела — не больше 20 монстров.
+    # Результат шага проходит те же пределы, что ручная запись, даже когда ничего не накопилось:
+    # черновик и версия остаются прежними.
     answers = v2_answers()
     [first, *rest] = answers["generator.encounters"]["encounters"]
     crowd = [{"monster_id": m, "count": 20} for m in ("ghoul", "zombie", "skeleton", "cultist")]
@@ -1436,7 +1434,7 @@ async def test_a_generated_fight_of_more_than_twenty_monsters_fails_and_leaves_t
 
 
 async def test_a_concept_job_marks_the_time_of_the_clues_step_too(stand):
-    # Дополнение B6 §11 (R5): генерация Замысла пишет раздел открытий — время шага «Улики» тоже.
+    # Генерация Замысла пишет раздел открытий — время шага «Улики» тоже.
     author = await stand.author()
     draft = await stand.new_draft(author)
 

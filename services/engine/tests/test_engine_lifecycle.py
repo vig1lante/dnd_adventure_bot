@@ -1,4 +1,4 @@
-"""Сквозные проверки блока B2 на встроенных данных SRD: создание → производные значения →
+"""Сквозные проверки на встроенных данных SRD: создание → производные значения →
 проверки → отдых на одном и том же персонаже.
 
 Модульные тесты проверяют каждую часть отдельно. Здесь проверяются стыки: что персонаж,
@@ -245,10 +245,9 @@ def test_long_rest_returns_a_worn_out_character_to_the_state_of_creation(srd, cr
 
         rested, outcome = long_rest(worn_out, srd)
 
-        # Возвращается половина костей хитов (из трёх — одна); вдохновение даёт только человек.
-        assert rested == c.model_copy(
-            update={"hit_dice": 1, "inspiration": c.species == "human"}
-        ), c.id
+        # Возвращаются все кости хитов, как при создании; вдохновение даёт только человек.
+        assert rested == c.model_copy(update={"inspiration": c.species == "human"}), c.id
+        assert rested.hit_dice == c.hit_dice_max, c.id
         assert outcome.hp_gained == c.hp_max - 1, c.id
         expected_restored = {*c.resources, *(["spell_slots"] if c.spell_slots else [])}
         assert set(outcome.restored) == expected_restored, c.id

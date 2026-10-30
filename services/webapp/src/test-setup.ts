@@ -102,9 +102,12 @@ export class FakeSocket {
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onclose: ((event: { code: number; reason: string }) => void) | null = null;
   readonly url: string;
+  /** Подпротоколы рукопожатия, как их передал клиент (у сокета игры в них токен сессии). */
+  readonly protocols: string | string[] | undefined;
 
-  constructor(url: string) {
+  constructor(url: string, protocols?: string | string[]) {
     this.url = url;
+    this.protocols = protocols;
   }
 
   send(data: string) {
@@ -143,8 +146,8 @@ export class FakeSocket {
 export function fakeWebSocket() {
   const sockets: FakeSocket[] = [];
   class StubSocket extends FakeSocket {
-    constructor(url: string) {
-      super(url);
+    constructor(url: string, protocols?: string | string[]) {
+      super(url, protocols);
       sockets.push(this);
     }
   }

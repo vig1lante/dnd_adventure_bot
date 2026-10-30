@@ -17,7 +17,7 @@ interface FeatureEditorProps {
 /**
  * Деталь локации: описание, скрытность, замок, проверка, что раскрывает и предметы в тайнике.
  * Предмет «в тайнике» — это `reveals: [{kind: "item", id}]` детали при держателе-локации
- * (формат DND-1, проверка движка `_check_revealed_items`).
+ * (прежний формат, проверка движка `_check_revealed_items`).
  */
 export function FeatureEditor({
   feature,

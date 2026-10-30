@@ -1,9 +1,9 @@
 """Адаптеры и общие типы `base.py`: один контракт для `fake`, `anthropic_api` и `openai_compatible`.
 
-Оркестратор (B7) не знает, какой провайдер ведёт ход, поэтому одинаковый разговор должен давать
-одинаковый `TurnResult`, лимиты спеки §7 и §12 действуют на всех, а то, что уходит модели (схемы
-инструментов движка, схемы шагов генератора), должно проходить через обе проводные формы.
-Сети нет: у настоящих SDK-клиентов вместо неё `httpx2.MockTransport`.
+Оркестратор не знает, какой провайдер ведёт ход, поэтому одинаковый разговор должен давать
+одинаковый `TurnResult`, общие лимиты хода действуют на всех, а то, что уходит модели (схемы
+инструментов движка, схемы шагов генератора), должно проходить через обе проводные формы. Сети нет:
+у настоящих SDK-клиентов вместо неё `httpx2.MockTransport`.
 """
 
 import json
@@ -166,7 +166,7 @@ def provider_for(adapter: str, calls: list[Call]) -> LLMProvider:
 
 
 def default_request() -> TurnRequest:
-    """Запрос с лимитами по умолчанию: границы спеки проверяются на них, а не на своих числах."""
+    """Запрос с лимитами по умолчанию: границы проверяются на них, а не на своих числах."""
     return TurnRequest(system="система", adventure_brief="сводка", context="контекст", tools=())
 
 
@@ -197,10 +197,10 @@ async def test_the_same_conversation_gives_the_same_result_with_every_adapter():
     assert results["openai_compatible"][0].usage == results["anthropic_api"][0].usage
 
 
-# --- лимиты спеки §7 и §12 на настоящих значениях по умолчанию ---
+# --- общие лимиты хода на настоящих значениях по умолчанию ---
 
 
-def test_default_limits_are_the_ones_of_the_spec():
+def test_default_limits_are_the_agreed_ones():
     request = default_request()
 
     assert request.max_tool_iterations == 20

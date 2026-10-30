@@ -10,7 +10,7 @@ import type { StepProps } from "./steps";
 const abilityName = (options: StepProps["options"], id: Ability) =>
   nameIn(options.abilities, id);
 
-// Раса, класс и предыстория выбираются листанием подробных карточек (спека §7).
+// Раса, класс и предыстория выбираются листанием подробных карточек.
 
 export function SpeciesStep({ draft, options, update }: StepProps) {
   return (

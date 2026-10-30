@@ -1,8 +1,7 @@
-"""API черновиков конструктора `/api/drafts` (планы B4.1, B5.1; спека §10.3; дополнения dispatcher
-B4 и B5).
+"""API черновиков конструктора `/api/drafts`.
 
 Контракт для параллельной работы с webapp: формы `Draft`, `DraftSummary`, `DraftReport`, ошибки
-`{detail, code, problems?}`, версия черновика (409 `version_conflict`), разделы B4 и B5 и доступ
+`{detail, code, problems?}`, версия черновика (409 `version_conflict`), все разделы и доступ
 (только создатели игр, чужой черновик — 404). Задания генерации — `test_jobs.py`, справочник
 ссылок — `test_refs.py`; они берут отсюда класс стенда и данные разделов, а фикстуры стенда
 `settings` и `stand` — общие для папки, в её `conftest.py`.
@@ -170,7 +169,7 @@ def as_served(model: type[BaseModel], entities: list[dict[str, Any]]) -> list[di
 
 
 def locations_data() -> dict[str, Any]:
-    """Раздел «Карта» демо v2 (дополнение B5 §1): локации с графом и наполнением, старт и финал."""
+    """Раздел «Карта» демо v2: локации с графом и наполнением, старт и финал."""
     answers = v2_answers()
     graph = answers["generator.locations"]
     filled = [
@@ -224,7 +223,7 @@ def items_data() -> list[dict[str, Any]]:
 
 
 def section_data(section: str) -> Any:
-    """Верные данные любого раздела B4 и B5 (из демо-сценария v2)."""
+    """Верные данные любого раздела конструктора (из демо-сценария v2)."""
     return {
         "settings": settings_data,
         "world": world_data,
@@ -256,7 +255,7 @@ def database_file(settings: Settings) -> Path:
 
 
 def assert_draft_shape(draft: dict[str, Any]) -> None:
-    """Форма `Draft` дополнения §1 — страж для webapp: все поля, все 12 шагов, `job` — `Job`."""
+    """Форма `Draft` — страж для webapp: все поля, все 12 шагов, `job` — `Job`."""
     assert set(draft) == DRAFT_FIELDS
     assert set(draft["settings"]) == SETTINGS_FIELDS
     assert list(draft["steps"]) == list(STEPS)
@@ -317,7 +316,7 @@ async def test_a_new_draft_has_the_shape_of_the_contract(stand):
         assert set(draft["steps"][step]) == {"status", "updated_at"}
         assert draft["steps"][step]["status"] in ("empty", "draft", "ready")
         assert draft["steps"][step]["updated_at"] is None
-    # Название — уже содержимое Замысла, но без id приключения он черновик (дополнение §3);
+    # Название — уже содержимое Замысла, но без id приключения он черновик;
     # остальное пусто, и шаги-наполнители тоже.
     assert draft["steps"]["concept"]["status"] == "draft"
     assert {draft["steps"][step]["status"] for step in STEPS if step != "concept"} == {"empty"}
@@ -375,7 +374,7 @@ async def test_the_list_holds_only_the_authors_drafts_newest_first(stand):
 
 
 async def publish_rows(stand: Stand, author: Author, draft_id: str, *rows: tuple[str, datetime]):
-    """Строки опубликованного приключения из черновика, как их пишет публикация (блок B6)."""
+    """Строки опубликованного приключения из черновика, как их пишет публикация."""
     async with stand.db() as session:
         session.add_all(
             AuthoredAdventure(
@@ -391,8 +390,8 @@ async def publish_rows(stand: Stand, author: Author, draft_id: str, *rows: tuple
 
 
 async def test_the_list_tells_which_drafts_are_published_with_their_first_publication(stand):
-    # Дополнение B11 §2: бейдж «опубликовано» в списке черновиков. Если строк несколько (данные до
-    # fix-раунда B6), берётся самая ранняя публикация, как у `published_id` одного черновика.
+    # Бейдж «опубликовано» в списке черновиков. Если строк несколько (данные старых версий), берётся
+    # самая ранняя публикация, как у `published_id` одного черновика.
     author = await stand.author()
     plain = await stand.new_draft(author, title="Черновик")
     published = await stand.new_draft(author, title="Маяк")
@@ -418,8 +417,8 @@ async def test_the_list_tells_which_drafts_are_published_with_their_first_public
 async def test_the_badge_of_the_list_names_the_same_publication_as_the_locked_id_of_the_draft(
     stand,
 ):
-    # Бейдж списка и закреплённый id черновика (`published_id`, блок B6) берут одну и ту же
-    # публикацию — самую раннюю, при равном времени — с меньшим id, в любом порядке строк.
+    # Бейдж списка и закреплённый id черновика (`published_id`) берут одну и ту же публикацию —
+    # самую раннюю, при равном времени — с меньшим id, в любом порядке строк.
     author = await stand.author()
     tie = await stand.new_draft(author, title="Ничья")
     later = await stand.new_draft(author, title="Позже")
@@ -457,7 +456,7 @@ async def test_the_list_reads_the_publications_of_every_draft_at_once(stand):
         finally:
             event.remove(engine, "before_cursor_execute", count)
         assert response.status_code == 200, response.text
-        # JSON опубликованного приключения списку не нужен (R7 блока B11): его столбец не читается.
+        # JSON опубликованного приключения списку не нужен: его столбец не читается.
         assert not any("authored_adventures.data" in statement for statement in executed)
         return len(executed)
 
@@ -525,7 +524,7 @@ async def test_settings_write_the_settings_title_and_journal_intro_and_raise_the
         ("plot", v2_answers()["generator.plot"], "plot"),
     ],
 )
-async def test_each_section_of_block_4_is_saved_and_read_back(stand, section, data, step):
+async def test_each_world_section_is_saved_and_read_back(stand, section, data, step):
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -739,6 +738,56 @@ async def test_the_author_deletes_the_draft(stand):
     assert await count_drafts(stand.db) == 0
 
 
+async def test_only_the_author_deletes_and_a_missing_draft_is_404(stand):
+    # Кнопка «Удалить черновик» в конструкторе: чужой черновик не удаляется и отвечает как
+    # несуществующий, повторное удаление того же — тоже 404. Удаление во время задания (409) и
+    # опубликованное приключение после удаления проверены в `test_jobs.py` и `test_publish.py`.
+    author, other = await stand.author(), await stand.author()
+    draft = await stand.new_draft(author)
+    path = f"/api/drafts/{draft['id']}"
+
+    foreign = await stand.call(other, "DELETE", path)
+    missing = await stand.call(author, "DELETE", f"/api/drafts/{'0' * 32}")
+    kept = await stand.draft(author, draft["id"])
+    deleted = await stand.call(author, "DELETE", path)
+    again = await stand.call(author, "DELETE", path)
+
+    assert_error(foreign, 404, None)
+    assert_error(missing, 404, None)
+    assert kept["version"] == draft["version"]
+    assert deleted.status_code == 204
+    assert_error(again, 404, None)
+    assert await count_drafts(stand.db) == 0
+
+
+async def test_a_foreign_draft_answers_the_delete_exactly_like_a_missing_one(stand):
+    # По ответу на удаление нельзя узнать, что чужой черновик существует.
+    author, other = await stand.author(), await stand.author()
+    draft = await stand.new_draft(author)
+
+    foreign = await stand.call(other, "DELETE", f"/api/drafts/{draft['id']}")
+    missing = await stand.call(other, "DELETE", f"/api/drafts/{'0' * 32}")
+
+    assert (foreign.status_code, foreign.json()) == (missing.status_code, missing.json())
+
+
+async def test_after_the_delete_the_list_of_the_author_has_only_the_other_drafts(stand):
+    # После удаления конструктор перечитывает список: удалённого в нём нет, свои и чужие
+    # черновики на месте и не изменились.
+    author, other = await stand.author(), await stand.author()
+    gone = await stand.new_draft(author, title="Удалить")
+    mine = await stand.new_draft(author, title="Оставить")
+    foreign = await stand.new_draft(other, title="Чужой")
+
+    deleted = await stand.call(author, "DELETE", f"/api/drafts/{gone['id']}")
+
+    assert deleted.status_code == 204
+    listed = (await stand.call(author, "GET", "/api/drafts")).json()
+    assert [(s["id"], s["version"]) for s in listed] == [(mine["id"], mine["version"])]
+    others = (await stand.call(other, "GET", "/api/drafts")).json()
+    assert [(s["id"], s["version"]) for s in others] == [(foreign["id"], foreign["version"])]
+
+
 # --- проверка ---
 
 
@@ -853,7 +902,7 @@ async def test_a_draft_that_does_not_exist_is_404(stand):
     assert_error(response, 404, None)
 
 
-# --- финальное покрытие блока 4: каждая запись — целый `Draft` и версия ровно +1 ---
+# --- каждая запись — целый `Draft` и версия ровно +1 ---
 
 SECTIONS = (
     "settings",
@@ -988,7 +1037,7 @@ async def test_a_write_landing_between_the_check_and_the_save_is_refused_by_the_
     assert summary["title"] == "Другая вкладка"
 
 
-# --- пределы на границе API (дополнение §7) ---
+# --- пределы на границе API ---
 
 
 LEVELS = sorted(XP_BUDGET_PER_CHARACTER)
@@ -1165,13 +1214,12 @@ async def test_the_number_of_entities_stops_at_the_limit_of_a_model_answer(
 
 
 def test_the_limits_of_gods_and_factions_are_the_ones_of_the_contract():
-    # Дополнение §7 называет числа: богов и фракций не больше шести.
+    # Числа контракта: богов и фракций не больше шести.
     assert (schemas.MAX_DEITIES, schemas.MAX_FACTIONS) == (6, 6)
 
 
-def test_the_limits_of_block_5_are_the_ones_of_the_model_answers():
-    # Дополнение B5 §4: пределы схем ответа модели — локаций и NPC ≤ 12, связей ≤ 24,
-    # предметов ≤ 20.
+def test_the_limits_of_the_map_are_the_ones_of_the_model_answers():
+    # Пределы схем ответа модели: локаций и NPC ≤ 12, связей ≤ 24, предметов ≤ 20.
     assert (schemas.MAX_LOCATIONS, schemas.MAX_NPCS) == (12, 12)
     assert (schemas.MAX_RELATIONS, schemas.MAX_ITEMS) == (24, 20)
 
@@ -1346,10 +1394,10 @@ async def test_an_empty_wish_removes_only_the_wish_of_its_step(stand, empty):
     )
 
 
-# --- закрепления: каждый вид из §6 и каждый шаг ---
+# --- закрепления: каждый вид и каждый шаг ---
 
 
-# Виды ссылок закрепления по дополнению §6 записаны здесь, а не взяты из кода: это страж контракта.
+# Виды ссылок закрепления записаны здесь, а не взяты из кода: это страж контракта.
 LOCK_KINDS = (
     "deity",
     "faction",
@@ -1434,7 +1482,7 @@ async def test_the_time_of_a_step_changes_only_when_its_own_section_is_written(s
 
 async def test_validate_drops_findings_of_steps_not_written_yet(stand):
     # Фракции ссылаются на NPC и локацию, которых ещё нет: это работа пустых шагов, а не ошибка
-    # написанного раздела. Проверка идёт по заполненным разделам (дополнение §8).
+    # написанного раздела. Проверка идёт по заполненным разделам.
     author = await stand.author()
     draft = await stand.new_draft(author)
     draft = (await stand.put_section(author, draft, "factions", factions_data())).json()
@@ -1448,11 +1496,11 @@ async def test_validate_drops_findings_of_steps_not_written_yet(stand):
     assert report["errors"] == [] and report["readiness_percent"] == 0
 
 
-# --- fix-раунд 1 блока 4: статус ручного Замысла, пределы, сохранение сгенерированного ---
+# --- статус ручного Замысла, пределы, сохранение сгенерированного ---
 
 
 async def test_a_concept_written_by_hand_is_a_draft_and_counts_for_readiness(stand):
-    # Находка major reviewer B4: Замысел, написанный руками, — содержимое (дополнение §3).
+    # Замысел, написанный руками, — содержимое.
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -1474,7 +1522,7 @@ async def test_an_empty_world_saved_by_hand_is_empty(stand):
 
 @pytest.mark.parametrize("section", ["settings", "world", "deities", "factions", "plot"])
 async def test_a_generated_section_is_saved_back_unchanged(stand, section):
-    # Инвариант дополнения §7: пределы PUT не строже схем ответа модели.
+    # Инвариант: пределы PUT не строже схем ответа модели.
     step = {"settings": "concept", "deities": "pantheon"}.get(section, section)
     author = await stand.author()
     draft = await stand.new_draft(author)
@@ -1526,10 +1574,10 @@ async def test_problems_of_a_malformed_body_are_in_russian(stand):
     assert sorted(body["problems"]) == ["force: лишнее поле", "version: нужно целое число"]
 
 
-# --- разделы блока 5: карта, NPC, связи, предметы (дополнение B5 §1, §3–§5, §7) ---
+# --- разделы: карта, NPC, связи, предметы ---
 
-B5_SECTIONS = ("locations", "npcs", "relations", "items")
-B5_STEPS = ("locations", "location_contents", "npcs", "relations")
+MAP_SECTIONS = ("locations", "npcs", "relations", "items")
+MAP_STEPS = ("locations", "location_contents", "npcs", "relations")
 
 
 async def validate(stand: Stand, who: Author, draft: dict[str, Any]) -> dict[str, Any]:
@@ -1572,14 +1620,15 @@ async def put_draft(stand: Stand, who: Author, content: AuthoringDraft) -> dict[
 
 
 async def complete_draft(stand: Stand, who: Author) -> dict[str, Any]:
-    """Черновик автора со всеми разделами демо v2 (боги, фракции, NPC, карта, предметы, бои): так
-    в черновике есть и то, что конструктор B5 сам не пишет (бои, свои статблоки, открытия)."""
+    """Черновик автора со всеми разделами демо v2 (боги, фракции, NPC, карта, предметы, бои): так в
+    черновике есть и то, чего не пишут разделы карты, NPC, связей и предметов (бои, свои статблоки,
+    открытия)."""
     complete = (await generate(FakeProvider(load_scenario(V2_SCENARIO)), v2_draft())).draft
     return await put_draft(stand, who, complete)
 
 
-@pytest.mark.parametrize("section", B5_SECTIONS)
-async def test_each_section_of_block_5_is_saved_and_read_back_as_given(stand, section):
+@pytest.mark.parametrize("section", MAP_SECTIONS)
+async def test_each_section_of_the_map_is_saved_and_read_back_as_given(stand, section):
     author = await stand.author()
     draft = await stand.new_draft(author)
     data = section_data(section)
@@ -1646,7 +1695,7 @@ async def test_a_start_or_finale_outside_the_map_is_422_without_the_value(stand,
         ("items", [items_data()[0] | {"holder": None, "name": [SECRET_INPUT]}], "items.0."),
     ],
 )
-async def test_a_section_of_block_5_breaking_the_schema_is_422_without_input_values(
+async def test_a_section_of_the_map_breaking_the_schema_is_422_without_input_values(
     stand, section, data, where
 ):
     author = await stand.author()
@@ -1661,7 +1710,7 @@ async def test_a_section_of_block_5_breaking_the_schema_is_422_without_input_val
 
 
 async def test_relations_inside_an_npc_are_refused_with_a_hint_to_the_relations_step(stand):
-    # Дополнение B5 §1: связи NPC формата v1 в конструкторе — только пустой список.
+    # Связи NPC формата v1 в конструкторе — только пустой список.
     author = await stand.author()
     draft = await stand.new_draft(author)
     npc = npcs_data()[1] | {"relations": [{"npc_id": "veran", "kind": "debtor"}]}
@@ -1674,7 +1723,7 @@ async def test_relations_inside_an_npc_are_refused_with_a_hint_to_the_relations_
 
 
 async def test_a_location_without_exits_is_accepted(stand):
-    # Дополнение B5 §4: минимум выходов на границе API не требуется.
+    # Минимум выходов на границе API не требуется.
     author = await stand.author()
     draft = await stand.new_draft(author)
     lonely = location_at(HARBOR) | {"exits": []}
@@ -1709,8 +1758,8 @@ def with_the_first_repeated(entities: list[dict[str, Any]]) -> list[dict[str, An
         ("items", with_the_first_repeated(items_data()), "lamp-key"),
     ],
 )
-async def test_repeated_ids_in_a_section_of_block_5_are_refused(stand, section, data, ident):
-    # Дополнение B5 §4: повтор id в верхнем списке раздела — отказ записи, как в B4.
+async def test_repeated_ids_in_a_section_of_the_map_are_refused(stand, section, data, ident):
+    # Повтор id в верхнем списке раздела — отказ записи, как и в остальных разделах.
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -1745,7 +1794,7 @@ async def test_repeated_ids_in_a_section_of_block_5_are_refused(stand, section, 
 async def test_a_repeated_id_inside_a_location_is_accepted_and_shown_by_the_check(
     stand, data, ref, step
 ):
-    # Дополнение B5 §4: повтор id вложенных сущностей виден в проверке, а не на записи.
+    # Повтор id вложенных сущностей виден в проверке, а не на записи.
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -1756,8 +1805,8 @@ async def test_a_repeated_id_inside_a_location_is_accepted_and_shown_by_the_chec
 
 
 async def test_an_item_in_a_cache_saved_before_the_map_is_linked_to_its_feature(stand):
-    # Предмет «в тайнике»: держатель — локация места, деталь раскрывает предмет (дополнение B5 §1);
-    # webapp пишет сначала `items`, потом `locations`.
+    # Предмет «в тайнике»: держатель — локация места, деталь раскрывает предмет; webapp пишет
+    # сначала `items`, потом `locations`.
     author = await stand.author()
     draft = await stand.new_draft(author)
     draft = await saved(stand, author, draft, "items", items_data())
@@ -1790,8 +1839,8 @@ async def test_an_item_in_a_cache_of_another_location_is_a_dangling_ref_of_the_f
 async def test_an_encounter_of_a_location_that_does_not_exist_is_kept_and_shown_by_the_check(
     stand,
 ):
-    # Дополнение B5 §1: `encounter_id` без такого боя принимается и виден в проверке как висящая
-    # ссылка — в черновике, где бои уже есть (их шаг не пуст).
+    # `encounter_id` без такого боя принимается и виден в проверке как висящая ссылка — в черновике,
+    # где бои уже есть (их шаг не пуст).
     author = await stand.author()
     draft = await complete_draft(stand, author)
     data = served_section(draft, "locations")
@@ -1806,8 +1855,8 @@ async def test_an_encounter_of_a_location_that_does_not_exist_is_kept_and_shown_
 
 
 async def test_deleting_a_locked_location_unlocks_it_and_leaves_the_exit_to_the_check(stand):
-    # Дополнение B5 §5: удаление — запись раздела без сущности; её замок снимается в той же записи,
-    # закрепления шага и чужих сущностей остаются, ссылки на удалённое — находки проверки.
+    # Удаление — запись раздела без сущности; её замок снимается в той же записи, закрепления шага и
+    # чужих сущностей остаются, ссылки на удалённое — находки проверки.
     author = await stand.author()
     draft = await stand.new_draft(author)
     draft = await saved(stand, author, draft, "locations", locations_data())
@@ -1843,7 +1892,7 @@ async def test_deleting_a_locked_location_unlocks_it_and_leaves_the_exit_to_the_
 )
 async def test_deleting_an_entity_unlocks_only_that_entity(stand, section, kind, step, foreign):
     # Замок шага, замок сущности другого раздела и замок id, которого в разделе не было, — не замки
-    # удалённой сущности: запись раздела их не трогает (дополнение B5 §5).
+    # удалённой сущности: запись раздела их не трогает.
     author = await stand.author()
     draft = await stand.new_draft(author)
     first, second, *rest = section_data(section)
@@ -1858,8 +1907,8 @@ async def test_deleting_an_entity_unlocks_only_that_entity(stand, section, kind,
     assert restored["locks"] == kept
 
 
-async def test_the_steps_of_block_5_take_their_status_from_the_content(stand):
-    # Дополнение B5 §3: карта без наполнения — наполнение пусто; NPC и связи — по наличию.
+async def test_the_steps_of_the_map_take_their_status_from_the_content(stand):
+    # Карта без наполнения — наполнение пусто; NPC и связи — по наличию.
     author = await stand.author()
     draft = await stand.new_draft(author)
     graph = locations_data()
@@ -1871,8 +1920,8 @@ async def test_the_steps_of_block_5_take_their_status_from_the_content(stand):
     with_npcs = await saved(stand, author, filled, "npcs", npcs_data())
     linked = await saved(stand, author, with_npcs, "relations", relations_data())
 
-    assert {step: draft["steps"][step]["status"] for step in B5_STEPS} == dict.fromkeys(
-        B5_STEPS, "empty"
+    assert {step: draft["steps"][step]["status"] for step in MAP_STEPS} == dict.fromkeys(
+        MAP_STEPS, "empty"
     )
     assert bare["steps"]["locations"]["status"] == "ready"
     assert bare["steps"]["location_contents"]["status"] == "empty"
@@ -1885,8 +1934,8 @@ async def test_the_steps_of_block_5_take_their_status_from_the_content(stand):
     assert bare["steps"]["npcs"]["updated_at"] is None
 
 
-@pytest.mark.parametrize("step", B5_STEPS)
-async def test_a_wish_for_a_step_of_block_5_is_saved(stand, step):
+@pytest.mark.parametrize("step", MAP_STEPS)
+async def test_a_wish_for_a_step_of_the_map_is_saved(stand, step):
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -1911,8 +1960,8 @@ async def test_a_wish_for_a_step_of_block_5_is_saved(stand, step):
     ],
     ids=["locations", "location_contents", "npcs", "relations"],
 )
-async def test_a_generated_section_of_block_5_is_saved_back_unchanged(stand, steps, section):
-    # Инвариант дополнения B5 §4: всё, что даёт генерация, сохраняется обратно без правки.
+async def test_a_generated_section_of_the_map_is_saved_back_unchanged(stand, steps, section):
+    # Инвариант: всё, что даёт генерация, сохраняется обратно без правки.
     author = await stand.author()
     draft = await stand.new_draft(author)
     for step in steps:
@@ -1932,9 +1981,9 @@ async def test_a_generated_section_of_block_5_is_saved_back_unchanged(stand, ste
     assert served_section(response.json(), section) == served_section(generated, section)
 
 
-async def test_a_draft_written_before_block_5_is_read_and_edited(stand):
-    # carry_over B4: в JSON черновика нет номера схемы — черновик в формате B4 (без разделов B5)
-    # читается и правится после изменений B5.
+async def test_a_draft_written_before_the_map_is_read_and_edited(stand):
+    # В JSON черновика нет номера схемы — черновик старого формата (без разделов карты, NPC, связей
+    # и предметов) читается и правится по-прежнему.
     author = await stand.author()
     draft = await stand.new_draft(author)
     b4_data = {
@@ -1966,11 +2015,11 @@ async def test_a_draft_written_before_block_5_is_read_and_edited(stand):
     assert written["deities"] == read["deities"] and written["wishes"] == {"world": "Пираты"}
 
 
-# --- финальное покрытие блока 5: формы сущностей, заполненные черновики, границы, удаление ---
+# --- формы сущностей, заполненные черновики, границы, удаление ---
 
 
-# Поля сущностей B5 в `Draft` (дополнение B5 §1) записаны здесь, а не взяты из моделей движка: это
-# страж контракта webapp (`services/webapp/src/api/types.ts`).
+# Поля сущностей карты, NPC, связей и предметов в `Draft` записаны здесь, а не взяты из моделей
+# движка: это страж контракта webapp (`services/webapp/src/api/types.ts`).
 JOURNAL_FIELDS = {"public", "known_at_start"}
 LOCATION_FIELDS = JOURNAL_FIELDS | {
     "id",
@@ -2010,7 +2059,7 @@ RELATION_FIELDS = {"id", "a", "b", "kind", "note", "secret", "mutual"}
 ITEM_FIELDS = JOURNAL_FIELDS | {"id", "name", "description", "base_item", "holder"}
 
 
-async def test_entities_of_block_5_in_the_draft_have_exactly_the_fields_of_the_contract(stand):
+async def test_entities_of_the_map_in_the_draft_have_exactly_the_fields_of_the_contract(stand):
     author = await stand.author()
     draft = await stand.new_draft(author)
     zoned = map_with(
@@ -2043,7 +2092,7 @@ async def test_entities_of_block_5_in_the_draft_have_exactly_the_fields_of_the_c
     # Каждая форма есть в ответе хотя бы раз: страж не проходит на пустых списках.
     for fields, entities in shapes:
         assert entities and all(set(entity) == fields for entity in entities), sorted(fields)
-    # Связи NPC формата v1 в конструкторе — всегда пустой список (дополнение B5 §1).
+    # Связи NPC формата v1 в конструкторе — всегда пустой список.
     assert all(npc["relations"] == [] for npc in draft["npcs"])
 
 
@@ -2056,7 +2105,7 @@ async def test_entities_of_block_5_in_the_draft_have_exactly_the_fields_of_the_c
         ("items", None),
     ],
 )
-async def test_a_section_of_block_5_in_another_shape_is_422_invalid_data(stand, section, data):
+async def test_a_section_of_the_map_in_another_shape_is_422_invalid_data(stand, section, data):
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -2104,9 +2153,9 @@ def without_times(draft: dict[str, Any]) -> dict[str, Any]:
 
 @pytest.mark.parametrize("source", FILLED_DRAFTS)
 async def test_every_section_of_a_filled_draft_is_saved_back_unchanged(stand, source):
-    # Инвариант дополнений B4 §7 и B5 §1, §4: сервер принимает назад всё, что сам отдаёт, — и в
-    # черновике из генерации всех шагов, из сидов CLI и из папки готового приключения. Запись тех
-    # же данных не снимает замков (сущности не удалены) и не меняет статусов.
+    # Инвариант: сервер принимает назад всё, что сам отдаёт, — и в черновике из генерации всех
+    # шагов, из сидов CLI и из папки готового приключения. Запись тех же данных не снимает замков
+    # (сущности не удалены) и не меняет статусов.
     author = await stand.author()
     draft = await put_draft(stand, author, await FILLED_DRAFTS[source]())
     assert all(draft[section] for section in SECTIONS if section != "settings"), source
@@ -2150,10 +2199,10 @@ DRAGONS = "🐉"
     ],
     ids=["location-name", "read-aloud", "exit", "knows", "relation-note", "item-description"],
 )
-async def test_texts_of_block_5_are_counted_in_characters_up_to_the_limit(
+async def test_texts_of_the_map_are_counted_in_characters_up_to_the_limit(
     stand, section, write, limit
 ):
-    # Знак вне базовой плоскости — один знак, а не четыре байта (как у Замысла в B4).
+    # Знак вне базовой плоскости — один знак, а не четыре байта (как у Замысла).
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -2219,7 +2268,7 @@ async def test_a_difficulty_off_the_table_is_refused_in_every_check_of_a_locatio
     response = await stand.put_section(author, draft, "locations", build(dc))
 
     body = assert_error(response, 422, "invalid_data")
-    # Дополнение B5 §9 (security I1): правило таблицы, а не введённое число.
+    # Текст называет правило таблицы, а не введённое число.
     assert body["problems"] == [
         f"locations.locations.{LIGHTHOUSE}.{path}: Сл — одна из 5, 10, 15, 20, 25, 30"
     ]
@@ -2277,8 +2326,7 @@ def without(draft: dict[str, Any], section: str, ident: str) -> Any:
 async def test_deleting_an_entity_keeps_what_refers_to_it_and_the_check_names_the_dangling_ref(
     stand, section, ident, referrer, finding
 ):
-    # Дополнение B5 §5: ссылающиеся сущности не удаляются, висящая ссылка — находка проверки со
-    # своим шагом.
+    # Ссылающиеся сущности не удаляются, висящая ссылка — находка проверки со своим шагом.
     author = await stand.author()
     draft = await complete_draft(stand, author)
     assert finding not in findings(await validate(stand, author, draft))
@@ -2320,7 +2368,7 @@ async def test_the_start_or_finale_location_is_deleted_only_with_its_field_moved
     assert moved[field] is None and moved["locks"] == []
     assert moved["steps"]["locations"]["status"] == "draft"
     report = await validate(stand, author, moved)
-    # Текст находки — понятный автору (дополнение B6 §3), а не фраза движка о ссылке в никуда.
+    # Текст находки — понятный автору, а не фраза движка о ссылке в никуда.
     text = {"start_location": "Старт не выбран", "finale_location": "Финал не выбран"}[field]
     assert any(
         (f["code"], f["ref"], f["step"], f["message"])

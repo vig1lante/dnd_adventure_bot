@@ -34,18 +34,28 @@ from dnd_server.db.session import (
 # бы мимо журналов приложения `dnd_server`.
 logger = logging.getLogger("dnd_server.main")
 
-# Тестовый мастер (`fake`) в боевом режиме не собирается (`llm.factory`, спека DND-2 §15). Сервер
-# с ним всё равно стартует, чтобы не сломать запуск владельца, но говорит, что игру создать нельзя.
-NO_MASTER_WARNING = "тестовый мастер в боевом режиме недоступен: задайте LLM_PROVIDER"
+# Тестовый мастер (`fake`) в боевом режиме не собирается (`llm.factory`): игру с ним не создать,
+# поэтому сервер с ним не стартует, а говорит, что задать. Значений настроек в тексте нет.
+NO_MASTER_REFUSAL = (
+    "Тестовый мастер fake в боевом режиме не запускается. Для игры задайте LLM_PROVIDER="
+    "anthropic_api или openai_compatible и ключ API (README, «Переменные окружения»); "
+    "для локальной работы — APP_ENV=dev."
+)
 
-# Токен сессии WebSocket идёт в query (`/ws/games/<id>?token=…`): браузер не умеет слать заголовки
-# при открытии сокета. uvicorn пишет путь вместе с query в строку рукопожатия (`uvicorn.error`),
-# а на уровнях debug и trace ещё и в строки websockets и в repr scope (`uvicorn.asgi`). Поэтому
-# маскируется значение каждого параметра query, а не только `token`: имя параметра можно записать
-# в процентной кодировке (`t%6Fken`), и сервер всё равно его примет.
+# Токен сессии WebSocket идёт вторым подпротоколом (`Sec-WebSocket-Protocol: dnd-game.v1, <токен>`):
+# браузер не умеет слать другие заголовки при открытии сокета. На уровнях debug и trace uvicorn
+# пишет заголовки рукопожатия (строки websockets) и подпротоколы в repr scope (`uvicorn.asgi`),
+# поэтому значение заголовка и список подпротоколов маскируются целиком.
+#
+# Старый клиент присылает токен в query (`/ws/games/<id>?token=…`); сервер его не принимает, но
+# uvicorn пишет путь вместе с query в строку рукопожатия (`uvicorn.error`), а на уровнях debug и
+# trace ещё и в строки websockets и в repr scope. Поэтому маскируется значение каждого параметра
+# query, а не только `token`: имя параметра можно записать в процентной кодировке (`t%6Fken`).
 MASK = "***"
 QUERY_VALUE = re.compile(r"(?<=[?&])([^=&\s\"'?]+)=[^&\s\"']*")
 SCOPE_QUERY = re.compile(r"(?<=query_string': b[\'\"])[^\'\"]*")
+SUBPROTOCOL_HEADER = re.compile(r"(?i)(sec-websocket-protocol:[ \t]*)[^\r\n]*")
+SCOPE_SUBPROTOCOLS = re.compile(r"(?<='subprotocols': \[)[^\]]*")
 
 
 def mask_query_values(text: str) -> str:
@@ -53,16 +63,22 @@ def mask_query_values(text: str) -> str:
     return SCOPE_QUERY.sub(MASK, QUERY_VALUE.sub(rf"\1={MASK}", text))
 
 
+def mask_log_line(text: str) -> str:
+    """Строка журнала без токена сессии сокета: подпротоколы и значения query — `***`."""
+    masked = SUBPROTOCOL_HEADER.sub(rf"\1{MASK}", text)
+    return mask_query_values(SCOPE_SUBPROTOCOLS.sub(MASK, masked))
+
+
 # Маскируется готовая строка, а не запись: так закрыты и сообщение, и аргументы, и текст
 # исключения, а запись остаётся нетронутой для других обработчиков.
 class MaskingDefaultFormatter(DefaultFormatter):
     def format(self, record: logging.LogRecord) -> str:
-        return mask_query_values(super().format(record))
+        return mask_log_line(super().format(record))
 
 
 class MaskingAccessFormatter(AccessFormatter):
     def format(self, record: logging.LogRecord) -> str:
-        return mask_query_values(super().format(record))
+        return mask_log_line(super().format(record))
 
 
 # Журналы приложения и бота: формат uvicorn, но с именем журнала, чтобы записи `dnd_server.games`,
@@ -94,8 +110,8 @@ def configure_logging() -> None:
 
     Без этого предупреждения старта (тестовый мастер в боевом режиме, жёсткая ссылка на месте
     lock-файла) печатал бы `logging.lastResort` голым текстом, без метки WARNING и имени журнала.
-    Настройка та же, что потом применит uvicorn (`log_config=LOG_CONFIG`): маскировка query и формат
-    журналов не меняются."""
+    Настройка та же, что потом применит uvicorn (`log_config=LOG_CONFIG`): маскировка токена сокета
+    и формат журналов не меняются."""
     logging.config.dictConfig(LOG_CONFIG)
 
 
@@ -251,9 +267,9 @@ def require_current_schema(database_url: str) -> None:
     """Останавливает запуск, если файла базы нет или его ревизия — не `head` миграций кода.
 
     На старой базе новый код падал бы непонятными ошибками запросов, а пустая база без таблиц хуже
-    понятного отказа (дополнение B11 §1 п. 8). Ревизия читается только на чтение (`mode=ro`): файл
-    не создаётся и не меняется. Базы без файла (в памяти, другие СУБД) не проверяются, как и не
-    блокируются. В сообщении — путь к файлу и команда; адреса `DATABASE_URL` в нём нет."""
+    понятного отказа. Ревизия читается только на чтение (`mode=ro`): файл не создаётся и не
+    меняется. Базы без файла (в памяти, другие СУБД) не проверяются, как и не блокируются. В
+    сообщении — путь к файлу и команда; адреса `DATABASE_URL` в нём нет."""
     database = _sqlite_file(resolve_database_url(database_url))
     if database is None:
         return
@@ -295,20 +311,21 @@ def _known_revision(script: ScriptDirectory, revision: str) -> bool:
         return False
 
 
-def warn_without_master(settings: Settings) -> None:
-    """Одно предупреждение, если в боевом режиме мастер по умолчанию — тестовый `fake`.
+def require_master(settings: Settings) -> None:
+    """Останавливает запуск, если в боевом режиме мастер — тестовый `fake` (в том числе по
+    умолчанию): игры с ним не создаются (422), и сервер без мастера владельцу не нужен.
 
-    Запуск не останавливается (решение dispatcher B11 §1 п. 7): игры с таким провайдером не
-    создаются (422), а владелец видит, какую переменную задать. Путь к сценарию в текст не идёт."""
+    Текст `SystemExit` печатается в stderr; путь к сценарию и значения секретов в него не идут."""
     if settings.app_env != "dev" and settings.llm_provider == "fake":
-        logger.warning(NO_MASTER_WARNING)
+        raise SystemExit(NO_MASTER_REFUSAL)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     configure_logging()
     settings = get_settings()
-    warn_without_master(settings)
+    # Отказ без мастера — до порта и базы: незапущенный сервер ничего не занимает.
+    require_master(settings)
     # База блокируется по тем же настройкам, по которым приложение её откроет (кэш `get_settings`).
     database_url = settings.database_url
     # Порт раньше базы: у него нет следа на диске, а вторая копия на том же порту и той же базе
@@ -324,7 +341,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         # Фабрика без аргументов: create_app сам берёт кэшированные настройки.
         # Журнал доступа выключен: путь /internal/dm-tools/<токен>/… содержит одноразовый токен
         # хода, а токены в журналы не пишутся. Остальные журналы uvicorn идут через LOG_CONFIG: он
-        # прячет значения query, где лежит токен сессии сокета.
+        # прячет подпротоколы и значения query, где бывает токен сессии сокета.
         # `workers=1` указан явно: хаб сокетов, блокировки игр, реестр токенов хода и бот живут в
         # памяти одного процесса, а без явного значения uvicorn берёт число процессов из
         # WEB_CONCURRENCY окружения (README, «Один процесс»).

@@ -83,7 +83,7 @@ const TEXT_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ["--color-accent-text", "--color-surface"],
   ["--color-seal-text", "--color-bg"],
   ["--color-seal-text", "--color-surface"],
-  // Нижняя панель вкладок, день в строке статуса и тост (B10.2).
+  // Нижняя панель вкладок, день в строке статуса и тост.
   ["--color-text-muted", "--color-header"],
   ["--color-accent-text", "--color-header"],
   ["--color-accent-text", "--color-surface-sunken"],
@@ -183,7 +183,7 @@ describe("токены цвета", () => {
   });
 });
 
-// --- настройки интерфейса (B10.3): размер текста и высокий контраст — атрибуты на корне ---
+// --- настройки интерфейса: размер текста и высокий контраст — атрибуты на корне ---
 
 /** Тело правила с ровно таким списком селекторов (пробелы не важны). */
 function ruleOf(css: string, selectors: readonly string[]): string {

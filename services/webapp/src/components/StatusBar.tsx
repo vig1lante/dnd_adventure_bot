@@ -7,8 +7,8 @@ import { Countdown } from "./Countdown";
 import "./game.css";
 import { phaseLabel } from "./phases";
 
-// У `idle` (ход ещё не начат) значка нет: «Пишет» горит, только пока у игрока черновик с текстом
-// (решение D17). Незнакомый статус тоже остаётся без значка.
+// У `idle` (ход ещё не начат) значка нет: «Пишет» горит, только пока у игрока черновик с текстом.
+// Незнакомый статус тоже остаётся без значка.
 const STATUS_BADGES: Partial<
   Record<PlayerStatus, { label: string; tone: BadgeProps["tone"] }>
 > = {
@@ -53,7 +53,7 @@ function totalSecondsOf(view: GameView): number | undefined {
   return countdown === undefined ? undefined : game[countdown.seconds];
 }
 
-// «Полдень», а не «день»: иначе вышло бы «День 2, день» (решение B10.1.gate).
+// «Полдень», а не «день»: иначе вышло бы «День 2, день» (решение владельца).
 const PARTS_OF_DAY: Record<SceneView["part"], string> = {
   morning: "утро",
   day: "полдень",

@@ -1,4 +1,4 @@
-"""Проверка initData Mini App (спека §9.3, план B6.2).
+"""Проверка initData Mini App.
 
 Подпись и разбор делает `aiogram.utils.web_app.safe_parse_webapp_init_data`: он строит ключ как
 `HMAC_SHA256(key="WebAppData", msg=токен бота)`, считает HMAC строки проверки (поля без `hash`,

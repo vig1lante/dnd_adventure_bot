@@ -1,4 +1,4 @@
-"""Генератор и движок: стыки, которые тесты по отдельности не видят (план DND-1 B5.6, DND-2 B3.1).
+"""Генератор и движок: стыки, которые тесты по отдельности не видят.
 
 - `owner_step` получает проблемы настоящего валидатора, а не написанные вручную: если валидатор
   изменит `ref` или добавит код, маршрут к шагу-владельцу не должен сломаться молча;
@@ -259,7 +259,7 @@ ROUTES: list[tuple[str, Mutation, str, str, str | None]] = [
         "location_contents",
     ),
     ("duration", long_game_for_a_short_wish, "duration_mismatch", "adventure", None),
-    # Предупреждения движка B11.1: улика без описания и предмет без названия и `public`.
+    # Предупреждения движка: улика без описания и предмет без названия и `public`.
     (
         "clue without description",
         clue_without_description,
@@ -690,8 +690,7 @@ def test_every_code_the_validator_can_give_has_a_routing_case_above():
 
 @pytest.fixture(autouse=True)
 def dev_mode(monkeypatch) -> None:
-    """Генератор с тестовым мастером запускают в dev, как в README: `fake` вне dev не собирается
-    (спека DND-2 §15)."""
+    """Генератор с тестовым мастером запускают в dev, как в README: `fake` вне dev не собирается."""
     monkeypatch.setenv("APP_ENV", "dev")
 
 

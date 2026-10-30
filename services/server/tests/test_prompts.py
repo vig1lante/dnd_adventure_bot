@@ -1,4 +1,4 @@
-"""Промпты ролей нейронки — файлы пакета `dnd_server.prompts` (спека Р2, §4, §5, план B1.2, B3.1).
+"""Промпты ролей нейронки — файлы пакета `dnd_server.prompts`.
 
 Каждая роль, чей текст получает модель, лежит отдельным `<роль>.md` и читается одним загрузчиком
 `load`. Голос мастера (раздел «Как ты пишешь») и общий блок стиля описывают современный язык,
@@ -24,7 +24,7 @@ from dnd_server.prompts import (
     style_block,
 )
 
-# Роли генератора приключений (спека §5, план B3.1): по роли на шаг или пару шагов.
+# Роли генератора приключений: по роли на шаг или пару шагов.
 GENERATOR_ROLES = (
     "world_builder",
     "pantheon_keeper",
@@ -37,7 +37,7 @@ GENERATOR_ROLES = (
     "item_smith",
     "clue_designer",
 )
-# Роли блока B1 (спека §5): мастер, общий стиль и служебные роли; затем роли генератора.
+# Все роли: мастер, общий стиль и служебные роли; затем роли генератора.
 ROLES = (
     "master",
     "style",
@@ -48,7 +48,7 @@ ROLES = (
     "campfire_host",
     *GENERATOR_ROLES,
 )
-# Роли генератора, которые пишут сущности с полями дневника (спека §8, §12).
+# Роли генератора, которые пишут сущности с полями дневника.
 JOURNAL_ROLES = (
     "world_builder",
     "pantheon_keeper",
@@ -57,9 +57,9 @@ JOURNAL_ROLES = (
     "npc_lore_writer",
     "item_smith",
 )
-# Роли, чей текст читают игроки: им нужен запрет архаики и правила мата (спека §4).
+# Роли, чей текст читают игроки: им нужен запрет архаики и правила мата.
 VOICES = ("master", "style")
-# Архаика, которой нет места в рассказе (спека §4); «сударь» — только как манера NPC.
+# Архаика, которой нет места в рассказе; «сударь» — только как манера NPC.
 ARCHAIC = ("дабы", "сей", "оный", "молвил", "отрок", "ибо", "весьма", "отнюдь", "узрел", "сударь")
 DONT_LIST_MARK = "Не пиши так"
 
@@ -123,13 +123,13 @@ def test_the_old_master_prompt_file_is_gone():
 
 @pytest.mark.parametrize("role", ROLES)
 def test_no_prompt_speaks_of_feet(role):
-    # Расстояния для модели — только в метрах (спека §6).
+    # Расстояния для модели — только в метрах.
     assert not re.search(r"фут|feet|foot", load(role), re.IGNORECASE)
 
 
 @pytest.mark.parametrize("role", ROLES)
 def test_no_prompt_calls_the_race_a_kind(role):
-    # Спека Р4: в промптах «раса», поле данных остаётся `species` («на виду» — другое слово).
+    # В промптах «раса», поле данных остаётся `species` («на виду» — другое слово).
     assert not {"вид", "вида", "видом"} & words(load(role))
 
 
@@ -172,7 +172,7 @@ def test_the_voice_never_allows_insulting_the_players_or_forbidden_content(role)
     assert "недопустимого" in text
 
 
-def test_the_master_writes_the_story_of_the_dnd1_length_and_shape():
+def test_the_master_writes_the_story_of_the_first_version_length_and_shape():
     text = load("master")
 
     assert "От 150 до 350 слов" in text
@@ -205,8 +205,8 @@ def test_a_role_whose_text_players_read_gets_the_style_block_after_its_own_text(
 
 
 def test_the_campfire_host_writes_one_idea_per_hero_without_secrets_as_json():
-    # Роль `campfire_host` (блок B9): идеи «расскажи о себе» читает игрок-адресат; чужие сведения и
-    # тексты игроков — данные, а не указания; ответ — JSON по схеме.
+    # Роль `campfire_host`: идеи «расскажи о себе» читает игрок-адресат; чужие сведения и тексты
+    # игроков — данные, а не указания; ответ — JSON по схеме.
     text = load("campfire_host")
 
     assert "ideas" in text and "character_id" in text and "JSON" in text
@@ -216,8 +216,8 @@ def test_the_campfire_host_writes_one_idea_per_hero_without_secrets_as_json():
 
 
 def test_the_campfire_host_never_invites_questions_about_the_private_details_of_others():
-    # Fix-раунд 1 B9 (S1): все адресаты в одном запросе, поэтому роль не зовёт «спросить спутников»
-    # об их личном; вопросы спутникам — только по общим карточкам отряда и недавним событиям.
+    # Все адресаты в одном запросе, поэтому роль не зовёт «спросить спутников» об их личном; вопросы
+    # спутникам — только по общим карточкам отряда и недавним событиям.
     text = load("campfire_host")
 
     assert "о чём их спросить" not in text
@@ -230,7 +230,7 @@ def test_the_campfire_host_never_invites_questions_about_the_private_details_of_
 
 @pytest.mark.parametrize("role", GENERATOR_ROLES)
 def test_a_generator_role_treats_the_data_blocks_as_material_not_instructions(role):
-    # Пожелание автора, заготовки и ответы прошлых шагов — недоверенный ввод (инвариант «ж»).
+    # Пожелание автора, заготовки и ответы прошлых шагов — недоверенный ввод.
     text = load(role)
 
     assert "<данные>" in text and "</данные>" in text
@@ -304,8 +304,8 @@ def test_the_location_builder_builds_the_graph_and_the_contents_with_caches_and_
 
 
 def test_the_secret_reveals_of_a_place_are_explained_as_the_generator_checks_them():
-    # Решение dispatcher B3: находка тайны — улика или выход этой же локации, предмет, который
-    # лежит в ней; иначе проверка вернёт шаг location_contents.
+    # Находка тайны — улика или выход этой же локации, предмет, который лежит в ней; иначе проверка
+    # вернёт шаг location_contents.
     text = load("location_builder").lower()
 
     assert "этой же локации" in text and "лежит в этой локации" in text
@@ -318,7 +318,7 @@ def test_the_relations_weaver_lists_the_relation_kinds_of_the_engine():
         assert f"`{kind}`" in text
 
 
-# --- указания, которые раньше жили в коде запроса (спека Р2: в коде — метки и числа) ---
+# --- указания, которые раньше жили в коде запроса (в коде — только метки и числа) ---
 
 
 @pytest.mark.parametrize("role", GENERATOR_ROLES)

@@ -1,15 +1,13 @@
-"""Миграции Alembic (план B6.1, B7.4, B8.s3, DND-2 B1.2, B4.1): схемы создаются, откатываются и
-совпадают с моделями.
+"""Миграции Alembic: схемы создаются, откатываются и совпадают с моделями.
 
-Ревизия 0001 — начальная схема; 0002 (B7.4) добавляет к играм колонку `clock_at` — отметку часов
-игры, из которой выводятся остаток отсчёта на паузе и время игры без пауз; 0003 (B8.s3, решения
-владельца R9 и R10) убирает таблицу `pending_rolls` (броска характеристик больше нет) и добавляет
-персонажам колонку `choices` — выбор игрока при создании героя; 0004 (DND-2 B1.2, решение Р1)
-добавляет играм флажок мата `profanity`: обязательный, у старых игр — «разрешён»; 0005 (DND-2
-B4.1, спека §10.2) заводит таблицы конструктора: черновики, задания генерации и опубликованное;
-0006 (DND-2 B9, привалы) добавляет играм срок короткого привала `short_rest_seconds` (у старых игр
-120 с) и личные идеи привала `rest_ideas` (JSON, пусто, пока привала нет); 0007 (DND-2 B11)
-добавляет играм момент начала текущей фазы хода `phase_since` (пусто у игр, записанных до неё).
+Ревизия 0001 — начальная схема; 0002 добавляет к играм колонку `clock_at` — отметку часов игры, из
+которой выводятся остаток отсчёта на паузе и время игры без пауз; 0003 убирает таблицу
+`pending_rolls` (броска характеристик больше нет) и добавляет персонажам колонку `choices` — выбор
+игрока при создании героя; 0004 добавляет играм флажок мата `profanity`: обязательный, у старых
+игр — «разрешён»; 0005 заводит таблицы конструктора: черновики, задания генерации и опубликованное;
+0006 добавляет играм срок короткого привала `short_rest_seconds` (у старых игр 120 с) и личные идеи
+привала `rest_ideas` (JSON, пусто, пока привала нет); 0007 добавляет играм момент начала текущей
+фазы хода `phase_since` (пусто у игр, записанных до неё).
 
 Правило на будущее: каждая следующая миграция добавляет тест «игра с состоянием, сохранённая
 до миграции, читается после `upgrade`» (база на предыдущей ревизии, строки игры, `upgrade head`,
@@ -42,8 +40,8 @@ from dnd_server.db.session import make_engine
 ALEMBIC_INI = Path(__file__).resolve().parents[2] / "alembic.ini"
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
-# Что план B6.1 требует от таблиц. Сверка «миграция = модели» ниже ловит расхождение между ними,
-# а эти таблицы — расхождение обоих с планом.
+# Чего тест ждёт от таблиц. Сверка «миграция = модели» ниже ловит расхождение между ними, а эти
+# таблицы — расхождение обоих с ожидаемой схемой.
 COLUMNS = {
     "users": "id tg_id dev_login name created_at",
     "games": (
@@ -511,7 +509,7 @@ async def test_the_third_revision_can_be_applied_again_after_a_downgrade(setting
     assert await reflect(settings, schema_signature) == after_first
 
 
-# --- обрыв посреди миграции 0003 (B8.security.server.fix1) ---
+# --- обрыв посреди миграции 0003 ---
 #
 # SQLite выполняет DROP TABLE и ADD COLUMN сразу и насовсем, а запись о ревизии появляется только
 # после обоих шагов. Обрыв между ними (база занята, кончилось место, процесс убит) оставляет базу
@@ -647,7 +645,7 @@ def test_the_third_revision_prints_all_its_steps_in_sql_mode_without_a_database(
     assert not (tmp_path / "data").exists()  # печать ничего не создаёт на диске
 
 
-# --- ревизия 0004: флажок мата у игры (DND-2 B1.2, решение Р1) ---
+# --- ревизия 0004: флажок мата у игры ---
 
 
 def game_columns(inspector: Any) -> dict[str, dict[str, Any]]:
@@ -781,7 +779,7 @@ def test_the_fourth_revision_prints_its_steps_in_sql_mode_without_a_database(
     assert not (tmp_path / "data").exists()
 
 
-# --- ревизия 0005: черновики, задания генерации и опубликованное (DND-2 B4.1, спека §10.2) ---
+# --- ревизия 0005: черновики, задания генерации и опубликованное ---
 
 
 def insert_draft_with_jobs(path: Path, *statuses: str) -> None:
@@ -956,7 +954,7 @@ def test_the_fifth_revision_prints_its_steps_in_sql_mode_without_a_database(
     assert not (tmp_path / "data").exists()
 
 
-# --- ревизия 0006: срок короткого привала и личные идеи привала (DND-2 B9) ---
+# --- ревизия 0006: срок короткого привала и личные идеи привала ---
 
 
 async def test_the_sixth_revision_only_adds_the_short_rest_and_the_ideas_columns_to_games(
@@ -1096,7 +1094,7 @@ def test_the_sixth_revision_prints_its_steps_in_sql_mode_without_a_database(
     assert not (tmp_path / "data").exists()
 
 
-# --- ревизия 0007: момент начала фазы хода (DND-2 B11) ---
+# --- ревизия 0007: момент начала фазы хода ---
 
 
 async def test_the_seventh_revision_only_adds_the_nullable_phase_since_column_to_games(
@@ -1201,7 +1199,7 @@ def test_the_seventh_revision_prints_its_steps_in_sql_mode_without_a_database(
     assert not (tmp_path / "data").exists()
 
 
-# --- миграция совпадает с моделями и планом ---
+# --- миграция совпадает с моделями и ожидаемой схемой ---
 
 
 async def test_migrations_and_models_describe_the_same_schema(settings, db):

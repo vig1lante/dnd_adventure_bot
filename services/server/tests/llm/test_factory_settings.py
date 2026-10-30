@@ -21,7 +21,7 @@ INTERNAL_URL = "http://127.0.0.1:8000"
 
 # Полный набор переменных каждого провайдера, как их пишут в `.env`.
 PROVIDER_ENV = {
-    # Тестовый мастер, как и `claude_code_cli`, собирается только в dev (спека DND-2 §15).
+    # Тестовый мастер, как и `claude_code_cli`, собирается только в dev.
     "fake": {"LLM_PROVIDER": "fake", "APP_ENV": "dev", "FAKE_LLM_SCENARIO": str(BASIC_ROUND)},
     "anthropic_api": {
         "LLM_PROVIDER": "anthropic_api",

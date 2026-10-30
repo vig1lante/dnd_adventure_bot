@@ -1,6 +1,6 @@
-"""Проекция игры для игрока (план B6.5): снимок, события и адресаты.
+"""Проекция игры для игрока: снимок, события и адресаты.
 
-Главное, что здесь проверяется, — приватность (инвариант «г»): тайные ходы и личные сообщения видит
+Главное, что здесь проверяется, — приватность: тайные ходы и личные сообщения видит
 только адресат, а зацепки, мир, заметки мастера, журнал хода и точные HP монстров не видит никто.
 Тексты-ловушки лежат в игре из `conftest.py`; тесты ищут их в ответах целиком.
 """
@@ -63,7 +63,7 @@ from dnd_engine.events import (
 from dnd_engine.journal import open_journal, write
 from dnd_engine.modules import build_ruleset
 from dnd_engine.rng import ScriptedRng, SeededRng
-from dnd_engine.state import GameState, Scene, SceneType
+from dnd_engine.state import GameState, GameTime, Scene, SceneType
 from dnd_engine.tools import build_registry
 from dnd_engine.tools.registry import ToolContext
 from dnd_server.characters.service import new_character_id
@@ -166,7 +166,7 @@ async def test_every_player_sees_the_profanity_flag_of_the_game_in_the_snapshot(
 async def test_the_snapshot_game_has_its_creation_time_and_the_hero_names_for_everybody(
     db, srd, table
 ):
-    # Контракт B11 §2: `created_at` — и в снимке (ISO с поясом UTC), имена героев видят все.
+    # `created_at` — и в снимке (ISO с поясом UTC), имена героев видят все.
     async with db() as session:
         created = (await session.get(Game, table.game_id)).created_at
 
@@ -184,7 +184,7 @@ async def test_snapshot_describes_game_phase_scene_host_and_server_time(db, srd,
     assert snapshot["type"] == "snapshot"
     assert snapshot["game"]["id"] == table.game_id
     assert snapshot["game"]["adventure_title"] == "Склеп должника"
-    assert snapshot["game"]["profanity"] is True  # флажок мата игры (решение Р1): по умолчанию да
+    assert snapshot["game"]["profanity"] is True  # мат по умолчанию разрешён (решение владельца)
     assert [p["name"] for p in snapshot["game"]["players"]] == ["Алиса", "Борис", "Вера"]
     assert snapshot["host_user_id"] == table.alice.user_id
     assert snapshot["phase"] == {
@@ -343,7 +343,7 @@ async def test_combat_never_gives_monsters_numbers_and_gives_heroes_their_hp(db,
     assert alice["character_id"] == table.alice.character.id
 
 
-# --- скрытые монстры (I7 из security-review B6) ---
+# --- скрытые монстры ---
 
 
 def with_hidden(table, fighter_id: str, *, source: str = "hide", state=None):
@@ -458,7 +458,7 @@ def test_the_combat_event_hides_the_monster_the_same_way_as_the_snapshot_block(s
     assert "goblin_warrior-2" not in dump(state_events(state, srd, table.adventure))
 
 
-# --- боец-монстр, за которым стоит NPC (B8.6, nit B4): в бою он под именем NPC ---
+# --- боец-монстр, за которым стоит NPC: в бою он под именем NPC ---
 # В приключении у боя нет `npc_id`: NPC связан с бойцом через статблок и локацию (так же, как движок
 # отмечает павших NPC). Любая неоднозначность оставляет имя статблока.
 
@@ -604,7 +604,7 @@ def test_the_events_give_nothing_of_the_npc_but_the_name(table, srd):
     assert not MASTER_KEYS & set(keys_of(deliveries))
 
 
-# --- может ли герой действовать (план B8.6b, фаза B8.s2) ---
+# --- может ли герой действовать ---
 # Очередь может стоять на герое, который не ходит (парализован, без сознания): сервер ждёт героя
 # только тогда, когда он способен действовать (`waiting_hero`), и отказывает ему иначе. Клиент не
 # знает правил, поэтому в порядке хода у героя есть `can_act` от движка; у монстров его нет.
@@ -935,8 +935,8 @@ async def test_nothing_of_the_world_gods_factions_relations_or_place_secrets_rea
         assert SECRET_MARK not in dump(payload)
         assert not LORE_KEYS & set(keys_of(payload))
     assert snapshot["game"]["adventure_title"] == trapped["title"]  # снимок читал эту копию
-    # Дневник (блок B8) называет то, что отряд знает со старта (`known_at_start`): имя бога и края и
-    # сам слух. Это не тайна мира, и других меток ловушки в нём нет.
+    # Дневник называет то, что отряд знает со старта (`known_at_start`): имя бога и края и сам слух.
+    # Это не тайна мира, и других меток ловушки в нём нет.
     known = known_at_start_marks(trapped)
     assert known, "в образце должны быть известные со старта бог, край или слух"
     assert set(re.findall(rf"{SECRET_MARK}[\w-]+", dump(journal))) == known
@@ -978,7 +978,7 @@ async def test_snapshot_has_only_the_keys_of_the_contract(db, srd, table):
     }
 
 
-# --- привал: блок `rest` снимка и кадры (DND-2, блок B9) ---
+# --- привал: блок `rest` снимка и кадры ---
 
 TABLE_DEADLINE = datetime(2030, 5, 1, 12, 30, tzinfo=UTC)  # срок игры стола из `conftest.py`
 
@@ -1072,7 +1072,7 @@ async def test_the_lines_of_an_earlier_camp_are_not_lines_of_this_one(db, srd, t
     assert rest["lines"] == []
 
 
-async def test_a_camp_without_a_kind_is_the_long_camp_of_dnd1(db, srd, table):
+async def test_a_camp_without_a_kind_is_the_long_camp_of_the_first_version(db, srd, table):
     await camp_at(db, table, rest=None)
 
     rest = (await snapshot_of(db, srd, table, "alice"))["rest"]
@@ -1221,8 +1221,21 @@ async def test_phase_event_carries_the_phase_block_of_the_snapshot(db, srd, tabl
     assert phase_event(game, None, can_regenerate=True)["phase"]["can_regenerate"] is True
 
 
+async def test_the_scene_of_the_phase_has_the_day_and_the_part_of_the_hour_but_not_the_hour(
+    db, srd, table
+):
+    # Часы игры видит только мастер: игроку, как и прежде, — день и часть суток по часу.
+    async with db() as session:
+        game = await session.get(Game, table.game_id)
+    late = table.state.model_copy(update={"time": GameTime(day=4, hour=23)})
+
+    scene = phase_event(game, late, can_regenerate=False)["phase"]["scene"]
+
+    assert scene == {"type": "combat", "day": 4, "part": "night"}
+
+
 async def test_the_phase_tells_since_when_the_turn_phase_goes_in_utc(db, srd, table):
-    # Минуту до «Повторить» клиент считает от серверного начала фазы (дополнение B11 §1 п. 1).
+    # Минуту до «Повторить» клиент считает от серверного начала фазы.
     started = datetime(2030, 5, 1, 15, 0, tzinfo=timezone(timedelta(hours=3)))
     async with db() as session:
         game = await session.get(Game, table.game_id)
@@ -1255,7 +1268,7 @@ def row_of(status: ActionStatus, text: str = "") -> PlayerAction:
 
 
 def test_player_status_event_names_the_player_and_the_public_status():
-    # Решение D17: «пишет» — только черновик с видимым текстом; без строки хода и с пустым
+    # «Пишет» — только черновик с видимым текстом; без строки хода и с пустым
     # черновиком — `idle` (значка нет).
     assert player_status_event("u1", row_of(ActionStatus.AUTO_SUBMITTED, "Иду")) == {
         "type": "player_status",
@@ -1328,7 +1341,7 @@ def test_character_without_an_owner_gets_no_sheet_event(srd, table):
     assert character_event(orphan, srd, table.adventure, state)["character"]["id"] == orphan.id
 
 
-# --- лист владельца не называет источник состояний (security-review B7, L2) ---
+# --- лист владельца не называет источник состояний ---
 
 SNARING_MONSTER = "goblin_warrior-2"
 SNARED = {"id": "restrained", "name": "Опутан", "rounds_left": 2}  # как состояние видит владелец
@@ -1408,8 +1421,8 @@ async def test_the_snapshot_of_a_hero_snared_by_a_hidden_monster_never_names_the
         assert not {"source", "source_id"} & set(keys_of(snapshot[block])), block
 
 
-# --- числа листа, посчитанные движком (план B8.5, фаза B8.s1) ---
-# Клиент ничего не считает (инвариант «а»): КД, бонусы навыков и спасбросков, пассивная
+# --- числа листа, посчитанные движком ---
+# Клиент ничего не считает: КД, бонусы навыков и спасбросков, пассивная
 # внимательность, Сл и бонус атаки заклинаний и атаки оружием приходят готовыми в `derived`.
 
 DERIVED_KEYS = {
@@ -1611,7 +1624,7 @@ async def test_the_snapshot_of_a_player_has_no_numbers_of_the_sheets_of_others(d
         assert not {"derived", "armor_class", "attacks"} & set(keys_of(snapshot[block])), block
 
 
-# --- предметы приключения в листе: то, что держит герой (общая проверка B8, fix 5) ---
+# --- предметы приключения в листе: то, что держит герой ---
 # Предметы приключения движок не кладёт в `Character.inventory`: кто их держит, говорит только
 # `world.item_holders` (`give_item`, `take_item`, расход в бою). Лист героя строится по нему, как
 # контекст мастера: у предмета, который держит герой, в `inventory` есть строка с публичным
@@ -1885,8 +1898,8 @@ async def test_the_snapshot_has_the_same_sheet_as_the_event_after_the_turn(db, s
         assert snapshots[key]["character"] == sheets[seat.character.id], key
     assert KEY_NAME in dump(snapshots["alice"]) and POTION_NAME in dump(snapshots["alice"])
     for key in ("boris", "vera"):
-        # Дневник (блок B8) записывает предмет, полученный героем, для всего отряда — как строка
-        # ленты о передаче; в чужих листах предмета нет.
+        # Дневник записывает предмет, полученный героем, для всего отряда — как строка ленты о
+        # передаче; в чужих листах предмета нет.
         others = {name: block for name, block in snapshots[key].items() if name != "journal"}
         assert "chest-key" not in dump(others) and KEY_NAME not in dump(others)
         assert "item:chest-key@all" in {entry["id"] for entry in snapshots[key]["journal"]}
@@ -1908,7 +1921,7 @@ async def test_the_snapshot_names_the_items_from_the_copy_of_the_adventure_of_th
     boris = await snapshot_of(db, srd, table, "boris")
 
     assert lines_of(alice["character"])["chest-key"]["name"] == "Ключ из копии игры"
-    # Запись дневника о полученном предмете общая (блок B8); в листе Бориса предмета нет.
+    # Запись дневника о полученном предмете общая; в листе Бориса предмета нет.
     others = {name: block for name, block in boris.items() if name != "journal"}
     assert "chest-key" not in dump(others) and "Ключ из копии игры" not in dump(boris)
     assert SECRET_MARK not in dump(alice)
@@ -1921,7 +1934,7 @@ async def test_the_lobby_sheet_has_the_items_of_the_srd_without_names(db, srd, l
     assert lines and all(set(line) == SRD_LINE_KEYS for line in lines)
 
 
-# --- сообщения ленты из событий хода мастера (B7.3) ---
+# --- сообщения ленты из событий хода мастера ---
 
 
 @pytest.fixture(scope="module")
@@ -2020,7 +2033,7 @@ def test_a_monster_rolls_under_its_name_from_the_combat(table, srd, adventure):
     assert entry.data["actor"] == "Гоблин 1"
 
 
-# --- КД героя в карточке атаки (решение владельца R2, фаза B8.s1) ---
+# --- КД героя в карточке атаки ---
 # Монстр бьёт только героя, а герой — только монстра: цель атаки определяет сторона бойца. КД
 # героя игрокам известен, и карточка атаки монстра называет его; КД монстров скрыт всегда.
 
@@ -2232,7 +2245,7 @@ def test_the_card_of_a_hidden_monster_that_is_an_npc_names_neither_the_npc_nor_t
         assert trace not in entry.text + dump(entry.data), trace
 
 
-# --- причина броска бойца-NPC: настоящие броски движка (B8.review.server.fix1, minor 1) ---
+# --- причина броска бойца-NPC: настоящие броски движка ---
 # Причину броска (`data.reason`) пишет движок, и в ней бывает имя бойца по статблоку: «Инициатива:
 # Фанатик культа». Боец идёт под именем NPC, поэтому именем статблока причина его выдать не должна:
 # как у спрятанного монстра, в карточке остаётся название броска. Тесты берут события у настоящего
@@ -2365,7 +2378,7 @@ def test_the_reason_of_any_roll_of_such_a_monster_is_its_label_whatever_the_reas
     assert "Фанатик" not in entry.text + dump(entry.data)
 
 
-# --- броски NPC приключения (решение D9, security-review B7 L1) ---
+# --- броски NPC приключения ---
 # Карточка NPC несёт только имя: id из данных приключения (слаг вроде `cult-leader`) бывает
 # откровеннее имени, поэтому его нет ни в подписи, ни в `data`.
 
@@ -2437,7 +2450,7 @@ def test_a_fighter_that_shares_its_id_with_an_npc_is_still_a_fighter_with_its_id
     assert (entry.data["actor"], entry.data["actor_id"]) == ("Двойник", "fabian")
 
 
-# --- броски спрятанного монстра (решение D7, security-review B7 L3) ---
+# --- броски спрятанного монстра ---
 
 HIDDEN_MONSTER = "goblin_warrior-2"
 SOMEBODY_INVISIBLE = "Кто-то невидимый"
@@ -2685,7 +2698,7 @@ def test_a_withdrawn_feed_item_is_a_tombstone_in_the_feed_item_event():
     assert event["type"] in EVENT_TYPES
 
 
-# --- привал (план B7.6) ---
+# --- привал ---
 
 
 async def in_the_camp(db: async_sessionmaker[AsyncSession], table) -> None:
@@ -2758,7 +2771,7 @@ async def test_a_withdrawn_camp_line_is_not_in_the_snapshot_any_more(db, srd, ta
     assert "Лишняя реплика." not in [item["text"] for item in feed]
 
 
-# --- дневник отряда (блок B8, дополнение контракта §6) ---
+# --- дневник отряда ---
 # Дневник лежит в состоянии игры (движок); игроку уходят общие записи и личные записи его героя,
 # в снимке и в событиях. Адресат записи — id персонажа, как у событий движка: в id игрока его
 # переводит `audience_to_user`, и чужая личная запись не уходит никому, кроме её хозяина.
@@ -2910,7 +2923,7 @@ def test_a_character_named_all_makes_every_common_entry_go_to_nobody(table):
     assert journal_view(state, table.vera.user_id) == []
 
 
-# --- дневник: адресат без игрока и совпадение id (финальное покрытие блока B8) ---
+# --- дневник: адресат без игрока и совпадение id ---
 
 
 async def test_a_personal_entry_of_a_hero_without_a_player_is_in_no_snapshot_and_no_block(

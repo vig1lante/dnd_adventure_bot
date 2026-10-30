@@ -18,15 +18,15 @@ import type { BadgeProps, IconName } from "../ui";
 import { classNames } from "../ui/classNames";
 import { applyContrast, applyTextSize } from "./settings";
 
-// Черновики элементов «как будет» для макетов B10.1. Это предложение для обсуждения с владельцем,
-// а не боевые компоненты: их по итогам гейта делают B10.2+ (ui/TabBar, Skeleton, ErrorState,
-// Toast, Settings). Всё собрано из токенов темы и элементов src/ui.
+// Черновики элементов «как будет» для макетов экранов. Это предложение для обсуждения с
+// владельцем, а не боевые компоненты: боевые (ui/TabBar, Skeleton, ErrorState, Toast, Settings)
+// делаются по итогам обсуждения. Всё собрано из токенов темы и элементов src/ui.
 
 // --- нижняя панель вкладок ---
 
 export type GameTab = "story" | "fight" | "hero" | "party" | "journal";
 
-/** А — нынешний порядок (решение B8), В — рекомендация разбора: бой и привал сразу за рассказом. */
+/** А — нынешний порядок, В — рекомендация: бой и привал сразу за рассказом. */
 export type TabOrder = "A" | "B";
 
 const ORDERS: Record<TabOrder, readonly GameTab[]> = {
@@ -141,7 +141,7 @@ const COUNTDOWN_LABELS: Partial<Record<TurnPhase, string>> = {
   camp: "До конца привала",
 };
 
-// У `idle` (ход ещё не начат) значка нет, как в строке статуса игры (решение D17).
+// У `idle` (ход ещё не начат) значка нет, как в строке статуса игры.
 const STATUS_BADGES: Partial<
   Record<PlayerStatus, { label: string; tone: BadgeProps["tone"] }>
 > = {

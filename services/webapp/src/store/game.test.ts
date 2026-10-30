@@ -148,7 +148,7 @@ function combatView(round = 1): CombatView {
   };
 }
 
-/** Запись дневника по контракту B8 (§2): общая, с начала игры, первой ревизии. */
+/** Запись дневника: общая, с начала игры, первой ревизии. */
 function entry(
   ref: string,
   overrides: Partial<Omit<JournalEntry, "id" | "ref">> = {},
@@ -168,7 +168,7 @@ function entry(
   };
 }
 
-/** Привал по контракту B9 (§3): короткий, срок через 2 минуты, без идей и реплик. */
+/** Привал: короткий, срок через 2 минуты, без идей и реплик. */
 function restView(overrides: Partial<RestView> = {}): RestView {
   return {
     kind: "short",
@@ -269,7 +269,7 @@ describe("applyEvent: снимок", () => {
     expect(viewOf(started({ rest: null })).rest).toBeNull();
   });
 
-  test("снимок без блока привала (сервер до B9.3) — привала нет, а не `undefined`", () => {
+  test("снимок без блока привала (старый сервер) — привала нет, а не `undefined`", () => {
     const legacy = { ...snapshot(), rest: undefined } as unknown as Snapshot;
 
     const state = applyEvent(NO_LIVE, legacy, SERVER_MS);
@@ -952,14 +952,15 @@ describe("followGame: игра из сокета в хранилище", () => {
     vi.setSystemTime(SERVER_MS);
   });
 
-  test("открывает сокет игры с токеном сессии и ждёт соединения", () => {
+  test("открывает сокет игры с токеном сессии в подпротоколе и ждёт соединения", () => {
     const { sockets, last } = fakeWebSocket();
     signedIn();
 
     const stop = followGame("g1");
 
     expect(sockets).toHaveLength(1);
-    expect(last().url).toContain("/ws/games/g1?token=tok-secret-123");
+    expect(last().url).toMatch(/\/ws\/games\/g1$/);
+    expect(last().protocols).toEqual(["dnd-game.v1", "tok-secret-123"]);
     expect(useGame.getState().connection).toBe("connecting");
     stop();
   });
@@ -1137,7 +1138,7 @@ describe("followGame: игра из сокета в хранилище", () => {
     expect(sockets).toHaveLength(1);
   });
 
-  // Финальное покрытие B11: кадр мог потеряться, причина закрытия всё равно говорит об исключении.
+  // Кадр мог потеряться, причина закрытия всё равно говорит об исключении.
   test("4403 с причиной kicked без кадра — тоже «Хост исключил вас.»", () => {
     const { last } = fakeWebSocket();
     signedIn();
@@ -1192,7 +1193,7 @@ describe("followGame: игра из сокета в хранилище", () => {
     stopSecond();
   });
 
-  test("токен остаётся только в адресе сокета: ни в журнале, ни в хранилищах браузера", () => {
+  test("токен уходит только подпротоколом сокета: ни в журнале, ни в хранилищах браузера", () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1359,7 +1360,7 @@ describe("applyEvent: новый ход начинается без хода и�
   });
 });
 
-describe("applyEvent: новый ход — ход ещё никто не начал (B11.3, решение D17)", () => {
+describe("applyEvent: новый ход — ход ещё никто не начал", () => {
   const players = gameSummary({
     players: ["u1", "u2", "u3"].map((user_id) => ({
       user_id,
@@ -1440,7 +1441,7 @@ describe("applyEvent: новый ход — ход ещё никто не нач
   });
 });
 
-describe("applyEvent: автосдача черновика по таймеру (контракт B11, §2)", () => {
+describe("applyEvent: автосдача черновика по таймеру", () => {
   const autoSubmitted: WsEvent = { type: "action_auto_submitted" };
 
   test("черновик с текстом становится сданным ходом: экран покажет «Ход сдан»", () => {
@@ -1498,7 +1499,7 @@ describe("applyEvent: автосдача черновика по таймеру 
   });
 });
 
-describe("applyEvent: привал (контракт B9, §3–§4)", () => {
+describe("applyEvent: привал", () => {
   const CAMP = phaseView({ turn_phase: "camp" });
   /** Игра на привале: фаза хода `camp` и привал из снимка. */
   const camping = (rest: Partial<RestView> = {}) =>
@@ -1674,11 +1675,11 @@ describe("applyEvent: привал (контракт B9, §3–§4)", () => {
   });
 });
 
-// Финальное покрытие B9: кадры идут в том порядке, в каком их шлёт сервер (B9.3, «Контракт для
-// B9.4/B9.5»): начало кнопкой — `phase`, затем `rest_started`; начало ходом мастера — записи
-// ленты, `phase` нового хода, затем `rest_started`; конец — `phase` «Мастер думает», записи
-// ленты, `phase` обсуждения и последним `rest_ended`.
-describe("applyEvent: привал в порядке кадров сервера (финальное покрытие B9)", () => {
+// Кадры идут в том порядке, в каком их шлёт сервер: начало кнопкой — `phase`, затем
+// `rest_started`; начало ходом мастера — записи ленты, `phase` нового хода, затем
+// `rest_started`; конец — `phase` «Мастер думает», записи ленты, `phase` обсуждения и последним
+// `rest_ended`.
+describe("applyEvent: привал в порядке кадров сервера", () => {
   const DEADLINE = "2026-10-20T12:02:00+00:00";
   const EXTENDED = "2026-10-20T12:03:00+00:00";
   const campPhase = (deadline_at: string | null = DEADLINE): WsEvent => ({

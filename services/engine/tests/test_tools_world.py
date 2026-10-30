@@ -1,4 +1,4 @@
-"""Инструменты мира и проверок (план B4.6, спека §5.4, §5.5, §8.2, §8.3).
+"""Инструменты мира и проверок.
 
 Инструменты зовутся через настоящий `ToolRegistry`, как их будет звать модель мастера. Приключение —
 `demo-crypt`: деревня → кладбище (скрытый выход в склеп, запертый сундук) → склеп. Броски — на
@@ -37,7 +37,7 @@ from dnd_engine.journal import (
 )
 from dnd_engine.modules import build_ruleset
 from dnd_engine.rng import ScriptedRng
-from dnd_engine.state import GameState, GameTime, RulesRef
+from dnd_engine.state import DAY_PART_STARTS, GameState, GameTime, RulesRef
 from dnd_engine.tools.checks import CHECK_TOOLS, TableDC
 from dnd_engine.tools.lore import LORE_TOOLS, exit_status, is_locked
 from dnd_engine.tools.registry import ToolArgs, ToolContext, ToolOutcome, ToolRegistry
@@ -181,7 +181,8 @@ def test_every_tool_has_a_russian_description_and_a_serializable_forbidding_sche
 
 
 def test_day_parts_and_table_dcs_match_the_engine_definitions():
-    assert set(get_args(DayPart)) == set(get_args(GameTime.model_fields["part"].annotation))
+    assert set(get_args(DayPart)) == set(DAY_PART_STARTS)
+    assert get_args(GameTime.model_computed_fields["part"].return_type) == get_args(DayPart)
     assert set(get_args(TableDC)) == VALID_DCS
 
 
@@ -924,38 +925,57 @@ def test_change_attitude_needs_a_known_npc(run, make_ctx):
 @pytest.mark.parametrize(
     ("start", "to", "expected"),
     [
-        ((1, "morning"), "day", (1, "day")),
-        ((1, "morning"), "night", (1, "night")),
-        ((1, "day"), "evening", (1, "evening")),
-        ((1, "evening"), "night", (1, "night")),
-        ((1, "evening"), "morning", (2, "morning")),  # ночь пройдена: наступил следующий день
-        ((1, "night"), "morning", (2, "morning")),
-        ((1, "night"), "evening", (2, "evening")),
-        ((3, "day"), "morning", (4, "morning")),
-        ((1, "evening"), "day", (2, "day")),
+        ((1, 6), "day", (1, 12)),
+        ((1, 9), "day", (1, 12)),  # с середины утра — к началу дня
+        ((1, 6), "night", (1, 22)),
+        ((1, 12), "evening", (1, 18)),
+        ((1, 18), "night", (1, 22)),
+        ((1, 19), "morning", (2, 6)),  # ночь пройдена: наступил следующий день
+        ((1, 22), "morning", (2, 6)),
+        ((1, 23), "evening", (2, 18)),
+        ((2, 1), "morning", (2, 6)),  # после полуночи день уже сменился: утро того же дня
+        ((2, 3), "evening", (2, 18)),
+        ((3, 13), "morning", (4, 6)),
+        ((1, 20), "day", (2, 12)),
     ],
 )
-def test_time_moves_forward_and_a_new_day_starts_after_the_night(
+def test_time_moves_forward_to_the_first_hour_of_the_part_and_a_new_day_starts_at_midnight(
     run, make_ctx, make_state, start, to, expected
 ):
-    ctx = make_ctx(make_state(time=GameTime(day=start[0], part=start[1])))
+    ctx = make_ctx(make_state(time=GameTime(day=start[0], hour=start[1])))
 
     outcome = run(ctx, "advance_time", to=to)
 
     assert outcome.error is None
-    assert (ctx.state.time.day, ctx.state.time.part) == expected
-    assert (outcome.result["day"], outcome.result["part"]) == expected
+    assert (ctx.state.time.day, ctx.state.time.hour, ctx.state.time.part) == (*expected, to)
+    assert (outcome.result["day"], outcome.result["hour"], outcome.result["part"]) == (
+        *expected,
+        to,
+    )
+    assert outcome.result["new_day"] is (expected[0] > start[0])
+
+
+@pytest.mark.parametrize("hour", [22, 23, 0, 5])
+def test_the_night_after_midnight_is_the_same_night_for_advance_time(
+    run, make_ctx, make_state, hour
+):
+    ctx = make_ctx(make_state(time=GameTime(day=2, hour=hour)))
+
+    outcome = run(ctx, "advance_time", to="night")
+
+    assert "night" in outcome.error  # ночь та же: время идёт только вперёд
+    assert ctx.state.time == GameTime(day=2, hour=hour)
 
 
 def test_time_cannot_stand_still_or_use_an_unknown_part(run, make_ctx):
-    ctx = make_ctx()  # день 1, утро
+    ctx = make_ctx()  # день 1, утро, 6:00
 
     same = run(ctx, "advance_time", to="morning")
     unknown = run(ctx, "advance_time", to="midnight")
 
     assert "morning" in same.error  # модель видит, что время уже такое
     assert unknown.result is None
-    assert (ctx.state.time.day, ctx.state.time.part) == (1, "morning")
+    assert ctx.state.time == GameTime(day=1, hour=6)
 
 
 def test_advance_time_reports_a_new_day(run, make_ctx, make_state):
@@ -963,7 +983,88 @@ def test_advance_time_reports_a_new_day(run, make_ctx, make_state):
 
     outcome = run(ctx, "advance_time", to="morning")
 
-    assert outcome.result == {"day": 2, "part": "morning", "new_day": True}
+    assert outcome.result == {"day": 2, "hour": 6, "part": "morning", "new_day": True}
+
+
+def first_hour_of_the_part_after(now: GameTime, part: str) -> GameTime:
+    """Ближайшее начало части `part` строго после `now`: шагаем по часу, пока не дойдём.
+
+    Ожидание считается перебором часов, а не формулой инструмента."""
+    later = now.plus_hours(1)
+    while later.hour != DAY_PART_STARTS[part]:
+        later = later.plus_hours(1)
+    return later
+
+
+@pytest.mark.parametrize("hour", range(24))
+def test_advance_time_goes_to_the_nearest_first_hour_of_the_part_strictly_after_now(
+    run, make_ctx, make_state, hour
+):
+    now = GameTime(day=3, hour=hour)
+    for to in DAY_PART_STARTS:
+        if to == now.part:
+            continue  # та же часть — отказ: его проверяет следующий тест
+        ctx = make_ctx(make_state(time=now), rng=NO_DICE)
+
+        outcome = run(ctx, "advance_time", to=to)
+
+        expected = first_hour_of_the_part_after(now, to)
+        assert outcome.error is None, (hour, to)
+        assert ctx.state.time == expected, (hour, to)
+        assert outcome.result == {
+            "day": expected.day,
+            "hour": expected.hour,
+            "part": to,
+            "new_day": expected.day > now.day,
+        }, (hour, to)
+        assert ctx.events == []
+
+
+@pytest.mark.parametrize("hour", range(24))
+def test_advance_time_to_the_part_already_going_on_is_refused_at_any_of_its_hours(
+    run, make_ctx, make_state, hour
+):
+    # Время идёт только вперёд: до начала той же части — целые сутки, и модель выбирает другую.
+    state = make_state(time=GameTime(day=3, hour=hour))
+    ctx = make_ctx(state, rng=NO_DICE)
+    before = state.model_dump()
+
+    outcome = run(ctx, "advance_time", to=state.time.part)
+
+    assert outcome.result is None
+    assert f"Сейчас уже {state.time.part}" in outcome.error
+    assert state.model_dump() == before
+    assert ctx.events == []
+
+
+THE_OLD_ORDER_OF_THE_DAY = ("morning", "day", "evening", "night")
+
+
+@pytest.mark.parametrize("now", THE_OLD_ORDER_OF_THE_DAY)
+def test_from_an_old_snapshot_advance_time_changes_the_day_as_it_did_before_the_hours(
+    run, make_ctx, make_state, now
+):
+    # Снимок до появления часов стоит на начале своей части. Прежнее правило: новый день, если
+    # нужная часть идёт в сутках раньше нынешней. Для таких снимков оно не изменилось.
+    for to in THE_OLD_ORDER_OF_THE_DAY:
+        if to == now:
+            continue
+        ctx = make_ctx(make_state(time=GameTime(day=2, part=now)), rng=NO_DICE)
+
+        outcome = run(ctx, "advance_time", to=to)
+
+        new_day = THE_OLD_ORDER_OF_THE_DAY.index(to) < THE_OLD_ORDER_OF_THE_DAY.index(now)
+        day = 2 + int(new_day)
+        assert (outcome.result["day"], outcome.result["new_day"]) == (day, new_day), to
+        assert ctx.state.time == GameTime(day=day, hour=DAY_PART_STARTS[to]), to
+
+
+def test_the_advance_time_description_names_the_first_hour_of_every_part():
+    # Модель узнаёт часы только из описания: они должны совпадать с теми, что ставит движок.
+    (spec,) = [spec for spec in WORLD_TOOLS if spec.name == "advance_time"]
+
+    for part, hour in DAY_PART_STARTS.items():
+        assert f"{part} — {hour}:00" in spec.description, part
 
 
 # --- short_rest ---
@@ -986,6 +1087,7 @@ def test_short_rest_spends_hit_dice_heals_and_counts_the_rest(
     assert (hero.hp, hero.hit_dice) == (18, 1)  # 5 + 6 + 7; кость хитов воина — к10
     assert state.party["pc-2"].hit_dice == 3  # не тратил кости
     assert state.short_rests_since_long == 1
+    assert state.time == GameTime(day=1, hour=7)  # короткий отдых длится час
     [event] = events_of(ctx, RestEvent)
     assert event.rest == "short"
     assert [o.character_id for o in event.outcomes] == ["pc-1", "pc-2"]
@@ -998,7 +1100,7 @@ def test_short_rest_heals_at_least_one_hit_point_per_die_even_with_a_poor_consti
     run, make_ctx, make_state, make_character
 ):
     # Телосложение 6 (−2): на костях 1 и 2 итоги −1 и 0, но каждая кость лечит не меньше 1 HP
-    # (дополнение B9 §1 п. 5: SRD 5.2.1 и план DND-2; в DND-1 минимум был 0).
+    # по SRD 5.2.1 (прежде минимум был 0).
     state = make_state(wounded(make_character, scores={Ability.CON: 6}))
     ctx = make_ctx(state, rng=ScriptedRng([1, 2]))
 
@@ -1023,6 +1125,47 @@ def test_short_rest_without_spending_still_restores_class_resources(
 
     assert state.party["pc-1"].resources["second_wind"] == 1
     assert outcome.result["characters"][0]["restored"] == ["second_wind"]
+
+
+def test_a_short_rest_at_eleven_at_night_ends_after_midnight_on_the_next_day(
+    run, make_ctx, make_state
+):
+    state = make_state(time=GameTime(day=3, hour=23))
+
+    outcome = run(make_ctx(state, rng=NO_DICE), "short_rest")
+
+    assert outcome.error is None
+    assert state.time == GameTime(day=4, hour=0)
+
+
+@pytest.mark.parametrize(
+    ("hour", "expected"),
+    [
+        (5, (6, "morning")),
+        (11, (12, "day")),
+        (17, (18, "evening")),
+        (21, (22, "night")),
+        (12, (13, "day")),  # внутри части суток меняется только час
+    ],
+)
+def test_the_masters_short_rest_moves_the_clock_across_the_border_of_a_part(
+    run, make_ctx, make_state, hour, expected
+):
+    state = make_state(time=GameTime(day=2, hour=hour))
+
+    outcome = run(make_ctx(state, rng=NO_DICE), "short_rest")
+
+    assert outcome.error is None
+    assert (state.time.day, state.time.hour, state.time.part) == (2, *expected)
+
+
+def test_a_refused_short_rest_leaves_the_clock_as_it_was(run, make_ctx, make_state):
+    state = make_state(short_rests_since_long=2, time=GameTime(day=1, hour=20))
+
+    outcome = run(make_ctx(state, rng=NO_DICE), "short_rest")
+
+    assert outcome.error is not None
+    assert state.time == GameTime(day=1, hour=20)
 
 
 def test_bg3_flavor_allows_two_short_rests_between_long_ones(run, make_ctx, make_state):
@@ -1080,6 +1223,7 @@ def test_short_rest_is_impossible_during_combat(run, make_ctx, make_state):
 
     assert "В бою" in outcome.error
     assert ctx.state.short_rests_since_long == 0
+    assert ctx.state.time == GameTime(day=1, hour=6)  # отказ часы не двигает
 
 
 # --- request_check ---
@@ -1503,7 +1647,7 @@ def test_contest_accepts_a_bare_ability_instead_of_a_skill(
     assert (outcome.result["a"]["total"], outcome.result["b"]["total"]) == (13, 10)
 
 
-# Фабиан живёт в склепе, а состязание берёт только NPC из текущей локации (решение D9): отряд
+# Фабиан живёт в склепе, а состязание берёт только NPC из текущей локации: отряд
 # в этих тестах стоит там же.
 def test_contest_against_an_npc_with_a_statblock_uses_the_statblock_bonus(
     run, make_ctx, make_state
@@ -1669,7 +1813,7 @@ def test_contest_rejects_bad_participants_before_anything_is_rolled_or_spent(
     assert ctx.events == []
 
 
-# --- дневник: переход, находка, предмет и journal_add (дополнение контракта B8 §4) ---
+# --- дневник: переход, находка, предмет и journal_add ---
 
 
 def journal_of(state: GameState) -> dict[str, JournalEntry]:
@@ -1736,7 +1880,7 @@ def test_a_found_clue_is_written_in_the_journal_once(run, make_ctx, make_state, 
 def test_a_clue_found_in_a_secret_turn_with_for_hero_is_written_only_for_that_hero(
     run, make_ctx, make_state
 ):
-    # Тайный ход: мастер называет героя находки, и запись улики видит только он (дополнение §10).
+    # Тайный ход: мастер называет героя находки, и запись улики видит только он.
     ctx = make_ctx(make_state(location_id="cemetery"), secret_actors={"pc-2"})
 
     outcome = run(ctx, "reveal", ref="feature:tracks", for_hero="pc-2")
@@ -1772,7 +1916,7 @@ def test_a_find_in_a_round_with_a_secret_turn_needs_the_hero_of_the_find_before_
     run, make_ctx, make_state, secret, ref
 ):
     # `secret_actors` — тайные авторы всего раунда, а не этого вызова: чья находка, движок не
-    # знает, и общую находку открытого героя нельзя молча отдать тайному (дополнение §12).
+    # знает, и общую находку открытого героя нельзя молча отдать тайному.
     state = make_state(location_id="cemetery")
     ctx = make_ctx(state, secret_actors=secret)
     before = state.model_dump()
@@ -2062,13 +2206,13 @@ def test_journal_add_refuses_a_note_beyond_the_limit_of_the_entry(run, make_ctx,
     assert (len(entry.text), entry.revision) == (3 * MAX_NOTE_CHARS + 4, 3)
 
 
-# --- дневник: финальное покрытие блока (дополнение контракта B8 §3, §4, §10) ---
+# --- дневник: границы перехода, находки и передачи предмета ---
 
 
 def test_a_move_of_the_party_is_written_for_everyone_even_in_a_secret_turn(
     run, make_ctx, make_state
 ):
-    # Отряд ходит вместе: у перехода нет автора, и запись о месте общая (дополнение §4).
+    # Отряд ходит вместе: у перехода нет автора, и запись о месте общая.
     ctx = make_ctx(make_state(), secret_actors={"pc-1"})
 
     run(ctx, "move_party", location_id="cemetery")
@@ -2222,11 +2366,11 @@ def test_journal_add_extends_a_place_the_party_has_been_to_and_keeps_the_visit(
     assert entry.text == f"{village.text}\n\nТрактир закрыт до утра."
 
 
-# Регрессия B8.coverage D1 (исправлена в B8.1.fix1, дополнение §11 п. 1): улика с пустым
-# описанием, предмет и место без названия и `public` проходят схему, валидатор и формы
-# конструктора. Авто-запись дневника о них раньше бросала ошибку уже после изменения рабочей копии,
-# и ход мастера падал целиком. Теперь находка, передача и переход работают, как до B8, а записи о
-# сущности без текста нет; мастер может записать её сам — только с note.
+# Регрессия: улика с пустым описанием, предмет и место без названия и `public` проходят схему,
+# валидатор и формы конструктора. Авто-запись дневника о них раньше бросала ошибку уже после
+# изменения рабочей копии, и ход мастера падал целиком. Теперь находка, передача и переход
+# работают, как до появления дневника, а записи о сущности без текста нет; мастер может записать
+# её сам — только с note.
 
 
 def without_text(data: dict[str, Any]) -> None:
@@ -2275,7 +2419,7 @@ def test_a_place_without_a_name_and_public_text_is_still_reached(
 def test_the_master_cannot_write_an_entity_without_text_without_a_note(
     run, make_ctx, make_state, demo_adventure
 ):
-    # Строгая запись `journal_add`: отказ до изменений, с note — можно (дополнение §11 п. 1).
+    # Строгая запись `journal_add`: отказ до изменений, с note — можно.
     adventure = variant(demo_adventure, without_text)
     state = make_state(location_id="cemetery")
     state.world.revealed.append("clue:clue-tracks")
@@ -2290,7 +2434,7 @@ def test_the_master_cannot_write_an_entity_without_text_without_a_note(
 
 
 # Текст из одних пробелов — пустой, как и у валидатора (`clue_without_description`,
-# `item_without_text`; дополнение B11 §5 п. 1): найденная улика без описания записи не даёт, а
+# `item_without_text`): найденная улика без описания записи не даёт, а
 # предмет с `public` из пробелов записывается по названию — как при пустом тексте выше.
 
 
@@ -2324,7 +2468,7 @@ def test_an_item_with_spaces_instead_of_public_text_is_written_by_its_name(
     assert (entry.title, entry.text) == ("Ключ от сундука", "Ключ от сундука")
 
 
-# --- journal_add: только найденная улика (S4) и печатаемость note (R4), дополнение §11 ---
+# --- journal_add: только найденная улика и печатаемость note ---
 
 
 def test_journal_add_writes_a_clue_only_after_it_is_found(run, make_ctx, make_state):
@@ -2430,7 +2574,7 @@ def test_journal_add_accepts_a_note_with_a_visible_character_in_any_script(
     assert ctx.state.journal[0].text == note
 
 
-# --- B11.coverage: видимый знак в note — весь список, смеси, комбинируемые знаки, RTL ---
+# --- видимый знак в note — весь список, смеси, комбинируемые знаки, RTL ---
 
 # Печатаемые, но пустые на экране знаки из справочников «невидимых символов»: заполнители хангыля,
 # пустой шаблон Брайля, пустая нотная головка и комбинируемые знаки без буквы (соединитель графем,
@@ -2586,7 +2730,7 @@ def test_right_to_left_text_is_visible_but_direction_marks_are_refused(
     assert [entry.text for entry in ctx.state.journal] == ([note] if accepted else [])
 
 
-# --- B11.coverage: раунд дополнения записи через инструменты (дополнение B11 §1 п. 4) ---
+# --- раунд дополнения записи через инструменты ---
 
 
 def test_journal_add_remembers_the_round_of_each_extension_and_only_of_an_extension(
@@ -2621,7 +2765,7 @@ def test_automatic_entries_of_the_tools_are_not_extensions_until_the_master_adds
     run, make_ctx, make_state, demo_adventure
 ):
     # Переход в известное место и находка улики пишут дневник сами, но текст словами мастера
-    # не дополняют (решение D4); раунд дополнения ставит только `journal_add` с note.
+    # не дополняют; раунд дополнения ставит только `journal_add` с note.
     state = open_journal(make_state(party_round=2), demo_adventure)
     ctx = make_ctx(state)
 

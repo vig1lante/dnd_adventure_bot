@@ -1,4 +1,4 @@
-"""Обсуждение, сбор ходов и отсчёты (план B7.4, спека §8.2 и §12).
+"""Обсуждение, сбор ходов и отсчёты.
 
 Настоящее приложение (`create_app` и его `lifespan`), временная SQLite после миграций, настоящий
 движок и демо-приключение `demo-crypt` в копии игры. Время отсчётов ведёт `ManualScheduler`: тест
@@ -359,13 +359,13 @@ async def test_the_task_set_keeps_tasks_until_they_end_and_join_waits_for_them()
     assert len(tasks) == 0
 
 
-# Гонка `join` (дополнение контракта B9 §10 п. 5, зависание полного прогона на 100% CPU): задача
-# уже кончилась, а её колбэк `_finished`, который убирает её из набора, ещё стоит в очереди цикла.
-# С Python 3.12 `gather` из одних готовых задач завершается сразу, не отдавая управление циклу,
-# поэтому `while self._tasks` в `join` крутился без единого переключения: колбэк не выполнялся
-# никогда, и `wait_for` вокруг `join` тоже не срабатывал. Чтобы тест не завис сам, счётчик
-# прерывает `join` после `JOIN_GATHER_LIMIT` вызовов `gather` (исправному хватает одного-двух).
-# Дефект B9.coverage D2 исправлен в fix-раунде 1 B9 (R2/S3): xfail снят.
+# Гонка `join` (зависание полного прогона на 100% CPU): задача уже кончилась, а её колбэк
+# `_finished`, который убирает её из набора, ещё стоит в очереди цикла. С Python 3.12 `gather` из
+# одних готовых задач завершается сразу, не отдавая управление циклу, поэтому `while self._tasks` в
+# `join` крутился без единого переключения: колбэк не выполнялся никогда, и `wait_for` вокруг `join`
+# тоже не срабатывал. Чтобы тест не завис сам, счётчик прерывает `join` после `JOIN_GATHER_LIMIT`
+# вызовов `gather` (исправному хватает одного-двух).
+# Дефект исправлен, xfail снят.
 JOIN_GATHER_LIMIT = 100
 
 
@@ -987,8 +987,8 @@ async def statuses_in_the_snapshot(table: Table, key: str = "vera") -> dict[str,
 
 
 async def test_nobody_is_writing_until_he_writes_and_a_draft_with_text_is_told_once(table):
-    # Решение D17 (дополнение B11 §7): «Пишет» — только у черновика с видимым текстом. Кадр
-    # `player_status` уходит, лишь когда публичный статус сменился; правка текста кадра не даёт.
+    # «Пишет» — только у черновика с видимым текстом. Кадр `player_status` уходит, лишь когда
+    # публичный статус сменился; правка текста кадра не даёт.
     assert await statuses_in_the_snapshot(table) == {
         "alice": "idle",
         "boris": "idle",
@@ -1254,7 +1254,7 @@ async def test_submitting_marks_the_player_ready_and_puts_the_action_into_the_co
     response = await table.call("alice", "POST", "/action/submit")
 
     assert action_fields(response) == ("submitted", "Осмотреть дверь", False, False)
-    # Черновик с текстом — «пишет», сданный ход — «готов» (решение D17).
+    # Черновик с текстом — «пишет», сданный ход — «готов».
     assert table.statuses_sent() == [("alice", "writing"), ("alice", "ready")]
     [(item, audience)] = table.broadcaster.of_type("feed_item")
     assert audience == "all"
@@ -1569,7 +1569,7 @@ async def test_when_the_time_is_up_drafts_are_submitted_and_the_rest_pass(table)
     assert table.scheduler.pending() == {}
 
 
-# --- битая копия приключения (ручная проверка B2, дополнение B11 §3) ---
+# --- битая копия приключения ---
 
 
 async def break_the_copy(table: Table) -> None:
@@ -1646,8 +1646,8 @@ def iso(moment: datetime) -> str:
 
 
 async def test_the_author_of_a_draft_with_text_is_told_alone_that_it_was_submitted_for_him(table):
-    # Дополнение B11 §1 п. 5: «Ход сдан» — только автору черновика с текстом; пустой черновик и
-    # отсутствующий ход — пас без кадра. В кадре нет текста хода.
+    # «Ход сдан» — только автору черновика с текстом; пустой черновик и отсутствующий ход — пас без
+    # кадра. В кадре нет текста хода.
     await table.draft("alice", "Осмотреть дверь")
     await table.draft("vera", "   ")
     await table.host("collect")
@@ -1683,8 +1683,8 @@ async def test_a_player_who_submitted_or_passed_himself_gets_no_auto_submit_fram
 
 
 async def test_each_new_turn_phase_starts_at_the_server_time_of_its_change(table):
-    # Дополнение B11 §1 п. 1: смена фазы хода пишет момент её начала той же транзакцией, а кадр
-    # фазы и снимок отдают его в UTC. «+1 минута» фазу не меняет и момент не сдвигает.
+    # Смена фазы хода пишет момент её начала той же транзакцией, а кадр фазы и снимок отдают его в
+    # UTC. «+1 минута» фазу не меняет и момент не сдвигает.
     await table.draft("alice", "Я ещё пишу")
     collect_at = table.scheduler.now()
     await table.host("collect")
@@ -1734,7 +1734,7 @@ async def test_a_failed_turn_starts_its_failed_phase_when_the_master_gives_up(ta
     )
 
 
-# --- финальное покрытие B11 (сервер): битая копия, «Ход сдан», «Перегенерировать», начало фазы ---
+# --- битая копия, «Ход сдан», «Перегенерировать», начало фазы ---
 
 
 async def snapshot_of(table: Table, key: str) -> dict[str, Any]:
@@ -1822,8 +1822,8 @@ async def after_a_round(table: Table, monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_buttons_that_start_the_master_with_a_broken_copy_are_409_and_change_nothing(
     table, caplog, monkeypatch, prepare, button
 ):
-    # Отчёт B11.2: где записи до хода нет, отказ даёт резерв хода — тоже 409, а не 500, и игра
-    # остаётся, какой была: фаза, версия состояния, ходы, лента и журнал хода.
+    # Где записи до хода нет, отказ даёт резерв хода — тоже 409, а не 500, и игра остаётся, какой
+    # была: фаза, версия состояния, ходы, лента и журнал хода.
     await prepare(table, monkeypatch)
     await break_the_copy(table)
     before = await table.game()
@@ -1854,8 +1854,8 @@ async def test_buttons_that_start_the_master_with_a_broken_copy_are_409_and_chan
 async def test_the_end_of_the_hurry_turns_a_blank_draft_into_a_dodge_without_telling_it_was_sent(
     table, monkeypatch
 ):
-    # Дополнение B11 §1 п. 5: черновик из одних пробелов — не ход игрока. Сервер сдаёт за него
-    # «Уклоняется», но «Ход сдан» не говорит: писать этот ход игрок не начинал.
+    # Черновик из одних пробелов — не ход игрока. Сервер сдаёт за него «Уклоняется», но «Ход сдан»
+    # не говорит: писать этот ход игрок не начинал.
     use_provider(monkeypatch, StubProvider())
     await put_in_combat(table, "boris")
     await table.draft("boris", "   ")
@@ -1920,8 +1920,8 @@ async def collecting_after_a_round(table: Table, monkeypatch: pytest.MonkeyPatch
 async def test_the_regenerate_flag_of_the_phase_is_the_answer_of_the_server_to_the_button(
     table, monkeypatch, prepare, expected
 ):
-    # Дополнение B11 §1 п. 11: клиент показывает «Перегенерировать» только при `can_regenerate`,
-    # поэтому признак в снимке и в последнем кадре фазы — ровно то, что ответит сервер на кнопку.
+    # Клиент показывает «Перегенерировать» только при `can_regenerate`, поэтому признак в снимке и в
+    # последнем кадре фазы — ровно то, что ответит сервер на кнопку.
     await prepare(table, monkeypatch)
     flag = (await snapshot_of(table, "vera"))["phase"]["can_regenerate"]
     frames = table.broadcaster.of_type("phase")
@@ -1936,8 +1936,8 @@ async def test_the_regenerate_flag_of_the_phase_is_the_answer_of_the_server_to_t
 
 
 async def test_on_a_pause_the_regenerate_flag_says_no_as_the_server_does(table):
-    # Дополнение B11 §5 п. 3 (R2): на паузе «Перегенерировать» отвечает 409, и признак говорит то
-    # же; после «Продолжить» признак возвращается кадром фазы.
+    # На паузе «Перегенерировать» отвечает 409, и признак говорит то же; после «Продолжить» признак
+    # возвращается кадром фазы.
     await resolved_round(table)
     paused = await table.host("pause")
 
@@ -1953,8 +1953,8 @@ async def test_on_a_pause_the_regenerate_flag_says_no_as_the_server_does(table):
 
 
 async def test_a_pause_and_its_end_do_not_move_the_start_of_the_turn_phase(table):
-    # Дополнение B11 §1 п. 1: пауза меняет фазу игры, а не фазу хода — момент начала обсуждения
-    # остаётся прежним и в базе, и в кадрах фазы.
+    # Пауза меняет фазу игры, а не фазу хода — момент начала обсуждения остаётся прежним и в базе, и
+    # в кадрах фазы.
     await resolved_round(table)
     since = (await table.game()).phase_since
     await table.scheduler.advance(30)
@@ -2738,8 +2738,8 @@ async def test_a_game_on_pause_gets_no_timer_and_resumes_with_the_saved_remainde
 async def test_a_turn_cut_short_by_a_restart_starts_its_failed_phase_at_the_restart(
     settings, db, srd, setup
 ):
-    # Дополнение B11 §1 п. 1: «мастер не справился» после перезапуска — новая фаза хода, и её
-    # начало — время перезапуска, а не начало прерванного разбора: «Повторить» хост видит по нему.
+    # «Мастер не справился» после перезапуска — новая фаза хода, и её начало — время перезапуска, а
+    # не начало прерванного разбора: «Повторить» хост видит по нему.
     cut_at = setup.created + timedelta(minutes=5)
     stuck = {"turn_phase": TurnPhase.RESOLVING, "phase_since": cut_at}
     async with db() as session:
@@ -2797,7 +2797,7 @@ async def test_a_turn_that_was_resolving_when_the_process_died_becomes_dm_failed
     async with running_table(settings, db, srd, setup) as table:
         game = await table.game()
         turn = (await table.turns())[0]
-        # Ход сам не перезапускается (решение D3): модель не вызывалась, хост видит отказ.
+        # Ход сам не перезапускается: модель не вызывалась, хост видит отказ.
         assert (game.turn_phase, game.deadline_at, turn.status) == (
             TurnPhase.DM_FAILED,
             None,
@@ -2844,7 +2844,7 @@ async def test_the_opening_turn_that_was_resolving_is_dm_failed_and_stays_in_wea
         assert (await table.game()).phase == GamePhase.PLAYING  # открытие прошло с повтора
 
 
-# --- вплетение героев и открытие игры (план B7.8, решение D3) ---
+# --- вплетение героев и открытие игры ---
 
 
 async def begin_game(
@@ -3328,11 +3328,11 @@ def test_every_route_of_the_flow_is_mounted(settings, route_table):
     [
         (SceneType.EXPLORATION, False, (TurnPhase.DISCUSSION, TurnKind.ROUND)),
         (SceneType.SOCIAL, False, (TurnPhase.DISCUSSION, TurnKind.ROUND)),
-        # Бой идёт: ход у героя по инициативе, ходы пишет только он (B7.5).
+        # Бой идёт: ход у героя по инициативе, ходы пишет только он.
         (SceneType.COMBAT, True, (TurnPhase.COMBAT_WAIT, TurnKind.COMBAT)),
         # Сцена «бой» без самого боя — ошибка данных; игра не должна встать в ожидание героя.
         (SceneType.COMBAT, False, (TurnPhase.DISCUSSION, TurnKind.ROUND)),
-        # Привал (B7.6): фаза camp; следующий ход — «конец привала», его запускает отсчёт или хост.
+        # Привал: фаза camp; следующий ход — «конец привала», его запускает отсчёт или хост.
         (SceneType.CAMP, False, (TurnPhase.CAMP, TurnKind.CAMP_END)),
     ],
     ids=["исследование", "разговор", "бой", "бой без боя", "привал"],

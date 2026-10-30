@@ -1,4 +1,4 @@
-"""WebSocket игры (план B6.5): вход, снимок, события, приватность, ping/pong.
+"""WebSocket игры: вход, снимок, события, приватность, ping/pong.
 
 Сервер настоящий: приложение крутит uvicorn на свободном порту loopback, клиент — библиотека
 `websockets`, как браузер. Так видны настоящие коды закрытия (4401 и 4403 доходят до клиента только
@@ -21,6 +21,7 @@ import pytest
 import uvicorn
 import yaml
 from fastapi import FastAPI
+from game_socket import SOCKET_PROTOCOL, open_game_socket
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from websockets.asyncio.client import ClientConnection, connect
@@ -66,9 +67,12 @@ class Server:
     def hub(self) -> Hub:
         return self.app.state.hub
 
-    def url(self, game_id: str, token: str | None = None) -> str:
-        query = "" if token is None else f"?token={token}"
-        return f"ws://127.0.0.1:{self.port}/ws/games/{game_id}{query}"
+    def url(self, game_id: str) -> str:
+        return f"ws://127.0.0.1:{self.port}/ws/games/{game_id}"
+
+    def socket(self, game_id: str, token: str | None, **options: Any) -> connect:
+        """Сокет игры, как его открывает Mini App: токен — вторым подпротоколом, адрес без него."""
+        return open_game_socket(self.url(game_id), token, **options)
 
     def http(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(base_url=f"http://127.0.0.1:{self.port}", trust_env=False)
@@ -105,9 +109,9 @@ async def drain(ws: ClientConnection) -> list[dict[str, Any]]:
     return seen
 
 
-async def close_code(url: str) -> int:
+async def close_code(opening: connect) -> int:
     """Код, которым сервер закрыл сокет, не пустив игрока."""
-    async with connect(url) as ws:
+    async with opening as ws:
         with pytest.raises(ConnectionClosed) as closed:
             await asyncio.wait_for(ws.recv(), TIMEOUT_S)
     return closed.value.rcvd.code
@@ -120,8 +124,8 @@ async def watching(server: Server, table, *keys: str) -> AsyncIterator[dict[str,
     async with AsyncExitStack() as stack:
         sockets = {}
         for key in keys:
-            url = server.url(table.game_id, table.seats[key].token)
-            ws = await stack.enter_async_context(connect(url))
+            opening = server.socket(table.game_id, table.seats[key].token)
+            ws = await stack.enter_async_context(opening)
             assert (await recv(ws))["type"] == "snapshot"
             sockets[key] = ws
         yield sockets
@@ -131,7 +135,7 @@ async def watching(server: Server, table, *keys: str) -> AsyncIterator[dict[str,
 
 
 async def test_snapshot_comes_first_and_events_follow(server, table):
-    async with connect(server.url(table.game_id, table.alice.token)) as ws:
+    async with server.socket(table.game_id, table.alice.token) as ws:
         snapshot = await recv(ws)
         assert snapshot["type"] == "snapshot"
         assert snapshot["game"]["id"] == table.game_id
@@ -156,7 +160,7 @@ async def test_event_sent_while_the_snapshot_is_being_prepared_follows_it_and_is
 
     monkeypatch.setattr(ws_module, "snapshot_text", slow_snapshot)
     try:
-        async with connect(server.url(table.game_id, table.alice.token)) as ws:
+        async with server.socket(table.game_id, table.alice.token) as ws:
             async with asyncio.timeout(TIMEOUT_S):
                 while not server.hub.connections(table.game_id):
                     await asyncio.sleep(0.005)
@@ -173,10 +177,10 @@ async def test_event_sent_while_the_snapshot_is_being_prepared_follows_it_and_is
 
 async def test_extra_query_parameters_do_not_reach_the_code_of_the_endpoint(server, table):
     # `load_srd(path)` читает каталог по пути; как зависимость FastAPI он превратил бы `path` из
-    # query в путь, выбранный клиентом. Сокет принимает из query один параметр — `token`.
-    url = server.url(table.game_id, table.alice.token) + "&path=/no/such/dir&srd=1"
+    # query в путь, выбранный клиентом. Сокет из query не берёт ничего.
+    url = server.url(table.game_id) + "?path=/no/such/dir&srd=1"
 
-    async with connect(url) as ws:
+    async with open_game_socket(url, table.alice.token) as ws:
         snapshot = await recv(ws)
 
     assert snapshot["type"] == "snapshot"
@@ -190,7 +194,7 @@ async def test_the_hub_is_the_broadcaster_of_the_app(server):
 
 @pytest.mark.parametrize("key", ["alice", "boris", "vera"])
 async def test_each_player_gets_a_snapshot_without_the_secrets_of_the_others(server, table, key):
-    async with connect(server.url(table.game_id, table.seats[key].token)) as ws:
+    async with server.socket(table.game_id, table.seats[key].token) as ws:
         text = json.dumps(await recv(ws), ensure_ascii=False)
 
     assert SECRET_MARK not in text
@@ -200,9 +204,9 @@ async def test_each_player_gets_a_snapshot_without_the_secrets_of_the_others(ser
 
 
 async def test_player_b_does_not_see_the_secret_move_and_private_message_of_player_a(server, table):
-    async with connect(server.url(table.game_id, table.boris.token)) as ws:
+    async with server.socket(table.game_id, table.boris.token) as ws:
         boris = await recv(ws)
-    async with connect(server.url(table.game_id, table.alice.token)) as ws:
+    async with server.socket(table.game_id, table.alice.token) as ws:
         alice = await recv(ws)
 
     boris_feed = [item["text"] for item in boris["feed"]]
@@ -214,13 +218,13 @@ async def test_player_b_does_not_see_the_secret_move_and_private_message_of_play
 
 
 async def test_after_reconnecting_the_snapshot_has_the_feed_including_new_messages(server, table):
-    async with connect(server.url(table.game_id, table.alice.token)) as ws:
+    async with server.socket(table.game_id, table.alice.token) as ws:
         first = await recv(ws)
         message = await table.add_message("Рассказ после коммита.")
         await server.hub.send(table.game_id, feed_item_event(message))
         event = await recv(ws)
 
-    async with connect(server.url(table.game_id, table.alice.token)) as ws:
+    async with server.socket(table.game_id, table.alice.token) as ws:
         again = await recv(ws)
 
     assert event["item"]["text"] == "Рассказ после коммита."
@@ -229,19 +233,103 @@ async def test_after_reconnecting_the_snapshot_has_the_feed_including_new_messag
     assert again["feed"][-1]["id"] == event["item"]["id"]
 
 
-@pytest.mark.parametrize("who", ["no_token", "empty", "garbage", "foreign_secret", "unknown_user"])
+async def test_the_token_goes_in_the_subprotocol_and_only_the_protocol_name_comes_back(
+    server, table
+):
+    # Браузер требует, чтобы сервер назвал один из предложенных подпротоколов: называется только
+    # постоянное имя, токен в ответ не возвращается.
+    async with server.socket(table.game_id, table.alice.token) as ws:
+        snapshot = await recv(ws)
+
+    assert snapshot["type"] == "snapshot" and snapshot["game"]["id"] == table.game_id
+    assert ws.subprotocol == SOCKET_PROTOCOL == "dnd-game.v1"
+    assert ws.response.headers.get_all("Sec-WebSocket-Protocol") == ["dnd-game.v1"]
+    assert table.alice.token not in str(ws.response.headers)
+
+
+async def test_a_token_in_the_address_is_no_longer_accepted(server, table):
+    # Прежний способ (`?token=…`) не принимается ни один, ни рядом с подпротоколом без токена.
+    address = f"{server.url(table.game_id)}?token={table.alice.token}"
+
+    assert await close_code(connect(address)) == 4401
+    assert await close_code(connect(address, subprotocols=[SOCKET_PROTOCOL])) == 4401
+    assert server.hub.connections(table.game_id) == 0
+
+
+# Пустой токен браузер подпротоколом не отправит (имя подпротокола не бывает пустым); его
+# отказ проверяется на чтении токена (`tests/auth/test_auth.py`).
+@pytest.mark.parametrize("who", ["no_token", "garbage", "foreign_secret", "unknown_user"])
 async def test_missing_or_bad_token_is_closed_with_4401(server, table, who):
     foreign = SessionSigner("another-session-secret-0123456789-abcdef")
     signer = SessionSigner("test-session-secret-0123456789-abcdefghij")
     token = {
         "no_token": None,
-        "empty": "",
         "garbage": "garbage",
         "foreign_secret": foreign.issue(table.alice.user_id),
         "unknown_user": signer.issue("no-such-user"),
     }[who]
 
-    assert await close_code(server.url(table.game_id, token)) == 4401
+    assert await close_code(server.socket(table.game_id, token)) == 4401
+    assert server.hub.connections(table.game_id) == 0
+
+
+@pytest.mark.parametrize(
+    "subprotocols",
+    [
+        pytest.param(["dnd-game.v1"], id="имя без токена"),
+        pytest.param(["{token}", "dnd-game.v1"], id="токен первым"),
+        pytest.param(["other.v1", "{token}"], id="чужое имя"),
+        pytest.param(["{token}"], id="только токен"),
+        pytest.param(["dnd-game.v1", "{token}", "extra"], id="лишний подпротокол"),
+    ],
+)
+async def test_a_valid_token_outside_its_place_in_the_subprotocols_is_closed_with_4401(
+    server, table, subprotocols
+):
+    offered = [name.format(token=table.alice.token) for name in subprotocols]
+
+    assert await close_code(connect(server.url(table.game_id), subprotocols=offered)) == 4401
+    assert server.hub.connections(table.game_id) == 0
+
+
+# Отказ виден браузеру только после принятого рукопожатия, а браузер принимает его, лишь если
+# сервер назвал один из предложенных подпротоколов. Поэтому `dnd-game.v1` называется в ответе и
+# при отказе — если клиент его предложил; токен (и любая другая строка клиента) назад не идёт.
+# Старый клиент без подпротоколов получает рукопожатие без подпротокола и тот же 4401.
+@pytest.mark.parametrize(
+    ("offered", "in_query", "echo", "code"),
+    [
+        pytest.param(["dnd-game.v1", "garbage"], False, "dnd-game.v1", 4401, id="битый токен"),
+        pytest.param(["dnd-game.v1"], False, "dnd-game.v1", 4401, id="имя без токена"),
+        pytest.param(
+            ["dnd-game.v1", "{token}", "extra"], False, "dnd-game.v1", 4401, id="лишний третий"
+        ),
+        pytest.param(["{token}", "dnd-game.v1"], False, "dnd-game.v1", 4401, id="токен первым"),
+        pytest.param(["other.v1", "{token}"], False, None, 4401, id="чужое имя"),
+        pytest.param([], True, None, 4401, id="старый клиент с токеном в адресе"),
+        pytest.param(["dnd-game.v1", "{stranger}"], False, "dnd-game.v1", 4403, id="не участник"),
+    ],
+)
+async def test_a_refused_socket_is_accepted_first_and_names_only_the_protocol(
+    server, table, db, signer, offered, in_query, echo, code
+):
+    async with db() as session:
+        stranger = User(dev_login="dev-9", name="Чужой")
+        session.add(stranger)
+        await session.commit()
+    tokens = {"token": table.alice.token, "stranger": signer.issue(stranger.id)}
+    subprotocols = [name.format(**tokens) for name in offered] or None
+    address = server.url(table.game_id) + (f"?token={table.alice.token}" if in_query else "")
+
+    async with connect(address, subprotocols=subprotocols) as ws:
+        with pytest.raises(ConnectionClosed) as closed:
+            await asyncio.wait_for(ws.recv(), TIMEOUT_S)
+
+    assert closed.value.rcvd.code == code
+    assert ws.subprotocol == echo
+    named = ws.response.headers.get_all("Sec-WebSocket-Protocol")
+    assert named == ([] if echo is None else [echo])
+    assert all(value not in str(ws.response.headers) for value in tokens.values())
     assert server.hub.connections(table.game_id) == 0
 
 
@@ -254,17 +342,17 @@ async def test_not_a_member_is_closed_with_4403_the_same_for_a_missing_game(
         await session.commit()
     token = signer.issue(stranger.id)
 
-    assert await close_code(server.url(table.game_id, token)) == 4403
-    assert await close_code(server.url("no-such-game", token)) == 4403
+    assert await close_code(server.socket(table.game_id, token)) == 4403
+    assert await close_code(server.socket("no-such-game", token)) == 4403
     assert server.hub.connections(table.game_id) == 0
 
 
 async def test_foreign_host_header_is_refused_before_the_socket_opens(server, table):
     # Страница злоумышленника ходит на localhost под своим именем (DNS-rebinding): Host чужой.
-    url = server.url(table.game_id, table.alice.token).replace("127.0.0.1", "evil.example")
+    url = server.url(table.game_id).replace("127.0.0.1", "evil.example")
 
     with pytest.raises(InvalidStatus) as refused:
-        async with connect(url, host="127.0.0.1", port=server.port):
+        async with open_game_socket(url, table.alice.token, host="127.0.0.1", port=server.port):
             pass
 
     assert refused.value.response.status_code == 400
@@ -276,7 +364,7 @@ async def test_unreadable_game_state_is_reported_with_an_error_event_and_1011(se
         row.schema_version = 999  # записан более новой версией сервера
         await session.commit()
 
-    async with connect(server.url(table.game_id, table.alice.token)) as ws:
+    async with server.socket(table.game_id, table.alice.token) as ws:
         error = await recv(ws)
         with pytest.raises(ConnectionClosed) as closed:
             await asyncio.wait_for(ws.recv(), TIMEOUT_S)
@@ -296,7 +384,7 @@ async def test_a_snapshot_that_fails_is_logged_without_the_input_of_the_error(
     monkeypatch.setattr(ws_module, "snapshot_text", broken_snapshot)
 
     with caplog.at_level(logging.ERROR, logger=ws_module.__name__):
-        async with connect(server.url(table.game_id, table.alice.token)) as ws:
+        async with server.socket(table.game_id, table.alice.token) as ws:
             assert (await recv(ws))["type"] == "error"
             with pytest.raises(ConnectionClosed):
                 await asyncio.wait_for(ws.recv(), TIMEOUT_S)
@@ -374,8 +462,8 @@ async def test_two_tabs_of_one_player_both_get_the_events(server, table, db):
     async with db() as session:
         game = await session.get(Game, table.game_id)
     async with (
-        connect(server.url(table.game_id, table.alice.token)) as tab_1,
-        connect(server.url(table.game_id, table.alice.token)) as tab_2,
+        server.socket(table.game_id, table.alice.token) as tab_1,
+        server.socket(table.game_id, table.alice.token) as tab_2,
     ):
         await recv(tab_1)
         await recv(tab_2)
@@ -436,7 +524,7 @@ async def test_nothing_of_the_dm_turn_log_or_adventure_copy_is_ever_sent(server,
     assert SECRET_MARK not in json.dumps(frames, ensure_ascii=False)
 
 
-# --- дневник отряда: личная запись только её хозяину (блок B8) ---
+# --- дневник отряда: личная запись только её хозяину ---
 
 JOURNAL_NOTE = "ЛИЧНОЕ-boris: Марта прячет ключ под стойкой."
 
@@ -455,8 +543,8 @@ async def test_a_personal_journal_entry_reaches_only_its_player_in_the_snapshot_
     users = [seat.user_id for seat in table.seats.values()]
 
     async with (
-        connect(server.url(table.game_id, table.alice.token)) as alice_ws,
-        connect(server.url(table.game_id, table.boris.token)) as boris_ws,
+        server.socket(table.game_id, table.alice.token) as alice_ws,
+        server.socket(table.game_id, table.boris.token) as boris_ws,
     ):
         snapshots = {"alice": await recv(alice_ws), "boris": await recv(boris_ws)}
         for payload, audience in journal_entry_events(before, after):
@@ -540,13 +628,13 @@ async def test_a_player_kicked_from_the_lobby_is_closed_and_cannot_come_back_to_
         connections_left = server.hub.connections(lobby_table.game_id)
 
     assert kicked.status_code == 200
-    # Исключённому — кадр `kicked` и закрытие 4403 с причиной `kicked` (дополнение B11 §2): клиент
-    # говорит «Хост исключил вас». Кадров игры после исключения ему нет, хосту — ничего нового.
+    # Исключённому — кадр `kicked` и закрытие 4403 с причиной `kicked`: клиент говорит «Хост
+    # исключил вас». Кадров игры после исключения ему нет, хосту — ничего нового.
     assert frames == [{"type": "kicked"}]
     assert (closed.value.rcvd.code, closed.value.rcvd.reason) == (4403, "kicked")
     assert [e["type"] for e in host_events] == ["lobby"]
     assert connections_left == 1  # остался только хост
-    assert await close_code(server.url(lobby_table.game_id, boris.token)) == 4403
+    assert await close_code(server.socket(lobby_table.game_id, boris.token)) == 4403
 
 
 async def test_every_socket_of_a_kicked_player_hears_it_and_the_others_hear_no_kick(
@@ -555,8 +643,8 @@ async def test_every_socket_of_a_kicked_player_hears_it_and_the_others_hear_no_k
     boris, alice = lobby_table.boris, lobby_table.alice
     async with (
         watching(server, lobby_table, "alice", "vera") as sockets,
-        connect(server.url(lobby_table.game_id, boris.token)) as first,
-        connect(server.url(lobby_table.game_id, boris.token)) as second,
+        server.socket(lobby_table.game_id, boris.token) as first,
+        server.socket(lobby_table.game_id, boris.token) as second,
         server.http() as http,
     ):
         for socket in (first, second):
@@ -585,7 +673,7 @@ async def test_every_socket_of_a_kicked_player_hears_it_and_the_others_hear_no_k
 async def test_a_player_who_leaves_the_lobby_is_closed_as_before_without_the_kick(
     server, lobby_table
 ):
-    # Выход — не исключение (решение D6): кадра `kicked` нет, сокет закрывается «переподключитесь».
+    # Выход — не исключение: кадра `kicked` нет, сокет закрывается «переподключитесь».
     boris = lobby_table.boris
     async with (
         watching(server, lobby_table, "alice", "boris") as sockets,
@@ -608,7 +696,7 @@ async def test_a_player_who_leaves_the_lobby_is_closed_as_before_without_the_kic
     assert [e["type"] for e in host_events] == ["lobby"]
 
 
-# --- привал: идея для рассказа только своему игроку (блок B9 DND-2) ---
+# --- привал: идея для рассказа только своему игроку ---
 
 
 async def test_an_idea_of_a_rest_reaches_only_its_player_over_the_socket_and_after_a_reconnect(
@@ -665,7 +753,7 @@ async def test_an_idea_of_a_rest_reaches_only_its_player_over_the_socket_and_aft
         assert [f["text"] for f in frames[key] if f["type"] == "rest_idea"] == [ideas[key]]
         seen = json.dumps(frames[key], ensure_ascii=False)
         assert [text for text in ideas.values() if text in seen] == [ideas[key]]
-        async with connect(server.url(table.game_id, table.seats[key].token)) as ws:
+        async with server.socket(table.game_id, table.seats[key].token) as ws:
             snapshot = await recv(ws)
         assert snapshot["rest"]["kind"] == "long"
         assert snapshot["rest"]["my_ideas"] == [ideas[key]]

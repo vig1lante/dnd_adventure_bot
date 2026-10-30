@@ -47,6 +47,38 @@ describe("клиент конструктора: пути, методы и те�
     expect(server.calls[0].path).toBe("/api/drafts/a%2Fb");
   });
 
+  test("удаление черновика — DELETE /api/drafts/{id} без тела, id кодируется, ответ 204", async () => {
+    const { api, server } = apiWith({
+      "DELETE /api/drafts/a%2Fb": { status: 204 },
+    });
+
+    await expect(api.deleteDraft("a/b")).resolves.toBeUndefined();
+    expect(server.calls[0]).toMatchObject({
+      method: "DELETE",
+      path: "/api/drafts/a%2Fb",
+      body: undefined,
+    });
+    expect(server.calls[0].headers.get("Authorization")).toBe("Bearer tok");
+  });
+
+  test("удаление идущей генерации — 409 job_running с текстом сервера", async () => {
+    const { api } = apiWith({
+      "DELETE /api/drafts/d1": {
+        status: 409,
+        json: {
+          detail: "Идёт генерация: дождитесь её окончания.",
+          code: "job_running",
+        },
+      },
+    });
+
+    await expect(api.deleteDraft("d1")).rejects.toMatchObject({
+      status: 409,
+      code: "job_running",
+      detail: "Идёт генерация: дождитесь её окончания.",
+    });
+  });
+
   test("раздел — PUT .../sections/{section} с версией и данными", async () => {
     const { api, server } = apiWith({
       "PUT /api/drafts/d1/sections/deities": { json: draftOf({ version: 4 }) },
@@ -118,7 +150,7 @@ describe("клиент конструктора: пути, методы и те�
     expect(server.calls[0].headers.get("Authorization")).toBe("Bearer tok");
   });
 
-  test("раздел карты — объект: локации, старт и финал (дополнение B5 §1)", async () => {
+  test("раздел карты — объект: локации, старт и финал", async () => {
     const data = {
       locations: [locationOf()],
       start_location: "crypt",
@@ -190,7 +222,7 @@ describe("ошибки конструктора несут код из отве�
     });
   });
 
-  test("ответ без кода — кода нет (ошибки игр DND-1 не меняются)", async () => {
+  test("ответ без кода — кода нет (прежние ошибки игр не меняются)", async () => {
     const { api } = apiWith({
       "GET /api/drafts": { status: 403, json: { detail: "Нет доступа." } },
     });
@@ -200,8 +232,6 @@ describe("ошибки конструктора несут код из отве�
     expect(error).toMatchObject({ status: 403, code: undefined });
   });
 });
-
-// --- финальное покрытие блока 4 ---
 
 describe("ошибки конструктора: что видит автор", () => {
   test("detail не по-русски (FastAPI, прокси) не показывается: текст по статусу, код остаётся", async () => {
@@ -287,7 +317,7 @@ describe("ошибки конструктора: что видит автор", 
   });
 });
 
-// --- блок 6: проверка, публикация, архив, копия, справочник SRD (дополнение B6 §3, §6–§8) ---
+// --- проверка, публикация, архив, копия, справочник SRD ---
 
 /** Что клиент передал в fetch: тело и заголовки как есть (заглушка разбирает только JSON). */
 const sent = (server: ReturnType<typeof fakeServer>, index = 0) =>
@@ -430,7 +460,7 @@ describe("клиент конструктора: архив zip", () => {
     await expect(api.importArchive(file)).resolves.toEqual(draft);
 
     const init = sent(server);
-    // Тело — сам файл, без JSON и без multipart (B6 §7).
+    // Тело — сам файл, без JSON и без multipart.
     expect(init.body).toBe(file);
     expect(server.calls[0].headers.get("Content-Type")).toBe("application/zip");
     expect(server.calls[0].headers.get("Authorization")).toBe("Bearer tok");
@@ -540,7 +570,7 @@ describe("клиент конструктора: копия и справочн�
   });
 });
 
-// --- финальное покрытие блока 6: файл в ответе и сырое тело — те же русские ошибки ---
+// --- файл в ответе и сырое тело — те же русские ошибки ---
 
 describe("клиент: архив — сбои связи и чужие ответы по-русски", () => {
   test("экспорт: обрыв связи — статус 0 и текст про связь", async () => {

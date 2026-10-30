@@ -199,7 +199,7 @@ describe("воск и очистка", () => {
     expect((wax as HTMLElement).style.width).toBe("50%");
   });
 
-  describe("после «+1 мин» (контракт B11, §1 п. 16)", () => {
+  describe("после «+1 мин»", () => {
     const waxOf = (container: HTMLElement) =>
       (container.querySelector(".ui-countdown__wax > span") as HTMLElement)
         .style.width;
@@ -250,7 +250,7 @@ describe("воск и очистка", () => {
       expect(waxOf(container)).toBe("75%"); // 90 из 120
     });
 
-    // Финальное покрытие B11: продление не одно, и снимок после обрыва приносит тот же срок.
+    // Продление не одно, и снимок после обрыва приносит тот же срок.
     test("два «+1 мин» подряд: каждый раз свеча снова полная и тает от нового остатка", () => {
       const props = (deadline: number) => ({
         phase: phaseOf("collecting", { deadline_at: at(deadline) }),

@@ -1,4 +1,8 @@
-"""WebSocket игры `/ws/games/{game_id}?token=<сессия>` (план B6.5).
+"""WebSocket игры `/ws/games/{game_id}`; токен сессии — вторым подпротоколом после `dnd-game.v1`.
+
+Клиент открывает сокет с подпротоколами `[dnd-game.v1, <токен>]` (`auth.deps.SOCKET_PROTOCOL`),
+сервер принимает рукопожатие с подпротоколом `dnd-game.v1` и токен назад не называет. Токен в
+адресе (`?token=…`, прежний способ) не принимается.
 
 Порядок такой: токен (нет или недействителен — код 4401), участие в игре (нет — 4403), подписка на
 события в хабе, снимок для этого игрока, затем события. Подписка оформляется до чтения снимка:
@@ -7,10 +11,12 @@
 блоки снимка целиком).
 
 Код закрытия 4401 или 4403 клиент видит, только если рукопожатие принято, поэтому эндпоинт сначала
-принимает сокет и лишь потом проверяет игрока: до проверки он ничего не отправляет.
+принимает сокет и лишь потом проверяет игрока: до проверки он ничего не отправляет. Предложенный
+`dnd-game.v1` называется в ответе и при плохом токене: браузер, не получив в ответ одного из своих
+подпротоколов, рвёт соединение, и клиент не увидел бы 4401.
 
 Когда хаб снял соединение, эндпоинт закрывает сокет. Исключённому хостом (`Hub.kick_user`) он сам
-шлёт кадр `{"type": "kicked"}` и закрывает сокет кодом 4403 с причиной `kicked` (контракт B11 §2):
+шлёт кадр `{"type": "kicked"}` и закрывает сокет кодом 4403 с причиной `kicked`:
 клиент говорит «Хост исключил вас», а не «игра недоступна». Остальным — 1013 «переподключитесь»:
 вышедший из лобби при переподключении получит обычный 4403.
 
@@ -30,7 +36,7 @@ from starlette.requests import HTTPConnection
 from starlette.websockets import WebSocket
 
 from dnd_engine.content import SrdContent, load_srd
-from dnd_server.auth.deps import websocket_user
+from dnd_server.auth.deps import SOCKET_PROTOCOL, websocket_user
 from dnd_server.db.models import User
 from dnd_server.dm.text import safe_traceback
 from dnd_server.games.service import NotFound, get_game
@@ -119,7 +125,8 @@ async def game_socket(
     hub: Annotated[Hub, Depends(get_hub)],
     srd: Annotated[SrdContent, Depends(get_srd)],
 ) -> None:
-    await websocket.accept()
+    offered = websocket.scope.get("subprotocols", [])
+    await websocket.accept(subprotocol=SOCKET_PROTOCOL if SOCKET_PROTOCOL in offered else None)
     user = await websocket_user(websocket)
     if user is None:
         await websocket.close(code=CLOSE_UNAUTHORIZED)

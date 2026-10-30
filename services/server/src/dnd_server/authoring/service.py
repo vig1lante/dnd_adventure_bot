@@ -1,5 +1,4 @@
-"""Черновики конструктора (планы B4.1, B5.1, B6.1; спека §10.2, §10.3, Р5, Р7; дополнения
-dispatcher B4, B5 и B6).
+"""Черновики конструктора.
 
 Слой не знает про HTTP: принимает сессию базы и автора, отдаёт JSON контракта (`Draft`,
 `DraftSummary`, `DraftReport`, справочник ссылок, справочник монстров SRD) и архив черновика, а
@@ -64,7 +63,7 @@ _LOCK = TypeAdapter(LockRef)
 JOB_RUNNING = "Идёт генерация шага: дождитесь её окончания, потом правьте черновик."
 ID_LOCKED = "Приключение уже опубликовано под этим id."
 NO_ADVENTURE_ID = "Сначала задайте id приключения."
-# Закрепления уходят в промпт каждого шага: их число ограничено (дополнение §7).
+# Закрепления уходят в промпт каждого шага: их число ограничено.
 MAX_LOCKS = 256
 VERSION_CONFLICT = "Черновик изменился: обновите его и повторите правку."
 
@@ -135,7 +134,7 @@ async def latest_job(session: AsyncSession, draft_id: str) -> AuthoringJob | Non
 
 
 def job_out(job: AuthoringJob) -> dict[str, Any]:
-    """`Job` (дополнение §5): без пожелания — оно уходит только в промпт шага."""
+    """`Job`: без пожелания — оно уходит только в промпт шага."""
     return {
         "id": job.id,
         "step": job.step,
@@ -148,7 +147,7 @@ def job_out(job: AuthoringJob) -> dict[str, Any]:
 
 
 def draft_out(row: AdventureDraft, job: AuthoringJob | None) -> dict[str, Any]:
-    """`Draft` (дополнение §1): разделы — модели B3 в JSON, `id` — id записи черновика, slug
+    """`Draft`: разделы — модели черновика в JSON, `id` — id записи черновика, slug
     приключения — `adventure_id`; `job` — активное или последнее задание."""
     draft = stored_draft(row)
     data = draft.model_dump(mode="json")
@@ -171,16 +170,15 @@ def draft_out(row: AdventureDraft, job: AuthoringJob | None) -> dict[str, Any]:
     }
 
 
-# Виды справочника ссылок по порядку (дополнение B5 §6): то, что выбирают поля-ссылки разделов.
+# Виды справочника ссылок по порядку: то, что выбирают поля-ссылки разделов.
 REF_KINDS = ("deity", "faction", "npc", "location", "item", "encounter")
 _SECTION_OF_KIND = {kind: section for section, kind in SECTION_KINDS.items()}
 
 
 def refs_out(draft: AuthoringDraft) -> list[dict[str, str]]:
-    """Справочник ссылок `[{ref, kind, name}]` (дополнение B5 §6): виды по `REF_KINDS`, внутри
-    вида — порядок раздела. Имя — `name` сущности, у боя имени нет — его id, пустое имя — тоже
-    id. Ничего, кроме имени, в справочник не идёт: тайны (`secret`, `dm_notes`, тексты тайников)
-    остаются в черновике."""
+    """Справочник ссылок `[{ref, kind, name}]`: виды по `REF_KINDS`, внутри вида — порядок раздела.
+    Имя — `name` сущности, у боя имени нет — его id, пустое имя — тоже id. Ничего, кроме имени, в
+    справочник не идёт: тайны (`secret`, `dm_notes`, тексты тайников) остаются в черновике."""
     return [
         {"ref": f"{kind}:{entity.id}", "kind": kind, "name": _ref_name(entity)}
         for kind in REF_KINDS
@@ -201,9 +199,9 @@ class Publication(NamedTuple):
 
 
 def summary_out(row: AdventureDraft, published: Publication | None) -> dict[str, Any]:
-    """`DraftSummary`: строка списка черновиков без разбора всего черновика. `published` — первая
-    публикация черновика (`first_publications`) или `None`: по ней клиент ставит бейдж
-    «опубликовано» (дополнение B11 §2)."""
+    """`DraftSummary`: строка списка черновиков без разбора всего черновика. `published` —
+    первая публикация черновика (`first_publications`) или `None`: по ней клиент ставит
+    бейдж «опубликовано»."""
     return {
         "id": row.id,
         "title": row.title,
@@ -263,8 +261,8 @@ async def validate_draft(session: AsyncSession, user: User, draft_id: str) -> di
 
 async def published_id(session: AsyncSession, draft_id: str) -> str | None:
     """id приключения, под которым черновик опубликован; не публиковался — `None`. После первой
-    публикации id черновика закреплён (дополнение B6 §2). Если строк несколько (данные до
-    fix-раунда 1 B6), закреплён самый ранний id: ответ не зависит от порядка строк в базе."""
+    публикации id черновика закреплён. Если строк несколько (старые данные), закреплён самый
+    ранний id: ответ не зависит от порядка строк в базе."""
     return await session.scalar(
         select(AuthoredAdventure.id)
         .where(AuthoredAdventure.source_draft_id == draft_id)
@@ -287,8 +285,8 @@ async def same_version(session: AsyncSession, draft_id: str, version: int) -> bo
 
 
 def srd_monsters() -> list[dict[str, Any]]:
-    """Справочник монстров SRD для боя (дополнение B6 §8): `[{id, name, cr, xp, tags}]` в порядке
-    данных; размера и типа в данных SRD нет."""
+    """Справочник монстров SRD для боя: `[{id, name, cr, xp, tags}]` в порядке данных; размера и
+    типа в данных SRD нет."""
     return [
         {"id": m.id, "name": m.name, "cr": m.cr, "xp": m.xp, "tags": list(m.tags)}
         for m in load_srd().monsters.values()
@@ -340,7 +338,7 @@ IMPORT_REFUSED = "Архив не подходит для импорта."
 
 async def copy_adventure(session: AsyncSession, user: User, adventure: Adventure) -> dict[str, Any]:
     """Новый черновик автора — копия приключения каталога (папки или опубликованного) без
-    пожеланий; флажок мата — умолчание Р1 (у приключения его нет). Пределы разделов копия не
+    пожеланий; флажок мата — по умолчанию (у приключения его нет). Пределы разделов копия не
     проверяет: папки — данные владельца, опубликованное их уже прошло; публикация копии проверит."""
     return await _insert(session, user, draft_of(adventure))
 
@@ -467,7 +465,7 @@ def require_editor_step(step: str) -> None:
 async def put_wish(
     session: AsyncSession, user: User, draft_id: str, step: str, version: int, text: str
 ) -> dict[str, Any]:
-    """Пожелание к шагу: пустое после обрезки удаляет пожелание (дополнение §6)."""
+    """Пожелание к шагу: пустое после обрезки удаляет пожелание."""
     row = await owned_draft(session, user, draft_id)
     require_editor_step(step)
     await _require_editable(session, row, version)

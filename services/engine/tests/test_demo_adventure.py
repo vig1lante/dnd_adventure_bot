@@ -1,5 +1,4 @@
-"""Рукописное мини-приключение `demo-crypt` (план B4.4, спека §6.1–§6.2; формат v2 —
-спека DND-2 §8).
+"""Рукописное мини-приключение `demo-crypt` (формат v2).
 
 Приключение — данные в `content/adventures/demo-crypt/`. На него опираются тесты инструментов
 мастера (скрытый выход, запертый сундук, поиск по лору, бой «Встающие кости», мир, боги, фракции и
@@ -19,8 +18,8 @@ from dnd_engine.adventure.validator import validate
 from dnd_engine.content import SrdContent, load_srd
 
 # Предупреждения демо-приключения заданы явно: правка контента, которая добавит или уберёт
-# предупреждение, должна быть заметна в тесте. Оба боя из плана «слишком лёгкие» для шести героев
-# 3-го уровня (решение владельца B4.4): финальный бой с Фабианом — бой с боссом, поэтому о нём
+# предупреждение, должна быть заметна в тесте. Оба боя демо «слишком лёгкие» для шести героев
+# 3-го уровня (так решил владелец): финальный бой с Фабианом — бой с боссом, поэтому о нём
 # валидатор говорит «легче высокой сложности». Оценка валидатора (116 мин) выше цели 1,5 ч больше
 # чем на 25%: формула считает полные 30 минут на каждый бой.
 EXPECTED_WARNINGS = {
@@ -28,7 +27,7 @@ EXPECTED_WARNINGS = {
     ("boss_too_easy", "encounter:fabian-fight"),
     ("duration_mismatch", "adventure"),
 }
-# Футы в текстах не пишут: расстояния — в метрах (решение DND-2 B1).
+# Футы в текстах не пишут: расстояния — в метрах.
 FEET = re.compile(r"фут|\bфт\b|\bfeet\b|\bfoot\b", re.IGNORECASE)
 
 # Текст приключения — данные, а не инструкции модели: фразы вроде этих в нём недопустимы.
@@ -194,7 +193,7 @@ def test_npc_relations_live_only_in_the_graph(demo_adventure: Adventure):
 
 
 def test_the_word_debt_is_in_fabians_own_texts_for_lore_search(demo_adventure: Adventure):
-    # search_lore("долг") (B4.5) ищет по текстам: Фабиан должен находиться и без чужих описаний.
+    # search_lore("долг") ищет по текстам: Фабиан должен находиться и без чужих описаний.
     fabian = demo_adventure.npcs["fabian"]
     own_texts = [fabian.motive, fabian.secret, fabian.manner, fabian.appearance, *fabian.knows]
 
@@ -208,7 +207,7 @@ def test_each_location_has_features_and_read_aloud_and_dm_notes(demo_adventure: 
     for location in demo_adventure.locations.values():
         assert location.features, location.id
         assert location.read_aloud.strip(), location.id
-        # Заметки мастера нужны тесту краткого описания приключения (B7.2): в нём их быть не должно.
+        # Заметки мастера нужны тесту краткого описания приключения: в нём их быть не должно.
         assert location.dm_notes.strip(), location.id
 
 

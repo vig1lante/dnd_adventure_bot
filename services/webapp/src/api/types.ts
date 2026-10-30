@@ -1,5 +1,5 @@
 // Типы ответов и тел запросов сервера. Источник правды — код сервера (auth/api.py,
-// games/schemas.py, characters/*, turns/api.py, realtime/views.py), а не спека.
+// games/schemas.py, characters/*, turns/api.py, realtime/views.py).
 // Клиент не проверяет форму ответов во время работы: он им верит, как контракту.
 // Числа, броски и HP клиент только показывает — считает их сервер.
 
@@ -47,8 +47,8 @@ export interface PlayerSummary {
   ready: boolean;
   has_character: boolean;
   /**
-   * Имя героя игрока; `null` — героя ещё нет. Его видят все (контракт B11, §1 п. 3). Сервер до B11
-   * поля не присылает — тогда имени просто нет.
+   * Имя героя игрока; `null` — героя ещё нет. Его видят все. Старый сервер поля не присылает —
+   * тогда имени просто нет.
    */
   hero_name?: string | null;
 }
@@ -65,14 +65,14 @@ export interface GameSummary {
   model: string | null;
   collect_seconds: number;
   hurry_seconds: number;
-  /** Срок долгого привала (и привала DND-1), с. */
+  /** Срок долгого привала (и прежнего привала), с. */
   camp_seconds: number;
-  /** Срок короткого привала, с (контракт B9, §3: `GameOut.short_rest_seconds`). */
+  /** Срок короткого привала, с (`GameOut.short_rest_seconds`). */
   short_rest_seconds: number;
   /** Флажок «Мат и грубая речь»: его видят мастер и служебные роли нейронки. */
   profanity: boolean;
   players: PlayerSummary[];
-  /** Когда создана игра, ISO с `+00:00` (контракт B11, §2); сервер до B11 его не присылает. */
+  /** Когда создана игра, ISO с `+00:00`; старый сервер его не присылает. */
   created_at?: string;
 }
 
@@ -262,7 +262,7 @@ export interface AbilityOption {
   name: string;
 }
 
-// --- подробности вариантов для карточек (`details`, контракт блока 7) ---
+// --- подробности вариантов для карточек (`details`) ---
 // Верхние поля вариантов — для логики формы, `details` — для подробной карточки: часть данных
 // нарочно повторяется. Коды характеристик и навыков названия не несут: их берут из
 // `CreationOptions.abilities` и `.skills`. Тексты — по-русски, расстояния — только в метрах.
@@ -275,7 +275,7 @@ export interface TraitDetail {
 }
 
 export interface SpeciesDetails {
-  /** Английское название расы (спека §7: «название и английское»). */
+  /** Английское название расы. */
   name_en: string;
   /** 2–3 предложения о расе. */
   description: string;
@@ -558,7 +558,7 @@ export type HostAction =
   | "hurry"
   | "camp-extend"
   | "camp-end"
-  // Те же «+1 мин» и «Закончить» для привала любого вида (контракт B9, §1 п. 3).
+  // Те же «+1 мин» и «Закончить» для привала любого вида.
   | "rest-extend"
   | "rest-end";
 
@@ -577,7 +577,7 @@ export interface HitDieResult {
 /**
  * Статус хода для всех: что в ходе написано и тайный ли он, статус не говорит. `idle` — ход ещё не
  * начат (строки хода нет или в черновике нет видимого текста), `writing` — черновик с текстом,
- * `ready` — сдан (вручную или по таймеру), `pass` — пас (решение D17, контракт B11, §7).
+ * `ready` — сдан (вручную или по таймеру), `pass` — пас.
  */
 export type PlayerStatus = "idle" | "writing" | "ready" | "pass";
 
@@ -612,7 +612,7 @@ export interface RollData {
   dc: number | null;
   success: boolean | null;
   /**
-   * КД героя-цели. Сервер кладёт его только в атаку монстра по герою (решение владельца R2):
+   * КД героя-цели. Сервер кладёт его только в атаку монстра по герою (решение владельца):
    * КД монстров не передаётся никогда.
    */
   target_ac?: number;
@@ -632,13 +632,13 @@ export interface PhaseView {
   remaining_seconds: number | null;
   scene: SceneView | null;
   /**
-   * Серверное время начала текущей фазы хода, ISO с `+00:00` (контракт B11, §2). `null` — игра
-   * шла до B11 и сервер его не знает; у сервера до B11 поля нет вовсе.
+   * Серверное время начала текущей фазы хода, ISO с `+00:00`. `null` — игра началась на старом
+   * сервере, и он его не знает; у старого сервера поля нет вовсе.
    */
   phase_since?: string | null;
   /**
-   * Примет ли сервер «Перегенерировать ответ мастера» сейчас (то же правило, что у сервера:
-   * контракт B11, §1 п. 11). Без поля (сервер до B11) кнопки нет.
+   * Примет ли сервер «Перегенерировать ответ мастера» сейчас (то же правило, что у сервера).
+   * Без поля (старый сервер) кнопки нет.
    */
   can_regenerate?: boolean;
 }
@@ -691,7 +691,7 @@ export interface CombatView {
   zones: { id: string; name: string; combatants: string[] }[];
 }
 
-/** Раздел дневника (дополнение dispatcher к контракту B8, §1). */
+/** Раздел дневника. */
 export type JournalSection =
   | "main"
   | "places"
@@ -704,8 +704,8 @@ export type JournalSection =
   | "items";
 
 /**
- * Запись дневника отряда (дополнение к контракту B8, §2). Сервер присылает только то, что
- * игроку можно видеть: общие записи и личные записи его героя; тайн в тексте нет.
+ * Запись дневника отряда. Сервер присылает только то, что игроку можно видеть: общие записи
+ * и личные записи его героя; тайн в тексте нет.
  */
 export interface JournalEntry {
   /** `<ref>@<audience>`: одна запись на сущность и адресата. */
@@ -725,8 +725,8 @@ export interface JournalEntry {
   /** Только у мест: раунд, когда отряд впервые пришёл сюда; иначе `null`. */
   visited_turn: number | null;
   /**
-   * Раунд последнего дополнения текста (контракт B11, §1 п. 4); первый приход в место его не
-   * ставит. `null` — текст не дополняли; у сервера до B11 поля нет.
+   * Раунд последнего дополнения текста; первый приход в место его не ставит. `null` — текст не
+   * дополняли; у старого сервера поля нет.
    */
   updated_turn?: number | null;
 }
@@ -751,8 +751,8 @@ export interface Snapshot {
 }
 
 /**
- * Привал глазами игрока (дополнение к контракту B9, §3). Есть только в фазе хода `camp`, иначе
- * `null`. Тайн в нём нет: идеи — только героя смотрящего.
+ * Привал глазами игрока. Есть только в фазе хода `camp`, иначе `null`. Тайн в нём нет: идеи —
+ * только героя смотрящего.
  */
 export interface RestView {
   kind: RestKind;
@@ -789,19 +789,19 @@ export type WsEvent =
   | { type: "rest_idea"; text: string }
   /** Привал кончился (всем), мастер рассказал его итог. */
   | { type: "rest_ended"; kind: RestKind }
-  /** Черновик автора сдан по таймеру — только автору, без текста (контракт B11, §2). */
+  /** Черновик автора сдан по таймеру — только автору, без текста. */
   | { type: "action_auto_submitted" }
   /**
    * Хост исключил игрока — только его соединениям, следом сокет закрывается кодом 4403 с причиной
-   * `kicked` (контракт B11, §2). Его разбирает подключение (`api/ws.ts`), до игры он не доходит.
+   * `kicked`. Его разбирает подключение (`api/ws.ts`), до игры он не доходит.
    */
   | { type: "kicked" }
   | { type: "error"; detail: string }
   | { type: "pong" };
 
-// --- конструктор приключений (спека DND-2 §10.3 и дополнение dispatcher к контракту B4) ---
+// --- конструктор приключений ---
 
-/** Шаги генератора по порядку (контракт B3); они же ключи `steps`, `wishes` и замков `step:<шаг>`. */
+/** Шаги генератора по порядку; они же ключи `steps`, `wishes` и замков `step:<шаг>`. */
 export type AuthoringStep =
   | "concept"
   | "world"
@@ -817,8 +817,7 @@ export type AuthoringStep =
   | "clues";
 
 /**
- * Разделы, которые принимает `PUT /api/drafts/{id}/sections/{section}` (дополнения B4 §2, B5 §1,
- * B6 §1): все 12.
+ * Разделы, которые принимает `PUT /api/drafts/{id}/sections/{section}`: все 12.
  */
 export type DraftSection =
   | "settings"
@@ -858,7 +857,7 @@ export interface Job {
   finished_at: string | null;
 }
 
-/** Поля дневника отряда у сущностей (спека §8): что знают игроки и известно ли с начала. */
+/** Поля дневника отряда у сущностей: что знают игроки и известно ли с начала. */
 export interface JournalFields {
   public: string;
   known_at_start: boolean;
@@ -998,7 +997,7 @@ export interface Location extends JournalFields {
   links: ZoneLink[];
 }
 
-/** Данные раздела `locations`: локации и два поля верхнего уровня черновика (B5 §1). */
+/** Данные раздела `locations`: локации и два поля верхнего уровня черновика. */
 export interface LocationsSection {
   locations: Location[];
   start_location: string | null;
@@ -1023,7 +1022,7 @@ export interface Npc extends JournalFields {
   statblock: string | null;
 }
 
-/** Вид связи из словаря спеки §8; `other` — с пояснением в `note`. */
+/** Вид связи; `other` — с пояснением в `note`. */
 export type RelationKind =
   | "kin"
   | "spouse"
@@ -1070,7 +1069,7 @@ export interface MonsterGroup {
   zone: string;
 }
 
-/** Бой черновика (`Encounter` движка, дополнение B6 §1). */
+/** Бой черновика (`Encounter` движка). */
 export interface Encounter {
   id: string;
   /** id локации, где идёт бой. */
@@ -1149,7 +1148,7 @@ export interface Revelation {
   clues: Clue[];
 }
 
-/** Строка справочника `GET /api/srd/monsters` (дополнение B6, §8). */
+/** Строка справочника `GET /api/srd/monsters`. */
 export interface SrdMonster {
   id: string;
   name: string;
@@ -1166,7 +1165,7 @@ export interface Finding {
   step: AuthoringStep | null;
 }
 
-/** Ответ `POST /api/drafts/{id}/validate` (дополнения B4 §8, B6 §3). */
+/** Ответ `POST /api/drafts/{id}/validate`. */
 export interface DraftReport {
   errors: Finding[];
   warnings: Finding[];
@@ -1175,7 +1174,7 @@ export interface DraftReport {
   readiness_percent: number;
 }
 
-/** Ответ `POST /api/drafts/{id}/publish`: 201 — первая публикация, 200 — повторная (B6 §6). */
+/** Ответ `POST /api/drafts/{id}/publish`: 201 — первая публикация, 200 — повторная. */
 export interface PublishResult {
   adventure_id: string;
   published_at: string;
@@ -1184,7 +1183,7 @@ export interface PublishResult {
 export type RefKind =
   "deity" | "faction" | "npc" | "location" | "item" | "encounter";
 
-/** Строка справочника ссылок `GET /api/drafts/{id}/refs` (дополнение B5, §6), без тайн. */
+/** Строка справочника ссылок `GET /api/drafts/{id}/refs`, без тайн. */
 export interface DraftRef {
   /** `<вид>:<id>`, как у закреплений. */
   ref: string;
@@ -1207,17 +1206,17 @@ export interface DraftSettings {
 export interface SettingsSection extends DraftSettings {
   title: string;
   journal_intro: string;
-  /** id приключения (B6 §2); `null` — не задан. После публикации сервер его не меняет. */
+  /** id приключения; `null` — не задан. После публикации сервер его не меняет. */
   adventure_id: string | null;
 }
 
-/** Черновик приключения (контракт B4, §1). */
+/** Черновик приключения. */
 export interface Draft {
   /** id записи черновика, не slug приключения. */
   id: string;
   version: number;
   title: string;
-  /** slug приключения: его даёт генерация замысла или автор (B6 §2); `null` — не задан. */
+  /** slug приключения: его даёт генерация замысла или автор; `null` — не задан. */
   adventure_id: string | null;
   journal_intro: string;
   settings: DraftSettings;
@@ -1251,8 +1250,8 @@ export interface DraftSummary {
   version: number;
   updated_at: string;
   /**
-   * id приключения первой публикации черновика и её время, ISO (контракт B11, §2); `null` —
-   * черновик не публиковали. У сервера до B11 полей нет.
+   * id приключения первой публикации черновика и её время, ISO; `null` — черновик не
+   * публиковали. У старого сервера полей нет.
    */
   published_id?: string | null;
   published_at?: string | null;

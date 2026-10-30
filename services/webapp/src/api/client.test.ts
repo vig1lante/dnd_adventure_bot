@@ -3,7 +3,7 @@ import { fakeServer, signInAs } from "../test-setup";
 import { createApi } from "./client";
 import type { HostAction, RestKind, RestView } from "./types";
 
-// Привалы по кнопке хоста (дополнение к контракту B9, §3–§4): пути, тела и ответы сервера.
+// Привалы по кнопке хоста: пути, тела и ответы сервера.
 
 const PHASE = {
   phase: "playing",
@@ -64,7 +64,7 @@ describe("клиент API: привалы", () => {
     });
   });
 
-  // Финальное покрытие B9: отказ начать привал — тоже текстом сервера (тексты B9.3: 409 и 403).
+  // Отказ начать привал — тоже текстом сервера (409 и 403).
   test.each([
     [409, "Привал уже идёт: второй начать нельзя."],
     [403, "Эта кнопка доступна только хосту."],
@@ -83,7 +83,7 @@ describe("клиент API: привалы", () => {
   );
 
   test.each<HostAction>(["rest-extend", "rest-end", "camp-extend", "camp-end"])(
-    "hostAction(%s): новые пути привала и прежние пути DND-1 работают",
+    "hostAction(%s): новые пути привала и прежние пути работают",
     async (action) => {
       const { api, server } = apiWith({
         [`POST /api/games/g1/host/${action}`]: { json: PHASE },
@@ -109,11 +109,11 @@ describe("клиент API: привалы", () => {
   });
 });
 
-// Финальное покрытие B9. Сверка клиент–сервер на стороне сервера (tests/flows/test_client_routes.py)
+// Сверка клиент–сервер на стороне сервера (tests/flows/test_client_routes.py)
 // сравнивает поля кадров и верхний уровень снимка, но не поля блока `rest` внутри снимка. Сервер
 // закрепляет их набор в tests/realtime/test_views.py; здесь тот же набор закреплён у клиента:
 // переименование поля в types.ts без сервера ломает и `tsc -b` (satisfies), и этот тест.
-describe("типы привала совпадают с контрактом сервера (B9, §3)", () => {
+describe("типы привала совпадают с контрактом сервера", () => {
   test("блок rest снимка — ровно kind, deadline_at, my_ideas, lines", () => {
     const fields = {
       kind: true,

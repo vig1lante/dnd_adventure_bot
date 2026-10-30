@@ -192,11 +192,12 @@ describe("подключение и состав лобби", () => {
     noButton("Начать");
   });
 
-  test("лобби слушает сокет игры с токеном сессии", async () => {
+  test("лобби слушает сокет игры с токеном сессии в подпротоколе, не в адресе", async () => {
     const { ws } = await openLobby({ game: null });
 
     expect(ws.sockets).toHaveLength(1);
-    expect(ws.last().url).toMatch(/\/ws\/games\/g1\?token=tok-u1$/);
+    expect(ws.last().url).toMatch(/\/ws\/games\/g1$/);
+    expect(ws.last().protocols).toEqual(["dnd-game.v1", "tok-u1"]);
   });
 
   test("название приключения и завязка из каталога по adventure_id", async () => {
@@ -269,7 +270,7 @@ describe("подключение и состав лобби", () => {
     ).toBeInTheDocument();
   });
 
-  test("у игрока с героем видно имя героя — и хосту, и другим игрокам (B11.3)", async () => {
+  test("у игрока с героем видно имя героя — и хосту, и другим игрокам", async () => {
     const game = lobbyOf([
       host({ hero_name: "Торин" }),
       boris({ hero_name: "Мила Тень" }),
@@ -309,7 +310,7 @@ describe("подключение и состав лобби", () => {
     expect(document.querySelector("img[src='x']")).toBeNull();
   });
 
-  test("сервер без hero_name (до B11) — строка игрока как раньше", async () => {
+  test("старый сервер без hero_name — строка игрока как раньше", async () => {
     const old = boris();
     delete old.hero_name;
     await openLobby({ game: lobbyOf([host(), old]) });
@@ -1336,7 +1337,7 @@ describe("начало игры: вплетение", () => {
       expect(button("Повторить")).toBeInTheDocument();
     });
 
-    describe("от серверного начала вплетения (phase_since, контракт B11, §2)", () => {
+    describe("от серверного начала вплетения (phase_since)", () => {
       const NOW = Date.parse("2026-10-20T12:00:00+00:00");
       const ago = (seconds: number) =>
         new Date(NOW - seconds * 1000).toISOString();
@@ -1385,8 +1386,8 @@ describe("начало игры: вплетение", () => {
         noButton("Повторить");
       });
 
-      // Финальное покрытие B11: после перезагрузки начало вплетения приходит в самом снимке,
-      // а сдвиг часов стор берёт из его `server_time`.
+      // После перезагрузки начало вплетения приходит в самом снимке, а сдвиг часов стор берёт
+      // из его `server_time`.
       test("перезагрузка: снимок с началом вплетения, часы телефона отстают на 3 минуты — «Повторить» через 10 с", async () => {
         vi.useFakeTimers({ toFake: [...FAKE_TIMERS, "Date"] });
         vi.setSystemTime(NOW);

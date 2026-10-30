@@ -33,7 +33,7 @@ def set_serving_port(port: int) -> None:
 
 
 class Settings(BaseSettings):
-    """Конфигурация сервера из переменных окружения и `.env` (спека §14).
+    """Конфигурация сервера из переменных окружения и `.env`.
 
     Имена полей — имена переменных `.env.example` в нижнем регистре. Все значения
     по умолчанию безопасны: нет секретов, нет живых моделей, нет dev-режима.
@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     # символов — правило Telegram; шаблон не пускает в ссылку ничего лишнего.
     telegram_bot_username: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
     # Telegram-id тех, кто может создавать игры и выбирать провайдера и модель (решение владельца
-    # B6: «Только из списка»). Остальные только входят в чужую игру по коду. Пусто — в prod игры не
+    # «Только из списка»). Остальные только входят в чужую игру по коду. Пусто — в prod игры не
     # создаёт никто; в dev создают dev-логины (см. auth/deps.py). Переменная — числа через запятую:
     # NoDecode не даёт pydantic-settings разбирать её как JSON, запятые режет валидатор ниже.
     game_creator_tg_ids: Annotated[tuple[PositiveInt, ...], NoDecode] = ()
@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     openai_compat_api_key: SecretStr | None = None
     openai_compat_model: str | None = None
     claude_cli_path: str = "claude"
-    # Модель подписки для `claude_code_cli` (спека §11, Р9): модель, уровень усилий и дешёвая модель
+    # Модель подписки для `claude_code_cli`: модель, уровень усилий и дешёвая модель
     # служебных ролей. Пусто — выбирает сам CLI. Значения уходят в командную строку CLI, поэтому их
     # проверяет адаптер при сборке (`llm.claude_code_cli`), а ошибка — `ConfigError` фабрики.
     claude_cli_model: str | None = None
@@ -93,8 +93,8 @@ class Settings(BaseSettings):
 
     collect_seconds: int = Field(default=120, gt=0)
     hurry_seconds: int = Field(default=60, gt=0)
-    camp_seconds: int = Field(default=300, gt=0)  # долгий привал (и привал мастера DND-1)
-    short_rest_seconds: int = Field(default=120, gt=0)  # короткий привал по кнопке хоста (B9)
+    camp_seconds: int = Field(default=300, gt=0)  # долгий привал (и привал, который начал мастер)
+    short_rest_seconds: int = Field(default=120, gt=0)  # короткий привал по кнопке хоста
 
     # Пустая строка — «не задано» в любом источнике (аргумент, окружение, `.env`): в
     # `.env.example` необязательные значения стоят пустыми (`TELEGRAM_BOT_TOKEN=`), а

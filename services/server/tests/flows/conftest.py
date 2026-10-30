@@ -1,4 +1,4 @@
-"""Стенд для сквозных сценариев блока B6: настоящий сервер на loopback, клиент как у Mini App.
+"""Стенд для сквозных сценариев: настоящий сервер на loopback, клиент как у Mini App.
 
 Сервер — приложение под uvicorn на свободном порту `127.0.0.1` с полным `lifespan` (каталог
 приключений из временной копии `demo-crypt`), база — настоящая SQLite после миграций. Клиент — REST
@@ -32,6 +32,7 @@ import pytest
 import uvicorn
 from adventure_secrets import hidden_texts
 from fastapi import FastAPI
+from game_socket import open_game_socket
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from websockets.asyncio.client import ClientConnection, connect
@@ -103,7 +104,7 @@ class Player:
 
 
 class RecordingHooks:
-    """Запуск мастера (B7.8) заменён записью: какие игры начались."""
+    """Запуск мастера заменён записью: какие игры начались."""
 
     def __init__(self) -> None:
         self.started: list[str] = []
@@ -153,9 +154,9 @@ def sign_init_data(
 
 
 def check_error_shape(response: httpx.Response) -> None:
-    """Контракт ошибок блока: `{"detail": "<строка>"}`; `problems` лишь у 422, списком строк.
-    У 409/422 конструктора (`/api/drafts`) ещё `code` — вид отказа (DND-2 B4, дополнение §4), как и
-    у 413/415 импорта архива (DND-2 B6, дополнение §7, §10)."""
+    """Контракт ошибок: `{"detail": "<строка>"}`; `problems` лишь у 422, списком строк.
+    У 409/422 конструктора (`/api/drafts`) ещё `code` — вид отказа, как и у 413/415 импорта
+    архива."""
     where = f"{response.request.method} {response.request.url.path} -> {response.status_code}"
     try:
         body = response.json()
@@ -265,7 +266,7 @@ class Stand:
         return await self.create_character(player, game_id, body)
 
     async def random(self, player: Player, game_id: str) -> httpx.Response:
-        """Случайный герой единственным путём (спека DND-2 §15): предпросмотр, затем «Беру»."""
+        """Случайный герой единственным путём: предпросмотр, затем «Беру»."""
         shown = await self.call(player, "POST", f"/api/games/{game_id}/characters/random-preview")
         assert shown.status_code == 200, shown.text
         body = {"mode": "random", "preview_id": shown.json()["preview_id"]}
@@ -301,13 +302,16 @@ class Stand:
 
     # --- сокеты ---
 
-    def ws_url(self, game_id: str, token: str | None = None) -> str:
-        query = "" if token is None else f"?token={token}"
-        return f"ws://127.0.0.1:{self.port}/ws/games/{game_id}{query}"
+    def ws_url(self, game_id: str) -> str:
+        return f"ws://127.0.0.1:{self.port}/ws/games/{game_id}"
+
+    def socket(self, game_id: str, token: str | None) -> connect:
+        """Сокет игры, как его открывает Mini App: токен — вторым подпротоколом, адрес без него."""
+        return open_game_socket(self.ws_url(game_id), token)
 
     async def watch(self, stack: AsyncExitStack, game_id: str, player: Player) -> Watcher:
         """Подключает игрока к игре и принимает снимок; сокет закроется вместе со `stack`."""
-        ws = await stack.enter_async_context(connect(self.ws_url(game_id, player.token)))
+        ws = await stack.enter_async_context(self.socket(game_id, player.token))
         snapshot = await recv(ws)
         assert snapshot["type"] == "snapshot", snapshot
         self.watchers.append(Watcher(ws, snapshot))
@@ -317,7 +321,7 @@ class Stand:
         async with AsyncExitStack() as stack:
             return (await self.watch(stack, game_id, player)).snapshot
 
-    # --- общие договорённости блока ---
+    # --- общие договорённости ---
 
     def secrets_in(self, text: str, *, own_tokens_ok: bool) -> list[str]:
         """Секреты, которые встретились в тексте: токены не отдаются никому, кроме ответа входа."""

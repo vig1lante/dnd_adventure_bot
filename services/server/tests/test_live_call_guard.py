@@ -1,4 +1,4 @@
-"""Сквозной запрет живых вызовов в тестах сервера (спека §13, инвариант «и»).
+"""Сквозной запрет живых вызовов в тестах сервера.
 
 Запрет стоит в автоматической фикстуре `live_call_attempts` (`conftest.py`) и действует на каждый
 тест: ни сети, ни живых провайдеров, ни настоящего `claude`. Здесь проверяется сам запрет: что он
@@ -104,7 +104,7 @@ async def test_loopback_connections_stay_possible(live_call_attempts):
 async def test_a_websocket_client_to_an_external_host_is_refused_and_recorded(live_call_attempts):
     # Клиенты сокетов в тестах ходят на loopback (`test_ws.py`); внешний адрес запрещён так же.
     with pytest.raises(AssertionError, match="getaddrinfo"):
-        async with websockets_connect("ws://games.example.org/ws/games/1?token=t"):
+        async with websockets_connect("ws://games.example.org/ws/games/1"):
             pass
 
     assert len(live_call_attempts) == 1

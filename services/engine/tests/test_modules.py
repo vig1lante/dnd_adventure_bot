@@ -27,8 +27,8 @@ from dnd_engine.modules.base import (
     RuleRegistry,
     RuleSet,
 )
-from dnd_engine.modules.campfire import CAMP_FRAGMENT, begin_rest
-from dnd_engine.rest import AID_BUFF, RestError, RestOutcome, spend_hit_die
+from dnd_engine.modules.campfire import CAMP_FRAGMENT, LONG_REST_WAKE_HOUR, begin_rest
+from dnd_engine.rest import AID_BUFF, SHORT_REST_HOURS, RestError, RestOutcome, spend_hit_die
 from dnd_engine.rng import ScriptedRng, SeededRng
 from dnd_engine.state import GameState, GameTime, RulesRef, Scene, SceneType
 
@@ -67,7 +67,7 @@ def keep_state(state: GameState, content: SrdContent):
 
 
 def test_registry_builds_a_ruleset_from_everything_the_modules_registered():
-    spec = object()  # спецификации инструментов (B4.5) реестр только хранит
+    spec = object()  # спецификации инструментов реестр только хранит
     registry = RuleRegistry()
     registry.add_check_hook(keep_result)
     registry.add_trigger("on_scene_end", keep_state)
@@ -383,7 +383,8 @@ def test_the_end_of_a_camp_scene_gives_everyone_a_long_rest_and_the_next_morning
 
     assert after.party["pc-1"].hp == after.party["pc-1"].hp_max == 20
     assert after.party["pc-2"].spell_slots == {1: 2}
-    assert after.time == GameTime(day=3, part="morning")
+    assert after.time == GameTime(day=3, hour=8)  # утро следующего дня, 8:00
+    assert after.time.part == "morning"
     assert after.short_rests_since_long == 0
     (rest,) = events
     assert isinstance(rest, RestEvent)
@@ -392,15 +393,46 @@ def test_the_end_of_a_camp_scene_gives_everyone_a_long_rest_and_the_next_morning
     assert rest.outcomes[1].restored == ["spell_slots"]
 
 
-def test_the_next_morning_is_the_day_after_even_when_the_camp_began_in_the_morning(
-    srd, make_character
-):
+@pytest.mark.parametrize("hour", range(24))  # в том числе после полуночи и ровно в 8:00
+def test_a_long_rest_wakes_the_party_at_eight_on_the_nearest_morning(srd, make_character, hour):
+    # День меняется в полночь: привал с 0:00 до 5:59 идёт в ту же ночь, и утро — того же дня, как
+    # у `advance_time`. С 6:00 ближайшее утро после отдыха — уже следующего дня.
     state = camp_state(make_character())
-    state.time = GameTime(day=5, part="morning")
+    state.time = GameTime(day=5, hour=hour)
 
     after, _ = end_of_scene(state, srd, "campfire")
 
-    assert after.time == GameTime(day=6, part="morning")
+    assert after.time == GameTime(day=5 if hour < 6 else 6, hour=8)
+
+
+def test_a_short_rest_past_midnight_and_then_a_long_one_skip_no_day(srd, make_character):
+    # 23:00 — короткий привал до полуночи, затем долгий: герои просыпаются тем же новым днём.
+    state = camp_state(make_character())
+    state.time = GameTime(day=5, hour=23)
+    state.scene.rest = "short"
+
+    after_short, _ = end_of_scene(state, srd, "campfire")
+    after_short.scene.rest = "long"
+    after_long, _ = end_of_scene(after_short, srd, "campfire")
+
+    assert after_short.time == GameTime(day=6, hour=0)
+    assert after_long.time == GameTime(day=6, hour=8)
+
+
+def test_the_end_of_a_long_camp_returns_every_spent_hit_die_to_the_living(srd, make_character):
+    # Долгий привал возвращает все потраченные кости хитов (SRD 5.2.1): из одной, из нуля и при
+    # полном запасе. Павший отдыха не получает: его кости остаются потраченными.
+    party = (
+        make_character(id="pc-1", hp=4, hit_dice=1),
+        make_character(id="pc-2", hit_dice_max=5, hit_dice=0),
+        make_character(id="pc-3"),
+        make_character(id="pc-4", hp=0, hit_dice=0, death_saves=DeathSaves(failures=3)),
+    )
+
+    after, _ = end_of_scene(camp_state(*party), srd, "campfire")
+
+    hit_dice = {character_id: c.hit_dice for character_id, c in after.party.items()}
+    assert hit_dice == {"pc-1": 3, "pc-2": 5, "pc-3": 3, "pc-4": 0}
 
 
 def test_a_dead_character_gets_an_empty_outcome_and_stays_dead(srd, camp_party):
@@ -443,7 +475,7 @@ def test_the_end_of_any_other_scene_changes_nothing(srd, camp_party, scene):
 
 
 # =============================================================================================
-# campfire: начало привала любого вида и конец короткого привала (DND-2, B9)
+# campfire: начало привала любого вида и конец короткого привала
 # =============================================================================================
 
 
@@ -485,7 +517,7 @@ def test_a_rest_cannot_begin_in_battle(srd, demo_adventure, camp_party, kind):
         begin(state, kind, srd, demo_adventure)
 
 
-@pytest.mark.parametrize("current", [None, "short", "long"], ids=["dnd1", "short", "long"])
+@pytest.mark.parametrize("current", [None, "short", "long"], ids=["no-kind", "short", "long"])
 @pytest.mark.parametrize("kind", ["short", "long"])
 def test_a_second_rest_cannot_begin_while_a_camp_goes_on(
     srd, demo_adventure, camp_party, kind, current
@@ -546,7 +578,7 @@ def test_the_end_of_a_short_rest_restores_short_rest_features_and_counts_the_res
     assert (after.party["pc-1"].hp, after.party["pc-1"].hit_dice) == (4, 1)
     assert after.party["pc-1"].resources == {"second_wind": 1}
     assert after.party["pc-2"].spell_slots == {1: 0}  # ячейки возвращает только долгий отдых
-    assert after.time == GameTime(day=2, part="night")  # короткий привал время не двигает
+    assert after.time == GameTime(day=2, hour=23)  # час отдыха: с 22:00 до 23:00
     assert after.short_rests_since_long == 3
     nothing = {"hp_gained": 0, "hit_dice_spent": 0, "rolls": []}
     assert events == [
@@ -579,17 +611,17 @@ def test_the_end_of_a_short_rest_gives_a_dead_character_nothing(srd, camp_party)
         {"type": "camp", "started_turn": 3, "inspiration_granted": []},
         {"type": "camp", "started_turn": 3, "inspiration_granted": [], "rest": "long"},
     ],
-    ids=["dnd1-camp-without-a-kind", "long"],
+    ids=["old-camp-without-a-kind", "long"],
 )
 def test_a_camp_without_a_kind_or_a_long_one_ends_with_a_long_rest(srd, camp_party, saved_scene):
-    # Сцена `camp` из снимка DND-1 поля `rest` не знает: такой привал был только долгим.
+    # Сцена `camp` из старого снимка поля `rest` не знает: такой привал был только долгим.
     state = camp_state(*camp_party[:2])
     state.scene = Scene.model_validate(saved_scene)
 
     after, events = end_of_scene(state, srd, "campfire")
 
     assert after.party["pc-1"].hp == 20
-    assert after.time == GameTime(day=3, part="morning")
+    assert after.time == GameTime(day=3, hour=8)
     assert after.short_rests_since_long == 0
     assert [event.rest for event in events] == ["long"]
 
@@ -613,7 +645,7 @@ def test_a_short_rest_from_its_beginning_to_its_end_through_end_scene(
     assert events[0].rest == "short"
     assert (after.party["pc-1"].hp, after.party["pc-1"].hit_dice) == (healed, 2)
     assert after.party["pc-1"].resources == {"second_wind": 1}
-    assert (after.time, after.short_rests_since_long) == (state.time, 1)
+    assert (after.time, after.short_rests_since_long) == (GameTime(day=2, hour=23), 1)
     assert after.scene == Scene(type=SceneType.EXPLORATION, started_turn=state.turn)
 
 
@@ -648,7 +680,16 @@ def test_the_camp_prompt_describes_both_the_short_and_the_long_rest():
     assert "start_camp" in CAMP_FRAGMENT
 
 
-# --- финальное покрытие B9: предел из правил, порядок отказов, конец привала любого вида ---
+def test_the_camp_prompt_names_the_hours_the_engine_sets_after_a_rest():
+    # Мастер рассказывает о конце привала по подсказке: часы в ней те же, что ставит движок.
+    assert f"на {LONG_REST_WAKE_HOUR} утра" in CAMP_FRAGMENT
+    assert "после полуночи — того же дня" in CAMP_FRAGMENT  # привал в ту же ночь
+    assert SHORT_REST_HOURS == 1
+    assert "сдвинет время на час" in CAMP_FRAGMENT
+    assert "время не изменит" not in CAMP_FRAGMENT  # так говорилось, пока часов не было
+
+
+# --- предел из правил, порядок отказов, конец привала любого вида ---
 
 
 def with_short_rest_limit(limit: int) -> RuleSet:
@@ -716,21 +757,30 @@ def test_the_first_broken_rule_names_the_refusal_and_the_state_stays_as_it_was(
 
 
 @pytest.mark.parametrize(
-    ("part", "done"), [("morning", 0), ("day", 1), ("evening", 4), ("night", 2)]
+    ("hour", "done", "expected"),
+    [
+        (6, 0, (4, 7, "morning")),
+        (11, 0, (4, 12, "day")),  # утро сменилось днём
+        (17, 1, (4, 18, "evening")),  # час отдыха сменил часть суток
+        (21, 4, (4, 22, "night")),
+        (23, 2, (5, 0, "night")),  # полночь: наступил следующий день
+        (5, 0, (4, 6, "morning")),
+    ],
 )
-def test_the_end_of_a_short_rest_keeps_the_time_of_day_and_adds_one_short_rest(
-    srd, make_character, part, done
+def test_the_end_of_a_short_rest_moves_the_clock_one_hour_and_adds_one_short_rest(
+    srd, make_character, hour, done, expected
 ):
     # Предел коротких проверяет только начало привала: конец считает и сверх него (4 -> 5).
     state = camp_state(make_character())
     state.scene.rest = "short"
-    state.time = GameTime(day=4, part=part)
+    state.time = GameTime(day=4, hour=hour)
     state.short_rests_since_long = done
 
     after, _ = end_of_scene(state, srd, "campfire")
 
-    assert after.time == GameTime(day=4, part=part)
+    assert (after.time.day, after.time.hour, after.time.part) == expected
     assert after.short_rests_since_long == done + 1
+    assert state.time == GameTime(day=4, hour=hour)  # исходное состояние не меняется
 
 
 def test_the_end_of_a_short_rest_neither_heals_nor_wakes_nor_ends_effects(srd, make_character):
@@ -761,7 +811,7 @@ def test_the_end_of_a_short_rest_neither_heals_nor_wakes_nor_ends_effects(srd, m
 @pytest.mark.parametrize(
     ("kind", "rest"),
     [(None, "long"), ("long", "long"), ("short", "short")],
-    ids=["dnd1-camp", "long", "short"],
+    ids=["camp-without-a-kind", "long", "short"],
 )
 @pytest.mark.parametrize(
     "next_type", [SceneType.EXPLORATION, SceneType.SOCIAL], ids=lambda s: s.value

@@ -1,10 +1,12 @@
-"""Кто делает запрос и что ему можно (план B6.2).
+"""Кто делает запрос и что ему можно.
 
-REST берёт токен сессии из `Authorization: Bearer` (`current_user`), WebSocket — из query `token`
-(`websocket_user`: браузер не умеет слать заголовки при открытии сокета). Остальные части блока
-(игры, персонажи, сокеты, бот) строят доступ из этих кирпичиков и сами сессий не проверяют.
+REST берёт токен сессии из `Authorization: Bearer` (`current_user`), WebSocket — из второго
+подпротокола рукопожатия (`websocket_user`: браузер не умеет слать другие заголовки при открытии
+сокета). Остальные части сервера (игры, персонажи, сокеты, бот) строят доступ из этих кирпичиков и
+сами сессий не проверяют.
 """
 
+from collections.abc import Sequence
 from typing import Annotated
 
 from fastapi import Depends, HTTPException
@@ -102,25 +104,40 @@ async def current_user(
         )
     # Чтение пользователя открыло транзакцию и заняло соединение пула, а дальше маршрут может долго
     # ждать блокировку игры. Держатель блокировки открывает свою сессию и ждёт соединение из того же
-    # пула: если ждущие держат все соединения, встаёт вся база (дефект D1 блока B7). Коммит без
-    # изменений отпускает соединение; `expire_on_commit=False` сохраняет поля пользователя, а
-    # следующее обращение сессии возьмёт новое соединение уже под блокировкой.
+    # пула: если ждущие держат все соединения, встаёт вся база. Коммит без изменений отпускает
+    # соединение; `expire_on_commit=False` сохраняет поля пользователя, а следующее обращение сессии
+    # возьмёт новое соединение уже под блокировкой.
     await session.commit()
     return user
 
 
-async def websocket_user(websocket: WebSocket) -> User | None:
-    """Пользователь по токену из query `token`; `None` — сокет надо закрыть с кодом 4401.
+# Подпротокол сокета игры. Браузер не умеет слать заголовки при открытии сокета, но передаёт
+# подпротоколы (`Sec-WebSocket-Protocol`): клиент предлагает `[SOCKET_PROTOCOL, токен]`, а сервер
+# в ответ называет только `SOCKET_PROTOCOL`, так что токен назад не возвращается. В адресе сокета
+# токена нет: адрес попадает в журналы туннеля и прокси.
+SOCKET_PROTOCOL = "dnd-game.v1"
 
-    Сессию базы открывает сама: зависимость `get_session` принимает `Request` и в маршрутах
-    WebSocket не подставляется.
+
+def socket_token(subprotocols: Sequence[str]) -> str | None:
+    """Токен сессии из подпротоколов рукопожатия: ровно `[SOCKET_PROTOCOL, токен]`, иначе `None`."""
+    if len(subprotocols) == 2 and subprotocols[0] == SOCKET_PROTOCOL:
+        return subprotocols[1]
+    return None
+
+
+async def websocket_user(websocket: WebSocket) -> User | None:
+    """Пользователь по токену из второго подпротокола; `None` — сокет надо закрыть с кодом 4401.
+
+    Токен в query (`?token=…`, прежний способ) не принимается. Сессию базы открывает сама:
+    зависимость `get_session` принимает `Request` и в маршрутах WebSocket не подставляется.
     """
     signer = SessionSigner.from_settings(app_settings(websocket))
+    token = socket_token(websocket.scope.get("subprotocols", []))
     async with websocket.app.state.sessionmaker() as session:
-        return await user_for_token(session, signer, websocket.query_params.get("token"))
+        return await user_for_token(session, signer, token)
 
 
-# --- кто может создавать игры (решение владельца B6: «Только из списка») ---
+# --- кто может создавать игры (решение владельца: «Только из списка») ---
 
 
 def is_game_creator_tg_id(settings: Settings, tg_id: int) -> bool:

@@ -1,4 +1,4 @@
-"""Мост MCP для `claude_code_cli` (спека §7, план B5.4).
+"""Мост MCP для `claude_code_cli`.
 
 `python -m dnd_server.llm.mcp_bridge --url <база>/internal/dm-tools/<токен>` — stdio MCP-сервер,
 который CLI `claude` запускает сам по `mcp.json`. Мост ничего не решает: список инструментов он

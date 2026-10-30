@@ -1,4 +1,4 @@
-"""Хаб сокетов (план B6.5): кому уходят события, порядок, мёртвые и медленные сокеты.
+"""Хаб сокетов: кому уходят события, порядок, мёртвые и медленные сокеты.
 
 Сокеты здесь подставные: хабу нужен только `send_text`. Настоящие сокеты и сервер проверяет
 `test_ws.py`.
@@ -263,10 +263,10 @@ def test_event_types_are_those_of_the_plan():
         "rest_started",
         "rest_idea",
         "rest_ended",
-        "action_auto_submitted",  # блок B11: «Ход сдан» автору автосданного черновика
+        "action_auto_submitted",  # «Ход сдан» автору автосданного черновика
         "error",
     } == EVENT_TYPES
-    # Кадр исключения уходит прямо в сокет исключённого, а не рассылкой хаба (блок B11).
+    # Кадр исключения уходит прямо в сокет исключённого, а не рассылкой хаба.
     assert "kicked" not in EVENT_TYPES
 
 
@@ -295,7 +295,7 @@ async def test_lobby_event_goes_through_the_hub_to_everyone():
     assert socket.sent == [lobby]
 
 
-# --- вышедший или исключённый игрок (S5) ---
+# --- вышедший или исключённый игрок ---
 
 
 async def test_drop_user_removes_every_connection_of_that_user_in_that_game_only():
@@ -345,7 +345,7 @@ async def test_dropping_a_user_without_connections_or_in_an_unknown_game_is_harm
 
 
 async def test_kicking_marks_and_drops_only_the_connections_of_the_kicked_player():
-    # Блок B11: исключённого эндпоинт закроет кадром `kicked` и кодом 4403, вышедшего — нет.
+    # Исключённого эндпоинт закроет кадром `kicked` и кодом 4403, вышедшего — нет.
     hub = Hub()
     tab_1 = join(hub, GAME, "alice", FakeSocket())
     tab_2 = join(hub, GAME, "alice", FakeSocket())

@@ -1,4 +1,4 @@
-"""Атомарный ход мастера (план B7.3, спека §8.4 и §12).
+"""Атомарный ход мастера.
 
 Настоящий движок, демо-приключение `demo-crypt` (копия лежит в игре, как после создания игры),
 временная SQLite после миграций и `FakeProvider` по сценариям. Заглушки провайдеров нужны только
@@ -31,12 +31,12 @@ import pytest
 import uvicorn
 import yaml
 from adventure_secrets import hidden_texts
+from game_socket import open_game_socket
 from lore_trap import trap_lore
 from pydantic import SecretStr
 from sqlalchemy import select, update
 from sqlalchemy import text as raw_sql
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from websockets.asyncio.client import connect
 
 from dnd_engine.adventure.loader import adventure_from_data, load_adventure
 from dnd_engine.adventure.schema import Adventure
@@ -543,7 +543,7 @@ def use_fake_claude(world: World, env: dict[str, str] | None = None, **settings:
     )
 
 
-# --- провайдер игры и адрес моста (F3) ---
+# --- провайдер игры и адрес моста ---
 
 
 def test_the_address_of_the_bridge_is_built_from_host_and_port_of_the_config():
@@ -902,7 +902,7 @@ async def test_a_found_item_of_a_public_turn_is_in_the_common_feed(world):
     assert "Борис" in line.text
 
 
-# --- предметы приключения в листе героя: ход мастера, событие, снимок (проверка B8, fix 5) ---
+# --- предметы приключения в листе героя: ход мастера, событие, снимок ---
 
 KEY_LINE = {"item_id": "chest-key", "qty": 1, "equipped": False, "name": "Запасной ключ Ульриха"}
 
@@ -1165,8 +1165,8 @@ async def test_the_cli_version_of_the_subscription_provider_reaches_the_journal(
 
 
 async def test_the_journal_names_the_model_the_subscription_cli_actually_used(world):
-    # Спека §11: журнал пишет фактическую модель из `modelUsage` ответа CLI, а не псевдоним из
-    # настроек: имитатор «разворачивает» `opus` в полное имя, как это делает настоящий CLI.
+    # Журнал пишет фактическую модель из `modelUsage` ответа CLI, а не псевдоним из настроек:
+    # имитатор «разворачивает» `opus` в полное имя, как это делает настоящий CLI.
     use_fake_claude(world, {"FAKE_CLAUDE_MODEL": "claude-opus-test-9"}, claude_cli_model="opus")
 
     outcome = await world.run()
@@ -1199,15 +1199,15 @@ async def test_the_model_of_the_game_reaches_the_cli_and_beats_the_environment(w
         # потом владелец включил CLI.
         pytest.param(None, "qwen2.5:14b", "opus", "opus", id="модель другого провайдера"),
         pytest.param(None, "claude-opus-4@x", None, "claude-fake-subscription", id="без env"),
-        # Игра DND-1 с provider=claude_code_cli и моделью, присланной прямо в API.
-        pytest.param("claude_code_cli", "x:y", "sonnet", "sonnet", id="игра CLI из DND-1"),
+        # Игра первой версии с provider=claude_code_cli и моделью, присланной прямо в API.
+        pytest.param("claude_code_cli", "x:y", "sonnet", "sonnet", id="игра CLI из первой версии"),
     ],
 )
 async def test_a_saved_game_with_a_model_the_cli_refuses_still_plays_on_the_model_of_the_env(
     world, provider_name, game_model, cli_model, expected
 ):
-    # Спека §11: модель игры → CLAUDE_CLI_MODEL → модель CLI по умолчанию. Модель игры, которую CLI
-    # не примет, пропускается: сохранённая игра продолжается, а не падает на каждом ходу.
+    # Модель игры → CLAUDE_CLI_MODEL → модель CLI по умолчанию. Модель игры, которую CLI не примет,
+    # пропускается: сохранённая игра продолжается, а не падает на каждом ходу.
     use_fake_claude(world, claude_cli_model=cli_model)
     async with world.db() as session:
         await session.execute(
@@ -1226,7 +1226,7 @@ async def test_a_saved_game_with_a_model_the_cli_refuses_still_plays_on_the_mode
 
 async def test_a_failed_turn_after_a_good_one_names_no_model_in_the_journal(world):
     # Провайдер игры один на все её ходы: модель удачного хода не достаётся журналу следующего,
-    # неудачного (спека §11 — журнал пишет модель, которой CLI провёл именно этот ход).
+    # неудачного (журнал пишет модель, которой CLI провёл именно этот ход).
     good = {
         "type": "result",
         "subtype": "success",
@@ -1285,8 +1285,8 @@ SILENT_REPLY = {  # CLI ответил, но без рассказа: попыт
 async def test_each_attempt_of_a_retried_turn_names_its_own_model_in_the_journal(
     world, second_reply, models
 ):
-    # Спека §11: модель в журнале — та, которой CLI провёл именно эту попытку. При автоповторе
-    # строка первой попытки не получает модель второй (или пустоту, если вторая упала).
+    # Модель в журнале — та, которой CLI провёл именно эту попытку. При автоповторе строка первой
+    # попытки не получает модель второй (или пустоту, если вторая упала).
     use_fake_claude(
         world,
         {
@@ -1730,8 +1730,8 @@ async def test_the_journal_has_the_lore_around_the_party_and_the_players_get_non
             seen.append(dump(snapshot))
     assert "Марта пожимает плечами" in " ".join(seen)
     assert LORE_MARK not in " ".join(seen)
-    # Дневник (блок B8) называет только то, что отряд знает со старта (`known_at_start`): имя бога и
-    # края и сам слух. Других меток мира в нём нет.
+    # Дневник называет только то, что отряд знает со старта (`known_at_start`): имя бога и края и
+    # сам слух. Других меток мира в нём нет.
     known = (
         {
             f"{LORE_MARK}name-{deity.id}"
@@ -2432,7 +2432,7 @@ async def test_cancelling_the_turn_does_not_leave_the_game_in_resolving(monkeypa
     assert [log.error is not None for log in await world.logs()] == [True]
 
 
-# --- блокировка, соединение и конфликт версий (F13) ---
+# --- блокировка, соединение и конфликт версий ---
 
 
 async def test_neither_the_lock_nor_a_connection_is_held_while_the_model_thinks(monkeypatch, world):
@@ -2655,8 +2655,8 @@ async def test_reconnecting_a_socket_does_not_start_a_turn(monkeypatch, world, s
     token = SessionSigner(SESSION_SECRET).issue(world.alice.user_id)
     try:
         for _ in range(2):  # подключение и повторное подключение
-            url = f"ws://127.0.0.1:{port}/ws/games/{world.game_id}?token={token}"
-            async with connect(url) as ws:
+            url = f"ws://127.0.0.1:{port}/ws/games/{world.game_id}"
+            async with open_game_socket(url, token) as ws:
                 snapshot = json.loads(await asyncio.wait_for(ws.recv(), TIMEOUT_S))
                 assert snapshot["type"] == "snapshot"
                 assert snapshot["phase"]["turn_phase"] == "dm_failed"
@@ -2949,7 +2949,7 @@ def test_spotlight_hints_go_from_the_longest_waiting_hero_and_start_at_the_thres
     ]
 
 
-# --- привал: швы хода (B7.6) ---
+# --- привал: швы хода ---
 
 CAMP_LINES = (
     ("alice", "Подкину дров в костёр."),
@@ -3049,14 +3049,15 @@ async def test_the_camp_end_turn_gives_the_master_the_lines_and_the_morning_afte
     assert outcome.status == TurnStatus.DONE
     [request] = provider.requests
     assert camp_lines_of(request) == [text for _key, text in CAMP_LINES]  # по порядку, все
-    # Длинный отдых уже проведён: мастер видит утро следующего дня, исследование и полное здоровье.
-    assert "День 3, утро. Сцена: исследование." in request.context
+    # Длинный отдых уже проведён: привал начат вечером, поэтому мастер видит 8 утра следующего дня,
+    # исследование и полное здоровье.
+    assert "День 3, утро, 08:00. Сцена: исследование." in request.context
     full = (await world.state()).party[alice].hp_max
     assert f"HP {full}/{full}" in request.context
     assert "HP 1/" not in request.context
     state = await world.state()
     assert state.scene.type == SceneType.EXPLORATION
-    assert state.time == GameTime(day=3, part="morning")
+    assert state.time == GameTime(day=3, hour=8)
     assert state.party[alice].hp == state.party[alice].hp_max
     assert state.party[vera].spell_slots == state.party[vera].spell_slots_max
     assert state.short_rests_since_long == 0
@@ -3139,7 +3140,7 @@ async def test_regenerating_the_camp_end_turn_rolls_the_rest_back_and_makes_it_a
     assert len(rests) == 1 and rests[0].id not in first_rest  # отдых один: старая строка снята
     state = await world.state()
     assert state.party[alice].hp == state.party[alice].hp_max
-    assert state.time == GameTime(day=3, part="morning")  # день не прибавился дважды
+    assert state.time == GameTime(day=3, hour=8)  # день не прибавился дважды
     assert camp_lines_of(provider.requests[-1]) == [text for _key, text in CAMP_LINES]
     kept = [m for m in await world.messages() if m.kind == MessageKind.CAMP_LINE]
     assert [m.superseded for m in kept] == [False, False, False]  # реплики — вход хода, остаются
@@ -3275,7 +3276,7 @@ def test_deps_are_taken_from_the_parts_of_the_app(settings):
     assert deps.compressions is app.state.chronicle_compressions
     # Срок привала считается по часам планировщика: отсчёт и срок в базе идут по одним часам.
     assert deps.clock == app.state.scheduler.now
-    # Приложение само кладёт выбор следующей фазы по сцене (B7.4): B7.5 и B7.6 заменяют его ветки.
+    # Приложение само кладёт выбор следующей фазы по сцене: потоки боя и привала заменяют его ветки.
     assert app.state.turn_follow_up is scene_follow_up
     assert deps.follow_up is scene_follow_up
     assert deps.providers is app.state.game_providers
@@ -3316,7 +3317,7 @@ def test_a_config_error_is_not_cached_and_the_next_call_builds_again(monkeypatch
     assert len(attempts) == 2
 
 
-# --- швы для сбора ходов (B7.4) ---
+# --- швы для сбора ходов ---
 
 
 async def test_on_reserved_is_called_after_the_reserve_and_before_the_model(monkeypatch, world):
@@ -3444,11 +3445,11 @@ async def test_the_pacing_of_a_game_without_a_clock_is_the_saved_active_time(mon
     assert "Темп: прошло 1 ч из" in provider.requests[0].context
 
 
-# --- дневник отряда (блок B8, дополнение контракта §5–§6) ---
+# --- дневник отряда ---
 # Записи дневника пишет движок на рабочей копии хода; сервер сохраняет их коммитом хода и после него
 # шлёт `journal_entry` каждой новой или дополненной записи её адресату. Откат хода шлёт каждому
 # игроку его дневник целиком (`journal`). Состояние мира теста записано без дневника — как у игры,
-# начатой до блока B8: дневник открывает первый же ход мастера.
+# начатой до появления дневника: дневник открывает первый же ход мастера.
 
 LEARNED = "Завсегдатаи держатся Марты и не любят чужаков."
 MORE = "Они же первыми заметили, что Фабиан исчез."
@@ -3595,8 +3596,8 @@ async def test_the_same_finding_in_an_open_turn_is_for_the_whole_party(world):
 
 
 async def test_a_finding_of_an_open_hero_in_a_round_with_a_secret_turn_stays_common(world):
-    # Дополнение §12: тайные авторы — это авторы всего раунда, а не вызова. Находка открытого героя
-    # с `for_hero` остаётся общей, даже если кто-то в этом раунде ходит тайно.
+    # Тайные авторы — это авторы всего раунда, а не вызова. Находка открытого героя с `for_hero`
+    # остаётся общей, даже если кто-то в этом раунде ходит тайно.
     world.use_scenario(
         scenario_turn(
             tool("reveal", ref="clue:clue-marta", for_hero="$pc1"),
@@ -3717,7 +3718,7 @@ async def test_the_context_of_the_master_lists_the_journal_by_refs_without_texts
     assert world.adventure.journal_intro.split()[0] not in line
 
 
-# --- дневник: сбой хода, автоповтор и «Повторить» (финальное покрытие блока B8) ---
+# --- дневник: сбой хода, автоповтор и «Повторить» ---
 # Попытка хода пишет дневник на своей рабочей копии. Неудачная попытка копию выбрасывает: в базе
 # дневник прежний и кадров дневника нет, а следующая попытка начинает с чистой копии — запись не
 # накапливается от попытки к попытке.
@@ -3806,7 +3807,7 @@ async def test_the_first_turn_of_an_old_game_shows_the_master_its_starting_journ
     assert line == f"Дневник отряда: {', '.join(refs)}."
 
 
-# --- номер раунда игроков (дополнение контракта B8 §11, п. 5–6) ---
+# --- номер раунда игроков ---
 # «Узнали в раунде N» в дневнике — номер раунда игроков (`GameState.party_round`), а не номер хода
 # мастера. Его поднимает только ход вида «раунд игроков», считая от базового состояния хода:
 # «Перегенерировать» и «Повторить» дают тот же номер. Открытие, ходы боя и конец привала номер не
@@ -3896,7 +3897,7 @@ async def test_the_opening_keeps_the_round_of_the_start(opening_world):
     assert (await opening_world.state()).party_round == 0
 
 
-# --- дневник после открытия игры (дополнение контракта B8 §11, п. 7) ---
+# --- дневник после открытия игры ---
 
 
 async def test_after_the_opening_every_player_gets_the_whole_journal(opening_world):

@@ -1,4 +1,4 @@
-"""Реестр инструментов мастера как целое (спека §5.4, §5.7, §8.2–§8.3, план B4.5–B4.7).
+"""Реестр инструментов мастера как целое.
 
 Инструменты уже проверены по группам (`test_tools_lore`, `test_tools_world`, `test_tools_combat`).
 Здесь проверяются свойства, которые должны держаться для всех инструментов сразу, пока модель
@@ -43,7 +43,7 @@ EVENTS = TypeAdapter(list[Event])
 
 VALID_CHECK = {"character_id": HERO, "ability": "dex", "dc": 15, "reason": "т"}
 
-# Таблица инструментов из спеки §8.3 и инструменты чтения формата v2 (спека DND-2 §8): движок может
+# Обязательный набор инструментов мастера и инструменты чтения формата v2: движок может
 # добавлять свои, но эти обязаны остаться.
 SPEC_TOOLS = {
     "get_location",
@@ -438,7 +438,7 @@ def test_rolls_of_a_secret_author_are_hidden_from_the_others_in_every_rolling_to
     assert {roll.audience for roll in rolls} == {call.author if secret else "all"}
 
 
-# Тайность определяет автор вызова (спека §8.2 «броски по тайному ходу видны только его автору»),
+# Тайность определяет автор вызова (броски по тайному ходу видны только его автору),
 # а не то, кто бросал: когда действие автора заставляет бросать других (спасбросок цели, атака по
 # возможности), эти броски тоже закрыты, даже если сам автор не бросал.
 @pytest.mark.parametrize(
@@ -461,7 +461,7 @@ def audiences_of_rolls(events: list[Event]) -> dict[str, str]:
 
 
 def test_the_initiative_of_a_secret_actor_is_public_like_everyone_elses(make_scene, call_tool):
-    # Спека §15: инициатива всегда общая — она и так видна всем в порядке хода. Тайный ход от
+    # Инициатива всегда общая — она и так видна всем в порядке хода. Тайный ход от
     # этого не перестаёт быть тайным: закрыты остальные броски тайного героя.
     ctx = make_scene(secret=(HERO,))
     first_new = len(ctx.events)
@@ -500,7 +500,7 @@ def test_the_death_save_of_a_secret_actor_who_starts_the_fight_stays_closed(make
     assert {roll.audience for roll in rolls if roll.label == "Инициатива"} == {"all"}
 
 
-# --- B11.coverage: общая инициатива на стыках (спека DND-2 §15, дополнение B11 §3) ---
+# --- общая инициатива на стыках ---
 
 # Кубы начала боя для трёх героев и пяти монстров «Встающих костей», затем спасбросок от смерти
 # первого бойца (10 — успех, без натуральной 20 и без лечения).
@@ -793,7 +793,7 @@ def test_the_same_seed_replays_the_whole_master_turn_and_another_seed_changes_th
     assert sum(outcome["error"] is None for outcome in first["outcomes"]) >= 8  # ход не пустой
 
 
-# --- состязание с NPC: только из текущей локации отряда (решение D9, security-review B7, L1) ---
+# --- состязание с NPC: только из текущей локации отряда ---
 
 # Фабиан живёт в склепе, а `make_scene` ставит отряд на кладбище: «здесь» его нет.
 HERO_VS_FABIAN = {

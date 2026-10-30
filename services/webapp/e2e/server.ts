@@ -7,9 +7,9 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { test as base } from "@playwright/test";
 
-// Фикстура сервера игры для сквозного теста (план B8.7): настоящий `dnd-server` с `FakeProvider`
-// по сценарию (по умолчанию `e2e_full.yaml`), временной базой SQLite и пустыми ключами. Запускается
-// так же, как у разработчика: `uv run dnd-server --port <порт>` из корня репозитория. Порт выбирает
+// Фикстура сервера игры для сквозного теста: настоящий `dnd-server` с `FakeProvider` по сценарию
+// (по умолчанию `e2e_full.yaml`), временной базой SQLite и пустыми ключами. Запускается так же,
+// как у разработчика: `uv run dnd-server --port <порт>` из корня репозитория. Порт выбирает
 // `playwright.config.ts` (от него зависит прокси Vite) и передаёт через окружение.
 //
 // Свой сценарий спецификация выбирает параметром фикстуры: `test.use({ scenario: "…yaml" })`.

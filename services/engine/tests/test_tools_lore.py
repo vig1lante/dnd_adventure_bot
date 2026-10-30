@@ -1,4 +1,4 @@
-"""Реестр инструментов мастера и чтение лора (план B4.5, спека §5.7, §8.2–§8.3).
+"""Реестр инструментов мастера и чтение лора.
 
 Реестр принимает вызов модели: проверяет имя и аргументы, зовёт обработчик и превращает ошибки
 модели в `ToolOutcome(error=...)`. Здесь же проверяется приватность бросков тайного хода и
@@ -382,7 +382,7 @@ def test_acting_is_empty_by_default(make_ctx):
 
 
 def test_acting_is_passed_to_the_constructor_and_kept_as_a_tuple(make_ctx):
-    # Сервер может передать список (план B7.5: acting — list[str]); контекст хранит кортеж.
+    # Сервер может передать список (acting — list[str]); контекст хранит кортеж.
     ctx = make_ctx(acting=["pc-1", "skeleton-1"])
 
     assert ctx.acting == ("pc-1", "skeleton-1")
@@ -539,7 +539,7 @@ def label_audiences(ctx: ToolContext) -> list[tuple[str, str]]:
 def test_a_roll_with_a_public_label_of_the_tool_is_seen_by_everyone_even_from_a_secret_actor(
     make_ctx,
 ):
-    # Инициатива начала боя всегда общая (спека §15): инструмент объявляет её подпись, а
+    # Инициатива начала боя всегда общая: инструмент объявляет её подпись, а
     # остальные броски того же вызова закрыты, как прежде.
     ctx = make_ctx(secret_actors={"pc-1"})
 

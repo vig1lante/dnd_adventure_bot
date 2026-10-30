@@ -8,7 +8,7 @@
 
 Короткий отдых собран из двух шагов: `spend_hit_die` (одна кость хитов) и `finish_short_rest`
 (особенности «до короткого отдыха»). Мастер проводит его целиком (`short_rest`), а на коротком
-привале по кнопке хоста игроки тратят кости по одной, и шаги идут порознь (DND-2, B9).
+привале по кнопке хоста игроки тратят кости по одной, и шаги идут порознь.
 
 Здесь же — окончание эффектов с последствиями (`end_buffs`: «Подмога» возвращает максимум HP)
 и Магическое восстановление волшебника (`arcane_recovery`): их вызывают и отдых, и бой.
@@ -27,9 +27,10 @@ from dnd_engine.content import ClassDef, SrdContent
 from dnd_engine.dice import RollResult, roll
 from dnd_engine.rng import Rng
 
-# Нижняя граница лечения одной костью хитов: SRD 5.2.1 и план DND-2 (в DND-1 был 0).
+# Нижняя граница лечения одной костью хитов по SRD 5.2.1 (прежде лечение могло быть нулевым).
 MIN_HEAL_PER_DIE: Final = 1
 HIT_DIE_REASON: Final = "Короткий отдых: кость хитов"
+SHORT_REST_HOURS: Final = 1  # короткий отдых длится час игрового времени
 
 # Ресурсы класса, которые возвращает короткий отдых (SRD 5.2.1). Остальные ресурсы класса
 # (Метка охотника, Магическое восстановление) возвращает только длинный отдых.
@@ -181,7 +182,7 @@ def short_rest(
 
 
 def long_rest(c: Character, content: SrdContent) -> tuple[Character, RestOutcome]:
-    """Длинный отдых: HP, ячейки и ресурсы полностью, половина костей хитов, конец эффектов."""
+    """Длинный отдых: HP, ячейки, ресурсы и все кости хитов полностью, конец эффектов."""
     if is_dead(c):
         return _no_rest(c)
     cls = content.classes[c.class_id]
@@ -205,7 +206,7 @@ def long_rest(c: Character, content: SrdContent) -> tuple[Character, RestOutcome
     end_buffs(rested, lambda x: x.rounds_left is not None)
     rested.hp = rested.hp_max
     rested.temp_hp = 0
-    rested.hit_dice = min(c.hit_dice_max, c.hit_dice + max(1, c.hit_dice_max // 2))
+    rested.hit_dice = c.hit_dice_max
     rested.spell_slots = dict(c.spell_slots_max)
     rested.resources = resources
     rested.concentration = None

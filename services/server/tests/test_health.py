@@ -36,7 +36,7 @@ async def test_apps_with_different_settings_do_not_share_env():
 
 
 async def test_health_does_not_expose_secrets():
-    # Спека §12: секреты не попадают в ответы API.
+    # Секреты не попадают в ответы API.
     secrets = {
         "session_secret": "sentinel-session-secret",
         "telegram_bot_token": "sentinel-telegram-token",

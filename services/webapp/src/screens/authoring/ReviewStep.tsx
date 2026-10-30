@@ -73,7 +73,7 @@ interface FindingsProps {
 
 /**
  * Список находок: текст сервера как есть, где найдена и переход к шагу, который за неё
- * отвечает, — прямо к её сущности на экране шага (спека §10.1).
+ * отвечает, — прямо к её сущности на экране шага.
  */
 function Findings({ title, empty, findings, draft, onGo }: FindingsProps) {
   const titleId = useId();

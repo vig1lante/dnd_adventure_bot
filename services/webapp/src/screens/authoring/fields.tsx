@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type {
   Draft,
@@ -10,6 +10,7 @@ import type {
 import { Button } from "../../ui";
 import { Switch, TextAreaField, TextField } from "../fields";
 import { parseNumber } from "./fieldValues";
+import { focusedElement, returnFocusTo } from "./focus";
 
 /** Справочник ссылок черновика; `error` — текст сбоя загрузки, список тогда прежний или пуст. */
 export interface DraftRefs {
@@ -34,7 +35,7 @@ export interface StepFormProps {
   draft: Draft;
   /**
    * Ключ данных разделов экрана. Правка начинается заново с черновиком сервера, когда он
-   * меняется; после частичной записи (B6 R7) он прежний, и несохранённое остаётся в форме.
+   * меняется; после частичной записи он прежний, и несохранённое остаётся в форме.
    */
   contentKey: string;
   /** Справочник ссылок; грузится только для экранов, где есть выбор ссылок. */
@@ -173,7 +174,7 @@ interface JournalFieldsEditorProps {
   onChange: (patch: Partial<JournalFields>) => void;
 }
 
-/** Поля дневника отряда у сущности (спека §8): что знают игроки и известно ли с начала. */
+/** Поля дневника отряда у сущности: что знают игроки и известно ли с начала. */
 export function JournalFieldsEditor({
   value,
   onChange,
@@ -241,15 +242,48 @@ interface AlertDialogProps {
   children: ReactNode;
   /** Кнопки диалога. */
   actions: ReactNode;
+  /**
+   * Куда вернуть фокус после ответа — элемент, с которого начато действие. Нужен, когда он
+   * потерял фокус ещё до вопроса (форма выключена на время запроса). Не задан — элемент, который
+   * был в фокусе, когда вопрос появился.
+   */
+  returnFocus?: HTMLElement | null;
 }
 
-/** Диалог-вопрос внутри экрана: заголовок, пояснение и кнопки ответа. */
-export function AlertDialog({ title, children, actions }: AlertDialogProps) {
+/**
+ * Диалог-вопрос внутри экрана: заголовок, пояснение и кнопки ответа. Вопрос встроен в экран, а
+ * нажатая кнопка бывает далеко от него (внизу длинного шага на телефоне), поэтому при появлении
+ * он забирает фокус и встаёт в середину экрана: иначе автор его не увидит и уйдёт, потеряв правку.
+ * После ответа фокус возвращается туда, откуда вопрос задан, — иначе клавиатура и читалка начали
+ * бы с начала страницы.
+ */
+export function AlertDialog({
+  title,
+  children,
+  actions,
+  returnFocus = null,
+}: AlertDialogProps) {
   const titleId = useId();
+  const dialog = useRef<HTMLDivElement>(null);
+  // Источник вопроса фиксируется при появлении: перерисовки его не меняют.
+  const origin = useRef(returnFocus);
+  useEffect(() => {
+    const element = dialog.current;
+    if (element === null) return;
+    const target = origin.current ?? focusedElement();
+    // Прокрутку делает scrollIntoView (в середину), а не фокус (к краю экрана).
+    element.focus({ preventScroll: true });
+    element.scrollIntoView?.({ block: "center" });
+    return () => {
+      if (target !== null) returnFocusTo(target, element);
+    };
+  }, []);
   return (
     <div
+      ref={dialog}
       role="alertdialog"
       aria-labelledby={titleId}
+      tabIndex={-1}
       className="authoring-dialog"
     >
       <p id={titleId} className="authoring-dialog__title">
@@ -264,16 +298,23 @@ export function AlertDialog({ title, children, actions }: AlertDialogProps) {
 interface ConflictDialogProps {
   onRefresh: () => void;
   onCancel: () => void;
+  /** Элемент, с которого начата отвергнутая запись: на него вернётся фокус после ответа. */
+  returnFocus?: HTMLElement | null;
 }
 
 /**
  * «Черновик изменился, обновить?» — ответ на 409 `version_conflict`: записи раздела, замка,
  * пожелания и публикации. «Обновить» перечитывает черновик, «Отмена» оставляет правки.
  */
-export function ConflictDialog({ onRefresh, onCancel }: ConflictDialogProps) {
+export function ConflictDialog({
+  onRefresh,
+  onCancel,
+  returnFocus,
+}: ConflictDialogProps) {
   return (
     <AlertDialog
       title="Черновик изменился, обновить?"
+      returnFocus={returnFocus}
       actions={
         <>
           <Button onClick={onRefresh}>Обновить</Button>

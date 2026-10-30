@@ -1,4 +1,4 @@
-"""Telegram-бот (план B6.6): запуск polling, `/start`, `/newgame`, ссылка-приглашение, уведомления.
+"""Telegram-бот: запуск polling, `/start`, `/newgame`, ссылка-приглашение, уведомления.
 
 Настоящий Telegram и сеть не нужны: у `Bot` стоит сессия-заглушка `RecordingSession`, которая
 запоминает методы Bot API и отвечает на них заготовленными объектами. Логика `/newgame` и
@@ -454,9 +454,8 @@ FAKE_REFUSAL = "Провайдер мастера не подходит: тес�
 
 
 async def test_in_prod_the_test_master_is_refused_by_the_bot_as_by_the_app(deps, db):
-    # Спека DND-2 §15: `/newgame` выбирает провайдера по умолчанию (`fake` со сценарием), а в
-    # боевом режиме тестового мастера нет — тот же отказ, что у `POST /api/games`, без пути
-    # сценария.
+    # `/newgame` выбирает провайдера по умолчанию (`fake` со сценарием), а в боевом режиме тестового
+    # мастера нет — тот же отказ, что у `POST /api/games`, без пути сценария.
     prod = deps.settings.model_copy(update={"app_env": "prod"})
 
     reply = await lobby_reply(BotDeps(prod, deps.sessionmaker, deps.catalog, None))
@@ -648,7 +647,7 @@ def test_notification_texts():
     assert hurry_text(-1) == "Хост торопит: на ход в бою осталось 0 с"
     assert camp_text(300) == "Привал у костра — осталось 300 с: оставьте реплику своего героя"
     assert camp_text(-5) == "Привал у костра — осталось 0 с: оставьте реплику своего героя"
-    assert camp_text(300, short=False) == camp_text(300)  # долгий привал говорит как в DND-1
+    assert camp_text(300, short=False) == camp_text(300)  # долгий привал — как в первой версии игры
     assert camp_text(120, short=True) == (
         "Короткий привал — осталось 120 с: потратьте кости хитов и оставьте реплику героя"
     )

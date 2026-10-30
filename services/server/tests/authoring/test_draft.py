@@ -1,4 +1,4 @@
-"""Черновик приключения `AuthoringDraft` — контракт блока 3 (план DND-2, «Блок 3», спека §9, §10.3).
+"""Черновик приключения `AuthoringDraft`.
 
 Черновик — частичный формат v2: все разделы необязательны, сущности — модели движка, а сверху
 настройки (`settings`), закрепления (`locks`) и пожелания по шагам (`wishes`). `to_adventure`
@@ -115,7 +115,7 @@ def test_every_section_of_a_draft_is_optional():
 
 
 def test_a_new_draft_allows_profanity_by_default():
-    # Спека Р1: флажок мата у черновика, как у игры, по умолчанию включён.
+    # Флажок мата у черновика, как у игры, по умолчанию включён.
     assert AuthoringDraft().settings.profanity is True
     assert DraftSettings().profanity is True
 
@@ -265,7 +265,7 @@ def test_the_adventure_takes_the_settings_and_the_plot_of_the_draft():
 
 def test_the_fight_of_a_location_and_the_clues_of_its_places_are_linked_by_the_assembly():
     # Шаги не пишут связей, которые следуют из других шагов: бой в локации и улику в месте сводит
-    # сборка (так было и в генераторе DND-1).
+    # сборка (так было и в генераторе первой версии игры).
     draft = AuthoringDraft(
         locations=(location(),),
         encounters=(fight(),),
@@ -360,11 +360,11 @@ def test_empty_seeds_change_nothing():
     assert seeded(draft, Seeds()) == draft
 
 
-# --- связи формата v1 внутри NPC (Р8: обратная совместимость заготовок) ---
+# --- связи формата v1 внутри NPC (обратная совместимость заготовок) ---
 
 
 def rival_of_bram(**changes: Any) -> dict[str, Any]:
-    """NPC в форме заготовки DND-1: связь лежит внутри NPC (`npcs[].relations`)."""
+    """NPC в форме заготовки первой версии игры: связь лежит внутри NPC (`npcs[].relations`)."""
     relation = {"npc_id": "bram", "kind": "rival", "note": "Делят причал."} | changes
     return npc(id="ilsa").model_dump() | {"relations": [relation]}
 
@@ -410,7 +410,7 @@ def test_the_moved_relations_of_seeds_are_locked_like_any_seed_relation():
 
 
 def test_a_draft_read_from_data_moves_v1_relations_too():
-    # Черновик из базы или запроса конструктора (блок 4): тот же перевод, сборка v2 не падает.
+    # Черновик из базы или запроса конструктора: тот же перевод, сборка v2 не падает.
     draft = AuthoringDraft.model_validate_json(json.dumps({"npcs": [rival_of_bram()]}))
 
     assert draft.npcs[0].relations == ()
@@ -481,7 +481,7 @@ def test_a_draft_built_from_engine_models_moves_v1_relations_too():
     assert [r.id for r in draft.relations] == ["bram-rival-ilsa"]
 
 
-# --- контракт для конструктора (блок 4): хранение и обратный путь ---
+# --- контракт для конструктора: хранение и обратный путь ---
 
 
 def test_an_empty_draft_survives_a_json_round_trip():
@@ -491,7 +491,7 @@ def test_an_empty_draft_survives_a_json_round_trip():
 
 
 async def test_a_draft_stored_as_data_locks_and_wishes_columns_is_read_back_unchanged():
-    # Спека §10.2: `adventure_drafts` хранит данные, закрепления и пожелания отдельными JSON.
+    # `adventure_drafts` хранит данные, закрепления и пожелания отдельными JSON.
     built = (await generate(RecordingProvider(v2_answers()), v2_draft(profanity=False))).draft
     draft = built.model_copy(
         update={

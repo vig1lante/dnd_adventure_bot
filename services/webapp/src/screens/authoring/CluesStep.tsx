@@ -15,8 +15,8 @@ const newRevelation = (): Revelation => ({ id: "", statement: "", clues: [] });
 const newClue = (): Clue => ({ id: "", description: "", where: "" });
 
 /**
- * Детали локаций черновика для «Где лежит» улики: в справочнике ссылок сервера деталей нет
- * (дополнение B5, §6), а id деталей уникальны во всём приключении.
+ * Детали локаций черновика для «Где лежит» улики: в справочнике ссылок сервера деталей нет,
+ * а id деталей уникальны во всём приключении.
  */
 const featureOptions = (locations: readonly Location[]): Option[] =>
   locations.flatMap((location) =>

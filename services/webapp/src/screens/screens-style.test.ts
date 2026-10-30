@@ -1,7 +1,7 @@
 import { readSource } from "../styles/read-source";
 
 // Экраны строятся из токенов и элементов src/ui: своих цветов, шрифтов и анимаций
-// в стилях экранов быть не должно (решение владельца о стиле, B8.1a).
+// в стилях экранов быть не должно (решение владельца о стиле).
 const STYLE_FILES = [
   "../screens/screens.css",
   "../screens/character/character.css",
@@ -124,7 +124,7 @@ describe("липкая плашка обрыва связи (.screen-sticky)", (
   });
 });
 
-// Лента для чтения вслух и поле хода над клавиатурой (B10.3): правила в общем screens.css.
+// Лента для чтения вслух и поле хода над клавиатурой: правила в общем screens.css.
 describe("лента и поле хода на телефоне", () => {
   const screensCss = Object.fromEntries(styles)["../screens/screens.css"] ?? "";
   const rule = (selector: string) => {

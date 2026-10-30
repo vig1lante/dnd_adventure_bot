@@ -198,8 +198,6 @@ describe("шаг «Персонажи»", () => {
   });
 });
 
-// --- финальное покрытие блока 5 ---
-
 test("«Где находится» в локации, которой нет в справочнике: видна как есть и уходит голым id без подмены", async () => {
   const lost = npcOf({ id: "otto", name: "Отто", location_id: "old-mill" });
   const { server, form } = await openNpcs(world({ npcs: [lost] }));

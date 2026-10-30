@@ -113,7 +113,6 @@ describe("внутри Telegram", () => {
     expect(log).not.toHaveBeenCalled();
     expect(warn).not.toHaveBeenCalled();
   });
-  // --- финальное покрытие блока B10 (B10.coverage) ---
 
   test.each(["OFF", "0", "false", "", "off "])(
     "чужое значение ключа «%s» — как по умолчанию: вибрация включена (выключает только «off»)",
@@ -134,8 +133,8 @@ describe("внутри Telegram", () => {
     expect(() => setVibrationEnabled(true)).not.toThrow();
   });
 
-  // Бывший дефект B10.coverage (D1): у вибрации не было состояния в памяти страницы, и при
-  // недоступном хранилище выключенная вибрация всё равно звучала. Исправлено в B10.3.fix1.
+  // Бывший дефект: у вибрации не было состояния в памяти страницы, и при недоступном хранилище
+  // выключенная вибрация всё равно звучала.
   test("запись в хранилище не удалась, а чтение работает (старый Safari в частном режиме): действует выбор игрока", () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new DOMException("переполнено", "QuotaExceededError");

@@ -1,9 +1,9 @@
-"""Клиент Mini App и сервер говорят об одном и том же (финальное покрытие блока B8).
+"""Клиент Mini App и сервер говорят об одном и том же.
 
 У клиента и сервера свои контрактные тесты, и каждый идёт на заглушке другой стороны: тесты
 клиента — на заглушке сервера, тесты сервера — на своих запросах. Сквозной тест Playwright
 проходит только те маршруты, которых касается сценарий. Поэтому переименование или удаление
-маршрута на сервере (как «roll-abilities» в B8.s3) или новое поле кадра сокета могли бы пройти
+маршрута на сервере (как было с «roll-abilities») или новое поле кадра сокета могли бы пройти
 мимо всех тестов, пока игрок не нажмёт кнопку. Здесь исходники клиента (`api/client.ts`,
 `api/ws.ts`, `api/types.ts`) читаются как данные и сверяются с настоящим приложением:
 
@@ -11,7 +11,7 @@
   из типа `HostAction` и сокет игры;
 - виды кадров сокета и поля каждого кадра у сервера и в типе `WsEvent` клиента совпадают;
 - поля ответов REST у моделей сервера и у интерфейсов клиента с теми же именами совпадают;
-- блок `rest` снимка (словарь `rest_view`, блок B9) и интерфейс `RestView`, виды привала.
+- блок `rest` снимка (словарь `rest_view`) и интерфейс `RestView`, виды привала.
 """
 
 import importlib
@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from dnd_engine.journal import SECTIONS, Section
 from dnd_engine.state import GameState
 from dnd_server.app import create_app
+from dnd_server.auth.deps import SOCKET_PROTOCOL
 from dnd_server.config import Settings
 from dnd_server.db.models import Game, GamePhase, TurnPhase
 from dnd_server.dm.camp_flow import RestKind
@@ -101,7 +102,7 @@ def test_the_parser_finds_the_whole_api_of_the_client():
     assert ("POST", "/api/games/{}/host/camp-end") in calls
     assert ("POST", "/api/games/{}/characters/random-abilities") in calls
     assert ("GET", "/api/games/{}/characters/mine") in calls
-    # Привалы (блок B9 DND-2): начало привала хостом, кость хитов и кнопки привала любого вида.
+    # Привалы: начало привала хостом, кость хитов и кнопки привала любого вида.
     assert ("POST", "/api/games/{}/host/rest") in calls
     assert ("POST", "/api/games/{}/rest/hit-dice") in calls
     assert ("POST", "/api/games/{}/host/rest-end") in calls
@@ -142,8 +143,17 @@ def test_the_game_socket_the_client_opens_exists_on_the_server(settings):
     assert create_app(settings).url_path_for("game_socket", game_id="G1") == "/ws/games/G1"
 
 
+def test_the_client_offers_the_subprotocol_of_the_server_and_keeps_the_token_out_of_the_address():
+    # Токен сессии идёт вторым подпротоколом после имени, которое сервер называет в ответе: имя у
+    # клиента и сервера одно, а в адресе сокета токена нет (адрес пишут журналы туннеля и прокси).
+    ws_source = client_text("ws.ts")
+
+    assert f'"{SOCKET_PROTOCOL}"' in ws_source, "ws.ts не предлагает подпротокол сервера"
+    assert "token=" not in ws_source
+
+
 def test_the_old_roll_route_is_not_called_by_the_client(served):
-    # Прежний бросок характеристик убран по решению владельца R9: ни на сервере, ни у клиента.
+    # Прежний бросок характеристик убран по решению владельца: ни на сервере, ни у клиента.
     assert not any("roll-abilities" in path for _method, path in client_calls())
     assert "/api/games/{}/characters/roll-abilities" not in served
 
@@ -293,7 +303,7 @@ RESPONSES = [
     ("dnd_server.characters.service.AbilityOption", "AbilityOption", set(), set()),
     ("dnd_server.characters.service.FeatureOption", "FeatureOption", set(), set()),
     ("dnd_server.characters.service.ItemLine", "ItemLine", set(), set()),
-    # Подробности вариантов для карточек создания героя (контракт блока 7, `details`).
+    # Подробности вариантов для карточек создания героя (`details`).
     ("dnd_server.characters.service.TraitDetail", "TraitDetail", set(), set()),
     ("dnd_server.characters.service.SpeciesDetails", "SpeciesDetails", set(), set()),
     ("dnd_server.characters.service.ClassFeatureDetail", "ClassFeatureDetail", set(), set()),
@@ -302,19 +312,19 @@ RESPONSES = [
     ("dnd_server.characters.service.SkillDetails", "SkillDetails", set(), set()),
     ("dnd_server.characters.service.SpellDetails", "SpellDetails", set(), set()),
     ("dnd_server.characters.service.SummaryDetails", "SummaryDetails", set(), set()),
-    # Черта предыстории и боевой стиль: у обоих `details` (финальное покрытие блока 7).
+    # Черта предыстории и боевой стиль: у обоих `details`.
     ("dnd_server.characters.service.Described", "Described", set(), set()),
     ("dnd_server.characters.service.QuickChoices", "QuickChoices", set(), set()),
     ("dnd_engine.creation.CharacterChoices", "CharacterChoices", set(), set()),
     ("dnd_engine.character.Persona", "Persona", set(), set()),
     # Лист героя клиент получает с блоком `derived`, который добавляет `character_view`.
     ("dnd_engine.character.Character", "Character", set(), {"derived"}),
-    # У предмета приключения сервер добавляет `name` (B8.s2).
+    # У предмета приключения сервер добавляет `name`.
     ("dnd_engine.character.InventoryItem", "InventoryItem", set(), {"name"}),
-    # Запись дневника отряда (блок B8 DND-2): уходит в снимке и кадрах `journal_entry`/`journal`
-    # как есть (`model_dump`), без добавленных и снятых полей.
+    # Запись дневника отряда: уходит в снимке и кадрах `journal_entry`/`journal` как есть
+    # (`model_dump`), без добавленных и снятых полей.
     ("dnd_engine.journal.JournalEntry", "JournalEntry", set(), set()),
-    # Ответ на «Потратить кость хитов» (блок B9 DND-2): остаток костей и хиты героя.
+    # Ответ на «Потратить кость хитов»: остаток костей и хиты героя.
     ("dnd_server.turns.api.HitDieOut", "HitDieResult", set(), set()),
 ]
 
@@ -370,8 +380,8 @@ LOOSE_BODIES = {"DevLoginIn"}
 
 
 def test_every_request_body_of_the_api_refuses_unknown_fields(settings):
-    # Дополнение B11 §2: схемы запросов — `extra="forbid"`, лишнее поле — 422, а не молча
-    # отброшенный ввод. Сверка по описанию API ловит и новую схему, которую забыли закрыть.
+    # Схемы запросов — `extra="forbid"`, лишнее поле — 422, а не молча отброшенный ввод. Сверка по
+    # описанию API ловит и новую схему, которую забыли закрыть.
     bodies = request_bodies(create_app(settings).openapi())
     loose = {
         f"{route}: {schema['title']}"
@@ -469,13 +479,13 @@ def test_the_inline_comparison_goes_by_the_key_from_not_by_the_python_name():
     assert magic == {"ability", "cantrips", "prepared"}
 
 
-# --- дневник отряда: кадры, разделы и контракт хаба (финальное покрытие блока B8 DND-2) ---
+# --- дневник отряда: кадры, разделы и контракт хаба ---
 
 
 def test_the_journal_frames_and_the_journal_of_the_snapshot_are_on_both_sides():
-    # Дополнение контракта B8 §6: запись — кадром `journal_entry {entry}`, дневник целиком после
-    # отката — `journal {entries}`, в снимке — поле `journal`. Общая сверка видов и полей кадров
-    # выше прошла бы и тогда, когда обе стороны дневник потеряли бы вместе.
+    # Запись — кадром `journal_entry {entry}`, дневник целиком после отката — `journal {entries}`, в
+    # снимке — поле `journal`. Общая сверка видов и полей кадров выше прошла бы и тогда, когда обе
+    # стороны дневник потеряли бы вместе.
     server, client = server_events(), client_events()
 
     for events in (server, client):
@@ -501,7 +511,7 @@ def test_the_sections_of_the_journal_are_the_same_in_the_engine_and_in_the_clien
 
 
 def test_the_client_knows_exactly_the_public_statuses_the_server_gives():
-    # Решение D17 блока B11: значения статуса игрока на проводе совпадают буква в букву.
+    # Значения статуса игрока на проводе совпадают буква в букву.
     union = re.search(r"export type PlayerStatus = ([^;]+);", client_text("types.ts"))
     assert union is not None, "тип PlayerStatus в types.ts не найден"
 
@@ -514,15 +524,14 @@ def test_the_client_knows_exactly_the_public_statuses_the_server_gives():
 
 def test_every_frame_the_server_builds_passes_the_contract_of_the_hub():
     # Хаб рассылает только кадры из `EVENT_TYPES`, а кадр другого вида молча не уходит (только
-    # ошибка в журнале сервера). Снимок, `pong` и `kicked` (блок B11) идут своему соединению мимо
-    # хаба.
+    # ошибка в журнале сервера). Снимок, `pong` и `kicked` идут своему соединению мимо хаба.
     built = set(server_events()) - {"snapshot", "pong", "kicked"}
 
     assert {"journal_entry", "journal"} <= built
     assert built <= EVENT_TYPES, f"кадры вне контракта хаба: {sorted(built - EVENT_TYPES)}"
 
 
-# --- привалы: блок `rest` снимка, кадры и виды привала (финальное покрытие блока B9 DND-2) ---
+# --- привалы: блок `rest` снимка, кадры и виды привала ---
 
 
 def test_the_rest_of_the_snapshot_has_the_same_fields_on_the_server_and_in_the_client():

@@ -4,7 +4,7 @@ import type { WsEvent } from "./types";
 // перегрузка (1011, 1013, 1006…): их лечит переподключение.
 const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_NOT_A_MEMBER = 4403;
-// Причина закрытия 4403 у исключённого хостом (контракт B11, §2).
+// Причина закрытия 4403 у исключённого хостом.
 const KICKED_REASON = "kicked";
 
 const PING_INTERVAL_MS = 25_000;
@@ -51,19 +51,23 @@ function rejectionOf(
 }
 
 /**
- * Адрес сокета игры. Браузер не умеет слать заголовки при открытии сокета, поэтому
- * токен сессии идёт в query (так задумано сервером); в журнал адрес писать нельзя.
+ * Подпротокол сокета игры. Браузер не умеет слать свои заголовки при открытии сокета, кроме
+ * `Sec-WebSocket-Protocol`, поэтому токен сессии идёт вторым подпротоколом после этого имени.
+ * Сервер отвечает только именем: браузер требует в ответе один из предложенных подпротоколов,
+ * а токен назад не возвращается.
+ */
+const GAME_PROTOCOL = "dnd-game.v1";
+
+/**
+ * Адрес сокета игры — без токена: адрес попадает в журналы прокси и туннеля, а токен идёт
+ * подпротоколом (`GAME_PROTOCOL`).
  */
 export function gameSocketUrl(
   gameId: string,
-  token: string,
   page: Pick<Location, "protocol" | "host"> = window.location,
 ): string {
   const scheme = page.protocol === "https:" ? "wss:" : "ws:";
-  return (
-    `${scheme}//${page.host}/ws/games/${encodeURIComponent(gameId)}` +
-    `?token=${encodeURIComponent(token)}`
-  );
+  return `${scheme}//${page.host}/ws/games/${encodeURIComponent(gameId)}`;
 }
 
 // Кадр без type или не JSON — сбой сервера или прокси. Содержимое в журнал не пишем:
@@ -110,7 +114,8 @@ export function connectGame(
   onEvent: (event: WsEvent) => void,
   handlers: GameConnectionHandlers = {},
 ): () => void {
-  const url = gameSocketUrl(gameId, token);
+  const url = gameSocketUrl(gameId);
+  const protocols = [GAME_PROTOCOL, token];
   let socket: WebSocket | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   let pingTimer: ReturnType<typeof setInterval> | undefined;
@@ -185,7 +190,7 @@ export function connectGame(
   };
 
   const open = () => {
-    const current = new WebSocket(url);
+    const current = new WebSocket(url, protocols);
     socket = current;
     current.onopen = () => {
       handlers.onStatus?.("open");

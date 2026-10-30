@@ -1,5 +1,4 @@
-"""CLI `dnd-generate`: приключение формата v2 по короткому пожеланию (спека DND-1 §6.3, план
-DND-1 B5.6; DND-2 §9, план B3.1).
+"""CLI `dnd-generate`: приключение формата v2 по короткому пожеланию.
 
     uv run dnd-generate --pitch "..." --hours 5 --players 6 --level 3 \\
         [--seeds seeds.yaml] [--wishes wishes.yaml] [--modules bg3_flavor,campfire] \\

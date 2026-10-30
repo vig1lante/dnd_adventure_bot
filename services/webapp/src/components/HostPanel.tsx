@@ -45,7 +45,7 @@ function restButtonLabel(kind: RestKind, game: GameSummary): string {
 }
 
 // Привал по кнопке превращает открытый раунд в ход «конец привала»: черновики игроков мастер
-// не увидит, поэтому хост узнаёт об этом до того, как согласится (контракт B9, §11 п. 6).
+// не увидит, поэтому хост узнаёт об этом до того, как согласится.
 const REST_DRAFTS_WARNING =
   "Черновики ходов этого раунда до мастера не дойдут — после привала игрокам придётся написать их заново.";
 
@@ -113,7 +113,8 @@ function HostControls({ gameId, view, isResolving }: Controls) {
   const clockOffsetMs = useGame((state) => state.live.clockOffsetMs);
   const { phase, combat, game } = view;
   // Минута до «Повторить» идёт от серверного начала разбора: перезагрузка страницы её не
-  // перезапускает. Сервер его не знает (игра шла до B11) — минута с показа «Мастер думает».
+  // перезапускает. Сервер его не знает (игра началась до обновления сервера) — минута с показа
+  // «Мастер думает».
   const waitedLong = useStaysFor(
     isResolving ? `resolving@${phase.phase_since ?? ""}` : null,
     RETRY_PATIENCE_MS,
@@ -125,7 +126,7 @@ function HostControls({ gameId, view, isResolving }: Controls) {
   const paused = phase.phase === "paused";
   const can = {
     collect: playing && turn === "discussion",
-    // Привал по кнопке сервер начинает только из обсуждения и вне боя (контракт B9, §3).
+    // Привал по кнопке сервер начинает только из обсуждения и вне боя.
     rest: playing && turn === "discussion" && combat === null,
     extend: playing && turn === "collecting",
     close: playing && turn === "collecting",
@@ -149,8 +150,8 @@ function HostControls({ gameId, view, isResolving }: Controls) {
         (turn === "combat_wait" && masterMoves(combat))),
     pause: playing,
     resume: paused,
-    // «Перегенерировать» — по признаку сервера (контракт B11, §1 п. 11): привал по кнопке хоста
-    // перегенерировать нельзя, привал мастера — можно. Сервер до B11 признака не шлёт — кнопки нет.
+    // «Перегенерировать» — по признаку сервера: привал по кнопке хоста перегенерировать нельзя,
+    // привал мастера — можно. Старый сервер признака не шлёт — кнопки нет.
     regenerate: playing && phase.can_regenerate === true,
   };
 

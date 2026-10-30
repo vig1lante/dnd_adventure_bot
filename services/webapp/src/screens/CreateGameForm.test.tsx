@@ -52,7 +52,7 @@ const OPENAI: ProviderOption = {
   accepts_model: true,
   is_default: false,
 };
-// Контракт блока B1: модель Claude Code выбирается только из списка сервера (псевдонимы CLI).
+// Модель Claude Code выбирается только из списка сервера (псевдонимы CLI).
 const CLI: ProviderOption = {
   id: "claude_code_cli",
   title: "Claude Code на этом компьютере (только dev)",

@@ -1,5 +1,5 @@
-"""Персонажи (план B6.4, B8.s3): опции формы, случайная раскладка очков, три режима создания,
-выбор игрока, описание от модели.
+"""Персонажи: опции формы, случайная раскладка очков, три режима создания, выбор игрока, описание от
+модели.
 
 Приложение работает на настоящей SQLite после миграций (фикстуры `settings`, `db` из
 `tests/conftest.py`) и с выполненным стартом (`lifespan` грузит каталог приключений из временной
@@ -23,6 +23,7 @@ from typing import Any, NamedTuple, get_args
 import httpx
 import pytest
 import yaml
+from fastapi.exceptions import RequestValidationError
 from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -45,7 +46,7 @@ from dnd_engine.creation import (
 )
 from dnd_engine.rng import SeededRng
 from dnd_engine.units import meters_text
-from dnd_server.app import create_app
+from dnd_server.app import create_app, validation_detail
 from dnd_server.auth.session import SessionSigner
 from dnd_server.characters import flavor, service
 from dnd_server.characters.flavor import (
@@ -454,7 +455,7 @@ async def test_creation_options_give_the_form_everything_in_russian(world):
         "Мудрость",
         "Харизма",
     ]
-    # Прежние поля навыка не изменились; блок 7 только добавил `details` для подробной карточки.
+    # Прежние поля навыка не изменились; `details` для подробной карточки только добавились.
     assert by_id(options["skills"])["stealth"] == {
         "id": "stealth",
         "name": "Скрытность",
@@ -560,11 +561,11 @@ def test_the_form_describes_the_fighting_styles_with_the_engine_names():
     assert shown == {style: tuple(FIGHTING_STYLES[style]) for style in used} != {}
 
 
-# --- подробности вариантов для карточек (`details`, контракт блока 7 §2) ---
+# --- подробности вариантов для карточек (`details`) ---
 # Верхние поля вариантов — для логики формы, `details` — для подробной карточки. Тексты — из данных
 # движка, подписи кодов (размер, доспехи, школа, время, дистанция, длительность) — у сервера.
 
-# Поля вариантов до блока 7: они и их значения не меняются, `details` только добавляется.
+# Прежние поля вариантов: они и их значения не меняются, `details` только добавляется.
 OLD_OPTION_FIELDS = {
     "skills": {"id", "name", "ability"},
     "classes": {
@@ -637,7 +638,7 @@ async def test_species_details_tell_size_speed_in_meters_and_every_trait(form_op
     species = by_id(form_options["species"])
 
     assert species["dwarf"]["details"] == {
-        # Английское название — для подписи под русским на карточке (спека §7, дополнение §9).
+        # Английское название — для подписи под русским на карточке.
         "name_en": "Dwarf",
         "description": srd.species["dwarf"].description,
         "size": "Средний",
@@ -927,9 +928,9 @@ async def test_details_show_labels_instead_of_codes_and_no_feet(form_options):
     assert "фут" not in json.dumps(form_options, ensure_ascii=False).lower()
 
 
-# --- финальное покрытие блока 7 (B7.coverage): ответ целиком, все коды, старые поля, приватность
-# Подписи кодов по контракту блока (§2.1, §2.2, §2.5) — собственные таблицы теста, а не таблицы
-# сервера: так ответ сверяется с контрактом, а не сам с собой.
+# --- опции формы: ответ целиком, все коды, старые поля, приватность
+# Подписи кодов — собственные таблицы теста, а не таблицы сервера: так ответ сверяется с контрактом,
+# а не сам с собой.
 SIZE_LABELS = {"medium": "Средний", "small": "Маленький"}
 ARMOR_LABELS = {
     "light": "Лёгкие доспехи",
@@ -1005,7 +1006,7 @@ def test_the_openapi_schema_promises_details_and_the_key_from(settings):
 
     choices = schemas["SkillChoicesDetail"]
     assert set(choices["properties"]) == set(choices["required"]) == {"count", "from"}
-    # `details` обязателен у каждого вида варианта (контракт блока 7, §2).
+    # `details` обязателен у каждого вида варианта.
     for option in (
         "SkillOption",
         "Described",
@@ -1199,7 +1200,7 @@ async def test_texts_of_the_cards_are_russian_and_not_empty(form_options):
 
 
 async def test_old_fields_keep_their_nested_shape_and_values(form_options):
-    # Блок 7 только добавил `details`: вложенные старые объекты не получили новых ключей.
+    # Добавились только `details`: вложенные старые объекты не получили новых ключей.
     srd = load_srd()
     level = form_options["level"]
 
@@ -1325,7 +1326,7 @@ async def test_a_character_built_only_from_the_options_is_legal(world, class_id)
     assert response.json()["character"]["class_id"] == class_id
 
 
-# --- случайная раскладка очков (решение владельца R9) ---
+# --- случайная раскладка очков (решение владельца) ---
 
 
 def tables_snapshot_sync(connection: Any) -> dict[str, list[Any]]:
@@ -1771,8 +1772,8 @@ async def test_the_lobby_events_of_each_character_go_out_under_the_game_lock(wor
 
 
 async def test_the_name_the_model_gave_a_quick_hero_reaches_the_lobby_of_everybody(world):
-    # Дополнение B11 §5 п. 2 (R1): имя от модели приходит новым кадром `lobby` после записи
-    # описания, а не остаётся заглушкой из первого кадра.
+    # Имя от модели приходит новым кадром `lobby` после записи описания, а не остаётся заглушкой из
+    # первого кадра.
     game, _host, [friend] = await make_game(world, friends=1)
     world.broadcaster.sent.clear()
     world.broadcaster.under_lock.clear()
@@ -1859,7 +1860,7 @@ async def test_nothing_changes_after_the_game_left_the_lobby(world):
     assert world.broadcaster.sent == []
 
 
-# --- выбор игрока при создании героя (решение владельца R10) ---
+# --- выбор игрока при создании героя (решение владельца) ---
 #
 # Сервер хранит то, что игрок выбрал, рядом с героем и отдаёт это только владельцу героя
 # (`GET .../characters/mine`): форма «Изменить героя» открывается заполненной.
@@ -2213,6 +2214,116 @@ async def test_quick_text_has_length_limits(world, changes):
     assert response.status_code == 422
     assert "ЖЖЖЖ" not in response.text
     assert await stored_characters(world.db, game["id"]) == []
+
+
+# --- текст 422 у тела с вариантами ---
+#
+# У тела создания героя три ветки по полю `mode`, и pydantic ставит в путь ошибки после `body` тег
+# ветки (`("body", "quick", "name")`). Ответ называет поле ветки, а не тег: «проверьте name», а не
+# «проверьте quick». Значения из запроса в ответ не попадают, как и у остальных тел.
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        pytest.param(quick_body(name=too_long(NAME_MAX_CHARS)), "name", id="быстрый: длинное имя"),
+        pytest.param(
+            quick_body(concept=too_long(CONCEPT_MAX_CHARS)),
+            "concept",
+            id="быстрый: длинная задумка",
+        ),
+        pytest.param({**detailed_body(), "hp_max": 99}, "hp_max", id="подробный: лишнее поле"),
+        pytest.param(
+            detailed_body(name=too_long(NAME_MAX_CHARS)), "choices", id="подробный: поле выбора"
+        ),
+        pytest.param(
+            {"mode": "random", "preview_id": "rp_bad"}, "preview_id", id="случайный: битый id"
+        ),
+        pytest.param({"mode": "random", "seed": 1}, "seed", id="случайный: лишнее поле"),
+        pytest.param({**quick_body(), "mode": "heroic"}, "mode", id="неизвестный mode"),
+        pytest.param(
+            {key: value for key, value in quick_body().items() if key != "mode"},
+            "mode",
+            id="без mode",
+        ),
+    ],
+)
+async def test_a_422_of_the_hero_body_names_the_field_of_the_branch_and_not_its_tag(
+    world, body, field
+):
+    game, host, _ = await make_game(world)
+
+    response = await create(world, host, game["id"], body)
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": f"Некорректные данные запроса: проверьте {field}."}
+    assert "ЖЖЖЖ" not in response.text and "heroic" not in response.text
+    assert await stored_characters(world.db, game["id"]) == []
+
+
+def quick_body_without(field: str, **changes: Any) -> dict[str, Any]:
+    return {key: value for key, value in quick_body(**changes).items() if key != field}
+
+
+@pytest.mark.parametrize(
+    ("body", "fields"),
+    [
+        # Каждая ошибка ветки называет своё поле, тег не называется ни разу.
+        pytest.param(
+            quick_body_without("class_id", name=too_long(NAME_MAX_CHARS)),
+            "class_id, name",
+            id="две ошибки одной ветки",
+        ),
+        # Лишнее поле с именем ветки — это поле тела, а не тег: называется оно само.
+        pytest.param({**quick_body(), "detailed": 1}, "detailed", id="лишнее поле «detailed»"),
+        pytest.param({**quick_body(), "quick": 1}, "quick", id="лишнее поле «quick»"),
+    ],
+)
+async def test_a_422_of_the_hero_body_names_every_field_of_the_branch(world, body, fields):
+    game, host, _ = await make_game(world)
+
+    response = await create(world, host, game["id"], body)
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": f"Некорректные данные запроса: проверьте {fields}."}
+    assert "ЖЖЖЖ" not in response.text
+    assert await stored_characters(world.db, game["id"]) == []
+
+
+@pytest.mark.parametrize(
+    ("errors", "body", "detail"),
+    [
+        pytest.param(
+            [{"type": "missing", "loc": ("body", "login")}],
+            {"name": "login"},
+            "проверьте login",
+            id="нет поля, а его имя — значение другого",
+        ),
+        pytest.param(
+            [{"type": "missing", "loc": ("body", "abilities", "str")}],
+            {"abilities": {"dex": 10}, "kind": "abilities"},
+            "проверьте abilities",
+            id="вложенное поле обычного тела",
+        ),
+        pytest.param(
+            [{"type": "int_parsing", "loc": ("query", "limit")}],
+            None,
+            "проверьте limit",
+            id="параметр query",
+        ),
+        pytest.param(
+            [{"type": "json_invalid", "loc": ("body", 10)}],
+            "{битый",
+            None,
+            id="битый JSON",
+        ),
+    ],
+)
+def test_the_field_of_an_ordinary_request_is_named_as_before(errors, body, detail):
+    text = validation_detail(RequestValidationError(errors, body=body))
+
+    expected = "Некорректные данные запроса" + (f": {detail}." if detail else ".")
+    assert text == expected
 
 
 async def test_texts_exactly_at_the_limits_are_accepted(world):
@@ -2704,7 +2815,7 @@ async def test_backstory_help_uses_the_provider_of_the_game(world, monkeypatch):
     assert [(c["provider"], c["model"]) for c in calls] == [("fake", "some-model-1")]
 
 
-# --- промпты описания героя и «помоги написать» (план B1.2, спека §4 и Р4) ---
+# --- промпты описания героя и «помоги написать» ---
 
 
 @pytest.mark.parametrize("profanity", [True, False])
@@ -2880,7 +2991,7 @@ async def test_openapi_describes_the_character_routes(world):
     assert set(paths["/api/games/{game_id}/characters/random-preview"]) == {"post"}
 
 
-# --- предел вызовов модели из лобби (решение владельца B6.security) ---
+# --- предел вызовов модели из лобби ---
 #
 # У игрока в игре одновременно не больше одного вызова модели и не больше `MAX_MODEL_CALLS` за
 # лобби. Вызовами считаются «помоги написать» и описание героя в быстром и случайном режимах.
@@ -3088,7 +3199,7 @@ async def test_every_model_call_is_logged_without_the_texts_of_the_player_or_the
         assert private not in caplog.text
 
 
-# --- случайный герой с предпросмотром (план B8.s0, решение владельца R1) ---
+# --- случайный герой с предпросмотром ---
 #
 # «Бросить судьбу» и «Ещё раз» — `random-preview`: сервер бросает героя и запоминает его для этого
 # игрока и этой игры, ничего не записывая и не зовя нейронку. «Беру» — `mode: random` с
@@ -3123,7 +3234,7 @@ async def take(world: World, player: Player, game_id: str, preview_id: str) -> h
 
 
 async def random_hero(world: World, player: Player, game_id: str) -> httpx.Response:
-    """Случайный герой единственным путём (спека DND-2 §15): «Бросить судьбу», затем «Беру»."""
+    """Случайный герой единственным путём: «Бросить судьбу», затем «Беру»."""
     return await take(world, player, game_id, (await shown(world, player, game_id))["preview_id"])
 
 
@@ -3555,7 +3666,7 @@ RANDOM_NEEDS_PREVIEW = (
 async def test_a_random_hero_without_a_preview_is_422_and_nothing_is_rolled_or_saved(
     world, monkeypatch
 ):
-    # Прежнего пути «бросить и сразу сохранить» больше нет (спека DND-2 §15): только предпросмотр.
+    # Прежнего пути «бросить и сразу сохранить» больше нет: только предпросмотр.
     game, host, _ = await make_game(world)
     calls = use_provider(monkeypatch, ScriptedProvider())
     world.broadcaster.sent.clear()

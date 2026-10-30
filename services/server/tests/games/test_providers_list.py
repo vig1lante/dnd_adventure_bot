@@ -1,4 +1,4 @@
-"""Список провайдеров и моделей для создателей игр (план B8.s0, решение владельца R4).
+"""Список провайдеров и моделей для создателей игр.
 
 Форма «Создать игру» в Mini App показывает создателям выбор нейронки для игры. `GET /api/providers`
 отдаёт варианты: какие провайдеры есть, как они называются, какая модель у них по умолчанию и
@@ -274,7 +274,7 @@ async def test_fake_is_available_with_a_scenario(settings, db):
     ],
 )
 async def test_prod_refuses_a_game_with_the_test_master_even_with_a_scenario(settings, db, body):
-    # Спека §15: в боевом режиме тестового мастера нет, и FAKE_LLM_SCENARIO его не открывает.
+    # В боевом режиме тестового мастера нет, и FAKE_LLM_SCENARIO его не открывает.
     async with serve(settings, app_env="prod", fake_llm_scenario=SCENARIO) as http:
         creator = await add_player(db, tg_id=CREATOR_TG_ID)
 
@@ -375,7 +375,7 @@ async def test_the_scenario_stub_ignores_the_model_and_does_not_offer_one(settin
     assert (entry["default_model"], entry["models"], entry["accepts_model"]) == (None, [], False)
 
 
-# --- модель подписки claude_code_cli (DND-2 B1.2, спека §11) ---
+# --- модель подписки claude_code_cli ---
 
 CLI_ALIASES = ["opus", "sonnet", "haiku"]
 

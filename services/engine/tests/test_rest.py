@@ -75,7 +75,7 @@ def test_short_rest_never_heals_above_the_maximum_but_still_spends_the_die(make_
 
 def test_short_rest_die_with_negative_total_still_heals_one_hit_point(make_character, srd):
     # Телосложение 6 даёт −2: единица на кости — итог −1, но кость хитов лечит не меньше 1 HP
-    # (SRD 5.2.1 и план DND-2; прежде минимум был 0).
+    # (SRD 5.2.1; прежде минимум был 0).
     c = make_character(scores={CON: 6}, hp_max=20, hp=10)
 
     rested, outcome = short_rest(c, spend_hit_dice=1, rng=ScriptedRng([1]), content=srd)
@@ -230,25 +230,16 @@ def test_long_rest_restores_class_resources_of_every_class(make_character, srd, 
 
 
 @pytest.mark.parametrize(
-    ("hit_dice_max", "hit_dice", "expected"),
-    [
-        (3, 0, 1),  # половина от 3 — одна кость
-        (3, 1, 2),
-        (3, 3, 3),  # выше максимума не поднимается
-        (1, 0, 1),  # не меньше одной кости
-        (5, 0, 2),
-        (6, 1, 4),
-        (5, 4, 5),
-    ],
+    ("hit_dice_max", "hit_dice"),
+    [(3, 0), (3, 1), (3, 3), (1, 0), (5, 0), (6, 1), (5, 4)],
 )
-def test_long_rest_returns_half_of_the_hit_dice_but_at_least_one(
-    make_character, srd, hit_dice_max, hit_dice, expected
-):
+def test_long_rest_returns_every_spent_hit_die(make_character, srd, hit_dice_max, hit_dice):
+    # SRD 5.2.1: длинный отдых возвращает все потраченные кости хитов, а не половину.
     c = make_character(hit_dice_max=hit_dice_max, hit_dice=hit_dice)
 
     rested, _ = long_rest(c, srd)
 
-    assert rested.hit_dice == expected
+    assert rested.hit_dice == hit_dice_max
 
 
 def test_long_rest_resets_death_saves(make_character, srd):
@@ -384,6 +375,18 @@ def test_long_rest_gives_a_dead_character_nothing(make_character, srd):
     assert outcome == RestOutcome(
         character_id="pc-1", hp_gained=0, hit_dice_spent=0, rolls=[], restored=[]
     )
+
+
+def test_long_rest_returns_every_hit_die_to_a_knocked_out_hero_but_none_to_a_dead_one(
+    make_character, srd
+):
+    # Без сознания на нуле хитов — живой: длинный отдых будит его и возвращает все кости.
+    # Мёртвому отдых ничего не даёт, и потраченные кости остаются потраченными.
+    knocked, _ = long_rest(knocked_out(make_character, hit_dice=0), srd)
+    gone, _ = long_rest(dead(make_character, hit_dice=0), srd)
+
+    assert knocked.hit_dice == knocked.hit_dice_max == 3
+    assert gone.hit_dice == 0
 
 
 def test_short_rest_gives_a_dead_character_nothing_and_rolls_no_dice(make_character, srd):
@@ -787,7 +790,7 @@ def test_arcane_recovery_of_a_dead_wizard_changes_nothing(make_character, srd):
     assert outcome.restored == []
 
 
-# --- короткий привал по кнопке: кость хитов по одной и конец отдыха (DND-2, B9) ---
+# --- короткий привал по кнопке: кость хитов по одной и конец отдыха ---
 
 
 @pytest.mark.parametrize("seed", range(5))
@@ -959,7 +962,7 @@ def test_short_rest_is_hit_dice_one_by_one_and_then_the_end_of_the_rest(make_cha
     )
 
 
-# --- финальное покрытие B9: границы кости хитов и конца короткого отдыха ---
+# --- границы кости хитов и конца короткого отдыха ---
 
 
 @pytest.mark.parametrize(

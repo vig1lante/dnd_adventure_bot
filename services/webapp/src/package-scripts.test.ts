@@ -2,8 +2,8 @@ import packageJson from "../package.json";
 
 const { scripts } = packageJson;
 
-// Команды из плана B1.4: на них опираются README, CLAUDE.md и сам цикл.
-test("скрипты package.json совпадают с планом", () => {
+// На эти команды опирается README.
+test("скрипты package.json совпадают с ожидаемыми", () => {
   expect(scripts).toMatchObject({
     dev: "vite",
     build: "tsc -b && vite build",

@@ -296,7 +296,7 @@ function PickCarousel<T extends CarouselItem>({
   );
 }
 
-/** Листание рас (спека §7): в быстром и подробном создании. */
+/** Листание рас: в быстром и подробном создании. */
 export function RaceCarousel({ options, value, onChange }: PickProps) {
   return (
     <PickCarousel

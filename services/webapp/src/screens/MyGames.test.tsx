@@ -138,7 +138,7 @@ describe("список игр", () => {
     ]);
   });
 
-  test("сервер без даты (до B11) или с непонятной датой: строка как раньше, без «создана»", async () => {
+  test("сервер без даты (старый) или с непонятной датой: строка как раньше, без «создана»", async () => {
     const old = gameSummary({ id: "g2", adventure_title: "Старая" });
     delete old.created_at;
     renderMyGames({
@@ -594,8 +594,6 @@ describe("вкладка «Приключения»: только для соз�
     expect(tab("Мои игры")).toHaveAttribute("aria-selected", "true");
   });
 });
-
-// --- финальное покрытие блока 4 ---
 
 describe("вкладка «Приключения»: уход со вкладки", () => {
   const tick = (ms: number) =>

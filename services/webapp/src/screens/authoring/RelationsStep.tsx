@@ -9,7 +9,7 @@ import { ID_HINT, RELATION_KINDS } from "./labels";
 import { LockToggle } from "./LockToggle";
 import { RefPicker } from "./RefPicker";
 
-/** Концы связи — NPC, фракции, боги и места (спека §8, дополнение B5 §6). */
+/** Концы связи — NPC, фракции, боги и места. */
 const ENDS: readonly RefKind[] = ["npc", "faction", "deity", "location"];
 
 const KIND_OPTIONS = (Object.keys(RELATION_KINDS) as RelationKind[]).map(

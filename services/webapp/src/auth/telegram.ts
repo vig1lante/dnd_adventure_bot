@@ -44,7 +44,7 @@ function bestEffort(step: () => void, name: string): void {
 
 /**
  * Запускает SDK внутри Telegram: тема доступна как CSS-переменные `--tg-theme-*`
- * (светлую или тёмную палитру выбирает B8.1a по `themeParams.isDark()`), а при
+ * (светлую или тёмную палитру выбирают по `themeParams.isDark()`), а при
  * закрытии Mini App Telegram спрашивает подтверждение, чтобы не потерять черновик хода.
  */
 export function setupTelegram(): void {

@@ -1,7 +1,7 @@
 import { readSource } from "../styles/read-source";
 
 // Экран игры строится из токенов и элементов src/ui: своих цветов, шрифтов и анимаций
-// в его стилях быть не должно (решение владельца о стиле, B8.1a).
+// в его стилях быть не должно (решение владельца о стиле).
 const STYLE_FILE = "../components/game.css";
 
 const COMPONENTS = [

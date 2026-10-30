@@ -1,4 +1,4 @@
-"""Тесты фабрики провайдеров (план B5.5, спека §2, §7, §14).
+"""Тесты фабрики провайдеров.
 
 Живых моделей, сети и процессов `claude` здесь нет: фабрика только собирает адаптеры, а любой
 сетевой вызов или запуск процесса при сборке — ошибка теста. Адаптеры и SDK-клиенты подменяются
@@ -188,7 +188,7 @@ def cli_settings(**overrides: Any) -> Settings:
 
 
 def fake_settings(tmp_path, text: str = SCENARIO, **overrides: Any) -> Settings:
-    """Тестовый мастер со сценарием из `text`; он собирается только в dev (спека §15)."""
+    """Тестовый мастер со сценарием из `text`; он собирается только в dev."""
     scenario = tmp_path / "scenario.yaml"
     scenario.write_text(text, encoding="utf-8")
     values = {"llm_provider": "fake", "fake_llm_scenario": scenario, "app_env": "dev"}
@@ -243,8 +243,8 @@ async def test_fake_providers_of_different_games_have_own_turn_queues(tmp_path):
     ],
 )
 def test_fake_is_refused_in_prod_even_with_a_scenario(tmp_path, overrides):
-    # Сценарий задан и читается, но в боевом режиме тестового мастера нет (спека §15): без
-    # APP_ENV сервер работает как prod. Ни пути, ни содержимого сценария в тексте нет.
+    # Сценарий задан и читается, но в боевом режиме тестового мастера нет: без APP_ENV сервер
+    # работает как prod. Ни пути, ни содержимого сценария в тексте нет.
     values = {key: value for key, value in overrides.items() if value is not None}
     scenario = fake_settings(tmp_path).fake_llm_scenario
     settings = make_settings(llm_provider="fake", fake_llm_scenario=scenario, **values)
@@ -439,7 +439,7 @@ def test_anthropic_client_has_explicit_timeout_and_retries(spy):
 
     make_provider(anthropic_settings())
 
-    # Тайм-аут запроса не больше тайм-аута хода (180 с), повторы 429/5xx делает SDK (спека §12).
+    # Тайм-аут запроса не больше тайм-аута хода (180 с), повторы 429/5xx делает SDK.
     assert 0 < clients.only["timeout"] <= 180
     assert clients.only["max_retries"] == 2
 
@@ -741,9 +741,9 @@ def test_claude_cli_without_internal_url_is_config_error(internal_url):
 
 
 def test_claude_cli_is_not_built_from_the_anthropic_llm_settings():
-    # LLM_MODEL, LLM_EFFORT и LLM_CHEAP_MODEL — настройки Anthropic API: у CLI свои CLAUDE_CLI_*
-    # (спека DND-2 §11), поэтому неверный для CLI LLM_EFFORT его сборку не ломает. Модель игры
-    # («host-model» — допустимое имя) CLI получает сам: она сильнее окружения.
+    # LLM_MODEL, LLM_EFFORT и LLM_CHEAP_MODEL — настройки Anthropic API: у CLI свои CLAUDE_CLI_*,
+    # поэтому неверный для CLI LLM_EFFORT его сборку не ломает. Модель игры («host-model» —
+    # допустимое имя) CLI получает сам: она сильнее окружения.
     settings = cli_settings(llm_model="claude-x", llm_effort="turbo", llm_cheap_model="claude-y")
 
     provider = make_provider(

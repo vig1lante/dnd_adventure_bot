@@ -5,6 +5,8 @@ import type { ConnectionStatus, Rejection } from "./ws";
 import type { WsEvent } from "./types";
 
 const TOKEN = "tok-secret-123";
+// Имя подпротокола — договор с сервером: он отвечает только им и берёт токен вторым значением.
+const PROTOCOL = "dnd-game.v1";
 const SNAPSHOT = { type: "snapshot", server_time: "2026-10-20T12:00:00+00:00" };
 
 // Подключения слушают окно и документ (online, visibilitychange): тест, не закрывший своё,
@@ -49,42 +51,41 @@ beforeEach(() => {
 });
 
 describe("gameSocketUrl: адрес сокета", () => {
-  test("http даёт ws, а токен идёт в query", () => {
+  test("http даёт ws; токена и query в адресе нет", () => {
     expect(
-      gameSocketUrl("g1", "tok", { protocol: "http:", host: "localhost:5173" }),
-    ).toBe("ws://localhost:5173/ws/games/g1?token=tok");
+      gameSocketUrl("g1", { protocol: "http:", host: "localhost:5173" }),
+    ).toBe("ws://localhost:5173/ws/games/g1");
   });
 
   test("https даёт wss: Mini App в Telegram открывается по https", () => {
     expect(
-      gameSocketUrl("g1", "tok", { protocol: "https:", host: "app.example" }),
-    ).toBe("wss://app.example/ws/games/g1?token=tok");
+      gameSocketUrl("g1", { protocol: "https:", host: "app.example" }),
+    ).toBe("wss://app.example/ws/games/g1");
   });
 
-  test("id игры и токен экранируются", () => {
-    const url = gameSocketUrl("a/b", "t&x=1 2", {
-      protocol: "http:",
-      host: "h",
-    });
-
-    expect(url).toBe("ws://h/ws/games/a%2Fb?token=t%26x%3D1%202");
+  test("id игры экранируется", () => {
+    expect(gameSocketUrl("a/b?c", { protocol: "http:", host: "h" })).toBe(
+      "ws://h/ws/games/a%2Fb%3Fc",
+    );
   });
 
   test("по умолчанию берётся адрес страницы", () => {
-    expect(gameSocketUrl("g1", "tok")).toBe(
+    expect(gameSocketUrl("g1")).toBe(
       `${window.location.protocol === "https:" ? "wss:" : "ws:"}//` +
-        `${window.location.host}/ws/games/g1?token=tok`,
+        `${window.location.host}/ws/games/g1`,
     );
   });
 });
 
 describe("connectGame: подключение", () => {
-  test("сразу открывает сокет игры с токеном в адресе", () => {
+  test("сразу открывает сокет игры: адрес без токена, токен — вторым подпротоколом", () => {
     const { sockets, last } = connect("g7");
 
     expect(sockets).toHaveLength(1);
-    expect(last().url).toBe(gameSocketUrl("g7", TOKEN));
-    expect(last().url).toContain(`/ws/games/g7?token=${TOKEN}`);
+    expect(last().url).toBe(gameSocketUrl("g7"));
+    expect(last().url).not.toContain(TOKEN);
+    expect(last().url).not.toContain("?");
+    expect(last().protocols).toEqual([PROTOCOL, TOKEN]);
   });
 
   test("события сервера по порядку доходят до onEvent разобранными", () => {
@@ -214,13 +215,14 @@ describe("connectGame: переподключение", () => {
     expect(connection.statuses).toEqual(["open", "reconnecting", "open"]);
   });
 
-  test("повторное подключение идёт на тот же адрес с тем же токеном", () => {
+  test("повторное подключение идёт на тот же адрес с тем же токеном в подпротоколе", () => {
     const connection = connect("g9");
     connection.last().open();
 
     const again = reconnectAfter(connection, 1000);
 
-    expect(again.url).toBe(gameSocketUrl("g9", TOKEN));
+    expect(again.url).toBe(gameSocketUrl("g9"));
+    expect(again.protocols).toEqual([PROTOCOL, TOKEN]);
   });
 
   test("события нового сокета доходят до onEvent, как и прежнего", () => {
@@ -311,7 +313,7 @@ describe("connectGame: отказ в доступе", () => {
     expect(connection.rejections).toEqual(["kicked"]);
   });
 
-  // Финальное покрытие B11: признак исключения уточняет только 4403.
+  // Признак исключения уточняет только 4403.
   test("кадр kicked, а сокет закрыт 4401 — отказ «unauthorized»: недействительная сессия важнее", () => {
     const connection = connect();
     connection.last().open();
@@ -459,7 +461,8 @@ describe("connectGame: ожидание pong", () => {
     expect(connection.sockets).toHaveLength(1);
     vi.advanceTimersByTime(1);
     expect(connection.sockets).toHaveLength(2);
-    expect(connection.last().url).toBe(gameSocketUrl("g1", TOKEN));
+    expect(connection.last().url).toBe(gameSocketUrl("g1"));
+    expect(connection.last().protocols).toEqual([PROTOCOL, TOKEN]);
   });
 
   test("зависшее соединение не отказ: обработчик отказа не вызывается", () => {
@@ -621,6 +624,22 @@ describe("connectGame: возврат связи (online и visibilitychange)", 
     becomeVisible();
 
     expect(connection.sockets).toHaveLength(2);
+  });
+
+  test("сокеты, открытые по online и по возврату на вкладку, — тот же адрес без токена и токен вторым подпротоколом", () => {
+    const connection = connect("g5");
+    connection.last().open();
+    connection.last().drop(1006);
+    window.dispatchEvent(new Event("online"));
+    connection.last().drop(1006);
+    becomeVisible();
+
+    expect(connection.sockets).toHaveLength(3);
+    for (const socket of connection.sockets) {
+      expect(socket.url).toBe(gameSocketUrl("g5"));
+      expect(socket.url).not.toContain(TOKEN);
+      expect(socket.protocols).toEqual([PROTOCOL, TOKEN]);
+    }
   });
 
   test("быстрые повторы по online не сбрасывают лестницу задержек", () => {

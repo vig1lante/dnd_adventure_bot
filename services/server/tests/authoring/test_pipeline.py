@@ -1,5 +1,4 @@
-"""Генератор приключений: полный проход шагов, сборка, проверка и круги исправления (план DND-2
-B3.1, спека §9; основа — план DND-1 B5.6).
+"""Генератор приключений: полный проход шагов, сборка, проверка и круги исправления.
 
 `generate(provider, draft, progress)` проходит пустые шаги черновика по порядку, собирает
 приключение, проверяет его валидатором движка и проверкой находок тайн мест и возвращает ошибки
@@ -207,7 +206,7 @@ async def test_adventure_is_assembled_from_the_steps():
 
 
 async def test_the_world_factions_and_relations_have_their_own_sections_v2():
-    # Генератор DND-1 складывал мир строкой в заметки стартовой локации; v2 пишет разделы.
+    # Генератор первой версии складывал мир строкой в заметки стартовой локации; v2 пишет разделы.
     result, _ = await run_generation()
     adventure = result.adventure
 
@@ -297,7 +296,7 @@ async def test_the_srd_monsters_of_the_encounter_step_carry_the_numbers_of_their
     ]
 
 
-# Указания модели живут в файлах ролей (спека Р2); в запросе шага — только метки блоков и числа.
+# Указания модели живут в файлах ролей; в запросе шага — только метки блоков и числа.
 INSTRUCTIONS = ("не должен", "должна", "исправь", "называй", "верни", "не меняй")
 
 
@@ -1541,7 +1540,7 @@ async def test_an_inapplicable_reveal_of_a_locked_location_is_moved_by_its_own_s
     )
 
 
-# --- свой статблок: опыт по cr (дополнение dispatcher B6 §4) ---
+# --- свой статблок: опыт по cr ---
 
 
 def with_custom_monster(adventure: Adventure, **changes: Any) -> Adventure:
@@ -1603,7 +1602,7 @@ async def test_srd_monsters_of_an_encounter_need_no_xp_rule():
     assert all(issue.code != "custom_monster_xp" for issue in report.issues)
 
 
-# --- финальное покрытие B6: опыт своего статблока по каждой паре SRD и на краях ---
+# --- опыт своего статблока по каждой паре SRD и на краях ---
 
 SRD_PAIRS = sorted({(m.cr, m.xp) for m in load_srd().monsters.values()})
 

@@ -5,7 +5,7 @@ import { PREVIEW_SCREENS, screensPreviewOf, wantsScreensPreview } from "./gate";
 import type { PreviewScreen } from "./gate";
 import ScreensPreview from "./ScreensPreview";
 
-// Макеты B10.1: страница `/?preview=screens` показывает настоящие экраны на данных
+// Макеты экранов: страница `/?preview=screens` показывает настоящие экраны на данных
 // screenData.ts («как есть») и черновики новых элементов («как будет»). Сервер не нужен:
 // запросы и сокет игры обслуживает подмена самого превью, в сеть ничего не уходит.
 
@@ -52,7 +52,7 @@ describe("гейт превью экранов", () => {
     expect(screensPreviewOf("?preview=style&screen=story")).toBeNull();
   });
 
-  test("в списке есть все ключевые экраны плана B10.1", () => {
+  test("в списке есть все ключевые экраны", () => {
     expect(PREVIEW_SCREENS).toEqual(
       expect.arrayContaining([
         "login",
@@ -268,7 +268,7 @@ describe("страница превью экранов", () => {
     expect(screen.queryByRole("switch", { name: /Звук/ })).toBeNull();
   });
 
-  // B10.3 сделал настоящие настройки: «как есть» больше не говорит, что их нет (дополнение §9 п. 2).
+  // Настройки теперь настоящие: «как есть» больше не говорит, что их нет.
   test("настройки «как есть» — настоящая панель настроек приложения", async () => {
     openPreview("settings", "now");
 

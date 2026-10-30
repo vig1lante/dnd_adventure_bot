@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { defineConfig, devices } from "@playwright/test";
 
-// Сквозной тест «6 игроков» (план B8.7). Dev-сервер Vite поднимает `webServer`, а сервер игры
+// Сквозной тест «6 игроков». Dev-сервер Vite поднимает `webServer`, а сервер игры
 // с `FakeProvider` и временной базой поднимает фикстура `e2e/server.ts` (ей нужен перезапуск).
 // Оба слушают свободные порты 127.0.0.1, а не 8000 и 5173: на них может работать сервер владельца.
 

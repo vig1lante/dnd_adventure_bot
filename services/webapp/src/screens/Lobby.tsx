@@ -229,7 +229,7 @@ function PlayerRow({
   onKick,
 }: PlayerRowProps) {
   const status = statusOf(player);
-  // Имя героя видят все (контракт B11, §1 п. 3); сервер до B11 его не присылает.
+  // Имя героя видят все; старый сервер его не присылает.
   const heroName = player.hero_name ?? "";
   return (
     <li className="lobby-player">

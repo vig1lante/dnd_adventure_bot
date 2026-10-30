@@ -1,4 +1,4 @@
-"""Сквозные сценарии боя блока B3: от `start_combat` до `combat_winner` и привала после боя.
+"""Сквозные сценарии боя: от `start_combat` до `combat_winner` и привала после боя.
 
 Отдельные функции боя проверяют `test_combat_*.py`; здесь они собираются вместе, как их будет
 собирать оркестратор: бросок инициативы, перемещение, атаки, заклинания, смерть и спасброски
@@ -200,7 +200,7 @@ def monsters_in(srd: SrdContent, *placements: tuple[str, str]):
 def go_to_camp(state: GameState, srd: SrdContent) -> tuple[GameState, list[Event]]:
     """Бой позади, отряд устраивается на привал; конец сцены разыгрывают триггеры набора правил.
 
-    Так поступит инструмент `end_scene` (B4.7): сначала новая сцена, затем триггеры конца сцены
+    Так поступит инструмент `end_scene`: сначала новая сцена, затем триггеры конца сцены
     в порядке набора. Пока что его роль играет этот помощник."""
     camp = state.model_copy(update={"combat": None, "scene": Scene(type=SceneType.CAMP)})
     events: list[Event] = []
@@ -407,7 +407,7 @@ def test_a_fight_from_initiative_to_the_morning_after_the_camp(crypt, srd):
         assert c.hp == c.hp_max == 20
         assert c.buffs == [] and c.concentration is None  # длинный отдых заканчивает эффекты
     assert camp.party[CLERIC].spell_slots == {1: 4, 2: 2}
-    assert camp.time == GameTime(day=2, part="morning")  # утро следующего дня
+    assert camp.time == GameTime(day=2, hour=8)  # утро следующего дня, 8:00
     assert camp.short_rests_since_long == 0
     (rest,) = events
     assert isinstance(rest, RestEvent) and rest.rest == "long"
@@ -652,7 +652,7 @@ def test_the_camp_after_any_fight_gets_every_living_character_back_on_their_feet
     assert isinstance(rest, RestEvent)
     assert [o.character_id for o in rest.outcomes] == list(end.party)
     assert camp.combat is None and camp.scene.type == SceneType.CAMP
-    assert camp.time == GameTime(day=2, part="morning") and camp.short_rests_since_long == 0
+    assert camp.time == GameTime(day=2, hour=8) and camp.short_rests_since_long == 0
     for character_id, before in end.party.items():
         after = camp.party[character_id]
         if is_dead(before):

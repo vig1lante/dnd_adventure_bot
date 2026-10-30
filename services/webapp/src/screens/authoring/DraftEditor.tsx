@@ -11,7 +11,7 @@ import type {
   StepState,
 } from "../../api/types";
 import { useReducedMotion } from "../../theme/motion";
-import { Button, Card, ErrorState, Skeleton } from "../../ui";
+import { Alert, Button, Card, ErrorState, Skeleton } from "../../ui";
 import { ErrorAlert } from "../fields";
 import { useAction, useLoaded } from "../hooks";
 import { CluesStep } from "./CluesStep";
@@ -19,7 +19,7 @@ import { ContentsStep } from "./ContentsStep";
 import { DeitiesStep } from "./DeitiesStep";
 import { EncountersStep } from "./EncountersStep";
 import { FactionsStep } from "./FactionsStep";
-import { ConflictDialog } from "./fields";
+import { AlertDialog, ConflictDialog } from "./fields";
 import type {
   DraftRefs,
   FocusTarget,
@@ -28,6 +28,7 @@ import type {
   StepFormProps,
 } from "./fields";
 import { sameData } from "./fieldValues";
+import { focusedElement } from "./focus";
 import { GeneratePanel } from "./GeneratePanel";
 import { ItemsStep } from "./ItemsStep";
 import { isActive } from "./jobs";
@@ -46,7 +47,7 @@ import type { EditorScreen, EditorStep } from "./steps";
 import { WorldStep } from "./WorldStep";
 import "./authoring.css";
 
-/** Как часто спрашивать сервер о задании (контракт B4, §5). */
+/** Как часто спрашивать сервер о задании. */
 export const POLL_MS = 2000;
 
 interface StepForm {
@@ -57,7 +58,7 @@ interface StepForm {
   sections: readonly DraftSection[];
   /**
    * Разделы, которые пишет генерация шага экрана; по умолчанию — те же `sections`. Генерация
-   * Замысла пишет и откровения «Улик» (`_merge_concept`, контракт B3), генерация «Наполнения» —
+   * Замысла пишет и откровения «Улик» (`_merge_concept`), генерация «Наполнения» —
    * только локации.
    */
   generates?: readonly DraftSection[];
@@ -75,7 +76,7 @@ interface StepForm {
   srd?: true;
 }
 
-// Экран (шаг генерации) → разделы черновика (дополнения B4 §2, B5 §2, B6 §1).
+// Экран (шаг генерации) → разделы черновика.
 const STEP_FORMS: Record<EditorStep, StepForm> = {
   concept: {
     sections: ["settings"],
@@ -260,20 +261,88 @@ interface HeldForm {
   saved: Draft;
 }
 
+interface DeleteDraftProps {
+  draftId: string;
+  /** Правка закрыта (идёт задание или запись): удалять тоже нельзя, сервер ответил бы 409. */
+  disabled: boolean;
+  onDeleted: () => void;
+}
+
+/**
+ * «Удалить черновик» с вопросом-подтверждением, как у публикации: первое нажатие спрашивает,
+ * второе удаляет. Опубликованное из черновика приключение остаётся — у него своя запись.
+ */
+function DeleteDraft({ draftId, disabled, onDeleted }: DeleteDraftProps) {
+  const api = useApi();
+  const { busy, error, run } = useAction();
+  // Открытый вопрос и кнопка, с которой он задан: на неё вернётся фокус после ответа.
+  const [confirming, setConfirming] = useState<{ from: HTMLElement } | null>(
+    null,
+  );
+
+  const remove = async () => {
+    setConfirming(null);
+    if (await run(() => api.deleteDraft(draftId))) onDeleted();
+  };
+
+  return (
+    <div className="screen-stack">
+      <div>
+        <Button
+          variant="secondary"
+          busy={busy}
+          disabled={disabled}
+          onClick={(event) => setConfirming({ from: event.currentTarget })}
+        >
+          Удалить черновик
+        </Button>
+      </div>
+      {confirming !== null && (
+        <AlertDialog
+          title="Удалить черновик?"
+          returnFocus={confirming.from}
+          actions={
+            <>
+              <Button
+                variant="danger"
+                disabled={disabled}
+                onClick={() => void remove()}
+              >
+                Да, удалить
+              </Button>
+              <Button variant="secondary" onClick={() => setConfirming(null)}>
+                Отмена
+              </Button>
+            </>
+          }
+        >
+          <p className="screen-muted">
+            Черновик пропадёт насовсем. Опубликованное приключение останется в
+            каталоге и играх.
+          </p>
+        </AlertDialog>
+      )}
+      {error !== null && <Alert>{error}</Alert>}
+    </div>
+  );
+}
+
 interface EditorProps {
   initial: Draft;
   step: EditorScreen;
   onStep: (step: EditorScreen) => void;
   /** Перечитать черновик с сервера (конфликт версии, сорванный опрос). */
   onReload: () => void;
+  /** Черновик удалён: редактор закрывается к списку. */
+  onDeleted: () => void;
 }
 
-function Editor({ initial, step, onStep, onReload }: EditorProps) {
+function Editor({ initial, step, onStep, onReload, onDeleted }: EditorProps) {
   const api = useApi();
   const reducedMotion = useReducedMotion();
   const [draft, setDraft] = useState(initial);
   const [job, setJob] = useState(initial.job);
-  // Задание, которое упало ещё до открытия черновика, — не ошибка этого входа (ревью B4):
+  // Задание, которое упало ещё до открытия черновика, — не ошибка этого входа:
   // спокойная заметка, а если черновик с тех пор менялся — ничего.
   const [failedBefore] = useState(
     initial.job?.status === "failed" ? initial.job.id : null,
@@ -281,7 +350,7 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
   const pastFailure = job !== null && job.id === failedBefore;
   const outdatedFailure =
     pastFailure && changedAfter(draft.steps, job.finished_at ?? job.created_at);
-  // Формы, чья запись оборвалась на втором разделе (B6 R7): правки остаются в форме.
+  // Формы, чья запись оборвалась на втором разделе: правки остаются в форме.
   const [held, setHeld] = useState<Partial<Record<EditorStep, HeldForm>>>({});
   /**
    * Ключ формы экрана — данные её разделов: форма начинается заново, когда они поменялись. После
@@ -302,7 +371,11 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
   >(null);
   const panels = useRef<Partial<Record<EditorScreen, HTMLElement | null>>>({});
   const [pollError, setPollError] = useState<string | null>(null);
-  const [conflict, setConflict] = useState(false);
+  // Вопрос о конфликте версий и элемент, с которого начата отвергнутая запись (`null` — фокуса
+  // не было): к появлению вопроса он уже без фокуса — форма закрыта на время записи.
+  const [conflict, setConflict] = useState<{ from: HTMLElement | null } | null>(
+    null,
+  );
   // Несколько записей подряд оборвались не на первой: часть правок уже на сервере.
   const [partial, setPartial] = useState<string | null>(null);
   // Есть ли несохранённые правки на экранах. Экраны с общим разделом («Карта» и «Наполнение»,
@@ -339,7 +412,7 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
       ? null
       : `${onScreens(others)} есть несохранённые правки: они пропадут.`;
   };
-  // Проверка и публикация видят только сохранённый черновик (замечание R12 B6).
+  // Проверка и публикация видят только сохранённый черновик.
   const unsavedScreens = EDITOR_STEPS.filter(
     ({ step: screen }) => unsaved[screen] === true,
   ).map(({ label }) => label);
@@ -399,16 +472,20 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
     };
   }, [api, draft.id, activeJobId]);
 
-  // Запись в черновик идёт с его версией; чужая версия — диалог, а не текст ошибки.
+  // Запись в черновик идёт с его версией; чужая версия — диалог, а не текст ошибки. Открытый
+  // вопрос закрывается на время записи: новый отказ показывает его заново, с фокусом и прокруткой.
+  // Элемент в фокусе запоминается до того, как форма закроется на время записи.
   const write = (action: () => Promise<void>) =>
     run(async () => {
+      const from = focusedElement();
+      setConflict(null);
       setPartial(null);
       setWritten(null);
       try {
         await action();
       } catch (failure) {
         if (!isVersionConflict(failure)) throw failure;
-        setConflict(true);
+        setConflict({ from });
       }
     });
 
@@ -547,10 +624,16 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
 
   return (
     <div className="screen-stack">
-      {conflict && (
+      <DeleteDraft
+        draftId={draft.id}
+        disabled={activeJobId !== null || busy}
+        onDeleted={onDeleted}
+      />
+      {conflict !== null && (
         <ConflictDialog
+          returnFocus={conflict.from}
           onRefresh={onReload}
-          onCancel={() => setConflict(false)}
+          onCancel={() => setConflict(null)}
         />
       )}
       <StepNav draft={draft} current={step} onSelect={onStep} />
@@ -623,7 +706,7 @@ function Editor({ initial, step, onStep, onReload }: EditorProps) {
                           icon="d20"
                           aria-label={`Перегенерировать: ${name}`}
                           // После генерации форма начнётся заново с черновиком сервера, поэтому
-                          // при несохранённых правках кнопка закрыта (как «Закрепить», B4 §10).
+                          // при несохранённых правках кнопка закрыта (как «Закрепить»).
                           // Закреплённое генерация не меняет: сервер ответил бы 422 step_locked.
                           title={dirty ? "Сначала сохраните раздел" : undefined}
                           disabled={
@@ -728,6 +811,7 @@ export function DraftEditor({ draftId, onClose }: DraftEditorProps) {
             step={step}
             onStep={setStep}
             onReload={reload}
+            onDeleted={onClose}
           />
         )}
       </div>

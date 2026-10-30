@@ -1,6 +1,6 @@
-"""Доступ ко всем маршрутам `/api` одним обходом (план B6.2, финальное покрытие блока).
+"""Доступ ко всем маршрутам `/api` одним обходом.
 
-Тесты пунктов проверяют вход по месту: «этот маршрут без токена — 401». Здесь то же самое сделано
+Отдельные тесты проверяют вход по месту: «этот маршрут без токена — 401». Здесь то же самое сделано
 для всех маршрутов, которые приложение подключило, в dev и в prod: маршрут, добавленный позже и
 забывший зависимость входа, ответит не 401, и этот тест упадёт. Публичных маршрутов ровно четыре и
 они перечислены явно; внутренний API (`/internal`, только dev) защищён по-своему — токеном хода и
@@ -37,8 +37,8 @@ PUBLIC = frozenset(
 )
 # Какие префиксы вообще бывают у маршрутов приложения; новый префикс требует решения о доступе.
 KNOWN_PREFIXES = ("/health", "/api/", "/ws/", "/internal/")
-# Маршруты только для создателей игр: конструктор приключений (DND-2 B4.1), копия приключения
-# каталога в черновик и справочник монстров SRD (B6.1).
+# Маршруты только для создателей игр: конструктор приключений, копия приключения каталога в черновик
+# и справочник монстров SRD.
 CREATOR_ONLY_PREFIXES = ("/api/drafts", "/api/adventures/{adventure_id}/draft", "/api/srd/")
 
 
@@ -99,7 +99,7 @@ async def test_every_protected_route_is_401_without_a_token(settings, db, route_
         routes = protected_routes(route_table, app)
         statuses = {route: await http.request(route[0], concrete(route[1])) for route in routes}
 
-    assert len(routes) >= 12  # обход видит маршруты всех пунктов блока
+    assert len(routes) >= 12  # обход видит маршруты всех роутеров
     for route, response in statuses.items():
         assert response.status_code == 401, route
         assert isinstance(response.json()["detail"], str), route
@@ -160,8 +160,8 @@ async def test_every_protected_route_is_401_with_a_foreign_expired_or_broken_tok
 async def test_every_route_of_the_constructor_is_403_for_a_player_who_may_not_create_games(
     settings, db, route_table, app_env
 ):
-    # Конструктор — только для создателей игр (спека Р7, §10.3). Игрок с Telegram-id вне списка
-    # не создатель ни в dev, ни в prod; отказ в праве идёт раньше проверки тела и черновика.
+    # Конструктор — только для создателей игр. Игрок с Telegram-id вне списка не создатель ни в dev,
+    # ни в prod; отказ в праве идёт раньше проверки тела и черновика.
     async with db() as session:
         user = User(tg_id=4242, name="Игрок")
         session.add(user)

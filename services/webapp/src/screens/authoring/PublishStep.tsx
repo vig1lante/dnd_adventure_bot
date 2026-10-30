@@ -14,7 +14,7 @@ import type { EditorScreen } from "./steps";
 import { useDraftReport } from "./useDraftReport";
 
 // Отказы публикации, которые исправляют на «Замысле»: id не задан, занят или уже закреплён
-// прежней публикацией (B6 §6).
+// прежней публикацией.
 const FIX_ON_CONCEPT = new Set([
   "no_adventure_id",
   "id_taken",
@@ -99,6 +99,9 @@ export function PublishStep({ draft, onGo, onReload }: PublishStepProps) {
   const [conflict, setConflict] = useState(false);
   const [published, setPublished] = useState<PublishResult | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // Кнопка «Опубликовать», с которой начата публикация: на неё возвращается фокус после ответа
+  // на вопросы экрана, хотя на время запроса она занята и фокус теряет.
+  const [publishFrom, setPublishFrom] = useState<HTMLElement | null>(null);
   const open = openItems(draft);
   const errors = report.status === "ready" ? report.data.errors.length : null;
   const noId = draft.adventure_id === null;
@@ -147,7 +150,7 @@ export function PublishStep({ draft, onGo, onReload }: PublishStepProps) {
           <p>Пока проверки нет, публикация закрыта.</p>
         </ErrorState>
       )}
-      {/* Проверка отбрасывает находки пустых шагов (B4 §8), публикация проверяет всё (B6 §6). */}
+      {/* Проверка отбрасывает находки пустых шагов, публикация проверяет всё. */}
       {report.status === "ready" && report.data.readiness_percent < 100 && (
         <p className="form-field__hint">
           Проверка показывает находки только заполненных шагов; при публикации
@@ -169,7 +172,8 @@ export function PublishStep({ draft, onGo, onReload }: PublishStepProps) {
           icon="seal"
           busy={busy}
           disabled={!canPublish}
-          onClick={() => {
+          onClick={(event) => {
+            setPublishFrom(event.currentTarget);
             if (open.length > 0) setConfirming(true);
             else void publish();
           }}
@@ -180,6 +184,7 @@ export function PublishStep({ draft, onGo, onReload }: PublishStepProps) {
       {confirming && (
         <AlertDialog
           title="Предметы лежат открыто"
+          returnFocus={publishFrom}
           actions={
             <>
               <Button onClick={() => void publish()}>
@@ -216,6 +221,7 @@ export function PublishStep({ draft, onGo, onReload }: PublishStepProps) {
       )}
       {conflict && (
         <ConflictDialog
+          returnFocus={publishFrom}
           onRefresh={onReload}
           onCancel={() => setConflict(false)}
         />

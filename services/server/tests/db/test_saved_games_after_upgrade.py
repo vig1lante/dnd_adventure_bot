@@ -1,4 +1,4 @@
-"""Сохранённая игра переживает обновление сервера (план B6.1, инвариант «в»).
+"""Сохранённая игра переживает обновление сервера.
 
 Игры хранятся в SQLite, и владелец обновляет сервер, не теряя их. Это ломается двумя способами, и
 оба проверены на данных, записанных не нынешним кодом:
@@ -20,17 +20,18 @@
    записать»). Старый образец читается без потерь: ни одно его поле не потеряно и не изменено
    (`lost_fields`, как у копий приключений), а поля, которых в старой схеме не было, приходят со
    значениями по умолчанию — ровно те, что перечислены в `ADDED_FIELDS` для его версии (путь
-   поля на любой глубине, `added_fields`). Так версия 2 (DND-2, блок B8) добавила дневник отряда
-   `journal` и номер раунда игроков `party_round`: снимок версии 1 читается с пустым дневником и
-   раундом 0, а стартовый дневник такой игре открывает сервер (снимок игрока — в памяти, ход
-   мастера — со своим коммитом). Версия 3 (DND-2, блок B9) добавила вложенное поле вида привала
-   `scene.rest`: у старых снимков оно `null`, и сцена `camp` без вида — долгий привал DND-1.
-   Версия 4 (DND-2, блок B11) добавила записи дневника раунд последнего дополнения текста
-   `updated_turn`: у записей старых снимков оно `null` — «текст не дополняли».
+   поля на любой глубине, `added_fields`). Так версия 2 добавила дневник отряда `journal` и номер
+   раунда игроков `party_round`: снимок версии 1 читается с пустым дневником и раундом 0, а
+   стартовый дневник такой игре открывает сервер (снимок игрока — в памяти, ход мастера — со своим
+   коммитом). Версия 3 добавила вложенное поле вида привала `scene.rest`: у старых снимков оно
+   `null`, и сцена `camp` без вида — долгий привал первой версии игры. Версия 4 добавила записи
+   дневника раунд последнего дополнения текста `updated_turn`: у записей старых снимков оно `null`
+   — «текст не дополняли». Версия 5 добавила часы игры `time.hour`: у старых снимков час — начало
+   сохранённой части суток (`DAY_PART_STARTS`), так что игра, шедшая вечером, остаётся вечерней.
 3. Копия приключения хранится по поколениям формата: `golden/adventure_v<N>.json` — дамп
    `model_dump(mode="json")` приключения `demo-crypt` тем кодом, который писал копии формата N.
-   `adventure_v1.json` — копия DND-1 (без `format_version`), `adventure_v2.json` — формат v2
-   (DND-2, решение Р8). Образец добавляет тот, кто меняет схему `Adventure` несовместимо; прежние
+   `adventure_v1.json` — копия первой версии игры (без `format_version`), `adventure_v2.json` —
+   формат v2. Образец добавляет тот, кто меняет схему `Adventure` несовместимо; прежние
    образцы остаются и читаются всегда — через `adventure_from_data` движка, единственный вход для
    копий игр. Копия текущего формата читается и пишется без изменений, копия старого переводится
    в текущий без потерь. Падение теста чтения образца — сигнал, что сохранённые игры перестали
@@ -61,7 +62,7 @@ from dnd_engine.character import Character
 from dnd_engine.content import load_srd
 from dnd_engine.journal import open_journal
 from dnd_engine.rng import SeededRng
-from dnd_engine.state import GameState, Scene
+from dnd_engine.state import DAY_PART_STARTS, GameState, GameTime, Scene, day_part
 from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.db.models import (
@@ -217,10 +218,17 @@ def journal_without_updates(version: int) -> dict[str, None]:
     return {f"/journal/{index}/updated_turn": None for index in range(len(entries))}
 
 
+def hour_of_the_part(version: int) -> dict[str, int]:
+    """`time.hour` (версия 5) образца `version`: час начала сохранённой части суток."""
+    golden = json.loads(golden_files()[version].read_text(encoding="utf-8"))
+    return {"/time/hour": DAY_PART_STARTS[golden["state"]["time"]["part"]]}
+
+
 ADDED_FIELDS: dict[int, dict[str, Any]] = {
-    1: {"/journal": [], "/party_round": 0, "/scene/rest": None},
-    2: {"/scene/rest": None, **journal_without_updates(2)},
-    3: journal_without_updates(3),
+    1: {"/journal": [], "/party_round": 0, "/scene/rest": None, **hour_of_the_part(1)},
+    2: {"/scene/rest": None, **journal_without_updates(2), **hour_of_the_part(2)},
+    3: {**journal_without_updates(3), **hour_of_the_part(3)},
+    4: hour_of_the_part(4),
 }
 
 
@@ -268,8 +276,8 @@ def test_the_sample_of_the_current_schema_has_every_field_the_server_writes_now(
 
 
 def test_a_snapshot_of_the_first_schema_gets_exactly_the_new_fields_with_their_defaults():
-    # R8: к снимку версии 1 нынешний код добавляет дневник (пустой), раунд игроков (0) и вид
-    # привала у сцены (`null`, блок B9).
+    # К снимку версии 1 нынешний код добавляет дневник (пустой), раунд игроков (0), вид
+    # привала у сцены (`null`) и час игры по части суток (вечер — 18).
     golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
 
     dumped = GameState.model_validate(golden["state"]).model_dump(mode="json")
@@ -278,12 +286,18 @@ def test_a_snapshot_of_the_first_schema_gets_exactly_the_new_fields_with_their_d
     assert (dumped["journal"], dumped["party_round"]) == ([], 0)
     assert set(dumped["scene"]) - set(golden["state"]["scene"]) == {"rest"}
     assert dumped["scene"]["rest"] is None
-    assert ADDED_FIELDS[1] == {"/journal": [], "/party_round": 0, "/scene/rest": None}
+    assert set(dumped["time"]) - set(golden["state"]["time"]) == {"hour"}
+    assert ADDED_FIELDS[1] == {
+        "/journal": [],
+        "/party_round": 0,
+        "/scene/rest": None,
+        "/time/hour": 18,
+    }
 
 
 def test_every_older_schema_gets_the_kind_of_rest_of_the_scene_as_null():
-    # Блок B9: вид привала вложен в сцену (версия 3). Снимок версии до 3 читается с
-    # `scene.rest = null`; у сцены `camp` это долгий привал DND-1, у остальных сцен вида нет.
+    # Вид привала вложен в сцену (версия 3). Снимок версии до 3 читается с `scene.rest = null`;
+    # у сцены `camp` это долгий привал первой версии игры, у остальных сцен вида нет.
     for version, path in golden_files().items():
         if version >= 3:
             continue
@@ -297,7 +311,7 @@ def test_every_older_schema_gets_the_kind_of_rest_of_the_scene_as_null():
 
 
 def test_the_sample_of_the_current_schema_writes_the_kind_of_rest_of_the_scene():
-    # Образец версии 3 записан кодом версии 3: вид привала у сцены лежит в снимке явно.
+    # Образец текущей версии записан её кодом: вид привала у сцены лежит в снимке явно.
     golden = json.loads(golden_files()[GAME_STATE_SCHEMA_VERSION].read_text(encoding="utf-8"))
 
     assert GAME_STATE_SCHEMA_VERSION >= 3
@@ -306,12 +320,12 @@ def test_the_sample_of_the_current_schema_writes_the_kind_of_rest_of_the_scene()
 
 
 def test_the_sample_of_the_current_schema_writes_when_journal_entries_were_last_updated():
-    # Версия 4 (блок B11): у каждой записи дневника поле `updated_turn` лежит в снимке явно;
-    # дополненная запись несёт раунд дополнения, остальные — `null`.
+    # Версия 4: у каждой записи дневника поле `updated_turn` лежит в снимке явно; дополненная
+    # запись несёт раунд дополнения, остальные — `null`.
     golden = json.loads(golden_files()[GAME_STATE_SCHEMA_VERSION].read_text(encoding="utf-8"))
     journal = golden["state"]["journal"]
 
-    assert GAME_STATE_SCHEMA_VERSION == 4
+    assert GAME_STATE_SCHEMA_VERSION >= 4
     assert all("updated_turn" in entry for entry in journal)
     updated = [entry for entry in journal if entry["updated_turn"] is not None]
     assert updated and {entry["updated_turn"] for entry in updated} == {
@@ -320,9 +334,60 @@ def test_the_sample_of_the_current_schema_writes_when_journal_entries_were_last_
     assert all(entry["revision"] > 1 for entry in updated)
 
 
-def test_every_older_schema_reads_its_journal_entries_as_never_updated():
+def test_the_sample_of_the_current_schema_writes_the_hour_of_the_game_time():
+    # Версия 5: у времени игры есть час, а часть суток пишется рядом и сверяется с ним. Час
+    # образца — не начало части (19 — вечер), поэтому круг «прочитать и записать» проверяет, что
+    # час хранится как есть, а не выводится из части.
+    golden = json.loads(golden_files()[GAME_STATE_SCHEMA_VERSION].read_text(encoding="utf-8"))
+    time = golden["state"]["time"]
+
+    assert GAME_STATE_SCHEMA_VERSION == 5
+    assert set(time) == {"day", "hour", "part"}
+    assert time["hour"] not in DAY_PART_STARTS.values()
+    assert time["part"] == day_part(time["hour"])
+    assert GameState.model_validate(golden["state"]).time == GameTime(
+        day=time["day"], hour=time["hour"]
+    )
+
+
+def test_every_older_schema_reads_the_hour_from_its_part_of_the_day():
     for version, path in golden_files().items():
-        if version == GAME_STATE_SCHEMA_VERSION:
+        if version >= 5:
+            continue
+        golden = json.loads(path.read_text(encoding="utf-8"))
+        saved = golden["state"]["time"]
+        assert "hour" not in saved, version
+
+        time = GameState.model_validate(golden["state"]).time
+
+        assert (time.day, time.part) == (saved["day"], saved["part"]), version
+        assert time.hour == DAY_PART_STARTS[saved["part"]], version
+
+
+@pytest.mark.parametrize("part", ["morning", "day", "evening", "night"])
+def test_a_stored_snapshot_of_version_4_gets_the_start_of_its_part_and_is_written_as_version_5(
+    part,
+):
+    # Образцы прежних версий все вечерние; здесь — каждая часть суток через строку базы. Ночь
+    # переходит через полночь, и её начало — 22, а не 0: игра остаётся в той же части суток.
+    golden = json.loads(golden_files()[4].read_text(encoding="utf-8"))
+    data = copy.deepcopy(golden["state"])
+    data["time"] = {"day": 3, "part": part}
+    stored = GameStateSnapshot(game_id=data["game_id"], version=1, schema_version=4, data=data)
+
+    state = stored.to_state()
+    written = GameStateSnapshot.from_state(state)
+
+    assert state.time == GameTime(day=3, hour=DAY_PART_STARTS[part])
+    assert state.time.part == part
+    assert written.schema_version == GAME_STATE_SCHEMA_VERSION == 5
+    assert written.data["time"] == {"day": 3, "hour": DAY_PART_STARTS[part], "part": part}
+
+
+def test_every_older_schema_reads_its_journal_entries_as_never_updated():
+    # Раунд дополнения записей появился в версии 4: снимки до неё читаются с `null` у всех записей.
+    for version, path in golden_files().items():
+        if version >= 4:
             continue
         golden = json.loads(path.read_text(encoding="utf-8"))
 
@@ -419,7 +484,7 @@ def lost_fields(old: Any, new: Any, path: str = "") -> list[str]:
 def test_an_adventure_copy_of_an_older_format_is_read_without_losing_anything(version):
     golden = golden_adventure(version)
     old = copy.deepcopy(golden)
-    moved = [  # связи v1 лежали в NPC, в v2 — в общем графе (решение Р8)
+    moved = [  # связи v1 лежали в NPC, в v2 — в общем графе
         (owner, relation)
         for owner, npc in old["npcs"].items()
         for relation in npc.pop("relations", [])
@@ -510,8 +575,8 @@ def test_a_write_of_the_copy_is_not_a_reading(code):
 
 
 def test_the_server_reads_every_adventure_copy_through_the_engine_entry_point():
-    # Копия игры бывает любого поколения формата: читает её только `adventure_from_data`
-    # движка, а не модель напрямую (B2.2, контракт блока 2); одно поле (название) можно взять.
+    # Копия игры бывает любого поколения формата: читает её только `adventure_from_data` движка, а
+    # не модель напрямую; одно поле (название) можно взять.
     uses = [
         (path.name, use)
         for path in sorted(SERVER_SRC.rglob("*.py"))
@@ -609,8 +674,9 @@ async def test_a_game_saved_on_the_first_revision_is_read_after_upgrade_head(set
 async def test_a_game_with_a_v1_adventure_copy_plays_a_master_round_after_upgrade_head(
     settings, migrate, tmp_path
 ):
-    # Игра DND-1: копия приключения формата v1, связи NPC лежат в самих NPC. После обновления
-    # мастер разбирает по ней раунд (FakeProvider): копия читается, а связи NPC приходят из графа.
+    # Игра первой версии: копия приключения формата v1, связи NPC лежат в самих NPC. После
+    # обновления мастер разбирает по ней раунд (FakeProvider): копия читается, а связи NPC приходят
+    # из графа.
     golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
     await migrate("upgrade", "0001")
     ids = insert_saved_game(sqlite_file(settings.database_url), golden, golden_adventure(1))
@@ -665,7 +731,7 @@ async def test_a_game_with_a_v1_adventure_copy_plays_a_master_round_after_upgrad
 async def test_an_old_game_without_a_journal_shows_the_starting_one_and_saves_it_with_a_turn(
     settings, migrate, tmp_path
 ):
-    # Игра DND-2, начатая до блока B8: снимок схемы 1 без дневника и копия приключения v2 (с
+    # Игра, начатая до дневника отряда: снимок схемы 1 без дневника и копия приключения v2 (с
     # «Главным» и известным со старта). Игрок видит стартовый дневник сразу, а в базе его сохраняет
     # ход мастера (FakeProvider) — тем же коммитом, что и весь ход.
     golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
@@ -708,20 +774,22 @@ async def test_an_old_game_without_a_journal_shows_the_starting_one_and_saves_it
     assert {"intro", "location:village"} <= {entry.ref for entry in starting}
     assert before["journal"] == [entry.model_dump(mode="json") for entry in starting]
     assert "journal" not in old.data  # снимок игрока ничего не записал
-    # Ход пишет снимок текущей схемы (с B11 — версии 4, с раундом дополнения записей дневника).
-    assert new.schema_version == GAME_STATE_SCHEMA_VERSION == 4
+    # Ход пишет снимок текущей схемы (версии 5, с часом игры: у вечерней игры — 18, начало
+    # сохранённой части суток).
+    assert new.schema_version == GAME_STATE_SCHEMA_VERSION == 5
     assert new.data["scene"]["rest"] is None
+    assert new.data["time"] == {"day": 2, "hour": 18, "part": "evening"}
     assert new.to_state().journal == starting
     assert after["journal"] == before["journal"]
 
 
-async def test_a_dnd1_game_opens_the_same_journal_on_every_snapshot_without_writing_it(
+async def test_a_first_version_game_opens_the_same_journal_on_every_snapshot_without_writing_it(
     settings, migrate, tmp_path
 ):
-    # Игра DND-1 (финальное покрытие блока B8): снимок схемы 1 и копия приключения v1. Известного
-    # со старта в копии v1 нет, поэтому стартовый дневник — «Главное» из перевода копии в v2 и
-    # стартовая локация. Снимки подряд открывают один и тот же дневник в памяти и ничего не пишут
-    # в базу, а ход мастера сохраняет ровно его — без дублей от прежних снимков.
+    # Игра первой версии: снимок схемы 1 и копия приключения v1. Известного со старта в копии v1
+    # нет, поэтому стартовый дневник — «Главное» из перевода копии в v2 и стартовая локация. Снимки
+    # подряд открывают один и тот же дневник в памяти и ничего не пишут в базу, а ход мастера
+    # сохраняет ровно его — без дублей от прежних снимков.
     golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
     adventure = golden_adventure(1)
     await migrate("upgrade", "0001")
@@ -789,8 +857,8 @@ async def test_a_dnd1_game_opens_the_same_journal_on_every_snapshot_without_writ
 async def test_a_game_saved_before_the_clock_column_keeps_counting_after_upgrade_head(
     settings, migrate
 ):
-    # Ревизия 0002 (B7.4) завела `clock_at`: идущая игра прежней ревизии не должна обнулить время
-    # игры и должна читаться теми же моделями, что и раньше.
+    # Ревизия 0002 завела `clock_at`: идущая игра прежней ревизии не должна обнулить время игры и
+    # должна читаться теми же моделями, что и раньше.
     golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
     adventure = json.loads(golden_adventures()[1].read_text(encoding="utf-8"))
     await migrate("upgrade", "0001")
@@ -811,7 +879,8 @@ async def test_a_game_saved_before_the_clock_column_keeps_counting_after_upgrade
         # Часы идут с момента старта: накопленные 600 с и прошедшие после него. 600 — условный
         # остаток образца: он показывает, что накопленное миграцией не теряется. Но миграция ставит
         # `clock_at = started_at`, и у игры с ненулевым остатком эти секунды посчитались бы дважды.
-        # Базы B6 такой игры не содержат: `active_seconds` писал только блок B7 (в B6 он всегда 0).
+        # Базы, записанные до появления часов игры, такой игры не содержат: там `active_seconds`
+        # всегда 0.
         assert game.active_time(started + timedelta(seconds=90)) == 690
         assert_read_whole(golden, snapshot.to_state())
         assert view["phase"]["phase"] == "playing" and view["phase"]["remaining_seconds"] is None
@@ -822,9 +891,9 @@ async def test_a_game_saved_before_the_clock_column_keeps_counting_after_upgrade
 async def test_a_game_saved_before_hero_choices_keeps_its_heroes_after_upgrade_head(
     settings, migrate
 ):
-    # Ревизия 0003 (B8.s3) убрала `pending_rolls` и добавила `characters.choices`: игра на ревизии
-    # 0002 с набором характеристик в брошенной таблице продолжает читаться теми же моделями, а
-    # герои отдают лист без выбора — форма «Изменить героя» у них пустая.
+    # Ревизия 0003 убрала `pending_rolls` и добавила `characters.choices`: игра на ревизии 0002 с
+    # набором характеристик в брошенной таблице продолжает читаться теми же моделями, а герои отдают
+    # лист без выбора — форма «Изменить героя» у них пустая.
     golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
     adventure = json.loads(golden_adventures()[1].read_text(encoding="utf-8"))
     await migrate("upgrade", "0002")
@@ -864,8 +933,8 @@ async def test_a_game_saved_before_hero_choices_keeps_its_heroes_after_upgrade_h
 async def test_a_game_saved_before_the_profanity_flag_allows_profanity_after_upgrade_head(
     settings, migrate
 ):
-    # Ревизия 0004 (DND-2 B1.2, решение Р1) завела обязательный флажок мата: игра на ревизии 0003
-    # продолжает читаться теми же моделями, и мат в ней разрешён — так решил владелец.
+    # Ревизия 0004 завела обязательный флажок мата: игра на ревизии 0003 продолжает читаться теми же
+    # моделями, и мат в ней разрешён — так решил владелец.
     golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
     adventure = json.loads(golden_adventures()[1].read_text(encoding="utf-8"))
     await migrate("upgrade", "0003")
@@ -902,8 +971,8 @@ async def test_a_game_saved_before_the_profanity_flag_allows_profanity_after_upg
 async def test_a_game_saved_before_the_authoring_tables_is_read_after_upgrade_head(
     settings, migrate
 ):
-    # Ревизия 0005 (DND-2 B4.1, спека §10.2) завела таблицы конструктора и не тронула таблицы игр:
-    # игра на ревизии 0004 читается теми же моделями, а черновиков у владельца ещё нет.
+    # Ревизия 0005 завела таблицы конструктора и не тронула таблицы игр: игра на ревизии 0004
+    # читается теми же моделями, а черновиков у владельца ещё нет.
     golden = json.loads(golden_files()[1].read_text(encoding="utf-8"))
     adventure = json.loads(golden_adventures()[1].read_text(encoding="utf-8"))
     await migrate("upgrade", "0004")
@@ -943,9 +1012,9 @@ async def test_a_game_saved_before_the_authoring_tables_is_read_after_upgrade_he
 async def test_a_game_saved_before_the_short_rest_columns_is_read_after_upgrade_head(
     settings, migrate
 ):
-    # Ревизия 0006 (DND-2 B9, привалы) завела срок короткого привала и личные идеи привала: игра
-    # на ревизии 0005 со снимком схемы 2 читается теми же моделями, короткий привал у неё длится
-    # 120 с, идей нет, а вид привала у сцены — `null`.
+    # Ревизия 0006 завела срок короткого привала и личные идеи привала: игра на ревизии 0005 со
+    # снимком схемы 2 читается теми же моделями, короткий привал у неё длится 120 с, идей нет, а вид
+    # привала у сцены — `null`.
     golden = json.loads(golden_files()[2].read_text(encoding="utf-8"))
     adventure = json.loads(golden_adventures()[2].read_text(encoding="utf-8"))
     await migrate("upgrade", "0005")
@@ -985,9 +1054,9 @@ async def test_a_game_saved_before_the_short_rest_columns_is_read_after_upgrade_
 async def test_a_game_saved_before_the_phase_start_column_is_read_after_upgrade_head(
     settings, migrate
 ):
-    # Ревизия 0007 (DND-2 B11) завела момент начала фазы хода: игра на ревизии 0006 со снимком
-    # схемы 3 читается теми же моделями, а у её фазы начала нет (`phase_since: null`): клиент
-    # ждёт «Повторить» по своим часам, как раньше.
+    # Ревизия 0007 завела момент начала фазы хода: игра на ревизии 0006 со снимком схемы 3 читается
+    # теми же моделями, а у её фазы начала нет (`phase_since: null`): клиент ждёт «Повторить» по
+    # своим часам, как раньше.
     golden = json.loads(golden_files()[3].read_text(encoding="utf-8"))
     adventure = json.loads(golden_adventures()[2].read_text(encoding="utf-8"))
     await migrate("upgrade", "0006")
@@ -1022,13 +1091,14 @@ class Frames:
         self.sent.append((payload, audience))
 
 
-async def test_a_game_saved_at_a_dnd1_camp_before_the_short_rest_columns_ends_it_as_a_long_rest(
+async def test_a_game_saved_at_an_old_camp_before_the_short_rest_columns_ends_it_as_a_long_rest(
     settings, migrate, tmp_path
 ):
-    # Игра DND-1 посреди привала мастера на ревизии 0005: сцена `camp` без вида (снимок схемы 2),
-    # фаза `camp` со сроком, открыт ход «конец привала». После `upgrade head` это долгий привал:
-    # снимок показывает вид `long` и прежний срок, кость хитов и второй привал — 409, а конец
-    # привала — длинный отдых и утро следующего дня, как в DND-1, с кадром `rest_ended {long}`.
+    # Игра первой версии посреди привала мастера на ревизии 0005: сцена `camp` без вида (снимок
+    # схемы 2), фаза `camp` со сроком, открыт ход «конец привала». После `upgrade head` это долгий
+    # привал: снимок показывает вид `long` и прежний срок, кость хитов и второй привал — 409, а
+    # конец привала — длинный отдых и утро следующего дня, как в первой версии игры, с кадром
+    # `rest_ended {long}`.
     golden = copy.deepcopy(json.loads(golden_files()[2].read_text(encoding="utf-8")))
     golden["state"]["scene"] = {"type": "camp", "started_turn": 3, "inspiration_granted": []}
     golden["state"]["combat"] = None

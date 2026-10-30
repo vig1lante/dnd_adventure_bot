@@ -1,5 +1,4 @@
-"""Хранение игры (план B6.1): всё, что игра кладёт в базу, читается обратно и становится объектами
-движка.
+"""Хранение игры: всё, что игра кладёт в базу, читается обратно и становится объектами движка.
 
 Проверяется на базе после `upgrade head`: копия приключения (решение владельца «Копия в базе»),
 персонажи, снимки `GameState` с версией схемы, остальные таблицы хода и их ограничения.
@@ -138,7 +137,7 @@ async def test_every_version_of_the_state_is_kept(db, adventure, hero):
 
 
 async def test_second_commit_of_the_same_state_version_is_refused(db, adventure, hero):
-    # Защита от двойного коммита хода (спека §12): версия состояния уникальна в пределах игры.
+    # Защита от двойного коммита хода: версия состояния уникальна в пределах игры.
     await save_host_and_game(db, adventure)
     async with db() as session:
         session.add(GameStateSnapshot.from_state(make_state(adventure, hero)))
@@ -509,7 +508,7 @@ async def test_time_without_a_zone_is_refused(db, adventure):
             await session.commit()
 
 
-# --- фаза хода и момент её начала (DND-2 B11, дополнение §1 п. 1) ---
+# --- фаза хода и момент её начала ---
 
 SERVER_SRC = Path(__file__).resolve().parents[2] / "src" / "dnd_server"
 
@@ -629,8 +628,8 @@ def test_the_search_for_bypassing_writes_sees_unpacking_setattr_sql_and_the_cons
 
 
 def test_no_server_code_writes_the_turn_phase_around_the_moment_it_started():
-    # Дополнение B11 §1 п. 1: `phase_since` пишется только вместе с фазой. Прямое присваивание
-    # ловит тест выше, а этот — остальные пути в обход `Game.set_turn_phase`.
+    # `phase_since` пишется только вместе с фазой. Прямое присваивание ловит тест выше, а этот —
+    # остальные пути в обход `Game.set_turn_phase`.
     found = {
         str(path.relative_to(SERVER_SRC)): lines
         for path in SERVER_SRC.rglob("*.py")

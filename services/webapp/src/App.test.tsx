@@ -434,7 +434,7 @@ describe("каркас экранов", () => {
     expect(ws.last().url).toContain("/ws/games/g1");
   });
 
-  test("хост исключил игрока: из лобби — «Мои игры» с «Хост исключил вас.» на экране (B11.3)", async () => {
+  test("хост исключил игрока: из лобби — «Мои игры» с «Хост исключил вас.» на экране", async () => {
     const ws = fakeWebSocket();
     const server = await signedIn();
     act(() => useGame.getState().show({ screen: "lobby", gameId: "g1" }));
@@ -520,7 +520,8 @@ describe("каркас экранов", () => {
     act(() => useGame.getState().show({ screen: "game", gameId: "g1" }));
 
     expect(screen.getByRole("status")).toHaveTextContent("Подключаемся к игре");
-    expect(ws.last().url).toContain("/ws/games/g1?token=tok-dev-3");
+    expect(ws.last().url).toMatch(/\/ws\/games\/g1$/);
+    expect(ws.last().protocols).toEqual(["dnd-game.v1", "tok-dev-3"]);
     expect(screen.queryByRole("heading", { name: "Игра" })).toBeNull();
   });
 
@@ -557,7 +558,7 @@ describe("каркас экранов", () => {
       );
     });
 
-    // Порядок «В» нижней панели (решение владельца на B10.1.gate): «Дневник» последний.
+    // Нижняя панель в порядке, выбранном владельцем: «Дневник» последний.
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "Рассказ",
       "Персонаж",
@@ -641,6 +642,34 @@ describe("каркас экранов", () => {
     ).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Мои игры" })).toBeNull();
   });
+
+  test("выход и вход другим игроком: сокет игры закрыт и открыт заново с новым токеном, адрес без токена", async () => {
+    const ws = fakeWebSocket();
+    const server = fakeServer({
+      "GET /api/config": config(true),
+      "POST /api/auth/dev": devLogin,
+      "GET /api/games": NO_GAMES,
+    });
+    renderApp(server);
+    fireEvent.click(await screen.findByRole("button", { name: "dev-3" }));
+    await screen.findByRole("heading", { name: "Мои игры" });
+    act(() => useGame.getState().show({ screen: "game", gameId: "g1" }));
+    const first = ws.last();
+    expect(first.protocols).toEqual(["dnd-game.v1", "tok-dev-3"]);
+
+    act(() => useGame.getState().signOut());
+    expect(first.clientCloseCode).not.toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "dev-4" }));
+    await screen.findByRole("heading", { name: "Мои игры" });
+    act(() => useGame.getState().show({ screen: "game", gameId: "g1" }));
+
+    expect(ws.sockets).toHaveLength(2);
+    expect(ws.last().protocols).toEqual(["dnd-game.v1", "tok-dev-4"]);
+    for (const socket of ws.sockets) {
+      expect(socket.url).toMatch(/\/ws\/games\/g1$/);
+      expect(socket.url).not.toMatch(/tok-dev/);
+    }
+  });
 });
 
 describe("хранилище", () => {
@@ -676,7 +705,7 @@ describe("хранилище", () => {
   });
 });
 
-// --- настройки интерфейса (B10.3): кнопка в шапке и применение при запуске ---
+// --- настройки интерфейса: кнопка в шапке и применение при запуске ---
 
 describe("настройки интерфейса", () => {
   const root = document.documentElement;
@@ -746,7 +775,7 @@ describe("настройки интерфейса", () => {
   });
 });
 
-// --- финальное покрытие блока B10 (B10.coverage): настройки до первой отрисовки и хранилище ---
+// --- настройки до первой отрисовки и хранилище ---
 
 describe("настройки интерфейса: до первой отрисовки и что лежит в хранилище", () => {
   const root = document.documentElement;

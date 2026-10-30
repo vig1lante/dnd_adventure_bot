@@ -69,7 +69,7 @@ STR, DEX, CON, INT, WIS, CHA = (
     Ability.CHA,
 )
 
-# Числа ниже взяты из SRD 5.2.1 и таблицы плана B2.4.
+# Числа ниже взяты из SRD 5.2.1.
 # id класса -> (кость хитов, спасброски, id подкласса, число навыков на выбор)
 CLASS_FACTS = {
     "barbarian": (12, (STR, CON), "path_of_the_berserker", 2),
@@ -170,7 +170,7 @@ BACKGROUND_TOOLS = {
     "sage": "Инструменты каллиграфа",
     "soldier": "Один игровой набор на выбор",
 }
-# magic_initiate не механическая: план B2.4 даёт ей только текст для мастера (заговоры из данных),
+# magic_initiate не механическая: у неё только текст для мастера (заговоры из данных),
 # а выбора заговоров черты и свободного сотворения в движке нет.
 MECHANICAL_FEATS = {"alert", "savage_attacker"}
 
@@ -187,7 +187,7 @@ SENTENCE_END = re.compile(r"[.!?…](?=\s|$)")
 MIN_FEATURE_SUMMARY_LENGTH = 40
 
 
-# --- ожидаемое содержимое предметов, заклинаний, монстров и состояний (SRD 5.2.1, план B2.5) ---
+# --- ожидаемое содержимое предметов, заклинаний, монстров и состояний (SRD 5.2.1) ---
 
 # Типы урона SRD; в данных допустимы только они.
 DAMAGE_TYPES = {
@@ -818,14 +818,14 @@ def test_features_are_unique_and_within_levels_one_to_three(classes, class_id):
 
 
 @pytest.mark.parametrize("class_id", CLASS_IDS)
-def test_mechanical_features_match_plan(classes, class_id):
+def test_mechanical_features_match_the_expected_set(classes, class_id):
     mechanical = {feature.id for feature in classes[class_id].features if feature.mechanical}
 
     assert mechanical == MECHANICAL_FEATURES[class_id]
 
 
 @pytest.mark.parametrize("class_id", CLASS_IDS)
-def test_resources_at_level_three_match_plan(classes, class_id):
+def test_resources_at_level_three_match_the_expected_table(classes, class_id):
     resources = classes[class_id].resources
 
     # levels[3] без .get: отсутствие строки для 3-го уровня должно быть ошибкой данных.
@@ -899,7 +899,7 @@ def test_species_traits_are_unique(species, species_id):
 
 
 @pytest.mark.parametrize("species_id", SPECIES_IDS)
-def test_mechanical_species_traits_match_plan(species, species_id):
+def test_mechanical_species_traits_match_the_expected_set(species, species_id):
     mechanical = {trait.id for trait in species[species_id].traits if trait.mechanical}
 
     assert mechanical == MECHANICAL_TRAITS[species_id]
@@ -907,7 +907,7 @@ def test_mechanical_species_traits_match_plan(species, species_id):
 
 @pytest.mark.parametrize("species_id", SPECIES_IDS)
 def test_species_description_is_two_or_three_russian_sentences(species, species_id):
-    # Карточка расы (спека DND-2, §7): короткий пересказ своими словами, а не копия SRD.
+    # Карточка расы: короткий пересказ своими словами, а не копия SRD.
     description = species[species_id].description
 
     assert CYRILLIC.search(description)
@@ -955,13 +955,13 @@ def test_background_feats_exist(backgrounds, feats):
         assert background.feat in feats
 
 
-def test_only_planned_feats_are_mechanical(feats):
+def test_only_the_expected_feats_are_mechanical(feats):
     assert {feat.id for feat in feats.values() if feat.mechanical} == MECHANICAL_FEATS
     assert set(feats) >= MECHANICAL_FEATS
 
 
 def test_every_feature_up_to_level_three_and_every_feat_has_a_card_summary(classes, feats):
-    # Подробная карточка класса и черты (спека DND-2, §7) показывает summary как описание.
+    # Подробная карточка класса и черты показывает summary как описание.
     summaries = {
         f"{cls.id}.{feature.id}": feature.summary
         for cls in classes.values()
@@ -993,12 +993,12 @@ def test_skill_summary_says_what_it_checks_and_gives_examples(skills, skill):
 
     assert CYRILLIC.search(summary)
     assert len(summary) <= MAX_SUMMARY_LENGTH
-    assert "Например" in summary  # примеры применения для карточки навыка (спека DND-2, §7)
+    assert "Например" in summary  # примеры применения для карточки навыка
 
 
 @pytest.mark.parametrize("skill", Skill)
 def test_skill_summary_first_says_what_it_checks_then_lists_examples(skills, skill):
-    # Карточка навыка (контракт B7, §2.4): сначала что проверяет навык, затем примеры применения.
+    # Карточка навыка: сначала что проверяет навык, затем примеры применения.
     checks, marker, examples = skills[skill].summary.partition("Например:")
 
     assert marker, "примеры идут после «Например:»"
@@ -1068,7 +1068,7 @@ def test_names_and_summaries_are_russian_and_short(classes, species, backgrounds
 
 
 def test_card_texts_of_hero_creation_have_no_latin_letters(species, backgrounds, skills):
-    # Эти тексты сервер отдаёт в карточки как есть (контракт B7, §2: всё для игрока — на русском):
+    # Эти тексты сервер отдаёт в карточки как есть (всё для игрока — на русском):
     # код вроде `darkvision` или английское слово вместо русского игрок увидел бы сразу.
     texts = {f"species {kind.id} description": kind.description for kind in species.values()}
     texts |= {f"background {item.id} tool": item.tool for item in backgrounds.values()}
@@ -1079,9 +1079,9 @@ def test_card_texts_of_hero_creation_have_no_latin_letters(species, backgrounds,
 
 
 # Служебные пометки авторов данных: игрок видит summary в карточке «Подробнее», а «id» и «поля»
-# данных ему ничего не говорят (carry_over B7: «Это эффект на id заклинания: полями он не описан.»).
-# B11.coverage: кроме «id» и «полями» — и другие обороты о данных и коде («в данных», «не описан»,
-# «движок», имена форматов и полей).
+# данных ему ничего не говорят (например, «Это эффект на id заклинания: полями он не описан.»).
+# Кроме «id» и «полями» — и другие обороты о данных и коде («в данных», «не описан», «движок»,
+# имена форматов и полей).
 DATA_JARGON = re.compile(
     r"\bid\b|полями|в данных|не описан|\bдвиж(?:ок|ка|ком|ке)\b|\b(?:yaml|json|summary|todo)\b",
     re.IGNORECASE,
@@ -1146,7 +1146,7 @@ def test_builtin_data_is_cached(srd):
 # --- предметы ---
 
 
-def test_items_match_plan(items):
+def test_items_match_the_expected_table(items):
     assert set(items) == set(ITEM_IDS)
     assert len(items) == 34
 
@@ -1216,7 +1216,8 @@ def test_starting_equipment_exists_and_suits_class(srd, class_id):
     assert weapons, f"у {class_id} нет оружия в стартовом наборе"
     assert {weapon.category for weapon in weapons} <= set(cls.weapons)
     assert {armor.kind for armor in armors} <= set(cls.armor)
-    # B2.7 надевает первый доспех и щит: больше одного доспеха и одного щита быть не должно.
+    # Создание героя надевает первый доспех и щит: больше одного доспеха и одного щита быть не
+    # должно.
     assert sum(armor.kind != "shield" for armor in armors) <= 1
     assert sum(armor.kind == "shield" for armor in armors) <= 1
 
@@ -1229,7 +1230,7 @@ def test_background_equipment_exists(srd):
 # --- заклинания ---
 
 
-def test_spells_match_plan(spells):
+def test_spells_match_the_expected_table(spells):
     assert set(spells) == set(SPELL_IDS)
     assert len(spells) == 28
 
@@ -1323,7 +1324,7 @@ def test_default_spells_have_levels_that_fit_the_class(srd, class_id):
 # --- монстры ---
 
 
-def test_monsters_match_plan(monsters):
+def test_monsters_match_the_expected_table(monsters):
     assert set(monsters) == set(MONSTER_IDS)
     assert len(monsters) == 20
     assert all(monster.cr <= 3 for monster in monsters.values())
@@ -1441,7 +1442,7 @@ def test_monster_tags_describe_creature_type(monsters):
 # --- состояния ---
 
 
-def test_conditions_match_plan(conditions):
+def test_conditions_match_the_expected_table(conditions):
     assert set(conditions) == CONDITION_IDS
     assert len(conditions) == 14
 
@@ -1550,7 +1551,7 @@ def test_new_tables_have_russian_names_and_short_summaries(items, spells, monste
     assert [owner for owner, text in texts if len(text) > MAX_SUMMARY_LENGTH] == []
 
 
-# --- расстояния в текстах: метры с шагом 1,5 м (спека DND-2, Р3 и §18) ---
+# --- расстояния в текстах: метры с шагом 1,5 м ---
 
 # Метры с запятой; у оружия — пара «обычная/большая дальность»: «4,5 м», «24/96 м».
 METERS_IN_TEXT = re.compile(r"(\d+(?:,\d+)?)(?:/(\d+(?:,\d+)?))? м\b")
@@ -1567,7 +1568,7 @@ def test_rewritten_distances_match_the_meters_rule(species, monsters):
 
 
 def test_every_distance_in_srd_texts_is_a_multiple_of_one_and_a_half_meters():
-    # Тексты SRD пишутся руками — риск опечаток (спека DND-2, §18). Любое расстояние SRD —
+    # Тексты SRD пишутся руками — риск опечаток. Любое расстояние SRD —
     # целое число шагов по 1,5 м.
     files_text = {t: (SRD_DIR / f"{t}.yaml").read_text(encoding="utf-8") for t in TABLE_MODELS}
     distances = [

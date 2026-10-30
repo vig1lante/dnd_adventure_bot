@@ -1,4 +1,4 @@
-"""Экспорт и импорт черновика zip-архивом (план B6.1; спека §10.3; дополнение dispatcher B6 §7).
+"""Экспорт и импорт черновика zip-архивом.
 
 Экспорт — zip с одной папкой `<adventure_id>/` формата v2 (`dump_adventure`). Импорт — сырое тело
 `application/zip` с пределами и защитой: путь вне папки, симлинк, шифрование, повтор имени, лишняя
@@ -51,7 +51,7 @@ MARKER = "МЕТКА-ИЗ-АРХИВА"
 ASCII_MARKER = "leakmark"  # там, где формат допускает только латиницу (имя якоря YAML)
 KIB = 1024
 MIB = 1024 * KIB
-# Поля `Draft`, которые несут разделы и настройки (инвариант «экспорт → импорт», дополнение §7).
+# Поля `Draft`, которые несут разделы и настройки (их сохраняет круг «экспорт → импорт»).
 CONTENT_FIELDS = (
     "title",
     "adventure_id",
@@ -255,8 +255,8 @@ def _draft_of(served: dict[str, Any]) -> AuthoringDraft:
 
 
 async def test_an_imported_draft_takes_the_default_profanity_flag(stand):
-    # У приключения нет флажка мата: копия получает умолчание Р1 (дополнение §7). Пожелания шагов
-    # в архив не идут: у импортированного черновика их нет (финальное покрытие B6).
+    # У приключения нет флажка мата: копия получает значение по умолчанию. Пожелания шагов в архив
+    # не идут: у импортированного черновика их нет.
     author = await stand.author()
     content = normalized(await generated_draft())
     no_swearing = content.model_copy(
@@ -314,7 +314,7 @@ async def test_import_writes_nothing_into_the_content_folder(stand, scratch):
 
     accepted = await import_zip(stand, author, zip_of(demo_files()))
     refused = await import_zip(stand, author, zip_of({"../" + MARKER + ".yaml": b"x: 1"}))
-    # Финальное покрытие B6: архив с теми же путями, что у папки демо, но другими файлами.
+    # Архив с теми же путями, что у папки демо, но другими файлами.
     changed = demo_files() | {"demo-crypt/world.yaml": f"history: {MARKER}\n".encode()}
     overwrite = await import_zip(stand, author, zip_of(changed))
 
@@ -385,8 +385,8 @@ def anchored_manifest() -> bytes:
     return zip_of(files)
 
 
-# Враждебные архивы финального покрытия B6: имена, которые на диске совпадают, и YAML, который
-# ломает разбор, а не пределы архива.
+# Враждебные архивы с именами, которые на диске совпадают, и с YAML, который ломает разбор, а не
+# пределы архива.
 
 
 def with_world(text: bytes, compression: int = zipfile.ZIP_DEFLATED) -> bytes:
@@ -436,8 +436,8 @@ def with_method(method: int) -> bytes:
     return buffer.getvalue()
 
 
-# Методы сжатия, кроме stored и deflate (fix-раунд 1 B6, S1): их распаковщик zipfile отдаёт весь
-# результат сразу, без предела памяти. zstd — если он есть в установленном Python.
+# Методы сжатия, кроме stored и deflate: их распаковщик zipfile отдаёт весь результат сразу, без
+# предела памяти. zstd — если он есть в установленном Python.
 OTHER_METHODS = {"bzip2": zipfile.ZIP_BZIP2, "lzma": zipfile.ZIP_LZMA}
 if hasattr(zipfile, "ZIP_ZSTANDARD"):
     try:
@@ -477,7 +477,7 @@ HOSTILE = {
     "сжатие сильнее предела": lambda: with_extra("demo-crypt/locations/z.yaml", b" " * 400 * KIB),
     "якорь YAML": anchored_manifest,
     "не zip": lambda: f"PK это не архив {MARKER}".encode(),
-    # --- финальное покрытие B6 ---
+    # --- имена, совпадающие на диске, разбор YAML и другие формы архива ---
     "имя отличается только регистром": lambda: with_extra(
         "demo-crypt/Locations/CRYPT.yaml", f"id: {MARKER}\n".encode()
     ),
@@ -498,7 +498,7 @@ HOSTILE = {
         "demo-crypt/locations/notes.txt", MARKER.encode()
     ),
     "пустой архив": lambda: zip_of({}),
-    # --- fix-раунд 1 B6 ---
+    # --- другие методы сжатия и __MACOSX ---
     **{
         f"сжатие {name}": (lambda method=method: with_method(method))
         for name, method in OTHER_METHODS.items()
@@ -588,7 +588,7 @@ async def test_the_type_check_ignores_parameters_of_the_media_type(stand, scratc
     assert response.status_code == 201, response.text
 
 
-# --- финальное покрытие B6: тело запроса, границы пределов, формы zip, уборка и атомарность ---
+# --- тело запроса, границы пределов, формы zip, уборка и атомарность ---
 
 
 async def import_raw(stand: Stand, who: Author, body: Any, **headers: str) -> httpx.Response:
@@ -618,7 +618,7 @@ async def test_a_declared_length_over_the_limit_is_refused_after_the_body_is_rea
 ):
     # Заголовок обещает больше 2 МиБ: отказ 413, но сначала тело дочитывается и выбрасывается.
     # Иначе uvicorn закрыл бы соединение, пока прокси Vite ещё передаёт тело, и клиент получил бы
-    # 502 вместо 413 (R14, дополнение B11 §1 п. 9). Разбора и записи нет.
+    # 502 вместо 413. Разбора и записи нет.
     author = await stand.author()
     pulled: list[int] = []
     body = counted(zip_of(demo_files()), 1, pulled)
@@ -1031,9 +1031,9 @@ actions:
 async def test_a_custom_statblock_of_an_archive_with_a_cr_not_finite_or_negative_is_refused(
     stand, scratch, cr
 ):
-    # Намеренно изменено в fix-раунде 1 B6 (S2, R3): раньше такой импорт давал 201, а черновик с
-    # `cr: null` нельзя было сохранить назад. Теперь импорт проходит те же пределы разделов, что
-    # PUT: отказ `archive_invalid` с путём поля и без значения, черновика нет.
+    # Намеренно изменено: раньше такой импорт давал 201, а черновик с `cr: null` нельзя было
+    # сохранить назад. Теперь импорт проходит те же пределы разделов, что PUT: отказ
+    # `archive_invalid` с путём поля и без значения, черновика нет.
     author = await stand.author()
     files = demo_files() | {"demo-crypt/monsters/crypt-warden.yaml": WARDEN.format(cr=cr).encode()}
 
@@ -1051,14 +1051,14 @@ async def test_a_custom_statblock_of_an_archive_with_a_cr_not_finite_or_negative
     assert list(scratch.iterdir()) == []
 
 
-# --- fix-раунд 1 B6 ---
+# --- методы сжатия, пределы разделов и другие края импорта ---
 
 
 @pytest.mark.parametrize("name", list(OTHER_METHODS))
 async def test_an_entry_packed_by_another_method_is_refused_before_unpacking(
     stand, scratch, monkeypatch, name
 ):
-    # S1: отказ до распаковки — распаковщик не вызывается вовсе.
+    # Отказ до распаковки — распаковщик не вызывается вовсе.
     author = await stand.author()
     body = with_method(OTHER_METHODS[name])
     opened: list[str] = []
@@ -1100,7 +1100,7 @@ def with_long_notes(length: int) -> bytes:
 
 
 async def test_an_archive_over_the_limits_of_a_section_is_refused_with_the_path(stand, scratch):
-    # S2: импорт проходит те же пределы разделов, что ручная запись; в отказе путь и предел, без
+    # Импорт проходит те же пределы разделов, что ручная запись; в отказе путь и предел, без
     # значения поля.
     author = await stand.author()
 
@@ -1164,7 +1164,7 @@ def finder_files() -> dict[str, bytes]:
 
 
 async def test_an_archive_made_by_finder_is_imported_like_the_plain_one(stand, scratch):
-    # R4: `__MACOSX/` не распаковывается и не мешает снять верхнюю папку приключения.
+    # `__MACOSX/` не распаковывается и не мешает снять верхнюю папку приключения.
     author = await stand.author()
 
     finder = await import_zip(stand, author, zip_of(finder_files()))
@@ -1179,7 +1179,7 @@ async def test_an_archive_made_by_finder_is_imported_like_the_plain_one(stand, s
 async def test_a_declared_length_of_unicode_digits_is_ignored_and_the_body_is_counted(
     stand, scratch
 ):
-    # R13/I2: «³» — цифра для `str.isdigit`, но не число для `int`: заголовок не роняет импорт.
+    # «³» — цифра для `str.isdigit`, но не число для `int`: заголовок не роняет импорт.
     author = await stand.author()
     body = zip_of(demo_files())
 
@@ -1194,7 +1194,7 @@ async def test_a_declared_length_of_unicode_digits_is_ignored_and_the_body_is_co
     assert response.status_code == 201, response.text
 
 
-# --- fix-раунд 1 B6, дополнение: находки-улики места не упираются в предел находок ---
+# --- находки-улики места не упираются в предел находок ---
 
 
 def crowded_cupboard(content: AuthoringDraft) -> AuthoringDraft:

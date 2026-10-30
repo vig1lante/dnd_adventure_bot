@@ -1,4 +1,4 @@
-"""Контрактные тесты адаптера `anthropic_api` (план B5.2, спека §7, §12, §13).
+"""Контрактные тесты адаптера `anthropic_api`.
 
 Живой модели и сети здесь нет. Адаптер получает настоящий `AsyncAnthropic`, у которого вместо
 сети стоит `httpx2.MockTransport`: SDK сам собирает запрос и разбирает записанные JSON-ответы
@@ -196,7 +196,7 @@ class StrictWeaving(BaseModel):
     hooks: list[str]
 
 
-# Имена лишних ключей из находки X1 security review: запись в буфер обмена (OSC 52) и стирание
+# Имена лишних ключей, найденные проверкой безопасности: запись в буфер обмена (OSC 52) и стирание
 # строки возвратом каретки. Модель выбирает их сама.
 HOSTILE_KEYS = {
     "osc52-буфер-обмена": "\x1b]52;c;ZWNobyBwd25lZA==\x07",
@@ -728,6 +728,21 @@ async def test_not_cheap_request_ignores_the_cheap_model():
     await provider.complete_json(make_json_request(cheap=False), Weaving)
 
     assert api.requests[0]["model"] == "claude-opus-5-5"
+
+
+async def test_a_request_on_the_model_of_the_game_goes_to_the_main_model_with_its_effort():
+    # Идеи у костра просят модель игры (`game_model=True`, не дешёвый запрос): у API это основная
+    # модель с её усилиями, даже когда дешёвая модель задана.
+    api = FakeApi(valid_json_reply())
+    provider = api.make_provider(effort="high", cheap_model="claude-haiku-5-5")
+
+    request = make_json_request(purpose="campfire.ideas", game_model=True)
+    await provider.complete_json(request, Weaving)
+
+    body = api.requests[0]
+    assert body["model"] == "claude-opus-5-5"
+    assert body["output_config"]["effort"] == "high"
+    assert body["thinking"] == {"type": "adaptive"}
 
 
 async def test_invalid_answer_is_retried_with_the_validation_error_in_the_request():

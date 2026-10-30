@@ -1,4 +1,4 @@
-"""Тесты CLI `dnd-generate` (план DND-1 B5.6, спека §6.3; DND-2 B3.1: заготовки v2 и пожелания).
+"""Тесты CLI `dnd-generate`, в том числе заготовок v2 и пожеланий.
 
 Провайдер всегда `FakeProvider` по сценарию `generator_demo.yaml`: ключей, сети и живых моделей
 нет. Фабрика провайдеров подменяется шпионом там, где нужно доказать, что модель не вызывалась
@@ -48,7 +48,7 @@ BASE_ARGS = [
     "bg3_flavor,campfire",
 ]
 
-# Имена лишних ключей из находки X1 security review: запись в буфер обмена (OSC 52) и стирание
+# Имена лишних ключей, найденных проверкой безопасности: запись в буфер обмена (OSC 52) и стирание
 # строки возвратом каретки. Ответ модели или файл сидов выбирают их сами.
 HOSTILE_KEYS = {
     "osc52-буфер-обмена": "\x1b]52;c;ZWNobyBwd25lZA==\x07",
@@ -59,7 +59,7 @@ HOSTILE_KEYS = {
 @pytest.fixture(autouse=True)
 def dev_mode(monkeypatch):
     """Генератор без живой модели запускают в dev, как в README: тестовый мастер `fake` вне dev
-    не собирается (спека DND-2 §15). Тест боевого режима ставит APP_ENV=prod сам."""
+    не собирается. Тест боевого режима ставит APP_ENV=prod сам."""
     monkeypatch.setenv("APP_ENV", "dev")
 
 
@@ -177,7 +177,7 @@ def test_manual_command_writes_a_valid_adventure_and_exits_with_0(demo_env, tmp_
 
 
 def test_the_written_folder_is_format_v2_with_the_world_factions_and_the_graph(demo_env, tmp_path):
-    # Связи пишет шаг relations, мир и фракции — свои шаги: папка v2 читается обратно с ними (Р8).
+    # Связи пишет шаг relations, мир и фракции — свои шаги: папка v2 читается обратно с ними.
     out = tmp_path / "chapel-whispers"
 
     assert generate_into(out) == 0
@@ -395,7 +395,7 @@ V2_SCENARIO = DEMO_SCENARIO.with_name("generator_v2_demo.yaml")
 
 
 def seed_npc_with_relations(npc_id: str, location_id: str, *relations: dict[str, str]) -> dict:
-    """NPC заготовки в форме DND-1: связи лежат внутри NPC (`npcs[].relations`)."""
+    """NPC заготовки в форме первой версии игры: связи лежат внутри NPC (`npcs[].relations`)."""
     return {
         "id": npc_id,
         "name": "Смотритель",
@@ -415,7 +415,8 @@ def write_seeds(tmp_path: Path, seeds: dict[str, Any]) -> Path:
 
 
 def test_v1_relations_of_a_seed_npc_reach_the_graph_and_stay_locked(demo_env, tmp_path):
-    # Р8 и README B2: связи сида-NPC в старой форме переходят в граф по правилам движка.
+    # Связи сида-NPC в старой форме переходят в граф по правилам движка, как в README
+    # («Совместимость с v1»).
     warden = seed_npc_with_relations(
         "warden", "chapel", {"npc_id": "otto", "kind": "sibling", "note": "Старший брат."}
     )
@@ -436,7 +437,7 @@ def test_v1_relations_of_a_seed_npc_reach_the_graph_and_stay_locked(demo_env, tm
 def test_a_v1_relation_of_a_seed_npc_wins_over_the_same_relation_of_the_model(
     monkeypatch, tmp_path
 ):
-    # Воспроизведение находки B3.2: Ильза из заготовки соперничает с Брамом, которого создаст
+    # Воспроизведение найденной ошибки: Ильза из заготовки соперничает с Брамом, которого создаст
     # модель; модель присылает свою связь с тем же id — побеждает закреплённая связь заготовки.
     monkeypatch.setenv("FAKE_LLM_SCENARIO", str(V2_SCENARIO))
     ilsa = seed_npc_with_relations("ilsa", "harbor", {"npc_id": "bram", "kind": "rival"})

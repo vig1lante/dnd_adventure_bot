@@ -4,7 +4,7 @@ import { ErrorState } from "./ErrorState";
 import { Skeleton } from "./Skeleton";
 import { EmptyState, Waiting } from "./States";
 
-// Единые состояния экранов (B10.2): загрузка — скелетон, пусто — с кнопкой следующего шага,
+// Единые состояния экранов: загрузка — скелетон, пусто — с кнопкой следующего шага,
 // ошибка — с «Повторить», долгое ожидание мастера — «Мастер думает…».
 
 function stubReducedMotion(reduce: boolean) {

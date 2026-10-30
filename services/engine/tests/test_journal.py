@@ -1,4 +1,4 @@
-"""Дневник отряда (спека DND-2 §3 Р11, §12; дополнение контракта B8 §1–§4, §10).
+"""Дневник отряда.
 
 Дневник — часть состояния игры: стартовые записи (`open_journal`), запись о сущности по ссылке
 (`write`), первый приход отряда в место (`visit`) и выборки для сервера (`visible_entries`,
@@ -183,7 +183,7 @@ def test_the_start_has_only_the_intro_and_what_is_known_at_start(make_game, demo
     visited = {
         entry.ref: entry.visited_turn for entry in state.journal if entry.visited_turn is not None
     }
-    assert visited == {"location:village": 0}  # отряд начинает в деревне (дополнение §10)
+    assert visited == {"location:village": 0}  # отряд начинает в деревне
     assert all(entry.id == f"{entry.ref}@all" for entry in state.journal)
     sections = [SECTION_ORDER.index(entry.section) for entry in state.journal]
     assert sections == sorted(sections)  # записи старта идут в порядке разделов
@@ -212,7 +212,7 @@ def test_start_entries_take_the_public_text_and_the_name(make_game, demo_adventu
 def test_the_start_location_is_written_as_visited_even_when_it_is_not_known_at_start(
     make_game, demo_adventure
 ):
-    # Отряд уже стоит в стартовой локации: «пришёл в локацию — место» (дополнение §10, поправка §4).
+    # Отряд уже стоит в стартовой локации: «пришёл в локацию — место».
     adventure = variant(
         demo_adventure, lambda data: data["locations"]["village"].update(known_at_start=False)
     )
@@ -247,7 +247,7 @@ def test_coming_back_to_the_start_location_changes_nothing(make_game, demo_adven
 def test_the_turn_of_the_start_is_zero_even_when_an_old_game_opens_the_journal_later(
     make_game, demo_adventure
 ):
-    # Старая игра без дневника получает стартовый дневник посреди игры (дополнение §5).
+    # Старая игра без дневника получает стартовый дневник посреди игры.
     state = open_journal(make_game(party_round=7), demo_adventure)
 
     assert {entry.turn for entry in state.journal} == {0}
@@ -626,7 +626,7 @@ def test_changed_entries_are_the_new_ones_and_the_ones_with_a_higher_revision(
     assert changed_entries(state.journal, state.journal) == ()
 
 
-# --- финальное покрытие блока: модель записи ---
+# --- запись дневника: модель записи ---
 
 CONTRACT_FIELDS = (
     "id",
@@ -643,7 +643,7 @@ CONTRACT_FIELDS = (
 
 
 def test_an_entry_has_exactly_the_ten_fields_of_the_contract_and_all_of_them_reach_json():
-    # Webapp и сервер читают запись буква в букву (дополнение §2): лишнее или пропавшее поле
+    # Webapp и сервер читают запись буква в букву: лишнее или пропавшее поле
     # разошлось бы с `JournalEntry` клиента. Поля по умолчанию тоже уходят в JSON (`null`).
     entry = JournalEntry(
         id="npc:marta@all",
@@ -675,7 +675,7 @@ def test_no_field_of_an_entry_can_be_changed_in_place(field):
     assert entry.model_dump() == before
 
 
-# --- финальное покрытие блока: старт игры ---
+# --- запись дневника: старт игры ---
 
 
 def nothing_known(data: dict[str, Any]) -> None:
@@ -706,7 +706,7 @@ def test_an_adventure_without_intro_and_known_things_starts_with_the_start_locat
 
 
 def test_open_journal_on_an_opened_journal_returns_the_very_same_state(make_game, demo_adventure):
-    # Дополнение §2: «на непустом дневнике ничего не меняет» — даже копии не делает.
+    # На непустом дневнике открытие ничего не меняет — даже копии не делает.
     state = open_journal(make_game(), demo_adventure)
 
     assert open_journal(state, demo_adventure) is state
@@ -715,7 +715,7 @@ def test_open_journal_on_an_opened_journal_returns_the_very_same_state(make_game
 def test_an_old_game_gets_the_start_location_of_the_adventure_and_not_the_current_place(
     make_game, demo_adventure
 ):
-    # Буква §10 (3): стартовая локация отмечена раундом 0; место, где отряд стоит сейчас, и
+    # Стартовая локация отмечена раундом 0; место, где отряд стоит сейчас, и
     # пройденные места старой игры в стартовый дневник не переносятся.
     state = make_game(location_id="crypt", party_round=9)
     state.world.visited_locations.extend(["village", "cemetery", "crypt"])
@@ -727,7 +727,7 @@ def test_an_old_game_gets_the_start_location_of_the_adventure_and_not_the_curren
     assert "location:crypt" not in {entry.ref for entry in opened.journal}
 
 
-# --- финальное покрытие блока: текст и название записи ---
+# --- запись дневника: текст и название записи ---
 
 
 def entities_of(adventure: Adventure, kind: str) -> Mapping[str, Any]:
@@ -744,7 +744,7 @@ def entities_of(adventure: Adventure, kind: str) -> Mapping[str, Any]:
 
 
 def contract_text(adventure: Adventure, ref: str) -> str:
-    """Текст записи по контракту (дополнение §3): `public` сущности, а если он пуст — название;
+    """Текст записи по контракту: `public` сущности, а если он пуст — название;
     у слуха — `public`, иначе сам слух; у улики — описание найденного."""
     kind, _, key = ref.partition(":")
     if kind == "rumor":
@@ -843,11 +843,11 @@ def test_whether_a_rumor_is_true_does_not_change_its_entry_at_all(make_game, dem
     assert entries[0] == entries[1]
 
 
-# --- финальное покрытие блока: тайны ---
+# --- запись дневника: тайны ---
 
 
 def hidden_everywhere(data: dict[str, Any]) -> None:
-    """Каждое поле приключения, которого нет в контракте текста записи (§3), получает
+    """Каждое поле приключения, которого нет в контракте текста записи, получает
     уникальную метку «ТАЙНА-n»: тайны, мотивы, заметки мастера, утверждения открытий, описания
     предметов и краёв, история мира, примечания связей и прочие поля сущностей."""
     numbers = iter(range(1, 10_000))
@@ -905,7 +905,7 @@ def test_no_hidden_field_of_the_adventure_reaches_any_entry_title_or_text(
     assert len(state.journal) == 2 * len(every_ref(adventure)) + 2  # + «Главное» и история мира
 
 
-# --- финальное покрытие блока: запись и посещение ---
+# --- запись дневника: запись и посещение ---
 
 
 def test_extending_a_personal_entry_leaves_the_common_entry_about_the_entity_as_it_was(
@@ -972,7 +972,7 @@ def test_the_first_visit_keeps_what_the_master_already_added_about_the_place(
     assert entry == written.model_copy(update={"revision": 2, "visited_turn": 5})
 
 
-# --- финальное покрытие блока: выборки для сервера ---
+# --- запись дневника: выборки для сервера ---
 
 
 def test_visible_entries_keep_the_order_of_the_journal_and_never_show_others_personal_ones(
@@ -1021,14 +1021,14 @@ def test_the_extension_of_a_personal_entry_is_a_change_for_its_hero_only(make_ga
     assert changed not in visible_entries(state.journal, "pc-1")
 
 
-# --- fix-раунд 1 (дополнение §11): номер раунда игроков и сущности без текста ---
+# --- номер раунда игроков и сущности без текста ---
 
 
 def test_the_round_of_an_entry_is_the_round_of_the_players_and_not_the_turn_of_the_master(
     make_game, demo_adventure
 ):
     # Ход мастера (`turn`) растёт и в бою, и на привале; карточка говорит «узнали в раунде N» —
-    # это раунд игроков (`party_round`, дополнение §11 п. 5).
+    # это раунд игроков (`party_round`).
     state = open_journal(make_game(turn=9, party_round=2), demo_adventure)
 
     written, _ = write(state, demo_adventure, "npc:fabian")
@@ -1054,7 +1054,7 @@ def test_an_automatic_entry_is_written_once_and_a_repeat_changes_nothing(make_ga
 
 
 def without_texts(data: dict[str, Any]) -> None:
-    """Сущности без текста: схема и валидатор их пропускают (дополнение §11 п. 1)."""
+    """Сущности без текста: схема и валидатор их пропускают."""
     data["revelations"]["kidnapper"]["clues"][0]["description"] = ""  # clue-diary
     data["items"]["chest-key"].update(name="", public="")
     data["world"]["rumors"][0].update(text="", public="")  # известен со старта
@@ -1114,7 +1114,7 @@ def test_an_entity_without_a_name_but_with_public_text_is_titled_by_its_text(
     assert entry.title and entry.text.startswith(entry.title.rstrip("…"))
 
 
-# --- B11.1 (дополнение контракта B11 §1 п. 4, §2): раунд последнего дополнения ---
+# --- раунд последнего дополнения ---
 
 
 def test_extending_an_entry_with_a_note_remembers_the_round_of_the_players(
@@ -1178,7 +1178,7 @@ def test_a_refused_extension_leaves_the_round_of_the_extension_as_it_was(make_ga
 def test_the_first_visit_and_automatic_entries_are_not_extensions_of_the_text(
     make_game, demo_adventure
 ):
-    # Решение D4: первый приход в место поднимает `revision`, но текст не дополняет.
+    # Первый приход в место поднимает `revision`, но текст не дополняет.
     state = open_journal(make_game(party_round=2), demo_adventure)
 
     known = visit(state, demo_adventure, "cemetery")
@@ -1220,7 +1220,7 @@ def test_an_entry_saved_before_the_round_of_the_extension_existed_reads_without_
     assert entry.model_dump() == saved | {"updated_turn": None}
 
 
-# --- B11.coverage: раунд дополнения на границах (дополнение контракта B11 §1 п. 4, §2) ---
+# --- раунд дополнения на границах ---
 
 
 def test_an_extension_in_round_zero_is_remembered_as_zero_and_not_as_none(
@@ -1291,7 +1291,7 @@ def test_an_extended_entry_is_among_the_changed_ones_with_its_round(make_game, d
     assert changed.model_dump(mode="json")["updated_turn"] == 3
 
 
-# --- B11.1.fix1 (дополнение B11 §5 п. 1): текст из одних пробелов — пустой текст ---
+# --- текст из одних пробелов — пустой текст ---
 
 BLANK = " \n\t "  # пробелы, перенос и табуляция: на экране — пустое место
 

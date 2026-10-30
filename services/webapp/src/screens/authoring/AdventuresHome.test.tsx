@@ -127,9 +127,93 @@ describe("новый и существующий черновик", () => {
     ).toBeInTheDocument();
     expect(callsTo(server, "GET", "/api/drafts")).toHaveLength(2);
   });
-});
 
-// --- финальное покрытие блока 4 ---
+  test("«Удалить черновик» в редакторе: после подтверждения — список заново, удалённого в нём нет", async () => {
+    let deleted = false;
+    const server = renderHome([], {
+      "GET /api/drafts": () => ({
+        json: [
+          ...(deleted ? [] : [summaryOf({ id: "d1", title: "Гавань" })]),
+          summaryOf({ id: "d2", title: "Склеп" }),
+        ],
+      }),
+      "GET /api/drafts/d1": { json: draftOf({ id: "d1", title: "Гавань" }) },
+      "DELETE /api/drafts/d1": () => {
+        deleted = true;
+        return { status: 204 };
+      },
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Открыть: Гавань" }),
+    );
+    await editorOpened();
+    fireEvent.click(screen.getByRole("button", { name: "Удалить черновик" }));
+    fireEvent.click(screen.getByRole("button", { name: "Да, удалить" }));
+
+    expect(
+      await screen.findByRole("button", { name: "Открыть: Склеп" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Открыть: Гавань" }),
+    ).toBeNull();
+    expect(callsTo(server, "DELETE", "/api/drafts/d1")).toHaveLength(1);
+    expect(callsTo(server, "GET", "/api/drafts")).toHaveLength(2);
+  });
+
+  test("удалён черновик опубликованного приключения: в черновиках его нет, а в «Готовых приключениях» приключение осталось", async () => {
+    let deleted = false;
+    const published: AdventureSummary = {
+      id: "foggy-harbor",
+      title: "Гавань",
+      pitch: "Корабль исчез в тумане",
+      target_hours: 2,
+      score: 100,
+      blocking: false,
+    };
+    const server = renderHome([], {
+      "GET /api/drafts": () => ({
+        json: deleted
+          ? []
+          : [
+              summaryOf({
+                id: "d1",
+                title: "Гавань",
+                adventure_id: "foggy-harbor",
+                published_id: "foggy-harbor",
+                published_at: "2026-10-26T18:00:00+00:00",
+              }),
+            ],
+      }),
+      // Сервер оставляет опубликованное в каталоге: у него своя запись.
+      "GET /api/adventures": { json: [published] },
+      "GET /api/drafts/d1": {
+        json: draftOf({
+          id: "d1",
+          title: "Гавань",
+          adventure_id: "foggy-harbor",
+        }),
+      },
+      "DELETE /api/drafts/d1": () => {
+        deleted = true;
+        return { status: 204 };
+      },
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Открыть: Гавань" }),
+    );
+    await editorOpened();
+    fireEvent.click(screen.getByRole("button", { name: "Удалить черновик" }));
+    fireEvent.click(screen.getByRole("button", { name: "Да, удалить" }));
+
+    expect(await screen.findByText("Пока нет приключений")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Сделать копию: Гавань" }),
+    ).toBeInTheDocument();
+    expect(callsTo(server, "GET", "/api/adventures")).toHaveLength(2);
+  });
+});
 
 describe("уход из редактора", () => {
   // Подменяются только таймеры: опрос задания идёт через setInterval.
@@ -170,7 +254,7 @@ describe("уход из редактора", () => {
   });
 });
 
-// --- блок 6: импорт архива и копия приключения каталога (дополнение B6 §7, §8) ---
+// --- импорт архива и копия приключения каталога ---
 
 const IMPORT = "/api/drafts/import";
 
@@ -338,7 +422,7 @@ describe("готовые приключения: копия для правки"
   });
 });
 
-// --- финальное покрытие блока 6: отказы импорта на экране и копия каталога ---
+// --- отказы импорта на экране и копия каталога ---
 
 describe("импорт архива: что видит автор при отказе", () => {
   test.each([
@@ -463,7 +547,7 @@ describe("готовые приключения: копия открываетс
     expect(
       within(concept).getByRole("textbox", { name: "id приключения" }),
     ).toHaveValue("crow-lighthouse");
-    // Копия — POST без тела (B6 §8), открыт новый черновик d9.
+    // Копия — POST без тела, открыт новый черновик d9.
     const [call] = callsTo(
       server,
       "POST",
@@ -474,7 +558,7 @@ describe("готовые приключения: копия открываетс
   });
 });
 
-// --- B10.4: список черновиков и отказы импорта словами автора ---
+// --- список черновиков и отказы импорта словами автора ---
 
 /** Время в часовом поясе теста: строка списка показывает местное время. */
 const localIso = (month: number, day: number, hours: number, minutes: number) =>
@@ -552,7 +636,7 @@ describe("список черновиков: дата правки и разли
     ).toHaveAccessibleDescription(/опубликовано/);
   });
 
-  test("сервер без полей публикации (до B11): пометки нет, список как раньше", async () => {
+  test("старый сервер без полей публикации: пометки нет, список как раньше", async () => {
     const old = summaryOf({ title: "Гавань" });
     delete old.published_id;
     delete old.published_at;

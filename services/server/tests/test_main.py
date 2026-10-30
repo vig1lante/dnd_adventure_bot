@@ -16,12 +16,13 @@ import uvicorn
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from game_socket import open_game_socket
 from uvicorn.config import LOGGING_CONFIG
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
 from dnd_server import __main__ as server_main
-from dnd_server.__main__ import LOG_CONFIG, main, mask_query_values
+from dnd_server.__main__ import LOG_CONFIG, main, mask_log_line, mask_query_values
 from dnd_server.app import create_app
 from dnd_server.auth.session import SessionSigner
 from dnd_server.bot.bot import hide_token_in_logs
@@ -75,10 +76,30 @@ async def test_main_app_path_builds_app_from_environment(monkeypatch):
     assert response.json() == {"status": "ok", "env": "dev"}
 
 
-# --- тестовый мастер в боевом режиме (спека DND-2 §15, дополнение B11 §1 п. 7) ---
+# --- тестовый мастер в боевом режиме ---
+#
+# Тестовый мастер `fake` в боевом режиме не собирается (`llm.factory`), поэтому сервер с ним не
+# стартует вовсе: отказ называет, что задать, и приходит до занятия порта и базы. Остальные тесты
+# файла запускают `main()` с настоящим провайдером (фикстура ниже), а проверки отказа снимают его.
 
-NO_MASTER_WARNING = "тестовый мастер в боевом режиме недоступен: задайте LLM_PROVIDER"
 SCENARIO_FILE = Path(__file__).resolve().parent / "scenarios" / "basic_round.yaml"
+
+
+@pytest.fixture(autouse=True)
+def real_master_by_default(monkeypatch, isolated_settings_sources):
+    """Боевой режим (APP_ENV не задан) с провайдером модели, а не с тестовым мастером."""
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic_api")
+    get_settings.cache_clear()
+
+
+def refusal_of_main(monkeypatch, *args: str) -> object:
+    """Чем `main()` остановился (`SystemExit.code`); uvicorn при этом не должен запуститься."""
+    started: list[str] = []
+    monkeypatch.setattr(uvicorn, "run", lambda app, **options: started.append(app))
+    with pytest.raises(SystemExit) as stop:
+        main(list(args))
+    assert started == []
+    return stop.value.code
 
 
 @pytest.mark.parametrize(
@@ -91,10 +112,41 @@ SCENARIO_FILE = Path(__file__).resolve().parent / "scenarios" / "basic_round.yam
         ),
     ],
 )
-def test_prod_with_the_test_master_starts_and_warns_once(monkeypatch, caplog, environment):
-    # Сервер владельца не падает: он стартует, пишет одно предупреждение, а игры с `fake`
-    # не создаются (422 при создании игры).
+def test_prod_with_the_test_master_does_not_start_and_says_what_to_set(
+    monkeypatch, caplog, no_real_port_claim, no_real_database_lock, environment
+):
     monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.delenv("LLM_PROVIDER")
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    get_settings.cache_clear()
+
+    with caplog.at_level(logging.DEBUG, logger="dnd_server"):
+        refusal = refusal_of_main(monkeypatch)
+
+    # Текст `SystemExit` печатается в stderr, а код возврата процесса — 1.
+    assert isinstance(refusal, str)
+    assert "LLM_PROVIDER" in refusal and "APP_ENV=dev" in refusal
+    assert "anthropic_api" in refusal and "openai_compatible" in refusal
+    assert str(SCENARIO_FILE) not in refusal and SCENARIO_FILE.name not in refusal
+    # Порт и база не тронуты, а отказ идёт в stderr, а не в журнал.
+    assert no_real_port_claim == [] and no_real_database_lock == []
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        pytest.param({"APP_ENV": "dev", "LLM_PROVIDER": "fake"}, id="dev с fake"),
+        pytest.param({"APP_ENV": "prod", "LLM_PROVIDER": "anthropic_api"}, id="prod с моделью"),
+        pytest.param(
+            {"APP_ENV": "prod", "LLM_PROVIDER": "openai_compatible"}, id="prod с совместимым API"
+        ),
+    ],
+)
+def test_a_server_with_a_real_or_a_dev_master_starts_without_warnings(
+    monkeypatch, caplog, environment
+):
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
     get_settings.cache_clear()
@@ -103,32 +155,10 @@ def test_prod_with_the_test_master_starts_and_warns_once(monkeypatch, caplog, en
         app_path, _options = run_main_with_fake_uvicorn(monkeypatch)
 
     assert app_path == "dnd_server.app:create_app"
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert [r.getMessage() for r in warnings] == [NO_MASTER_WARNING]
-    assert str(SCENARIO_FILE) not in caplog.text
-
-
-@pytest.mark.parametrize(
-    "environment",
-    [
-        pytest.param({"APP_ENV": "dev"}, id="dev с fake"),
-        pytest.param({"APP_ENV": "prod", "LLM_PROVIDER": "anthropic_api"}, id="prod с моделью"),
-    ],
-)
-def test_a_server_with_a_real_or_a_dev_master_starts_without_the_warning(
-    monkeypatch, caplog, environment
-):
-    for name, value in environment.items():
-        monkeypatch.setenv(name, value)
-    get_settings.cache_clear()
-
-    with caplog.at_level(logging.WARNING, logger="dnd_server"):
-        run_main_with_fake_uvicorn(monkeypatch)
-
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
-# Секреты в окружении сервера: ни одно значение не должно попасть в журнал старта.
+# Секреты в окружении сервера: ни одно значение не должно попасть в отказ старта.
 STARTUP_SECRETS = {
     "SESSION_SECRET": "startup-session-secret-0123456789-abcdefgh",
     "TELEGRAM_BOT_TOKEN": "123456:startup-bot-token-secret",
@@ -137,11 +167,11 @@ STARTUP_SECRETS = {
 }
 
 
-def test_without_app_env_the_server_is_prod_and_warns_once_without_secrets_or_paths(
+def test_without_app_env_the_server_is_prod_and_refuses_the_test_master_without_secrets_or_paths(
     monkeypatch, caplog
 ):
     # APP_ENV не задан — это боевой режим (значение по умолчанию). Тестовый мастер со сценарием
-    # там недоступен: одно предупреждение, в нём нет ни секретов окружения, ни пути сценария.
+    # там недоступен: в отказе нет ни секретов окружения, ни пути сценария, и журнал пуст.
     for name, value in {
         **STARTUP_SECRETS,
         "LLM_PROVIDER": "fake",
@@ -151,13 +181,52 @@ def test_without_app_env_the_server_is_prod_and_warns_once_without_secrets_or_pa
     get_settings.cache_clear()
 
     with caplog.at_level(logging.DEBUG, logger="dnd_server"):
-        run_main_with_fake_uvicorn(monkeypatch)
+        refusal = refusal_of_main(monkeypatch)
 
     assert get_settings().app_env == "prod"
-    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert warnings == [NO_MASTER_WARNING]
+    assert isinstance(refusal, str) and "LLM_PROVIDER" in refusal
     for value in (*STARTUP_SECRETS.values(), str(SCENARIO_FILE), SCENARIO_FILE.name):
+        assert value not in refusal
         assert value not in caplog.text
+
+
+# Как ещё настройки называют тестового мастера в боевом режиме. Пустое значение в окружении —
+# «не задано» (значение по умолчанию: prod и fake) и перекрывает `.env`; имена переменных
+# pydantic-settings читает без учёта регистра; `.env` в каталоге запуска — такой же источник.
+@pytest.mark.parametrize(
+    ("environment", "dotenv"),
+    [
+        pytest.param({"LLM_PROVIDER": ""}, "", id="пустой LLM_PROVIDER"),
+        pytest.param({"APP_ENV": "", "LLM_PROVIDER": ""}, "", id="пустые APP_ENV и LLM_PROVIDER"),
+        pytest.param(
+            {"app_env": "prod", "llm_provider": "fake"}, "", id="имена переменных строчными"
+        ),
+        pytest.param({}, "LLM_PROVIDER=fake\n", id="fake в .env"),
+        pytest.param(
+            {"APP_ENV": ""},
+            "APP_ENV=dev\nLLM_PROVIDER=fake\n",
+            id="пустой APP_ENV перекрывает dev из .env",
+        ),
+    ],
+)
+def test_the_test_master_is_refused_in_prod_however_the_settings_name_it(
+    monkeypatch, tmp_path, caplog, no_real_port_claim, no_real_database_lock, environment, dotenv
+):
+    monkeypatch.delenv("LLM_PROVIDER")  # настоящий провайдер автофикстуры здесь не нужен
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    # Каталог запуска — пустой каталог теста (`isolated_settings_sources`): `.env` — только свой.
+    (tmp_path / ".env").write_text(f"{dotenv}FAKE_LLM_SCENARIO={SCENARIO_FILE}\n", encoding="utf-8")
+    get_settings.cache_clear()
+
+    with caplog.at_level(logging.DEBUG, logger="dnd_server"):
+        refusal = refusal_of_main(monkeypatch)
+
+    assert (get_settings().app_env, get_settings().llm_provider) == ("prod", "fake")
+    assert refusal == server_main.NO_MASTER_REFUSAL
+    assert str(SCENARIO_FILE) not in refusal and SCENARIO_FILE.name not in refusal
+    assert no_real_port_claim == [] and no_real_database_lock == []
+    assert caplog.records == []
 
 
 def test_dnd_server_console_script_points_to_main():
@@ -167,7 +236,7 @@ def test_dnd_server_console_script_points_to_main():
     assert script.load() is main
 
 
-# --- один процесс на порту (план B8.s2, мета H4 и B1.security) ---
+# --- один процесс на порту ---
 #
 # Блокировки игр, отсчёты и учёт идущих ходов живут в памяти процесса. Вторая копия сервера на той
 # же базе выполнила бы `lifespan` (восстановление игр, перевод идущих ходов в `dm_failed`) раньше,
@@ -393,7 +462,7 @@ async def test_uvicorn_serves_on_the_claimed_socket_and_the_port_is_held_during_
     assert port_free_in_lifespan == [False]  # порт занят уже в lifespan, а не после него
 
 
-# --- мост MCP ходит на порт, на котором сервер слушает на самом деле (B8.security.server.fix1) ---
+# --- мост MCP ходит на порт, на котором сервер слушает на самом деле ---
 #
 # Мост процесса `claude_code_cli` отправляет вызовы инструментов хода на адрес сервера, и в адресе
 # лежит одноразовый токен хода. Если `dnd-server --port 8001` оставит мосту порт по умолчанию, токен
@@ -456,7 +525,7 @@ def test_a_server_that_could_not_take_its_port_does_not_change_the_bridge_addres
     assert bridge_url() == "http://127.0.0.1:8000"
 
 
-# --- одна копия на файл базы (B8.security.server.fix1, решение по B8.security.repo L2) ---
+# --- одна копия на файл базы ---
 #
 # Порт защищает только от копии на том же порту. Вторая копия на другом порту и той же базе
 # выполнила бы `lifespan` (восстановление игр, перевод идущего хода в `dm_failed`) и запустила бы
@@ -618,8 +687,8 @@ def test_the_lock_file_lies_next_to_the_database_and_is_left_in_place_at_the_exi
     assert lock.is_file()
 
 
-# Lock-файл (спека DND-2 §15, дополнение B11 §1 п. 15): не идёт по символической ссылке и закрыт от
-# чужих глаз — права 0600 у нового файла и у прежнего файла своего пользователя.
+# Lock-файл не идёт по символической ссылке и закрыт от чужих глаз — права 0600 у нового файла и у
+# прежнего файла своего пользователя.
 
 
 def mode_of(path: Path) -> int:
@@ -662,9 +731,9 @@ def test_an_old_lock_file_of_the_owner_gets_owner_only_rights_and_stays_in_place
 def test_a_hard_link_in_place_of_the_lock_file_keeps_the_rights_of_the_linked_file(
     monkeypatch, tmp_path, use_database, caplog
 ):
-    # Дополнение B11 §5 п. 5 (S2): `O_NOFOLLOW` жёсткую ссылку не видит, а `fchmod` сменил бы права
-    # связанного файла (скрипт 0755 стал бы 0600). Права меняются только у обычного файла с одной
-    # ссылкой; иначе — предупреждение, файл и его права как были.
+    # `O_NOFOLLOW` жёсткую ссылку не видит, а `fchmod` сменил бы права связанного файла (скрипт 0755
+    # стал бы 0600). Права меняются только у обычного файла с одной ссылкой; иначе — предупреждение,
+    # файл и его права как были.
     script = tmp_path / "elsewhere" / "script.sh"
     script.parent.mkdir()
     script.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -672,7 +741,6 @@ def test_a_hard_link_in_place_of_the_lock_file_keeps_the_rights_of_the_linked_fi
     os.link(script, tmp_path / "one.sqlite3.lock")
     started = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **options: started.append(app))
-    monkeypatch.setenv("APP_ENV", "dev")  # без предупреждения о тестовом мастере
     use_database(sqlite_url(tmp_path / "one.sqlite3"))
 
     with caplog.at_level(logging.WARNING, logger="dnd_server"):
@@ -697,7 +765,6 @@ def test_a_lock_file_of_another_user_is_kept_as_it_is_with_a_warning(
     started = []
     monkeypatch.setattr(uvicorn, "run", lambda app, **options: started.append(app))
     monkeypatch.setattr(server_main.os, "getuid", lambda: lock.stat().st_uid + 1)
-    monkeypatch.setenv("APP_ENV", "dev")  # без предупреждения о тестовом мастере
     use_database(sqlite_url(tmp_path / "one.sqlite3"))
 
     with caplog.at_level(logging.WARNING, logger="dnd_server"):
@@ -741,7 +808,7 @@ def test_a_symlink_in_place_of_the_lock_file_stops_the_server_and_touches_nothin
         assert not target.exists()
 
 
-# --- ревизия базы при старте (спека DND-2 §15, дополнение B11 §1 п. 8) ---
+# --- ревизия базы при старте ---
 #
 # Новый код на старой базе падал бы непонятными ошибками запросов. Поэтому до uvicorn сервер сверяет
 # ревизию файла базы с `head` миграций: базы нет или она не на `head` — запуск останавливается с
@@ -1019,12 +1086,13 @@ def test_main_asks_to_lock_the_database_of_the_settings(
     ]
 
 
-# --- токен сессии WebSocket не попадает в журналы (план B6.5) ---
+# --- токен сессии WebSocket не попадает в журналы ---
 #
-# Браузер не умеет слать заголовки при открытии сокета, поэтому токен сессии идёт в query:
-# `/ws/games/<id>?token=…`. uvicorn пишет путь вместе с query в строку рукопожатия
-# (`uvicorn.error`), а при `--log-level debug/trace` — ещё и в строки websockets и в repr scope
-# (`uvicorn.asgi`). Проверяется настоящая настройка журналов, которую main() передаёт uvicorn.
+# Токен сессии идёт вторым подпротоколом (`Sec-WebSocket-Protocol: dnd-game.v1, <токен>`): при
+# `--log-level debug/trace` uvicorn пишет заголовки рукопожатия (строки websockets) и подпротоколы
+# в repr scope (`uvicorn.asgi`). Старый клиент присылает токен в query (`/ws/games/<id>?token=…`),
+# а uvicorn пишет путь вместе с query в строку рукопожатия (`uvicorn.error`). Проверяется настоящая
+# настройка журналов, которую main() передаёт uvicorn.
 
 # Журналы, которые настраивает LOG_CONFIG: uvicorn, приложение и aiogram.
 CONFIGURED_LOGGERS = (
@@ -1077,6 +1145,40 @@ def test_mask_query_values_hides_every_query_value(line, masked):
     assert mask_query_values(line) == masked
 
 
+@pytest.mark.parametrize(
+    ("line", "masked"),
+    [
+        pytest.param(
+            "< sec-websocket-protocol: dnd-game.v1, abc.DEF_ghi-1",
+            "< sec-websocket-protocol: ***",
+            id="заголовок запроса в строке websockets",
+        ),
+        pytest.param(
+            "< Sec-WebSocket-Protocol: abc.DEF_ghi-1, dnd-game.v1",
+            "< Sec-WebSocket-Protocol: ***",
+            id="токен первым и другой регистр",
+        ),
+        pytest.param(
+            "Started scope={'path': '/ws/games/g1', 'subprotocols': ['dnd-game.v1', 'abc.DEF']}",
+            "Started scope={'path': '/ws/games/g1', 'subprotocols': [***]}",
+            id="подпротоколы в repr scope",
+        ),
+        pytest.param(
+            '127.0.0.1:5 - "WebSocket /ws/games/g1?token=abc.DEF" [accepted]',
+            '127.0.0.1:5 - "WebSocket /ws/games/g1?token=***" [accepted]',
+            id="старый клиент с токеном в query",
+        ),
+        pytest.param(
+            "Сервер запущен: http://127.0.0.1:8000",
+            "Сервер запущен: http://127.0.0.1:8000",
+            id="обычная строка не меняется",
+        ),
+    ],
+)
+def test_mask_log_line_hides_the_subprotocols_and_the_query_values(line, masked):
+    assert mask_log_line(line) == masked
+
+
 def test_log_formatters_mask_the_final_line_of_both_uvicorn_handlers(monkeypatch):
     _, options = run_main_with_fake_uvicorn(monkeypatch)
     formatters = copy.deepcopy(options["log_config"]["formatters"])
@@ -1127,8 +1229,11 @@ def written_to(stream: io.StringIO, log_config: dict) -> dict:
     return config
 
 
-async def log_of_handshake(settings, options, log_config, token: str) -> str:
-    """Всё, что настоящий сервер uvicorn записал в журнал при рукопожатии сокета с токеном."""
+async def log_of_handshake(
+    settings, options, log_config, token: str, *, in_query: bool = False
+) -> str:
+    """Всё, что настоящий сервер uvicorn записал в журнал при рукопожатии сокета с токеном:
+    вторым подпротоколом, как у Mini App, или в query, как у старого клиента (`in_query`)."""
     stream = io.StringIO()
     app = create_app(settings)
     config = uvicorn.Config(
@@ -1152,7 +1257,13 @@ async def log_of_handshake(settings, options, log_config, token: str) -> str:
     try:
         # Клиент может получить отказ или закрытие: журнал рукопожатия пишется в любом случае.
         with suppress(WebSocketException):
-            async with connect(f"ws://127.0.0.1:{port}/ws/games/g-1?{TOKEN_FIELD}{token}") as ws:
+            address = f"ws://127.0.0.1:{port}/ws/games/g-1"
+            opening = (
+                connect(f"{address}?{TOKEN_FIELD}{token}")
+                if in_query
+                else open_game_socket(address, token)
+            )
+            async with opening as ws:
                 await asyncio.wait_for(ws.recv(), 5)
     finally:
         server.should_exit = True
@@ -1161,7 +1272,7 @@ async def log_of_handshake(settings, options, log_config, token: str) -> str:
     return stream.getvalue()
 
 
-async def test_session_token_from_ws_query_never_reaches_the_real_uvicorn_log(
+async def test_the_session_token_of_the_socket_never_reaches_the_real_uvicorn_log(
     monkeypatch, settings, db, uvicorn_loggers_restored
 ):
     _, options = run_main_with_fake_uvicorn(monkeypatch)
@@ -1169,22 +1280,37 @@ async def test_session_token_from_ws_query_never_reaches_the_real_uvicorn_log(
 
     log = await log_of_handshake(settings, options, options["log_config"], token)
 
-    # Журнал не пуст: строка рукопожатия и записи trace на месте, а токена в них нет.
-    assert '"WebSocket /ws/games/g-1?token=***"' in log
+    # Журнал не пуст: строки заголовков и записи trace на месте, а токена в них нет.
+    assert "sec-websocket-protocol: ***" in log.lower()
+    assert "'subprotocols': [***]" in log
     assert "Started scope" in log
     assert token not in log
     assert all(part not in log for part in token.split("."))
 
 
-async def test_unmasked_uvicorn_log_would_leak_the_token(
+async def test_a_session_token_an_old_client_puts_in_the_query_is_masked_too(
     monkeypatch, settings, db, uvicorn_loggers_restored
 ):
-    # Контроль: тот же стенд со стандартной настройкой uvicorn токен выдаёт. Без этого
-    # предыдущий тест мог бы проходить просто потому, что стенд ничего не записывает.
     _, options = run_main_with_fake_uvicorn(monkeypatch)
     token = SessionSigner.from_settings(settings).issue("user-with-a-long-id")
 
-    log = await log_of_handshake(settings, options, LOGGING_CONFIG, token)
+    log = await log_of_handshake(settings, options, options["log_config"], token, in_query=True)
+
+    assert '"WebSocket /ws/games/g-1?token=***"' in log
+    assert token not in log
+    assert all(part not in log for part in token.split("."))
+
+
+@pytest.mark.parametrize("in_query", [False, True], ids=["подпротокол", "query"])
+async def test_unmasked_uvicorn_log_would_leak_the_token(
+    monkeypatch, settings, db, uvicorn_loggers_restored, in_query
+):
+    # Контроль: тот же стенд со стандартной настройкой uvicorn токен выдаёт. Без этого
+    # предыдущие тесты могли бы проходить просто потому, что стенд ничего не записывает.
+    _, options = run_main_with_fake_uvicorn(monkeypatch)
+    token = SessionSigner.from_settings(settings).issue("user-with-a-long-id")
+
+    log = await log_of_handshake(settings, options, LOGGING_CONFIG, token, in_query=in_query)
 
     assert token in log
 
@@ -1260,9 +1386,9 @@ def test_application_records_are_written_once(server_log):
 def test_warnings_of_the_start_come_out_with_their_level_and_the_masking_stays(
     monkeypatch, tmp_path, use_database, uvicorn_loggers_restored
 ):
-    # Дополнение B11 §7 п. 3 (N1): предупреждения старта (тестовый мастер в prod, жёсткая ссылка
-    # на месте lock-файла) идут через настроенный журнал — с меткой WARNING и именем журнала, как
-    # обещает README, а не голым текстом `logging.lastResort`. Настройка та же, что у uvicorn.
+    # Предупреждения старта (жёсткая ссылка на месте lock-файла) идут через настроенный журнал —
+    # с меткой WARNING и именем журнала, как обещает README, а не голым текстом
+    # `logging.lastResort`. Настройка та же, что у uvicorn.
     stream = io.StringIO()
     monkeypatch.setattr(server_main, "LOG_CONFIG", written_to(stream, LOG_CONFIG))
     script = tmp_path / "script.sh"
@@ -1276,11 +1402,8 @@ def test_warnings_of_the_start_come_out_with_their_level_and_the_masking_stays(
     logging.getLogger("dnd_server.realtime.ws").warning("Сокет: /ws/games/g1?token=%s", "abc.DEF")
 
     lines = stream.getvalue().splitlines()
-    master = [line for line in lines if NO_MASTER_WARNING in line]
-    lock = [line for line in lines if "Файл блокировки базы" in line]
-    assert len(master) == len(lock) == 1
-    for line in (*master, *lock):
-        assert line.startswith("WARNING:") and "dnd_server.main:" in line
+    [lock] = [line for line in lines if "Файл блокировки базы" in line]
+    assert lock.startswith("WARNING:") and "dnd_server.main:" in lock
     assert "abc.DEF" not in stream.getvalue() and "token=***" in stream.getvalue()
     assert handed == [server_main.LOG_CONFIG]  # uvicorn получает ту же настройку
 
@@ -1288,9 +1411,7 @@ def test_warnings_of_the_start_come_out_with_their_level_and_the_masking_stays(
 def test_main_sets_up_the_logs_before_the_checks_of_the_start(monkeypatch, no_real_logging_setup):
     order: list[str] = []
     monkeypatch.setattr(server_main, "configure_logging", lambda: order.append("журналы"))
-    monkeypatch.setattr(
-        server_main, "warn_without_master", lambda _settings: order.append("мастер")
-    )
+    monkeypatch.setattr(server_main, "require_master", lambda _settings: order.append("мастер"))
 
     run_main_with_fake_uvicorn(monkeypatch)
 

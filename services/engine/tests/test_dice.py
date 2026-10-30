@@ -516,7 +516,7 @@ def test_advantage_given_as_plain_string_becomes_the_enum_value(text, expected, 
     assert (result.natural, result.advantage) == (expected, mode)
 
 
-# --- пределы записи костей, которую прислала модель (heal/damage, B4.7) ---
+# --- пределы записи костей, которую прислала модель (heal/damage) ---
 
 
 @pytest.mark.parametrize(

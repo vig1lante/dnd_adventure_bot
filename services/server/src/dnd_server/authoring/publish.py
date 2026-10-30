@@ -1,5 +1,4 @@
-"""Публикация черновика в каталог приключений (план B6.1; спека §10.2, §10.3; дополнение dispatcher
-B6 §2, §6).
+"""Публикация черновика в каталог приключений.
 
 `publish_draft` проверяет черновик полным списком ошибок `pipeline.check` (без фильтра пустых шагов
 «Проверки») и пределами разделов, как у ручной записи, пишет строку `authored_adventures` и кладёт
@@ -86,7 +85,7 @@ async def publish_draft(
         raise DraftInvalid(BLOCKING, "blocking_errors", found) from None
     report = check(adventure, load_srd())
     errors = [
-        # Разделы, записанные мимо ручной записи (копия папки, данные до B6), — теми же пределами.
+        # Разделы, записанные мимо ручной записи (копия папки, старые данные), — теми же пределами.
         *(
             f"{SECTION_STEPS[section]}: {line}"
             for section, lines in section_problems(draft).items()

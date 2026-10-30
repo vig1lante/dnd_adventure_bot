@@ -1,4 +1,4 @@
-"""Промпт мастера и сборка контекста хода (план B7.2, спека §8.6).
+"""Промпт мастера и сборка контекста хода.
 
 Настоящее демо-приключение `demo-crypt`, данные SRD и реестр инструментов движка; живых моделей нет.
 Контекст проверяется по тому, что видит модель: тексты игроков живут только в блоках данных,
@@ -329,8 +329,8 @@ def prompt_line(prompt: str, fragment: str) -> str:
     return line
 
 
-# Решение D9 (security-review B7, L1): карточки обоих участников `contest` видят все, поэтому
-# тайное действие NPC против героя через него не ставится.
+# Карточки обоих участников `contest` видят все, поэтому тайное действие NPC против героя через него
+# не ставится.
 def test_the_prompt_does_not_advise_a_contest_for_a_secret_action_of_an_npc():
     prompt = system_prompt(build_ruleset(BOTH_MODULES))
 
@@ -349,7 +349,7 @@ def prompt_section(prompt: str, heading: str) -> str:
 
 
 def test_the_prompt_tells_when_to_write_the_journal_and_what_to_write(srd, adventure):
-    # Спека §12 и дополнение контракта B8 §6: модель может забывать звать `journal_add` (риск §18).
+    # Модель может забывать звать `journal_add` — это известный риск.
     prompt = system_prompt(build_ruleset(BOTH_MODULES))
 
     journal = prompt_section(prompt, "Дневник")
@@ -369,9 +369,9 @@ def test_the_prompt_tells_when_to_write_the_journal_and_what_to_write(srd, adven
 def test_the_prompt_asks_for_the_hero_of_every_finding_in_a_round_with_a_secret_turn(
     srd, adventure
 ):
-    # Дополнение §12 (поправка §11, п. 2): в раунде с тайным ходом движок отказывает каждому
-    # `reveal` без `for_hero`, который находит улику, сколько бы ни было тайных героев. Находка
-    # открытого героя остаётся общей, тайного — только его.
+    # В раунде с тайным ходом движок отказывает каждому `reveal` без `for_hero`, который находит
+    # улику, сколько бы ни было тайных героев. Находка открытого героя остаётся общей, тайного —
+    # только его.
     prompt = system_prompt(build_ruleset(BOTH_MODULES))
 
     rule = prompt_line(prompt_section(prompt, "Дневник"), "`reveal`")
@@ -381,11 +381,11 @@ def test_the_prompt_asks_for_the_hero_of_every_finding_in_a_round_with_a_secret_
     assert "открытого героя" in rule and "общей" in rule
     assert "тайного" in rule and "только" in rule
     assert "ошибк" in rule  # без героя инструмент откажет
-    assert "один" not in rule and "несколько" not in rule  # прежнее правило §11 п. 2 снято
+    assert "один" not in rule and "несколько" not in rule  # прежнее правило снято
 
 
 def test_the_prompt_tells_how_to_share_a_secret_finding_with_the_whole_party(srd, adventure):
-    # R3: тайная находка остаётся личной; поделиться ею — `journal_add(clue:<id>)` без `for_hero`.
+    # Тайная находка остаётся личной; поделиться ею — `journal_add(clue:<id>)` без `for_hero`.
     journal = prompt_section(system_prompt(build_ruleset(BOTH_MODULES)), "Дневник")
 
     rule = prompt_line(journal, "`clue:<id>`")
@@ -398,7 +398,7 @@ def test_the_prompt_tells_how_to_share_a_secret_finding_with_the_whole_party(srd
 def test_the_prompt_warns_that_a_journal_entry_without_a_hero_opens_a_secret_to_everybody(
     srd, adventure
 ):
-    # S3: в тайном ходе `journal_add` без `for_hero` пишет запись для всех.
+    # В тайном ходе `journal_add` без `for_hero` пишет запись для всех.
     journal = prompt_section(system_prompt(build_ruleset(BOTH_MODULES)), "Дневник")
 
     rule = prompt_line(journal, "`journal_add` без `for_hero`")
@@ -649,7 +649,7 @@ def test_the_party_lines_give_the_master_what_the_tools_need(srd, adventure):
 
 
 def test_the_party_lines_name_the_class_and_the_race_by_their_words(srd, adventure):
-    # Спека Р4: мастер видит слово «раса», а id расы остаётся полем `species`.
+    # Мастер видит слово «раса», а id расы остаётся полем `species`.
     outside, _ = split_data_blocks(context_of(srd, adventure))
 
     assert hero_block(outside, BRON).splitlines()[0] == (
@@ -709,7 +709,7 @@ def test_the_context_of_every_mode_speaks_of_distances_only_in_meters(srd, adven
     assert not re.search(r"фут|feet", context, re.IGNORECASE)
 
 
-# Слово «вид» в значении расы (спека Р4); «на виду» — другое слово, его здесь нет.
+# Слово «вид» в значении расы; «на виду» — другое слово, его здесь нет.
 RACE_AS_KIND = {"вид", "вида", "видом"}
 
 
@@ -725,8 +725,8 @@ def test_the_context_of_every_mode_never_calls_the_race_a_kind(srd, adventure, m
 
 
 def test_the_whole_prompt_of_the_reference_game_speaks_of_meters_and_of_the_race(adventure):
-    # Спека §6: «в промптах и в контексте эталонной игры нет «фут»». Модель получает не только файл
-    # роли мастера, но и фрагменты модулей правил и сводку приключения.
+    # В промптах и в контексте эталонной игры нет «фут». Модель получает не только файл роли
+    # мастера, но и фрагменты модулей правил и сводку приключения.
     prompt = system_prompt(build_ruleset(BOTH_MODULES)) + adventure_brief(adventure)
 
     assert not re.search(r"фут|feet|foot", prompt, re.IGNORECASE)
@@ -841,7 +841,7 @@ def test_the_world_section_has_time_scene_pacing_and_story_state(srd, adventure)
     outside, _ = split_data_blocks(context_of(srd, adventure))
 
     world = section(outside, "## Мир")
-    assert "День 1, вечер" in world
+    assert "День 1, вечер, 18:00." in world
     assert "исследование" in world
     assert "прошло 1 ч 10 мин из 1 ч 30 мин" in world
     assert "акт 3 из 3" in world
@@ -850,7 +850,7 @@ def test_the_world_section_has_time_scene_pacing_and_story_state(srd, adventure)
     assert '"met_marta": true' in world
 
 
-# --- дневник отряда (блок B8, дополнение контракта §6) ---
+# --- дневник отряда ---
 
 
 def journal_line(context: str) -> str:
@@ -1399,7 +1399,7 @@ def test_without_a_fight_there_is_no_combat_section(srd, adventure):
 def test_the_end_of_a_long_camp_tells_the_morning_and_of_a_short_one_an_hour_of_rest(
     srd, adventure
 ):
-    # Блок B9: мастер узнаёт вид привала из задачи хода «конец привала».
+    # Мастер узнаёт вид привала из задачи хода «конец привала».
     long_task = section(
         split_data_blocks(context_of(srd, adventure, mode=TurnMode.CAMP_END))[0], "## Задача"
     )
@@ -1413,6 +1413,9 @@ def test_the_end_of_a_long_camp_tells_the_morning_and_of_a_short_one_an_hour_of_
     assert explicit_long == context_of(srd, adventure, mode=TurnMode.CAMP_END)
     assert "Конец короткого привала" in short_task
     assert "короткий рассказ: что изменилось за час отдыха" in short_task
+    # Час отдыха прошёл и на часах игры: движок сдвинул время, часть суток — по часам.
+    assert "время игры движок сдвинул на час" in short_task
+    assert "не сдвигай" not in short_task
     assert "утро" not in short_task.lower() and "длинный" not in short_task
     assert "реплики у костра" in short_task and "chronicle" in short_task
 
@@ -1465,7 +1468,7 @@ def test_the_round_context_matches_the_golden_file(srd, adventure):
     assert context == GOLDEN.read_text(encoding="utf-8")
 
 
-# --- предел строк раздела мира (carry_over B6.1, security B2 I3) ---
+# --- предел строк раздела мира ---
 
 LORE_MORE = "…ещё {} — смотри get_relations/get_faction/get_deity"
 
@@ -1498,7 +1501,7 @@ def test_the_lore_section_lists_at_most_forty_lines_and_names_the_rest(srd, adve
 
 
 def test_one_line_over_the_limit_leaves_forty_lines_and_names_the_one_left_out(srd, adventure):
-    # Финальное покрытие B6: граница предела контракта — фракция и 40 связей, то есть 41 строка.
+    # Граница предела контракта — фракция и 40 связей, то есть 41 строка.
     lore = lore_of(srd, crowded_village(adventure, 40))
 
     assert len(lore_entries(lore)) == 40
@@ -1535,7 +1538,7 @@ def test_a_heading_without_any_line_of_its_own_is_not_written(srd, adventure):
     assert village.splitlines()[-1] == LORE_MORE.format(2 * (MAX_LORE_LINES + 5) - MAX_LORE_LINES)
 
 
-# --- fix-раунд 1 B6 (S3): тексты приключения — данные автора, а не указания ---
+# --- тексты приключения — данные автора, а не указания ---
 
 
 def test_the_reading_guide_calls_the_texts_of_the_adventure_data_of_its_author(srd, adventure):
@@ -1551,14 +1554,14 @@ def test_the_reading_guide_calls_the_texts_of_the_adventure_data_of_its_author(s
 def test_the_reading_guide_gives_a_secret_turn_to_the_author_of_the_turn_not_of_the_adventure(
     srd, adventure
 ):
-    # Рядом сказано про «автора приключения»: тайный ход принадлежит автору хода (B6 N1, B11).
+    # Рядом сказано про «автора приключения»: тайный ход принадлежит автору хода.
     guide = context_of(srd, adventure).splitlines()[1]
 
     assert "его результат и броски принадлежат автору хода," in guide
     assert "принадлежат автору," not in guide
 
 
-# --- дневник: граница строки и связь промпта с инструментами (финальное покрытие блока B8) ---
+# --- дневник: граница строки и связь промпта с инструментами ---
 
 
 def rumors_journal(count: int) -> tuple[JournalEntry, ...]:

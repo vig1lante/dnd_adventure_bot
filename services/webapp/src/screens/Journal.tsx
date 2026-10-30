@@ -4,7 +4,7 @@ import { Badge, Card, EmptyState, onTabKeyDown } from "../ui";
 import { classNames } from "../ui/classNames";
 import "./journal.css";
 
-/** Разделы дневника в порядке показа (дополнение к контракту B8, §1). */
+/** Разделы дневника в порядке показа. */
 const SECTIONS: readonly (readonly [JournalSection, string])[] = [
   ["main", "Главное"],
   ["places", "Места"],
@@ -131,7 +131,7 @@ function whenText(entry: JournalEntry): string {
 
 /**
  * Когда текст записи дополняли в последний раз; не дополняли — ничего. Первый приход в место
- * дополнением не считается (контракт B11, §1 п. 4), а сервер до B11 поля не присылает.
+ * дополнением не считается, а старый сервер поля не присылает.
  */
 function updatedText(entry: JournalEntry): string | null {
   const turn = entry.updated_turn ?? null;

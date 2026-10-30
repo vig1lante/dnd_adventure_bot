@@ -1,4 +1,4 @@
-"""Случайные вызовы инструментов мастера: что бы ни прислала модель, ход не падает (спека §8.3).
+"""Случайные вызовы инструментов мастера: что бы ни прислала модель, ход не падает.
 
 Модель мастера — недоверенный источник аргументов (инвариант ж). Тест строит случайные вызовы по
 JSON-схемам всех инструментов `build_registry`: чаще образцовые вызовы (`tool_calls.VALID_CALLS`)
@@ -311,7 +311,7 @@ def test_random_calls_never_break_the_turn_or_the_state(tool_registry, srd, make
             assert EVENTS.validate_json(EVENTS.dump_json(new_events)) == new_events, where
             for roll in (e for e in new_events if isinstance(e, RollEvent)):
                 # Бросок тайного автора не бывает общим, а адресат тайного — герой отряда.
-                # Исключение — броски, которые инструмент объявил общими (инициатива, §15).
+                # Исключение — броски, которые инструмент объявил общими (инициатива).
                 assert roll.audience == "all" or roll.audience in ctx.state.party, where
                 if roll.label not in spec.public_roll_labels:
                     assert roll.audience != "all" or roll.actor_id not in ctx.secret_actors, where

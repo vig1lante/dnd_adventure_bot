@@ -9,6 +9,7 @@ import {
   callsTo,
   deityOf,
   draftOf,
+  dropFocus,
   encounterOf,
   exitOf,
   factionOf,
@@ -27,6 +28,7 @@ import {
   renderEditor,
   revelationOf,
   secretOf,
+  spyScrollIntoView,
   stepsOf,
 } from "./fixtures";
 import { ADVENTURE_ID_HINT, ID_HINT } from "./labels";
@@ -115,7 +117,7 @@ describe("полоска шагов", () => {
     }
   });
 
-  test("замок целого шага блока 6 — у его экрана: step:clues у «Улик»", async () => {
+  test("замок целого шага — у его экрана: step:clues у «Улик»", async () => {
     renderEditor(draftOf({ locks: ["step:clues"] }));
     await opened();
 
@@ -123,7 +125,7 @@ describe("полоска шагов", () => {
     expect(stepButton("Бои и боссы")).not.toHaveTextContent("закреплён");
   });
 
-  test("замок целого шага блока 5 — у его экрана: step:location_contents у «Наполнения»", async () => {
+  test("замок целого шага — у его экрана: step:location_contents у «Наполнения»", async () => {
     renderEditor(draftOf({ locks: ["step:location_contents"] }));
     await opened();
 
@@ -197,6 +199,249 @@ describe("полоска шагов", () => {
   });
 });
 
+describe("удаление черновика", () => {
+  const DRAFT_PATH = "/api/drafts/d1";
+  const deleteButton = () => button("Удалить черновик");
+  const question = () =>
+    screen.getByRole("alertdialog", { name: "Удалить черновик?" });
+
+  test("отказ удаления: пока запрос в пути, «Удалить черновик» занята и без фокуса; после ответа фокус снова на ней", async () => {
+    renderEditor(draftOf(), {
+      [`DELETE ${DRAFT_PATH}`]: {
+        status: 409,
+        json: {
+          detail: "Идёт генерация: дождитесь её окончания.",
+          code: "job_running",
+        },
+      },
+    });
+    await opened();
+    deleteButton().focus();
+    fireEvent.click(deleteButton());
+    const yes = within(question()).getByRole("button", { name: "Да, удалить" });
+    yes.focus();
+
+    fireEvent.click(yes);
+
+    // Вопрос ушёл, а кнопка, с которой он задан, занята запросом: браузер фокус на неё не ставит.
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(deleteButton()).toBeDisabled();
+    expect(deleteButton()).not.toHaveFocus();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Идёт генерация: дождитесь её окончания.",
+    );
+    await vi.waitFor(() => expect(deleteButton()).toHaveFocus());
+  });
+
+  test("«Отмена» в вопросе «Удалить черновик?» возвращает фокус на «Удалить черновик»", async () => {
+    renderEditor(draftOf());
+    await opened();
+    // В jsdom щелчок фокус не переносит: кнопка получает его, как в браузере при нажатии.
+    deleteButton().focus();
+    fireEvent.click(deleteButton());
+    expect(question()).toHaveFocus();
+
+    fireEvent.click(within(question()).getByRole("button", { name: "Отмена" }));
+
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(deleteButton()).toHaveFocus();
+  });
+
+  test("«Удалить черновик» сначала спрашивает: опубликованное приключение останется; «Отмена» ничего не удаляет", async () => {
+    const { server, onClose } = renderEditor(draftOf(), {
+      [`DELETE ${DRAFT_PATH}`]: { status: 204 },
+    });
+    await opened();
+
+    fireEvent.click(deleteButton());
+
+    expect(question()).toHaveTextContent(
+      "Опубликованное приключение останется в каталоге и играх.",
+    );
+    expect(question()).toHaveFocus();
+    fireEvent.click(within(question()).getByRole("button", { name: "Отмена" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(callsTo(server, "DELETE", DRAFT_PATH)).toHaveLength(0);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  test("«Да, удалить» — DELETE /api/drafts/{id}, затем редактор закрывается к списку", async () => {
+    const { server, onClose } = renderEditor(draftOf(), {
+      [`DELETE ${DRAFT_PATH}`]: { status: 204 },
+    });
+    await opened();
+
+    fireEvent.click(deleteButton());
+    fireEvent.click(
+      within(question()).getByRole("button", { name: "Да, удалить" }),
+    );
+
+    await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(callsTo(server, "DELETE", DRAFT_PATH)).toHaveLength(1);
+  });
+
+  test("отказ сервера — его текст у кнопки, редактор остаётся открытым", async () => {
+    const { onClose } = renderEditor(draftOf(), {
+      [`DELETE ${DRAFT_PATH}`]: {
+        status: 409,
+        json: {
+          detail: "Идёт генерация: дождитесь её окончания.",
+          code: "job_running",
+        },
+      },
+    });
+    await opened();
+
+    fireEvent.click(deleteButton());
+    fireEvent.click(
+      within(question()).getByRole("button", { name: "Да, удалить" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Идёт генерация: дождитесь её окончания.",
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    expect(await opened()).toBeInTheDocument();
+  });
+
+  test("пока идёт генерация, удалить черновик нельзя: кнопка закрыта", async () => {
+    renderEditor(draftOf({ job: jobOf({ status: "running" }) }));
+    await opened();
+
+    expect(screen.getByText("Генерирую…")).toBeInTheDocument();
+    expect(deleteButton()).toBeDisabled();
+  });
+
+  test("генерация началась при открытом вопросе — «Да, удалить» тоже закрыта", async () => {
+    renderEditor(draftOf(), {
+      "POST /api/drafts/d1/generate": {
+        status: 202,
+        json: jobOf({ status: "queued" }),
+      },
+    });
+    await opened();
+    fireEvent.click(deleteButton());
+
+    fireEvent.click(
+      within(panel("Замысел")).getByRole("button", {
+        name: "Сгенерировать шаг",
+      }),
+    );
+
+    await screen.findByText("Генерирую…");
+    expect(deleteButton()).toBeDisabled();
+    expect(
+      within(question()).getByRole("button", { name: "Да, удалить" }),
+    ).toBeDisabled();
+  });
+
+  /**
+   * Редактор, у которого ответы на запросы `method` ждут, пока тест их не отпустит (медленная
+   * связь): так видно, что закрыто, пока запрос в пути.
+   */
+  function renderHeld(method: "PUT" | "DELETE") {
+    signInAs({ id: "u1", name: "Вика", can_create_games: true });
+    const draft = draftOf();
+    const server = fakeServer({
+      "GET /api/drafts/d1": { json: draft },
+      "GET /api/drafts/d1/refs": { json: refsOf(draft) },
+      [`PUT ${CONCEPT_PATH}`]: { json: draftOf({ version: 2 }) },
+      [`DELETE ${DRAFT_PATH}`]: { status: 204 },
+    });
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow: typeof fetch = async (input, init) => {
+      if (init?.method === method) await held;
+      return server.fetch(input, init);
+    };
+    const onClose = vi.fn();
+    render(
+      <ApiContext value={createApi(slow, sessionToken)}>
+        <DraftEditor draftId="d1" onClose={onClose} />
+      </ApiContext>,
+    );
+    return { server, onClose, release };
+  }
+
+  test("пока идёт запись раздела, удалить нельзя: «Удалить черновик» и «Да, удалить» закрыты до ответа сервера", async () => {
+    const { server, release } = renderHeld("PUT");
+    await opened();
+    fireEvent.click(deleteButton());
+
+    fireEvent.click(
+      within(panel("Замысел")).getByRole("button", {
+        name: "Сохранить раздел",
+      }),
+    );
+
+    await vi.waitFor(() => expect(deleteButton()).toBeDisabled());
+    expect(
+      within(question()).getByRole("button", { name: "Да, удалить" }),
+    ).toBeDisabled();
+    release();
+    await vi.waitFor(() => expect(deleteButton()).toBeEnabled());
+    expect(
+      within(question()).getByRole("button", { name: "Да, удалить" }),
+    ).toBeEnabled();
+    expect(callsTo(server, "DELETE", DRAFT_PATH)).toHaveLength(0);
+  });
+
+  test("пока удаление в пути, второй раз не удалить: кнопка занята, редактор закрывается один раз", async () => {
+    const { server, onClose, release } = renderHeld("DELETE");
+    await opened();
+    fireEvent.click(deleteButton());
+    fireEvent.click(
+      within(question()).getByRole("button", { name: "Да, удалить" }),
+    );
+
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    await vi.waitFor(() => expect(deleteButton()).toBeDisabled());
+    expect(deleteButton()).toHaveAttribute("aria-busy", "true");
+    fireEvent.click(deleteButton());
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+
+    release();
+    await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(callsTo(server, "DELETE", DRAFT_PATH)).toHaveLength(1);
+  });
+
+  test("404 — черновика уже нет или он чужой: текст сервера у кнопки, редактор открыт", async () => {
+    const { onClose } = renderEditor(draftOf(), {
+      [`DELETE ${DRAFT_PATH}`]: {
+        status: 404,
+        json: { detail: "Черновик не найден." },
+      },
+    });
+    await opened();
+
+    fireEvent.click(deleteButton());
+    fireEvent.click(
+      within(question()).getByRole("button", { name: "Да, удалить" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Черновик не найден.",
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    expect(button("К списку приключений")).toBeEnabled();
+  });
+
+  test("вопрос «Удалить черновик?» встаёт в середину экрана, как остальные вопросы конструктора", async () => {
+    const scrollIntoView = spyScrollIntoView();
+    renderEditor(draftOf());
+    await opened();
+
+    fireEvent.click(deleteButton());
+
+    expect(question()).toHaveFocus();
+    expect(scrollIntoView.mock.contexts).toEqual([question()]);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+  });
+});
+
 describe("ответы сервера на запись", () => {
   const saveConcept = () =>
     fireEvent.click(
@@ -257,6 +502,114 @@ describe("ответы сервера на запись", () => {
     );
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(callsTo(server, "GET", "/api/drafts/d1")).toHaveLength(2);
+  });
+
+  test("409 version_conflict: вопрос получает фокус и встаёт в середину экрана — его видно и после «Сохранить раздел» внизу длинного шага", async () => {
+    const scrollIntoView = spyScrollIntoView();
+    renderEditor(draftOf(), {
+      [`PUT ${CONCEPT_PATH}`]: {
+        status: 409,
+        json: { detail: "Черновик изменился.", code: "version_conflict" },
+      },
+    });
+    await opened();
+
+    saveConcept();
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Черновик изменился, обновить?",
+    });
+
+    await vi.waitFor(() => expect(dialog).toHaveFocus());
+    expect(scrollIntoView.mock.contexts).toEqual([dialog]);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+  });
+
+  test("повторный 409 при открытом вопросе снова ведёт к нему: фокус и прокрутка", async () => {
+    const scrollIntoView = spyScrollIntoView();
+    renderEditor(draftOf(), {
+      [`PUT ${CONCEPT_PATH}`]: {
+        status: 409,
+        json: { detail: "Черновик изменился.", code: "version_conflict" },
+      },
+    });
+    await opened();
+    saveConcept();
+    await vi.waitFor(() =>
+      expect(screen.getByRole("alertdialog")).toHaveFocus(),
+    );
+    // Автор не ответил на вопрос, вернулся к форме и сохраняет снова.
+    const title = within(panel("Замысел")).getByRole("textbox", {
+      name: "Название",
+    });
+    title.focus();
+    scrollIntoView.mockClear();
+
+    saveConcept();
+
+    await vi.waitFor(() =>
+      expect(screen.getByRole("alertdialog")).toHaveFocus(),
+    );
+    expect(scrollIntoView.mock.contexts).toEqual([
+      screen.getByRole("alertdialog"),
+    ]);
+  });
+
+  test("форма выключена на время записи, и «Сохранить раздел» теряет фокус — после «Отмена» в вопросе о конфликте фокус снова на ней", async () => {
+    renderEditor(draftOf(), {
+      [`PUT ${CONCEPT_PATH}`]: {
+        status: 409,
+        json: { detail: "Черновик изменился.", code: "version_conflict" },
+      },
+    });
+    await opened();
+    const save = within(panel("Замысел")).getByRole("button", {
+      name: "Сохранить раздел",
+    });
+    save.focus();
+
+    fireEvent.click(save);
+    expect(save).toBeDisabled();
+    dropFocus();
+    const dialog = await screen.findByRole("alertdialog", {
+      name: "Черновик изменился, обновить?",
+    });
+    await vi.waitFor(() => expect(dialog).toHaveFocus());
+    fireEvent.click(within(dialog).getByRole("button", { name: "Отмена" }));
+
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(save).toHaveFocus();
+  });
+
+  test("«Обновить» в вопросе о конфликте перестраивает редактор: прежней кнопки нет, фокус на неё не уходит", async () => {
+    let reads = 0;
+    renderEditor(draftOf(), {
+      "GET /api/drafts/d1": () => ({ json: draftOf({ version: ++reads }) }),
+      [`PUT ${CONCEPT_PATH}`]: {
+        status: 409,
+        json: { detail: "Черновик изменился.", code: "version_conflict" },
+      },
+    });
+    await opened();
+    const save = within(panel("Замысел")).getByRole("button", {
+      name: "Сохранить раздел",
+    });
+    save.focus();
+    saveConcept();
+    const dialog = await screen.findByRole("alertdialog");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Обновить" }));
+
+    // Черновик перечитан, редактор собран заново: кнопка до вопроса ушла вместе с прежним.
+    await vi.waitFor(() =>
+      expect(
+        within(panel("Замысел")).getByRole("button", {
+          name: "Сохранить раздел",
+        }),
+      ).not.toBe(save),
+    );
+    expect(save.isConnected).toBe(false);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(document.body).toHaveFocus();
   });
 
   test("в диалоге конфликта «Отмена» закрывает его и оставляет правки", async () => {
@@ -393,7 +746,7 @@ describe("закрепление раздела-одиночки", () => {
 });
 
 // Закрепление фиксирует то, что знает сервер. Пока в форме есть несохранённые правки, закрепить
-// можно было бы не то, что видит автор, а следующая генерация стёрла бы правки (находка reviewer B4).
+// можно было бы не то, что видит автор, а следующая генерация стёрла бы правки.
 describe("несохранённые правки шага: закрепление и генерация", () => {
   const SAVE_FIRST =
     "Сначала сохраните раздел: закрепить можно только сохранённое.";
@@ -468,7 +821,7 @@ describe("несохранённые правки шага: закреплени
 });
 
 // Набранное пожелание — текст автора: пересоздание формы раздела (после «Сохранить раздел») не
-// должно его сбрасывать (находка reviewer B4, attempt 002). Сохранённое на сервере пожелание поле
+// должно его сбрасывать. Сохранённое на сервере пожелание поле
 // берёт после генерации и после «Обновить».
 describe("пожелание шага не теряется при сохранении раздела", () => {
   const concept = () => panel("Замысел");
@@ -917,7 +1270,7 @@ describe("опрос задания раз в 2 секунды", () => {
   });
 });
 
-// --- финальное покрытие блока 4: стыки редактора с сервером ---
+// --- стыки редактора с сервером ---
 
 const JOB_RUNNING = {
   status: 409,
@@ -1299,7 +1652,7 @@ describe("задание генерации: стыки с сервером", ()
     expect(callsTo(server, "GET", "/api/drafts/d1/jobs/j1")).toHaveLength(0);
   });
 
-  // Ревью B4 (nit): старое упавшее задание («сервер перезапускался» неделю назад) не тревожит
+  // Старое упавшее задание («сервер перезапускался» неделю назад) не тревожит
   // автора при каждом открытии черновика, если черновик с тех пор менялся.
   test("черновик менялся после упавшего задания: ни ошибки, ни заметки — правка и генерация открыты", async () => {
     const { server } = renderEditor(
@@ -1432,9 +1785,9 @@ describe("справочник ссылок (GET /api/drafts/{id}/refs)", () => 
   });
 });
 
-// --- финальное покрытие блока 5 ---
+// --- одна сущность на экранах «Наполнение», «Персонажи», «Связи» ---
 
-/** Черновик блока 5: локация, два персонажа и связь между ними. */
+/** Черновик: локация, два персонажа и связь между ними. */
 const PEOPLE = draftOf({
   version: 4,
   locations: [locationOf({ id: "crypt", name: "Склеп" })],
@@ -1455,7 +1808,7 @@ const editIn = (scope: HTMLElement, field: string, value: string) =>
     target: { value },
   });
 
-// Экран → шаг генерации → цель одной сущности (дополнение B5, §2 и §7); `edit` — любая правка экрана.
+// Экран → шаг генерации → цель одной сущности; `edit` — любая правка экрана.
 describe.each([
   {
     label: "Наполнение",
@@ -1486,8 +1839,8 @@ describe.each([
 ] as const)(
   "«Перегенерировать» на экране «$label»",
   ({ label, step, target, name, edit }) => {
-    // Fix-раунд 1 B5 (§9, minor 2): после генерации форма начинается заново с черновиком
-    // сервера, поэтому при несохранённых правках кнопка закрыта, как «Закрепить» (B4 §10).
+    // После генерации форма начинается заново с черновиком сервера, поэтому при несохранённых
+    // правках кнопка закрыта, как «Закрепить».
     test("при несохранённых правках экрана закрыта с подсказкой «Сначала сохраните раздел»", async () => {
       const { form } = await openStep(PEOPLE, label);
       const regenerate = await regenerateButton(form, name);
@@ -1619,7 +1972,7 @@ test("сбой перезагрузки справочника: прежний �
   ).toHaveValue("location:crypt");
 });
 
-// --- финальное покрытие блока 6: одна сущность на экранах «Бои и боссы», «Предметы», «Улики» ---
+// --- одна сущность на экранах «Бои и боссы», «Предметы», «Улики» ---
 
 const FIGHTS = draftOf({
   version: 4,
@@ -1633,7 +1986,7 @@ const FIGHTS = draftOf({
 // Справочник SRD нужен только экрану боёв; пустой список — чтобы не было текста сбоя.
 const SRD_ROUTE = { "GET /api/srd/monsters": { json: [] } };
 
-// Экран → шаг генерации → цель одной сущности (дополнение B6, §1: цели по `steps.target_id`).
+// Экран → шаг генерации → цель одной сущности (цели по `steps.target_id`).
 describe.each([
   {
     label: "Бои и боссы",
@@ -1762,9 +2115,7 @@ test.each([
   },
 );
 
-// --- fix-раунд 1 блока 6 (дополнение B6, §11: R2, R5, R12) ---
-
-describe("подсказка id — правило шаблона сервера на всех полях id (R2)", () => {
+describe("подсказка id — правило шаблона сервера на всех полях id", () => {
   // Сущность каждого вида с полем id: так на каждом экране видны все его поля id.
   const CRYPT = locationOf({
     id: "crypt",
@@ -1855,7 +2206,7 @@ describe("подсказка id — правило шаблона сервера
   });
 });
 
-describe("генерация Замысла пишет и откровения «Улик» (R5)", () => {
+describe("генерация Замысла пишет и откровения «Улик»", () => {
   const SMUGGLER = revelationOf();
   const fromClues =
     "На экране «Улики» есть несохранённые правки: они пропадут.";
@@ -1910,7 +2261,7 @@ describe("генерация Замысла пишет и откровения �
   });
 });
 
-describe("проверка и публикация говорят о несохранённых правках других экранов (R12)", () => {
+describe("проверка и публикация говорят о несохранённых правках других экранов", () => {
   const typeDeityName = (value: string) => {
     fireEvent.click(stepButton("Боги"));
     fireEvent.change(
@@ -1963,7 +2314,7 @@ describe("проверка и публикация говорят о несох�
   });
 });
 
-// B10.4: конструктор говорит тем же языком состояний, что игра (скелетон, единая ошибка).
+// Конструктор говорит тем же языком состояний, что игра (скелетон, единая ошибка).
 describe("загрузка и ошибка черновика — как на остальных экранах", () => {
   test("пока черновик идёт — скелетон «Загружаем черновик…»; сбой — «Не удалось открыть черновик», текст сервера и «Повторить»", async () => {
     let reads = 0;
@@ -1987,7 +2338,7 @@ describe("загрузка и ошибка черновика — как на о
   });
 });
 
-// --- финальное покрытие блока B10 (B10.coverage): имя сущности в отказе — только текст ---
+// --- имя сущности в отказе — только текст ---
 
 describe("отказ записи словами формы: имя сущности автора — буквами", () => {
   test("имя бога с разметкой в строке отказа выводится текстом, без элементов", async () => {

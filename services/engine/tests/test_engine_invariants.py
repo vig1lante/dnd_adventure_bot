@@ -71,7 +71,7 @@ ALLOWED_IMPORTS: dict[str, str] = {
     "secrets": "SystemRng: криптостойкий генератор для игры (rng.py)",
     "unicodedata": (
         "категория знака (Zs): неразрывные пробелы в note мастера становятся обычными "
-        "(tools/world.py, дополнение B8 §11)"
+        "(tools/world.py)"
     ),
 }
 # Корни, которым место только в одном модуле: остальным они не нужны, а появление там — сигнал.
@@ -188,10 +188,11 @@ def test_package_files_are_found():
     paths = {module_path(path) for path in MODULE_FILES}
 
     assert {"rng.py", "dice.py", "creation.py", "checks.py", "rest.py"} <= names
-    # Новые модули блока B3 тоже под проверкой: иначе границы держались бы только на старых файлах.
+    # Модули боя и состояния тоже под проверкой: иначе границы держались бы только на старых
+    # файлах.
     assert {"events.py", "state.py", "conditions.py", "engine.py", "model.py"} <= names
     assert {"base.py", "bg3_flavor.py", "campfire.py"} <= names
-    # Блок B4: приключение и инструменты мастера тоже под проверкой границ, не только старые файлы.
+    # Приключение и инструменты мастера тоже под проверкой границ, не только старые файлы.
     assert {
         "adventure/schema.py",
         "adventure/loader.py",

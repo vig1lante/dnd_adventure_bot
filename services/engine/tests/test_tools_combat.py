@@ -1,4 +1,4 @@
-"""Инструменты боя, рассказа и модулей, сборка реестра (план B4.7, спека §5.4, §5.5, §8.3, §8.5).
+"""Инструменты боя, рассказа и модулей, сборка реестра.
 
 Инструменты зовутся через настоящий `ToolRegistry` из `build_registry`, как их будет звать модель
 мастера. Приключение — `demo-crypt`: бой «Встающие кости» на кладбище (скелеты в могилах, зомби у
@@ -816,7 +816,7 @@ def test_the_clean_statblock_is_accepted_and_every_call_but_two_really_resolves(
     assert refused_calls == {("attack", "multiattack"), ("attack", "screech")}
 
 
-# --- B11.coverage: общая только инициатива начала боя (спека DND-2 §15, дополнение B11 §3) ---
+# --- общая только инициатива начала боя ---
 
 
 def test_a_monster_action_named_like_the_initiative_does_not_open_the_save_of_a_secret_hero(
@@ -1838,7 +1838,7 @@ def refusal_of_begin_rest(ctx: ToolContext) -> str:
     return str(refusal.value)
 
 
-@pytest.mark.parametrize("kind", [None, "short", "long"], ids=["dnd1", "short", "long"])
+@pytest.mark.parametrize("kind", [None, "short", "long"], ids=["no-kind", "short", "long"])
 def test_start_camp_during_any_camp_gives_the_model_the_refusal_of_begin_rest(run, make_ctx, kind):
     # `start_camp` идёт через `begin_rest`: модель видит тот же текст, что игроки в ответе 409.
     ctx = make_ctx()

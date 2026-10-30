@@ -1,11 +1,10 @@
-"""Игры и лобби (план B6.3): создание, вход по коду, готовность, старт.
+"""Игры и лобби: создание, вход по коду, готовность, старт.
 
-Приложение работает на настоящей SQLite после миграций (`db`, `settings` из `tests/conftest.py`),
-с выполненным стартом (`lifespan` грузит каталог приключений из временной копии `demo-crypt`).
-Рассылка по сокетам и запуск вплетения подменены регистраторами: хаб появится в B6.5, мастер —
-в B7.8. Персонажей создаёт B6.4, поэтому тесты вставляют строки `characters` напрямую. Настоящие
-модели не вызываются: фабрика провайдеров только проверяет настройки, а ключ в тестах — выдуманная
-строка.
+Приложение работает на настоящей SQLite после миграций (`db`, `settings` из `tests/conftest.py`), с
+выполненным стартом (`lifespan` грузит каталог приключений из временной копии `demo-crypt`).
+Рассылка по сокетам и запуск вплетения подменены регистраторами. Персонажей создаёт отдельная часть
+сервера, поэтому тесты вставляют строки `characters` напрямую. Настоящие модели не вызываются:
+фабрика провайдеров только проверяет настройки, а ключ в тестах — выдуманная строка.
 """
 
 import asyncio
@@ -52,7 +51,7 @@ SESSION_SECRET = "test-session-secret-0123456789-abcdefghij"
 CREATOR_TG_ID = 700
 ANTHROPIC_TEST_KEY = "sk-ant-test-not-a-real-key"
 CODE_FORMAT = re.compile(r"[A-Z0-9]{6}")
-# Решение владельца B6.security: 10 неудачных попыток войти по коду за 10 минут.
+# Решение владельца: 10 неудачных попыток войти по коду за 10 минут.
 MAX_FAILED_JOINS = 10
 FAILED_JOIN_WINDOW_S = 600
 GAME_FIELDS = {
@@ -156,7 +155,7 @@ async def start_lobby(
     app = create_app(settings)
     broadcaster = RecordingBroadcaster()
     hooks = RecordingHooks(db)
-    # Хаб (B6.5) и мастер (B7.8) подменят заглушки по умолчанию так же: через `app.state`.
+    # Настоящие хаб и мастер подменяют заглушки по умолчанию так же: через `app.state`.
     app.state.broadcaster = broadcaster
     app.state.game_hooks = hooks
     async with app.router.lifespan_context(app):
@@ -224,7 +223,7 @@ async def joined_friend(lobby: Lobby, game: dict[str, Any]) -> Player:
 async def give_character(
     db: async_sessionmaker[AsyncSession], game_id: str, player: Player
 ) -> None:
-    """Вставляет персонажа игроку напрямую: создание персонажей — B6.4."""
+    """Вставляет персонажа игроку напрямую, минуя создание персонажей."""
     hero = quick_character(
         "fighter",
         "human",
@@ -385,7 +384,7 @@ async def test_adventure_with_blocking_errors_is_422_and_the_creator_gets_the_re
     assert response.status_code == 422
     body = response.json()
     assert isinstance(body["detail"], str)
-    # Отчёт с id скрытого выхода получает только создатель игры (решение владельца B6).
+    # Отчёт с id скрытого выхода получает только создатель игры (решение владельца).
     assert any("to-crypt" in problem for problem in body["problems"])
     assert await count_games(lobby.db) == 0
 
@@ -532,7 +531,7 @@ async def test_in_prod_claude_code_cli_is_refused_as_dev_only_before_its_models_
         assert await count_games(db) == 0
 
 
-# --- модель подписки claude_code_cli (DND-2 B1.2, спека §11) ---
+# --- модель подписки claude_code_cli ---
 
 
 @pytest.mark.parametrize("model", ["opus", "sonnet", "haiku"])
@@ -649,7 +648,7 @@ async def test_the_subscription_settings_do_not_open_claude_code_cli_in_prod(set
         assert await count_games(db) == 0
 
 
-# --- мат и грубая речь (DND-2 B1.2, решение Р1) ---
+# --- мат и грубая речь ---
 
 
 async def test_a_new_game_allows_profanity_by_default(lobby):
@@ -720,7 +719,7 @@ async def test_host_sets_the_countdowns_at_creation(lobby):
 
 
 async def test_the_short_rest_comes_from_the_environment_or_from_the_host(lobby):
-    # Короткий привал (блок B9): без поля — `SHORT_REST_SECONDS`, с полем — выбор хоста.
+    # Короткий привал: без поля — `SHORT_REST_SECONDS`, с полем — выбор хоста.
     host = await add_host(lobby)
 
     by_default = await new_game(lobby, host)
@@ -953,7 +952,7 @@ async def test_newcomer_cannot_join_a_game_that_has_started_but_its_members_can(
     assert len(await stored_players(lobby.db, game["id"])) == 3
 
 
-# --- предел неудачных попыток войти по коду (решение владельца B6.security) ---
+# --- предел неудачных попыток войти по коду (решение владельца) ---
 
 
 class FakeClock:
@@ -1199,7 +1198,7 @@ async def test_my_games_lists_only_the_games_i_am_in_newest_first(lobby):
     assert nobodys_games.json() == []
 
 
-# --- что видно о игре в списке и лобби (B11.2) ---
+# --- что видно о игре в списке и лобби ---
 
 
 async def test_a_game_tells_when_it_was_created_in_utc_everywhere_it_is_shown(lobby):
@@ -1239,9 +1238,9 @@ async def test_every_player_sees_the_names_of_the_heroes_in_the_lobby(lobby):
 
 
 async def test_every_answer_and_frame_with_a_game_carries_its_creation_time_and_hero_names(lobby):
-    # Финальное покрытие B11: `GameOut` отдают не только список и карточка игры, но и вход,
-    # готовность, исключение и старт, а с ними — кадры `lobby`. Время создания везде одно и то же,
-    # имя героя — у всех игроков, у игрока без героя `null`.
+    # `GameOut` отдают не только список и карточка игры, но и вход, готовность, исключение и старт,
+    # а с ними — кадры `lobby`. Время создания везде одно и то же, имя героя — у всех игроков, у
+    # игрока без героя `null`.
     host = await add_host(lobby)
     game = await new_game(lobby, host)
     expected = game["created_at"]
@@ -1487,11 +1486,11 @@ async def test_a_failing_broadcaster_does_not_fail_the_change_and_is_logged(sett
         assert game["id"] in caplog.text
 
 
-# --- выход и исключение из лобби (решение владельца S5, D2) ---
+# --- выход и исключение из лобби (решение владельца) ---
 
 
 async def give_choice(db: async_sessionmaker[AsyncSession], game_id: str, player: Player) -> None:
-    """Выбор игрока при создании героя (B8.s3): он хранится вместе со строкой персонажа."""
+    """Выбор игрока при создании героя: он хранится вместе со строкой персонажа."""
     async with db() as session:
         row = await session.scalar(
             select(PlayerCharacter).where(
@@ -1644,8 +1643,8 @@ async def test_leaving_races_with_the_start_under_the_game_lock(lobby):
 
 
 async def test_the_kicked_player_is_cut_off_before_the_lobby_hears_of_the_kick(lobby, monkeypatch):
-    # Дополнение B11 §5 п. 6 (S3): соединения исключённого снимаются после коммита и до рассылки
-    # `lobby`, поэтому новый состав лобби до него не доходит — он получает только `kicked`.
+    # Соединения исключённого снимаются после коммита и до рассылки `lobby`, поэтому новый состав
+    # лобби до него не доходит — он получает только `kicked`.
     game, host, (target, _stayer) = await ready_lobby(lobby)
     order: list[object] = []
     hub = lobby.app.state.hub
@@ -1842,7 +1841,7 @@ async def test_a_refused_leave_or_kick_keeps_the_sockets_of_the_player(lobby):
     assert hub.connections(game["id"]) == 2
 
 
-# --- мир приключения (данные мастера формата v2, спека DND-2 §8 «Видимость») ---
+# --- мир приключения (данные мастера формата v2) ---
 
 LORE_MARK = "МИР-МАСТЕРА-"
 

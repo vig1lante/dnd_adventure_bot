@@ -1,4 +1,4 @@
-"""Бюджет боёв и валидатор приключения (спека §6.2, план B4.3).
+"""Бюджет боёв и валидатор приключения.
 
 Приключения собираются в памяти фабрикой `adventure_factory`: чистое приключение не даёт ни
 ошибок, ни предупреждений, а каждый тест вносит в него одну правку и ждёт один код.
@@ -774,7 +774,7 @@ def a_second_ledger_in_the_village(data: dict[str, Any]) -> None:
 
 
 def a_second_chest_in_the_cemetery(data: dict[str, Any]) -> None:
-    # Тот самый сценарий ревью: два «сундука», `reveal("feature:chest")` открыл бы только первый.
+    # Найденный случай: два «сундука», `reveal("feature:chest")` открыл бы только первый.
     chest = {"name": "Сундук", "description": "Окован железом."}
     data["locations"]["village"]["features"].append({"id": "chest", **chest})
     data["locations"]["cemetery"]["features"].append({"id": "chest", **chest})
@@ -1012,7 +1012,7 @@ def a_hidden_exit_named_like_a_plain_exit_of_another_location(data: dict[str, An
 
 
 def two_hidden_exits_with_one_id(data: dict[str, Any]) -> None:
-    # Сценарий ревью: `reveal("exit:trapdoor")` в деревне открыл бы и люк кладбища.
+    # Найденный случай: `reveal("exit:trapdoor")` в деревне открыл бы и люк кладбища.
     trapdoor = {"id": "trapdoor", "direction": "вниз", "description": "Люк.", "hidden_dc": 20}
     data["locations"]["village"]["exits"].append({**trapdoor, "to": "crypt"})
     data["locations"]["cemetery"]["exits"].append({**trapdoor, "to": "crypt", "hidden_dc": 25})
@@ -2389,7 +2389,7 @@ def test_an_item_with_a_name_or_public_text_is_not_warned(srd, name, public):
     assert validate(Adventure.model_validate(data), srd).issues == []
 
 
-# --- B11.coverage: текст для дневника на границах (дополнение контракта B11 §3) ---
+# --- текст для дневника на границах ---
 
 JOURNAL_TEXT_CODES = {"clue_without_description", "item_without_text"}
 # Пробелы, которые редактор или генератор оставляют вместо текста: табуляция, неразрывный,
@@ -2453,7 +2453,7 @@ def test_every_clue_and_item_without_text_gets_its_own_warning_and_nothing_block
 
 OLD_ADVENTURES = {
     "старая папка v1": lambda: load_adventure(FIXTURES / "demo-crypt-v1"),
-    "копия игры DND-1": lambda: adventure_from_data(
+    "копия игры v1": lambda: adventure_from_data(
         json.loads((FIXTURES / "adventure_v1.json").read_text(encoding="utf-8"))
     ),
 }

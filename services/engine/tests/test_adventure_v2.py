@@ -1,9 +1,9 @@
-"""Формат приключения v2 (спека DND-2 §8, решение Р8): схема, перевод v1 → v2, чтение и запись.
+"""Формат приключения v2: схема, перевод v1 → v2, чтение и запись.
 
 v2 добавляет мир, пантеон, фракции, общий граф связей, секреты мест, боссов, злодея и поля
 дневника. Старые приключения и копии в начатых играх (`games.adventure_data`) читаются без правок:
 данные без `format_version` — это v1, и связи из `npcs[].relations` переходят в граф. Запись —
-всегда v2. Образцы v1 лежат в `fixtures/`: копия демо до перевода и копия игры из golden DND-1.
+всегда v2. Образцы v1 лежат в `fixtures/`: копия демо до перевода и копия игры формата v1.
 """
 
 import copy
@@ -48,7 +48,7 @@ from dnd_engine.content import SrdContent, load_srd
 
 FIXTURES = Path(__file__).parent / "fixtures"
 V1_DEMO_DIR = FIXTURES / "demo-crypt-v1"  # демо-приключение до перевода в v2
-V1_GAME_COPY = FIXTURES / "adventure_v1.json"  # копия приключения в игре из golden DND-1
+V1_GAME_COPY = FIXTURES / "adventure_v1.json"  # копия приключения в игре формата v1
 
 FieldPath = tuple[str | int, ...]
 
@@ -67,7 +67,7 @@ def relation(**fields: Any) -> Relation:
 def v1_data(**relations: list[dict[str, Any]]) -> dict[str, Any]:
     """Чистое приключение фабрики в форме v1: без `format_version` и графа, связи — у NPC.
 
-    `relations` — связи v1 по id NPC-владельца; без них Марта и Фабиан связаны, как в демо DND-1."""
+    `relations` — связи v1 по id NPC-владельца; без них Марта и Фабиан связаны, как в демо v1."""
     data = adventure_data()
     for key in ("format_version", "relations", "world", "deities", "factions", "villain"):
         del data[key]
@@ -283,7 +283,7 @@ def test_deity_and_faction_defaults():
 
 @pytest.mark.parametrize("base", ["location:crypt", "Склеп", "../crypt", "crypt\nзаголовок", ""])
 def test_a_faction_base_is_the_id_of_a_location(base: str):
-    # Спека §8: `base_location: <id> | null` — id по шаблону, как у остальных ссылок на сущности.
+    # `base_location: <id> | null` — id по шаблону, как у остальных ссылок на сущности.
     with pytest.raises(ValidationError) as caught:
         Adventure.model_validate(with_value(("factions", "candle-circle", "base_location"), base))
 
@@ -585,7 +585,7 @@ def test_a_moved_v1_relation_gets_an_id_free_of_the_given_graph(
 def test_a_v1_folder_with_a_graph_file_moves_npc_relations_under_free_ids(
     srd: SrdContent, tmp_path: Path
 ):
-    # Папка v1 может нести relations.yaml (сценарий ревью): связь Марты из NPC и связь из файла
+    # Папка v1 может нести relations.yaml (найденный случай): связь Марты из NPC и связь из файла
     # говорят об одном, но автор не получает ошибку повтора id, которого сам не писал.
     shutil.copytree(V1_DEMO_DIR, tmp_path / "v1")
     graph = [{"id": "fabian-debtor-marta", "a": "npc:fabian", "b": "npc:marta", "kind": "debtor"}]
@@ -673,7 +673,7 @@ def test_a_broken_v1_relation_is_reported_at_its_npc():
     assert ("npcs", "marta", "relations", 0, "surprise") in locations
 
 
-# --- старое демо и копия игры DND-1 ---
+# --- старое демо и копия игры формата v1 ---
 
 # Порядок графа — порядок NPC (файлы по именам: fabian, затем marta) и их связей.
 V1_DEMO_GRAPH = [
@@ -705,7 +705,7 @@ def test_the_old_demo_folder_is_read_as_v2(srd: SrdContent):
     assert not validate(adventure, srd).blocking
 
 
-def test_the_golden_game_copy_of_dnd1_is_read_by_adventure_from_data(srd: SrdContent):
+def test_the_golden_game_copy_of_format_v1_is_read_by_adventure_from_data(srd: SrdContent):
     golden = json.loads(V1_GAME_COPY.read_text(encoding="utf-8"))
     assert "format_version" not in golden  # образец старше формата v2
 
@@ -823,7 +823,7 @@ def test_adventure_from_data_rejects_what_is_not_a_mapping(data: Any):
         pytest.param(lambda: load_adventure(V1_DEMO_DIR), id="старая папка"),
         pytest.param(
             lambda: adventure_from_data(json.loads(V1_GAME_COPY.read_text(encoding="utf-8"))),
-            id="копия игры DND-1",
+            id="копия игры v1",
         ),
     ],
 )
@@ -1029,7 +1029,7 @@ def test_world_and_relations_files_must_have_their_shape(
 
 def test_a_rumor_written_by_hand_with_a_bare_true_key_is_read(folder: Path):
     # YAML читает ключ `true:` без кавычек как логическое значение, а не строку: автор пишет
-    # слух по спеке (`text`, `true`) и не должен знать про кавычки.
+    # слух по формату (`text`, `true`) и не должен знать про кавычки.
     (folder / "world.yaml").write_text(
         "history: Давно.\nrumors:\n  - text: Клад есть.\n    true: false\n", encoding="utf-8"
     )

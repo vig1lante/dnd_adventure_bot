@@ -2,6 +2,7 @@ import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
@@ -51,16 +52,39 @@ LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]")
 FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,40}")
 
 
+# Ошибки поля-метки тела с вариантами: метки нет или она неизвестна. Путь у них — само тело,
+# а имя метки pydantic даёт в `ctx["discriminator"]` в кавычках (`"'mode'"`).
+TAG_ERRORS = ("union_tag_invalid", "union_tag_not_found")
+
+
+def field_of(error: dict[str, Any], body: Any) -> object:
+    """Поле запроса, о котором говорит ошибка pydantic: `("body", "login")` → `login`.
+
+    У тела с вариантами (дискриминированное объединение) pydantic ставит после `body` тег ветки —
+    значение поля-метки из самого тела (`("body", "quick", "name")`), и поле — следующий сегмент.
+    Тег отличается от поля тем, что такого ключа в теле нет, а такое значение есть."""
+    location = error["loc"]  # ("body", "login"), ("query", "limit"), ("body", 10) у битого JSON
+    if error["type"] in TAG_ERRORS:
+        return str(error.get("ctx", {}).get("discriminator", "")).strip("'")
+    if (
+        len(location) > 2
+        and isinstance(body, dict)
+        and location[1] not in body
+        and location[1] in body.values()
+    ):
+        return location[2]
+    return location[1] if len(location) > 1 else None
+
+
 def validation_detail(exc: RequestValidationError) -> str:
     """Русский текст ошибки запроса: названы только поля, значения из запроса не повторяются.
 
-    Договорённость блока B6: ошибка — `{"detail": "<строка>"}`, а FastAPI отдаёт в `detail` список
-    с входными значениями (`input`), то есть возвращает клиенту недоверенный ввод.
+    Ошибка — `{"detail": "<строка>"}`, а FastAPI отдаёт в `detail` список с входными значениями
+    (`input`), то есть возвращает клиенту недоверенный ввод.
     """
     fields: list[str] = []
     for error in exc.errors():
-        location = error["loc"]  # ("body", "login"), ("query", "limit"), ("body", 10) у битого JSON
-        name = location[1] if len(location) > 1 else None
+        name = field_of(error, exc.body)
         if isinstance(name, str) and FIELD_NAME.fullmatch(name) and name not in fields:
             fields.append(name)
     if not fields:
@@ -73,7 +97,7 @@ async def handle_invalid_request(_request: Request, exc: RequestValidationError)
 
 
 async def handle_unexpected_error(_request: Request, _exc: Exception) -> JSONResponse:
-    """Необработанное исключение отвечает по общему контракту блока, а не текстом Starlette.
+    """Необработанное исключение отвечает в общем формате ошибок (`detail`), а не текстом Starlette.
 
     Подробности клиенту не уходят: Starlette после ответа пробрасывает исключение серверу, и
     uvicorn пишет трассировку в журнал. WebSocket сюда не попадает: сокет сам закрывается с кодом.
@@ -172,26 +196,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Пока `lifespan` не выполнен (клиент в памяти без старта), приключений нет, но маршруты живы.
     app.state.adventures = {}
     # События игры рассылает хаб сокетов; он же `Broadcaster` для лобби, персонажей и хода мастера.
-    # Запуск мастера после «Начать» — `FlowHooks` (вплетение героев и открытие игры, B7.8).
+    # Запуск мастера после «Начать» — `FlowHooks` (вплетение героев и открытие игры).
     app.state.game_locks = GameLocks()
     # Пределы тоже считаются в памяти процесса: сервер всегда один процесс (README), как блокировки.
     app.state.model_calls = ModelCalls()
     app.state.join_attempts = JoinAttempts()
-    # Предпросмотры случайных героев (B8.s0) тоже живут в памяти процесса, с пределом частоты.
+    # Предпросмотры случайных героев тоже живут в памяти процесса, с пределом частоты.
     app.state.random_previews = RandomPreviews()
     app.state.hub = Hub()
     app.state.broadcaster = app.state.hub
     app.state.game_hooks = FlowHooks(app)
-    # Ход мастера (B7.3, B7.4): провайдеры игр живут в памяти процесса, как блокировки; выбор
-    # следующей фазы по сцене подставляют бой и привал (B7.5, B7.6); отсчёты ведёт планировщик,
-    # разборы мастера идут фоновыми задачами, обе части останавливаются вместе с сервером.
+    # Ход мастера: провайдеры игр живут в памяти процесса, как блокировки; выбор следующей фазы
+    # по сцене подставляют бой и привал; отсчёты ведёт планировщик, разборы мастера идут фоновыми
+    # задачами, обе части останавливаются вместе с сервером.
     app.state.game_providers = GameProviders()
     app.state.turn_follow_up = scene_follow_up
     app.state.scheduler = Scheduler(settings=settings)
     app.state.turn_tasks = TaskSet(settings=settings)
-    # Задания генерации конструктора (B4.1) — такие же фоновые задачи с учётом и остановкой.
+    # Задания генерации конструктора — такие же фоновые задачи с учётом и остановкой.
     app.state.authoring_tasks = TaskSet(settings=settings)
-    # Уведомления в Telegram шлёт мастер (B7) через `app.state.notifier`. До старта и без токена
+    # Уведомления в Telegram шлёт мастер через `app.state.notifier`. До старта и без токена
     # бота это заглушка, которая ничего не отправляет; `lifespan` подставляет рабочую.
     app.state.notifier = Notifier(app.state.sessionmaker)
     # Броски персонажей делает только сервер и только `SystemRng`. Подменить генератор можно лишь
@@ -214,8 +238,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if settings.app_env == "dev":
         app.include_router(dev_router)
 
-    # Внутренний API нужен только провайдеру claude_code_cli, а он доступен лишь в dev
-    # (спека §2): в prod маршрутов /internal нет вовсе, запрос получает обычный 404.
+    # Внутренний API нужен только провайдеру claude_code_cli, а он доступен лишь в dev: в prod
+    # маршрутов /internal нет вовсе, запрос получает обычный 404.
     if settings.app_env == "dev":
         app.state.turn_tokens = TurnTokens()
         app.include_router(build_internal_router(app.state.turn_tokens))

@@ -1,9 +1,9 @@
-"""Приключение целиком: файлы, загрузчик, схема и валидатор (спека §6.1–§6.2, план B4.1–B4.4).
+"""Приключение целиком: файлы, загрузчик, схема и валидатор.
 
 Каждая часть конвейера уже проверена отдельно (`test_adventure_schema`, `test_adventure_loader`,
 `test_validator`, `test_demo_adventure`). Здесь проверяются стыки: настоящие файлы `demo-crypt`
 проходят загрузчик и валидатор так же, как приключение в памяти; каждая ошибка и предупреждение
-из спеки §6.2 находится по испорченным файлам; ни один файл папки не теряется молча.
+валидатора находится по испорченным файлам; ни один файл папки не теряется молча.
 """
 
 import shutil
@@ -131,7 +131,7 @@ def test_the_broken_adventure_really_has_both_errors_and_warnings(srd: SrdConten
     assert {"empty_read_aloud", "npc_without_motive"} <= {i.code for i in report.issues}
 
 
-# --- спека §6.2: блокирующие ошибки находятся по испорченным файлам ---
+# --- блокирующие ошибки находятся по испорченным файлам ---
 
 
 def point_exit_into_the_void(folder: Path) -> None:
@@ -279,7 +279,7 @@ def test_a_file_that_breaks_the_schema_is_a_loader_error_with_its_path(
     assert any(problem.startswith(name) for problem in caught.value.problems)
 
 
-# --- спека §6.2: предупреждения ---
+# --- предупреждения ---
 
 
 def empty_the_village_text(folder: Path) -> None:

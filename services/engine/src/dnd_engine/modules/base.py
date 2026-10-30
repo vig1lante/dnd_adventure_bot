@@ -27,7 +27,7 @@ POTION_BONUS_ACTION = "potion_bonus_action"  # зелье тратит бону�
 SHOVE_BONUS_ACTION = "shove_bonus_action"  # толчок тратит бонусное действие
 HELP_REVIVES = "help_revives"  # «Помощь» упавшему союзнику поднимает его с 1 HP
 # Сколько коротких отдыхов допустимо между длинными. Предел по `GameState.short_rests_since_long`
-# проверяют инструмент мастера `short_rest` (B4.6) и начало короткого привала по кнопке хоста
+# проверяют инструмент мастера `short_rest` и начало короткого привала по кнопке хоста
 # (`campfire.begin_rest`); функции `rest` работают с одним персонажем и счётчика не знают.
 MAX_SHORT_RESTS_PER_LONG = "max_short_rests_per_long"
 
@@ -47,7 +47,7 @@ class RuleSet(BaseModel):
     modules: tuple[str, ...] = ()
     check_hooks: tuple[CheckHook, ...] = ()
     flags: Mapping[str, bool | int] = {}
-    # Спецификации инструментов мастера (`ToolSpec`, B4.5): здесь они только хранятся, поэтому
+    # Спецификации инструментов мастера (`ToolSpec`): здесь они только хранятся, поэтому
     # зависимости от будущего типа нет.
     tools: tuple[Any, ...] = ()
     prompt_fragments: tuple[str, ...] = ()

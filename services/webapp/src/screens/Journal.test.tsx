@@ -42,7 +42,7 @@ const storedSeen = (key = SEEN_KEY): unknown => {
 };
 
 describe("разделы дневника", () => {
-  test("девять разделов в порядке контракта, у каждого — число записей", () => {
+  test("девять разделов в порядке показа, у каждого — число записей", () => {
     renderJournal();
 
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
@@ -252,7 +252,7 @@ describe("карточка записи", () => {
     expect(screen.queryByText(/раунд 0/)).toBeNull();
   });
 
-  test("дополненная запись: под «узнали» — «дополнено в раунде N» (B11.3)", () => {
+  test("дополненная запись: под «узнали» — «дополнено в раунде N»", () => {
     renderJournal({
       entries: [
         journalEntry("npc:elder", {
@@ -300,7 +300,7 @@ describe("карточка записи", () => {
     expect(screen.queryByText(/раунд(е)? 0/)).toBeNull();
   });
 
-  test("не дополнялась (null) или сервер до B11 без поля — строки «дополнено» нет", () => {
+  test("не дополнялась (null) или старый сервер без поля — строки «дополнено» нет", () => {
     const old = journalEntry("npc:smith", { title: "Кузнец", revision: 2 });
     delete old.updated_turn;
     renderJournal({

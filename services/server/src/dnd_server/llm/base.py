@@ -1,4 +1,4 @@
-"""Общие типы слоя моделей (спека §7, план B5.1).
+"""Общие типы слоя моделей.
 
 Провайдер (`LLMProvider`) делает две вещи: ведёт ход мастера (`run_turn`: модель вызывает
 инструменты, итогом становится рассказ) и отвечает строго по схеме (`complete_json`). Числа,
@@ -30,7 +30,7 @@ MAX_TRACE_NAME_CHARS = 64
 MAX_TRACE_ARGS_CHARS = 2000  # длина аргументов, записанных JSON-текстом
 MAX_TRACE_RESULT_CHARS = 4000
 
-MAX_JSON_RETRIES = 2  # повторов complete_json после первой попытки (спека §7)
+MAX_JSON_RETRIES = 2  # повторов complete_json после первой попытки
 MAX_PROBLEMS_CHARS = 1500  # сколько текста ошибок проверки схемы добавляется к повторному запросу
 MAX_LOC_PART_CHARS = 64  # длина одной части пути поля в тексте ошибки схемы (имя ключа — от модели)
 _CODE_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
@@ -59,9 +59,13 @@ class JsonRequest:
     prompt: str
     purpose: str  # "generator.concept", "weaving" и т. п.: по нему FakeProvider находит ответ
     # Служебный запрос, которому хватит дешёвой модели: у `anthropic_api` — LLM_CHEAP_MODEL, если
-    # задана. У `claude_code_cli` все ответы по схеме — служебные роли спеки §11, и они идут на
-    # CLAUDE_CLI_CHEAP_MODEL независимо от признака.
+    # задана. У `claude_code_cli` все ответы по схеме — служебные роли, и они идут на
+    # CLAUDE_CLI_CHEAP_MODEL независимо от признака (если не стоит `game_model`).
     cheap: bool = False
+    # Ответ пишет основная модель игры (идеи у костра — решение владельца): у `claude_code_cli` —
+    # модель и усилия игры, а не CLAUDE_CLI_CHEAP_MODEL. API-провайдеры при `cheap=False` и так
+    # берут основную модель.
+    game_model: bool = False
 
 
 @dataclass(frozen=True)
@@ -167,7 +171,7 @@ def make_trace_call(name: str, args: dict[str, Any], result: str, is_error: bool
 
 
 async def within_turn_timeout[T](timeout_s: float, turn: Awaitable[T]) -> T:
-    """Выполняет `turn` с общим тайм-аутом хода (спека §8.4); по истечении — `ProviderError`.
+    """Выполняет `turn` с общим тайм-аутом хода; по истечении — `ProviderError`.
 
     `expired()` отличает наш тайм-аут от `TimeoutError`, который мог поднять сам исполнитель
     инструментов: чужой тайм-аут проходит дальше как есть."""

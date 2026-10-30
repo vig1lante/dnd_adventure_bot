@@ -1,8 +1,7 @@
 """Инструменты мира: переход, находки, предметы, флаги, отношение NPC, время, короткий отдых и
 дневник отряда.
 
-План B4.6, спека §5.7 и §8.3; дневник — спека DND-2 §12 и дополнение контракта B8 §4. Каждый
-инструмент меняет рабочую копию состояния `ctx.state` и добавляет события в `ctx.events`;
+Каждый инструмент меняет рабочую копию состояния `ctx.state` и добавляет события в `ctx.events`;
 результат — короткий словарь для модели. Переход, найденная улика и полученный героем предмет
 пишутся в дневник сами (`journal`), остальное мастер записывает через `journal_add`.
 
@@ -15,7 +14,7 @@
 
 import unicodedata
 from collections.abc import Mapping
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BeforeValidator, Field, StringConstraints
 
@@ -33,7 +32,7 @@ from dnd_engine.events import (
 )
 from dnd_engine.journal import MAX_NOTE_CHARS, JournalError
 from dnd_engine.modules.base import MAX_SHORT_RESTS_PER_LONG
-from dnd_engine.state import GameState, GameTime
+from dnd_engine.state import DAY_PART_STARTS, DayPart, GameState, GameTime
 from dnd_engine.tools.lore import (
     MAX_ID_CHARS,
     MAX_REF_CHARS,
@@ -43,9 +42,6 @@ from dnd_engine.tools.lore import (
     item_holder,
 )
 from dnd_engine.tools.registry import ToolArgs, ToolContext, ToolError, ToolSpec, find_or_error
-
-DayPart = Literal["morning", "day", "evening", "night"]
-DAY_PARTS: tuple[str, ...] = get_args(DayPart)  # порядок суток; после «night» идёт новый день
 
 ATTITUDE_MIN, ATTITUDE_MAX = -3, 3  # диапазон `WorldState.npc_attitude`
 MAX_ATTITUDE_STEP = 2
@@ -257,7 +253,7 @@ def _clues_to_find(ctx: ToolContext, ref: str, effects: tuple[RevealRef, ...]) -
 
 
 def _finder_audience(ctx: ToolContext, for_hero: str | None) -> str:
-    """Кому видна запись найденной улики (дополнение §10, поправка §12).
+    """Кому видна запись найденной улики.
 
     Герой находки назван — видит он один, если его ход тайный, иначе весь отряд. Не назван: вне
     тайного раунда — весь отряд; в раунде с тайным ходом — `ToolError`. `secret_actors` — тайные
@@ -448,20 +444,25 @@ def change_attitude(ctx: ToolContext, args: ChangeAttitudeArgs) -> dict[str, Any
 
 class AdvanceTimeArgs(ToolArgs):
     to: DayPart = Field(
-        description="часть суток: morning, day, evening или night; время идёт только вперёд"
+        description=(
+            "часть суток: morning, day, evening или night; часы встают на её начало, время "
+            "идёт только вперёд"
+        )
     )
 
 
 def advance_time(ctx: ToolContext, args: AdvanceTimeArgs) -> dict[str, Any]:
     now = ctx.state.time
-    before, after = DAY_PARTS.index(now.part), DAY_PARTS.index(args.to)
-    if after == before:
+    if args.to == now.part:
         raise ToolError(
             f"Сейчас уже {now.part}: время идёт только вперёд, выберите другую часть суток."
         )
-    new_day = after < before  # дошли до нужной части, пройдя через ночь
-    ctx.state.time = GameTime(day=now.day + int(new_day), part=args.to)
-    return {"day": ctx.state.time.day, "part": args.to, "new_day": new_day}
+    # Ближайшее начало нужной части после нынешнего часа: если сегодня оно уже прошло, то
+    # завтра. Ночь после полуночи — уже новый день, поэтому утро после неё — того же дня.
+    hour = DAY_PART_STARTS[args.to]
+    new_day = hour <= now.hour
+    ctx.state.time = GameTime(day=now.day + int(new_day), hour=hour)
+    return {"day": ctx.state.time.day, "hour": hour, "part": args.to, "new_day": new_day}
 
 
 # --- short_rest ---
@@ -515,6 +516,7 @@ def short_rest_party(ctx: ToolContext, args: ShortRestArgs) -> dict[str, Any]:
         outcomes.append(outcome)
     state.party.update(rested)
     state.short_rests_since_long += 1
+    state.time = state.time.plus_hours(rest.SHORT_REST_HOURS)
     ctx.events.append(RestEvent(rest="short", outcomes=outcomes))
     return {
         "rest": "short",
@@ -689,8 +691,9 @@ WORLD_TOOLS = (
     ToolSpec(
         name="advance_time",
         description=(
-            "Сдвинуть время вперёд до части суток (morning, day, evening, night). Если для этого "
-            "нужно пройти через ночь, наступает следующий день."
+            "Сдвинуть время вперёд до начала части суток (morning — 6:00, day — 12:00, "
+            "evening — 18:00, night — 22:00). Если это начало сегодня уже прошло, наступает "
+            "следующий день: новый день начинается в полночь."
         ),
         args_model=AdvanceTimeArgs,
         handler=advance_time,
@@ -698,9 +701,10 @@ WORLD_TOOLS = (
     ToolSpec(
         name="short_rest",
         description=(
-            "Короткий отдых всего отряда: герои тратят кости хитов (spend), возвращаются часть "
-            "ресурсов класса. Если правила приключения ограничивают число коротких отдыхов "
-            "между длинными, лишний отдых невозможен. В бою отдохнуть нельзя."
+            "Короткий отдых всего отряда на час: герои тратят кости хитов (spend), "
+            "возвращаются часть ресурсов класса, часы идут на час вперёд. Если правила "
+            "приключения ограничивают число коротких отдыхов между длинными, лишний отдых "
+            "невозможен. В бою отдохнуть нельзя."
         ),
         args_model=ShortRestArgs,
         handler=short_rest_party,

@@ -1,4 +1,4 @@
-"""Поток привала (план B7.6, спека §5.5 «Привал у костра» и §8.4).
+"""Поток привала у костра.
 
 Настоящий движок, демо-приключение `demo-crypt` (в нём включён модуль `campfire`), временная SQLite
 после миграций, настоящее приложение (`create_app` и его `lifespan`) и `FakeProvider` по сценариям;
@@ -95,7 +95,7 @@ from dnd_server.turns.timers import ManualScheduler
 # tests/dm/test_camp_flow.py -> dm -> tests -> server -> services -> корень репозитория
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEMO_ADVENTURE_DIR = REPO_ROOT / "content" / "adventures" / "demo-crypt"
-# Копия приключения из игры DND-1 (формат v1): связи NPC лежат в самих NPC.
+# Копия приключения из игры первой версии (формат v1): связи NPC лежат в самих NPC.
 ADVENTURE_V1 = REPO_ROOT / "services" / "server" / "tests" / "db" / "golden" / "adventure_v1.json"
 SESSION_SECRET = "camp-session-secret-0123456789-abcdefghij"
 TIMEOUT_S = 5
@@ -207,7 +207,8 @@ def test_the_end_of_the_camp_is_a_long_rest_for_everybody_and_the_morning_of_the
         assert hero.hp == hero.hp_max, key
         assert hero.spell_slots == hero.spell_slots_max, key
     assert morning.scene.type == SceneType.EXPLORATION
-    assert morning.time == GameTime(day=3, part="morning")
+    # Долгий отдых, начатый вечером: 8 часов ближайшего утра — следующего дня.
+    assert morning.time == GameTime(day=3, hour=8)
     assert morning.short_rests_since_long == 0
     assert [type(event) for event in events] == [RestEvent, SceneEvent]
     assert events[0].rest == "long"
@@ -846,7 +847,7 @@ async def test_when_the_countdown_ends_the_long_rest_is_made_and_the_master_tell
         )
         state = await table.state()
         assert state.scene.type == SceneType.EXPLORATION
-        assert state.time == GameTime(day=3, part="morning")
+        assert state.time == GameTime(day=3, hour=8)
         assert state.short_rests_since_long == 0
         for key, hero in state.party.items():
             assert hero.hp == hero.hp_max, key
@@ -855,7 +856,7 @@ async def test_when_the_countdown_ends_the_long_rest_is_made_and_the_master_tell
         assert log.error is None and log.output == NARRATION_OF_THE_MORNING
         context = await table.camp_end_context()
         assert camp_lines_of(context) == ["Подкину дров в костёр.", "Расскажу байку про сторожа."]
-        assert "День 3, утро. Сцена: исследование." in context
+        assert "День 3, утро, 08:00. Сцена: исследование." in context
         turns = await table.turns()
         assert [(t.kind, t.status) for t in turns] == [
             (TurnKind.CAMP_END, TurnStatus.DONE),
@@ -902,8 +903,8 @@ async def test_the_host_can_end_the_camp_before_the_countdown_and_the_timer_is_d
 
 
 async def test_a_game_with_a_v1_adventure_copy_ends_its_camp_with_the_morning(camp):
-    # Игра DND-1 у костра после обновления сервера: в базе копия формата v1. Конец привала читает
-    # её так же, как раунд, и длинный отдых с рассказом об утре проходит.
+    # Игра первой версии у костра после обновления сервера: в базе копия формата v1. Конец привала
+    # читает её так же, как раунд, и длинный отдых с рассказом об утре проходит.
     golden = json.loads(ADVENTURE_V1.read_text(encoding="utf-8"))
     async with camp() as table:
         async with table.db() as session:
@@ -978,7 +979,7 @@ async def test_a_line_or_an_idle_camp_never_calls_the_master(camp):
         assert (await table.state()).scene.type == SceneType.CAMP
 
 
-# `rest-*` (блок B9) — те же кнопки привала под новыми путями, `camp-*` остаются рабочими.
+# `rest-*` — те же кнопки привала под новыми путями, `camp-*` остаются рабочими.
 CAMP_BUTTONS = ["camp-end", "camp-extend", "rest-end", "rest-extend"]
 
 
@@ -1251,7 +1252,7 @@ async def test_regenerate_after_the_morning_rolls_the_rest_back_and_makes_it_onc
 
         assert response.status_code == 200, response.text
         state = await table.state()
-        assert state.time == GameTime(day=3, part="morning")  # утро наступило один раз
+        assert state.time == GameTime(day=3, hour=8)  # утро наступило один раз
         assert state.party["alice"].hp == state.party["alice"].hp_max
         live = [m for m in await table.messages() if not m.superseded]
         rests = [m for m in live if "Длинный отдых" in m.text]
@@ -1331,7 +1332,7 @@ async def test_the_camp_end_can_be_started_without_the_buttons_as_the_retry_does
         assert (await table.game()).turn_phase == TurnPhase.DISCUSSION
 
 
-# --- привал по кнопке хоста: короткий и долгий (DND-2, блок B9) ---
+# --- привал по кнопке хоста: короткий и долгий ---
 
 REST_SCENARIO = REPO_ROOT / "services" / "server" / "tests" / "scenarios" / "rest.yaml"
 REST_REFUSAL_REGENERATE = "После хода мастера игра уже изменилась: перегенерировать нельзя."
@@ -1622,7 +1623,8 @@ async def test_a_short_rest_gives_ideas_to_the_two_heroes_longest_out_of_focus_o
         )
         assert not any(text in everything for text in IDEA_OF.values())
         [request] = of_purpose(json_requests)
-        assert request.cheap is True
+        # Идеи пишет основная модель игры: не дешёвая у API и модель игры у CLI.
+        assert (request.cheap, request.game_model) == (False, True)
 
 
 async def test_on_a_tie_the_heroes_out_of_focus_go_in_the_order_of_the_party(camp):
@@ -2013,7 +2015,9 @@ async def test_a_hit_die_and_the_end_of_the_rest_at_once_stay_consistent(camp):
 # конец привала
 
 
-async def test_the_end_of_a_short_rest_restores_short_rest_features_and_keeps_the_time(camp):
+async def test_the_end_of_a_short_rest_restores_short_rest_features_and_moves_the_time_an_hour(
+    camp,
+):
     def fighter_tired(state: GameState) -> None:
         state.party["alice"].resources = {"second_wind": 0, "action_surge": 0}
 
@@ -2036,7 +2040,7 @@ async def test_the_end_of_a_short_rest_restores_short_rest_features_and_keeps_th
         )
         state = await table.state()
         assert state.scene == Scene(type=SceneType.EXPLORATION, started_turn=1)
-        assert state.time == GameTime(day=2, part="evening")  # час отдыха время не двигает
+        assert state.time == GameTime(day=2, hour=19)  # час отдыха: 18:00 -> 19:00
         assert state.short_rests_since_long == 2
         alice = state.party["alice"]
         assert alice.hp == healed  # лечили только кости хитов
@@ -2058,7 +2062,111 @@ async def test_the_end_of_a_short_rest_restores_short_rest_features_and_keeps_th
         assert await rest_of(table, "boris") is None
 
 
-async def test_the_end_of_a_long_rest_by_the_countdown_is_the_morning_of_dnd1(camp):
+def keys_of(value: Any) -> set[str]:
+    """Все ключи словарей на любой глубине кадра."""
+    if isinstance(value, dict):
+        return set(value) | {key for item in value.values() for key in keys_of(item)}
+    if isinstance(value, list):
+        return {key for item in value for key in keys_of(item)}
+    return set()
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "world_line", "part"),
+    [
+        pytest.param(
+            GameTime(day=2, hour=21),
+            GameTime(day=2, hour=22),
+            "День 2, ночь, 22:00.",
+            "night",
+            id="вечер -> ночь",
+        ),
+        pytest.param(
+            GameTime(day=2, hour=23),
+            GameTime(day=3, hour=0),
+            "День 3, ночь, 00:00.",
+            "night",
+            id="через полночь -> следующий день",
+        ),
+        pytest.param(
+            GameTime(day=2, hour=5),
+            GameTime(day=2, hour=6),
+            "День 2, утро, 06:00.",
+            "morning",
+            id="ночь -> утро того же дня",
+        ),
+    ],
+)
+async def test_the_hour_of_a_short_rest_turns_the_part_of_the_day_for_the_master_and_the_players(
+    camp, before, after, world_line, part
+):
+    # Час короткого привала может сменить часть суток и день. Мастер в ходе «конец привала» видит
+    # новый час в разделе «Мир», игроки — день и часть суток по нему, но сам час им не уходит.
+    def at_the_hour(state: GameState) -> None:
+        state.time = before
+
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, shape=at_the_hour) as table:
+        await start_rest(table, "short")
+        await table.settle()
+        table.broadcaster.sent.clear()
+
+        response = await table.host("rest-end")
+        await table.settle()
+
+        assert response.status_code == 200, response.text
+        assert (await table.state()).time == after
+        assert f"{world_line} Сцена: исследование." in await table.camp_end_context()
+        shown = table.broadcaster.of_type("phase")[-1][0]["phase"]["scene"]
+        assert shown == {"type": "exploration", "day": after.day, "part": part}
+        assert all("hour" not in keys_of(payload) for _g, payload, _w in table.broadcaster.sent)
+        async with table.db() as session:
+            user = await session.get(User, table.user_id("boris"))
+            snapshot = await snapshot_for(session, user, table.game_id, srd=table.srd)
+        assert snapshot["phase"]["scene"] == shown
+        assert "hour" not in keys_of(snapshot)
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "world_line"),
+    [
+        pytest.param(
+            GameTime(day=2, hour=2),
+            GameTime(day=2, hour=8),
+            "День 2, утро, 08:00.",
+            id="после полуночи -> утро того же дня",
+        ),
+        pytest.param(
+            GameTime(day=2, hour=21),
+            GameTime(day=3, hour=8),
+            "День 3, утро, 08:00.",
+            id="вечером -> утро следующего дня",
+        ),
+    ],
+)
+async def test_a_long_rest_ends_at_eight_of_the_nearest_morning(camp, before, after, world_line):
+    # День меняется в полночь: привал, начатый после полуночи, идёт в ту же ночь и кончается
+    # утром того же дня, а начатый вечером — утром следующего. Мастер видит час в разделе «Мир»,
+    # игроки — день и утро.
+    def at_the_hour(state: GameState) -> None:
+        state.time = before
+
+    async with camp(in_camp=False, scenario_file=REST_SCENARIO, shape=at_the_hour) as table:
+        await start_rest(table, "long")
+        await table.settle()
+        table.broadcaster.sent.clear()
+
+        await table.scheduler.advance(CAMP_SECONDS)
+        await table.settle()
+
+        state = await table.state()
+        assert state.time == after
+        assert state.party["alice"].hp == state.party["alice"].hp_max
+        assert f"{world_line} Сцена: исследование." in await table.camp_end_context()
+        shown = table.broadcaster.of_type("phase")[-1][0]["phase"]["scene"]
+        assert shown == {"type": "exploration", "day": after.day, "part": "morning"}
+
+
+async def test_the_end_of_a_long_rest_by_the_countdown_is_the_morning_as_before(camp):
     async with camp(in_camp=False, scenario_file=REST_SCENARIO) as table:
         await start_rest(table, "long")
         await table.settle()
@@ -2070,7 +2178,7 @@ async def test_the_end_of_a_long_rest_by_the_countdown_is_the_morning_of_dnd1(ca
         game = await table.game()
         assert (game.turn_phase, game.rest_ideas) == (TurnPhase.DISCUSSION, None)
         state = await table.state()
-        assert state.time == GameTime(day=3, part="morning")
+        assert state.time == GameTime(day=3, hour=8)
         assert state.short_rests_since_long == 0
         assert state.party["alice"].hp == state.party["alice"].hp_max
         context = await table.camp_end_context()
@@ -2082,8 +2190,8 @@ async def test_the_end_of_a_long_rest_by_the_countdown_is_the_morning_of_dnd1(ca
         assert types.index("rest_ended") > last_feed  # кадр конца — после записей хода
 
 
-async def test_a_master_camp_of_dnd1_without_a_kind_ends_as_a_long_rest_with_its_frame(camp):
-    async with camp() as table:  # сцена `camp` без вида: так её записал DND-1
+async def test_an_old_master_camp_without_a_kind_ends_as_a_long_rest_with_its_frame(camp):
+    async with camp() as table:  # сцена `camp` без вида: так её записывала первая версия
         assert (await table.state()).scene.rest is None
         assert (await rest_of(table, "alice"))["kind"] == "long"
 
@@ -2156,7 +2264,7 @@ async def test_a_restart_in_the_middle_of_a_short_rest_keeps_its_kind_time_left_
         await again.settle()
 
         state = await again.state()
-        assert (state.time, state.short_rests_since_long) == (GameTime(day=2, part="evening"), 2)
+        assert (state.time, state.short_rests_since_long) == (GameTime(day=2, hour=19), 2)
         assert (await again.game()).turn_phase == TurnPhase.DISCUSSION
         assert "час отдыха" in await again.camp_end_context()
 
@@ -2267,9 +2375,9 @@ async def test_regenerate_during_a_master_camp_drops_its_ideas(camp):
         assert (game.turn_phase, game.rest_ideas) == (TurnPhase.DISCUSSION, None)
 
 
-# --- битая копия приключения на привале (финальное покрытие B11, сервер) ---
+# --- битая копия приключения на привале ---
 
-BROKEN_MARK = "ЗНАЧЕНИЕ-ИЗ-КОПИИ-B11"
+BROKEN_MARK = "ЗНАЧЕНИЕ-ИЗ-КОПИИ-ПРИВАЛА"
 
 
 async def break_the_camp_copy(table: Table) -> dict[str, Any]:
@@ -2295,8 +2403,8 @@ def broken_copy_errors(caplog: pytest.LogCaptureFixture, table: Table) -> list[s
 
 
 async def test_a_rest_by_the_button_with_a_broken_copy_is_409_and_nothing_starts(camp, caplog):
-    # Отчёт B11.2: «Короткий привал» проверяет копию до записи — иначе привал начался бы, а его
-    # конец (ход мастера) — уже нет.
+    # «Короткий привал» проверяет копию до записи — иначе привал начался бы, а его конец (ход
+    # мастера) — уже нет.
     async with camp(in_camp=False, scenario=[morning_turn()]) as table:
         await break_the_camp_copy(table)
         before = await table.game()
@@ -2353,13 +2461,13 @@ async def test_a_hit_die_with_a_broken_copy_is_409_before_the_die_is_rolled(camp
         assert roll.data["label"] == "Кость хитов"
 
 
-# --- финальное покрытие привалов (B9.coverage) ---
+# --- привалы: пограничные случаи ---
 #
-# Пробелы после B9.3: идея не попадает ни в один ответ REST и ни в чужой снимок; сбой посреди
-# начала привала или кости хитов не оставляет половины; два нажатия сразу и «привал против сдачи
-# хода» решает блокировка игры; сбой идей не трогает ни состояние, ни ход; кость хитов на паузе и
-# после игры — 409; после «Перегенерировать» привала мастера адресаты получают только новые идеи, а
-# запоздавший ответ прежнего привала отбрасывается; идеи не попадают ни в состояние, ни к мастеру.
+# Идея не попадает ни в один ответ REST и ни в чужой снимок; сбой посреди начала привала или кости
+# хитов не оставляет половины; два нажатия сразу и «привал против сдачи хода» решает блокировка
+# игры; сбой идей не трогает ни состояние, ни ход; кость хитов на паузе и после игры — 409; после
+# «Перегенерировать» привала мастера адресаты получают только новые идеи, а запоздавший ответ
+# прежнего привала отбрасывается; идеи не попадают ни в состояние, ни к мастеру.
 
 
 def auth(table: Table, key: str) -> dict[str, str]:
@@ -2822,7 +2930,7 @@ async def test_a_failed_request_of_ideas_leaves_the_state_and_the_turn_and_the_r
         assert ended == [{"type": "rest_ended", "kind": "short"}]
 
 
-# отказы, которых не было в B9.3
+# отказы: кость хитов на паузе и после игры
 
 
 @pytest.mark.parametrize("stop", ["pause", "finished"], ids=["пауза", "игра окончена"])
@@ -2847,8 +2955,8 @@ async def test_a_hit_die_is_409_on_pause_or_after_the_game_and_spends_nothing(ca
         assert await table.messages(MessageKind.ROLL) == []
 
 
-# привал, начатый мастером в ходе «конец привала» (дефект B9.coverage D1 исправлен в fix-раунде 1
-# B9: R1/S2, xfail снят): конец прежнего привала и начало нового объявляются оба и по порядку
+# привал, начатый мастером в ходе «конец привала»: конец прежнего привала и начало нового
+# объявляются оба и по порядку
 
 
 async def test_a_camp_started_by_the_master_in_the_morning_turn_is_announced_with_rest_started(
@@ -2876,7 +2984,7 @@ async def test_a_camp_started_by_the_master_in_the_morning_turn_is_announced_wit
         assert (started["kind"], audience) == ("long", "all")
 
 
-# --- фильтр идей: личные сведения другого адресата (fix-раунд 1 B9, S1) ---
+# --- фильтр идей: личные сведения другого адресата ---
 
 # Личные сведения Бориса, которые лежат в общем запросе идей: предыстория своими словами и
 # открытая часть зацепки (цель, знакомый NPC с заметкой). Их видит только Борис.
@@ -3031,7 +3139,7 @@ def test_the_guard_ignores_names_of_heroes_and_words_of_the_cards_of_the_party(s
     assert (kept, dropped) == ({"vera": ["Спроси Бориса, бывшего стражника, о его пути."]}, 0)
 
 
-# --- фильтр идей: обходы нормализацией и имена из чужих текстов (B11.2, S4 и N1 блока B9) ---
+# --- фильтр идей: обходы нормализацией и имена из чужих текстов ---
 
 # Предыстория Бориса с именами внутри текста: сестра Мирра и пёс Лист (короткое имя).
 BORIS_NAMES_BACKSTORY = "Младшая сестра Мирра осталась в приюте у монахинь. Пёс Лист ждёт её."
@@ -3083,14 +3191,14 @@ def test_the_guard_sees_a_private_fragment_through_unicode_tricks(srd, adventure
     ids=["имя сестры в падеже", "имя заглавными", "короткое имя в падеже"],
 )
 def test_the_guard_catches_a_name_from_the_private_texts_of_another_hero(srd, adventure, vera_idea):
-    # Имя с заглавной не в начале предложения из чужой предыстории — имя собственное (S4 п. 3).
+    # Имя с заглавной не в начале предложения из чужой предыстории — имя собственное.
     assert names_guard(srd, adventure).leaks("vera", vera_idea)
 
 
 @pytest.mark.parametrize(
     "vera_idea",
     [
-        "Листвой укрыт твой храм — расскажи о нём.",  # «Лист» + три буквы — другое слово (N1)
+        "Листвой укрыт твой храм — расскажи о нём.",  # «Лист» + три буквы — другое слово
         "Спроси, почему в мирной деревне так тихо.",  # слово со строчной — не имя
         "Младшая из сестёр храма — ты. Расскажи о ней.",  # начало предложения — не имя
     ],
@@ -3110,10 +3218,10 @@ def test_a_hero_may_hear_names_from_his_own_story_and_the_shared_one(srd, advent
     assert not guard.leaks("vera", "Спроси Бориса, бывшего стражника, о его пути.")
 
 
-# --- фильтр идей: зонд security B9 целиком и обычные идеи (финальное покрытие B11, сервер) ---
+# --- фильтр идей: зонд безопасности целиком и обычные идеи ---
 
-# Личное Бориса из зонда `probe_bypass.py` (security B9, находка S4): предыстория с именем сестры,
-# цель и знакомый NPC с заметкой. Вера — получатель идеи, её идея не должна нести личное Бориса.
+# Личное Бориса из зонда `probe_bypass.py`: предыстория с именем сестры, цель и знакомый NPC с
+# заметкой. Вера — получатель идеи, её идея не должна нести личное Бориса.
 PROBE_BACKSTORY = "Сбежал из дома после пожара. Младшая сестра Мирра осталась в приюте у монахинь."
 
 
@@ -3133,9 +3241,8 @@ def probe_guard(
     return rest_ideas.idea_guard(state, adventure, srd, list(HEROES), [])
 
 
-# Попытки зонда, которые после усиления B11 фильтр обязан отбросить. Перестановка слов, вставка
-# слова и транслит — принятый остаточный риск (отчёт B11.2, решение владельца §11 п. 3): их
-# здесь нет.
+# Попытки зонда, которые усиленный фильтр обязан отбросить. Перестановка слов, вставка слова и
+# транслит — принятый владельцем остаточный риск: их здесь нет.
 PROBE_ATTEMPTS = {
     "дословно цель": "Спроси Бориса, как он хочет найти пропавшего брата.",
     "регистр и пунктуация": "СПРОСИ: найти — ПРОПАВШЕГО, брата?!",
@@ -3188,7 +3295,7 @@ def test_the_own_and_the_shared_ideas_of_the_probe_still_reach_their_heroes(srd,
 
 def test_a_name_the_addressee_knows_from_her_own_story_is_not_a_leak(srd, adventure):
     # Имя собственное из чужой предыстории, которое есть и в личных текстах самой Веры, — её
-    # собственное знание: идею с ним фильтр не снимает (находка N1 — меньше ложных срабатываний).
+    # собственное знание: идею с ним фильтр не снимает (так меньше ложных срабатываний).
     guard = probe_guard(srd, adventure, vera_backstory="Росла при храме с подругой Миррой.")
 
     assert not guard.leaks("vera", "Спроси, помнит ли Мирра твой храм.")
@@ -3222,9 +3329,9 @@ def test_ordinary_ideas_are_not_taken_for_the_private_details_of_another_hero(sr
 
 
 def test_a_forged_backstory_does_not_stall_the_guard_and_its_names_still_count(srd, adventure):
-    # Дополнение B11 §5 п. 4 (S1): тысяча знаков «!» и много слов с заглавной в предыстории
-    # (до 1500 знаков) не должны подвешивать цикл событий на каждом привале. Поиск конца
-    # предложения идёт за один проход; порог по времени щадящий, обычный фильтр — миллисекунды.
+    # Тысяча знаков «!» и много слов с заглавной в предыстории (до 1500 знаков) не должны
+    # подвешивать цикл событий на каждом привале. Поиск конца предложения идёт за один проход; порог
+    # по времени щадящий, обычный фильтр — миллисекунды.
     forged = ("!" * 1000 + " Аб" * 200)[:1500]
     state = camp_state(srd, adventure, {key: f"user-{key}" for key in HEROES})
     boris_opens_up(state)
@@ -3251,10 +3358,10 @@ def test_a_forged_backstory_does_not_stall_the_guard_and_its_names_still_count(s
 def test_the_guard_compares_an_idea_only_with_what_its_hero_does_not_know(
     srd, adventure, monkeypatch
 ):
-    # Дополнение B11 §7 п. 2 (S4): что адресат знает сам и что знают все, не зависит от идеи и
-    # считается один раз при сборке фильтра. Проверка идеи — только сверка с её словами, поэтому
-    # число дорогих сверок `_mentions` не растёт с числом имён в чужой предыстории. Тест считает
-    # вызовы, а не время: под `-n auto` часы ненадёжны.
+    # Что адресат знает сам и что знают все, не зависит от идеи и считается один раз при сборке
+    # фильтра. Проверка идеи — только сверка с её словами, поэтому число дорогих сверок `_mentions`
+    # не растёт с числом имён в чужой предыстории. Тест считает вызовы, а не время: под `-n auto`
+    # часы ненадёжны.
     letters = "абвгдежзиклмнопрстуф"
     names = [f"Б{a}{b}" for a in letters for b in letters][:375]  # разные слова с заглавной
     forged = ("и " + " ".join(names))[:1500]

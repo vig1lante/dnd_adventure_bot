@@ -1,4 +1,4 @@
-"""Вход и сведения о пользователе: `/api/auth/telegram`, `/api/me`, `/api/config` (план B6.2).
+"""Вход и сведения о пользователе: `/api/auth/telegram`, `/api/me`, `/api/config`.
 
 Ошибки отдаются как `{"detail": "<русский текст>"}`. Ни в ответах, ни в журнале нет initData, hash,
 токена бота и `SESSION_SECRET`.

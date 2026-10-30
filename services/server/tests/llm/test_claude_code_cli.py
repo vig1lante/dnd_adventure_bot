@@ -1,4 +1,4 @@
-"""Тесты адаптера `claude_code_cli`, внутреннего API инструментов и его подключения (план B5.4).
+"""Тесты адаптера `claude_code_cli`, внутреннего API инструментов и его подключения.
 
 Настоящий `claude` здесь не запускается никогда (запрет проекта): вместо него скрипт-обёртка
 вызывает имитатор `fake_claude.py`, который пишет в журнал `argv`, окружение и `cwd` и печатает
@@ -1163,7 +1163,7 @@ class StrictHook(BaseModel):
     title: str
 
 
-# Имена лишних ключей из находки X1 security review: запись в буфер обмена (OSC 52) и стирание
+# Имена лишних ключей, найденные проверкой безопасности: запись в буфер обмена (OSC 52) и стирание
 # строки возвратом каретки. Модель выбирает их сама.
 HOSTILE_KEYS = {
     "osc52-буфер-обмена": "\x1b]52;c;ZWNobyBwd25lZA==\x07",
@@ -1293,7 +1293,7 @@ def test_provider_is_named_after_its_config_value(tmp_path):
     assert provider.name == "claude_code_cli"
 
 
-# --- модель подписки: --model, --effort и дешёвая модель (DND-2 B1.2, спека §11) ---
+# --- модель подписки: --model, --effort и дешёвая модель ---
 
 MODEL_USAGE_REPLY = reply(
     modelUsage={
@@ -1340,7 +1340,7 @@ async def test_only_the_settings_that_are_set_reach_the_cli(tmp_path, model, eff
 @pytest.mark.parametrize("cheap", [True, False])
 async def test_every_answer_by_schema_goes_to_the_cheap_model_without_effort(tmp_path, cheap):
     # Служебные роли (описание героя, вплетение, летопись, генератор) — ответы по схеме: у CLI
-    # они идут на CLAUDE_CLI_CHEAP_MODEL, какой бы признак `cheap` ни был у запроса (спека §11).
+    # они идут на CLAUDE_CLI_CHEAP_MODEL, какой бы признак `cheap` ни был у запроса.
     # Возможности дешёвой модели неизвестны, поэтому усилия ей не передаются.
     answer = reply(result=json.dumps({"title": "Склеп", "danger": 3}))
     harness = Harness(
@@ -1358,21 +1358,50 @@ async def test_every_answer_by_schema_goes_to_the_cheap_model_without_effort(tmp
     assert flags_after_tools(harness.only_run()["argv"]) == ["--model", "haiku"]
 
 
-# Ответы по схеме строят только модули служебных ролей спеки §11, а ход мастера — всегда
-# `run_turn`. На этом держится правило адаптера «ответ по схеме → дешёвая модель»: новый
-# `JsonRequest` в другом модуле (не служебная роль) должен сначала пересмотреть это правило.
+@pytest.mark.parametrize(
+    ("model", "effort", "flags"),
+    [
+        pytest.param("opus", "high", ["--model", "opus", "--effort", "high"], id="модель и усилия"),
+        pytest.param(None, None, [], id="выбирает сам CLI"),
+    ],
+)
+async def test_an_answer_on_the_game_model_goes_to_the_model_and_the_effort_of_the_game(
+    tmp_path, model, effort, flags
+):
+    # Идеи у костра (`campfire_host`) пишет основная модель игры, а не дешёвая: признак
+    # `game_model` у запроса берёт модель и усилия игры, даже когда дешёвая модель задана.
+    answer = reply(result=json.dumps({"title": "Склеп", "danger": 3}))
+    harness = Harness(
+        tmp_path,
+        model=model,
+        effort=effort,
+        cheap_model="haiku",
+        FAKE_CLAUDE_REPLIES=json.dumps([answer]),
+    )
+
+    await harness.provider.complete_json(
+        JsonRequest(system="s", prompt="p", purpose="campfire.ideas", game_model=True), Hook
+    )
+
+    assert flags_after_tools(harness.only_run()["argv"]) == flags
+
+
+# Ответы по схеме строят только модули служебных ролей, а ход мастера — всегда `run_turn`. На
+# этом держится правило адаптера «ответ по схеме → дешёвая модель, если запрос не просит модель
+# игры»: новый `JsonRequest` в другом модуле (не служебная роль) должен сначала пересмотреть это
+# правило.
 SERVICE_ROLE_MODULES = {
     "authoring/steps.py",  # шаги генератора приключений по ролям (cheap=True)
     "characters/flavor.py",  # описание героя и «помоги написать» (cheap=True)
     "dm/chronicle.py",  # летопись (cheap=True)
-    # Идеи для рассказа у костра `campfire_host` (cheap=True; дополнение контракта B9 §1 п. 1: у
-    # CLI — CLAUDE_CLI_CHEAP_MODEL, адаптер не меняется; роль на пересмотр владельцем в §11).
+    # Идеи для рассказа у костра `campfire_host` (cheap=False, game_model=True): решение владельца —
+    # основная модель игры, у CLI тоже.
     "dm/rest_ideas.py",
-    "dm/weaving.py",  # вплетение (cheap=False: у API — основная модель, у CLI — дешёвая по §11)
+    "dm/weaving.py",  # вплетение (cheap=False: у API — основная модель, у CLI — дешёвая)
 }
 
 
-def test_only_the_service_roles_of_the_spec_build_answers_by_schema():
+def test_only_the_service_roles_build_answers_by_schema():
     package = Path(dnd_server.__file__).parent
 
     builders = {
@@ -1387,6 +1416,24 @@ def test_only_the_service_roles_of_the_spec_build_answers_by_schema():
     }
 
     assert builders == SERVICE_ROLE_MODULES
+
+
+def test_only_the_ideas_of_the_campfire_ask_for_the_model_of_the_game():
+    # Основную модель игры просят только идеи у костра (решение владельца); остальные служебные
+    # роли признака не ставят, поэтому у CLI они идут на дешёвую модель, как и раньше.
+    package = Path(dnd_server.__file__).parent
+
+    asking = {
+        path.relative_to(package).as_posix()
+        for path in package.rglob("*.py")
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "JsonRequest"
+        and any(keyword.arg == "game_model" for keyword in node.keywords)
+    }
+
+    assert asking == {"dm/rest_ideas.py"}
 
 
 # Стык генератора и адаптера: шаги генератора (`authoring/steps.py`) — ответы по схеме, у CLI они
@@ -1491,7 +1538,7 @@ def test_a_model_name_outside_the_allowed_shape_is_refused_at_assembly(tmp_path,
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
-def test_every_effort_level_of_the_spec_is_accepted(tmp_path, effort):
+def test_every_effort_level_of_the_cli_is_accepted(tmp_path, effort):
     assert Harness(tmp_path, effort=effort).provider.name == "claude_code_cli"
 
 
@@ -1714,9 +1761,9 @@ def test_garbage_in_the_settings_is_a_config_error_that_names_the_variable(
 async def test_a_model_of_the_game_the_cli_refuses_gives_way_to_the_environment(
     tmp_path, caplog, game_model, cli_model, flags
 ):
-    # Спека §11: модель игры → CLAUDE_CLI_MODEL → по умолчанию CLI. Модель игры, которую CLI не
-    # примет (игру создали под другим провайдером), пропускается: сборка не падает, в командную
-    # строку она не идёт, а журнал сервера говорит, что взята модель окружения.
+    # Модель игры → CLAUDE_CLI_MODEL → по умолчанию CLI. Модель игры, которую CLI не примет (игру
+    # создали под другим провайдером), пропускается: сборка не падает, в командную строку она не
+    # идёт, а журнал сервера говорит, что взята модель окружения.
     settings = cli_settings_for(tmp_path, claude_cli_model=cli_model)
     _cli_path, log = make_cli(tmp_path)
 

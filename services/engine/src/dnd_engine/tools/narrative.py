@@ -1,5 +1,4 @@
-"""Инструменты рассказа: `private_message`, `chronicle`, `heal`, `damage`, `apply_effect`
-(план B4.7, спека §8.3).
+"""Инструменты рассказа: `private_message`, `chronicle`, `heal`, `damage`, `apply_effect`.
 
 Рассказ ведёт модель, а числа считает код: урон и лечение берутся только из записи костей
 (`dice`), причём запись проходит пределы `dice.parse_model_dice` до первого броска; состояние

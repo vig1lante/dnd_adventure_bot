@@ -1,5 +1,5 @@
-"""Чтение лора: `get_location`, `get_npc`, `get_item`, `search_lore` (план B4.5, спека §8.3) и
-мира формата v2 — `get_world`, `get_deity`, `get_faction`, `get_relations` (спека DND-2 §8).
+"""Чтение лора: `get_location`, `get_npc`, `get_item`, `search_lore` и мира формата v2 —
+`get_world`, `get_deity`, `get_faction`, `get_relations`.
 
 Инструменты только читают приключение и состояние мира: состояние не меняют и событий не создают.
 Результат — короткий словарь, пригодный для JSON. Это инструменты мастера, поэтому в ответе есть

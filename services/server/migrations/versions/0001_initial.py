@@ -25,7 +25,7 @@ def _one_of(column: str, values: Sequence[str]) -> str:
     return f"{column} IN ({', '.join(repr(value) for value in values)})"
 
 
-# Допустимые значения колонок-перечислений (план B6.1).
+# Допустимые значения колонок-перечислений.
 GAME_PHASES = ("lobby", "weaving", "playing", "paused", "finished")
 TURN_PHASES = ("discussion", "collecting", "resolving", "dm_failed", "combat_wait", "camp")
 TURN_KINDS = ("opening", "round", "combat", "camp_end")

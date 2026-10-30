@@ -1,9 +1,8 @@
-"""Разделы черновика в конструкторе (планы B4.1, B5.1; спека §10.3; дополнения dispatcher B4 §2, §3,
-§7, §8 и B5 §1, §3–§5).
+"""Разделы черновика в конструкторе.
 
 Чистые функции без базы: раздел ↔ шаг, проверка данных раздела с пределами API и запись его в
 черновик (`apply_section`), строки проблем без значений входа, статусы шагов и отчёт проверки по
-заполненным разделам. Черновик — контракт B3 (`AuthoringDraft`); живых моделей нет.
+заполненным разделам. Черновик — `AuthoringDraft`; живых моделей нет.
 """
 
 import re
@@ -45,8 +44,7 @@ SECRET_INPUT = "ЗНАЧЕНИЕ-ИЗ-ЗАПРОСА"
 
 
 def settings_data(**changes) -> dict:
-    """Данные раздела «Замысел» по дополнению §2: все поля настроек, название и главное для
-    дневника."""
+    """Данные раздела «Замысел»: все поля настроек, название и главное для дневника."""
     return {
         "title": "Маяк",
         "journal_intro": "Маяк погас.",
@@ -98,8 +96,7 @@ def problems_of(section: str, data, draft: AuthoringDraft | None = None) -> list
 
 
 def test_the_editor_has_every_section_of_the_contract_each_with_its_step():
-    # Дополнение B6 §1: все 12 разделов; бои и свои статблоки пишет шаг encounters, откровения —
-    # шаг clues.
+    # Все 12 разделов; бои и свои статблоки пишет шаг encounters, откровения — шаг clues.
     assert SECTION_STEPS == {
         "settings": "concept",
         "world": "world",
@@ -114,7 +111,7 @@ def test_the_editor_has_every_section_of_the_contract_each_with_its_step():
         "monsters": "encounters",
         "revelations": "clues",
     }
-    # Шаги генерации — все 12 шагов генератора (дополнение B6 §1).
+    # Шаги генерации — все 12 шагов генератора.
     assert EDITOR_STEPS == STEPS
     assert REQUIRED_STEPS == (
         "concept",
@@ -165,7 +162,7 @@ def test_settings_without_a_title_and_journal_intro_keep_the_ones_already_writte
         ("plot", plot(), TypeAdapter(Plot)),
     ],
 )
-def test_a_section_is_written_in_the_shape_of_the_b3_models(section, data, model):
+def test_a_section_is_written_in_the_shape_of_the_draft_models(section, data, model):
     draft = apply_section(AuthoringDraft(), section, data)
 
     assert getattr(draft, section) == model.validate_python(data)
@@ -180,7 +177,7 @@ def test_writing_a_section_leaves_the_other_sections_alone():
     assert draft.world is not None
 
 
-# --- пределы на границе API (дополнение §7) ---
+# --- пределы на границе API ---
 
 
 @pytest.mark.parametrize(
@@ -287,7 +284,7 @@ def test_sections_as_long_as_a_model_answer_may_be_are_accepted():
     ],
 )
 def test_texts_of_sections_longer_than_a_model_answer_may_be_are_refused(section, data, path):
-    # Дополнение §7 (fix-раунд 1): пределы полей схем ответа модели, списки строк без аналога ≤ 12.
+    # Пределы полей схем ответа модели, списки строк без аналога ≤ 12.
     found = problems_of(section, data)
 
     assert any(line.startswith(f"{path}: ") for line in found), found
@@ -319,7 +316,7 @@ def test_repeated_modules_collapse_keeping_the_order_of_the_first_mention():
 
 
 # Самый длинный ответ, который допускают схемы ответа шагов (`authoring/schemas.py`): то, что даёт
-# генерация, автор должен суметь сохранить обратно без правки (инвариант дополнения §7).
+# генерация, автор должен суметь сохранить обратно без правки.
 LONGEST_ANSWERS = {
     "concept": {
         "id": "a" * 64,
@@ -482,7 +479,7 @@ LONGEST_ANSWERS = {
         ]
     },
     # Бой: самые длинные тексты и все четыре группы; монстров в бою — не больше 20 (предел раздела
-    # и валидатора, дополнение B6 §5), хотя схема ответа пускает до 20 в каждой группе.
+    # и валидатора), хотя схема ответа пускает до 20 в каждой группе.
     "encounters": {
         "encounters": [
             {
@@ -574,7 +571,7 @@ async def test_the_longest_filling_a_step_may_give_is_saved_back_by_hand():
     assert all(location.read_aloud for location in saved.locations)
 
 
-# Типичные отказы ручного ввода (находка minor reviewer B4): автор видит их в редакторе.
+# Типичные отказы ручного ввода: автор видит их в редакторе.
 TYPICAL_REFUSALS = {
     "id не латиницей": ("deities", [deity("тиамат")], "deities.0.id"),
     "семь игроков": ("settings", settings_data(party_size=7), "settings.party_size"),
@@ -670,7 +667,7 @@ def test_problems_of_a_validation_error_are_lines_with_a_path_and_a_message():
     assert all(": " in line and SECRET_INPUT not in line for line in lines)
 
 
-# --- статусы шагов (дополнение §3) ---
+# --- статусы шагов ---
 
 
 def test_every_step_of_the_generator_has_a_status_and_the_time_of_its_last_write():
@@ -685,8 +682,7 @@ def test_every_step_of_the_generator_has_a_status_and_the_time_of_its_last_write
 
 
 def test_every_step_of_an_empty_draft_is_empty_the_filling_steps_too():
-    # Дополнение §3 (уточнение dispatcher): шаг-наполнитель пуст и тогда, когда пуст его
-    # раздел-основа — наполнять ещё нечего.
+    # Шаг-наполнитель пуст и тогда, когда пуст его раздел-основа — наполнять ещё нечего.
     statuses = step_statuses(AuthoringDraft(), {})
 
     assert {step: status["status"] for step, status in statuses.items()} == dict.fromkeys(
@@ -706,14 +702,14 @@ def test_the_filling_steps_have_content_once_their_base_section_is_filled():
         }
     )
 
-    # Ни у одного открытия нет улик — шаг улик пуст (дополнение B6 §3).
+    # Ни у одного открытия нет улик — шаг улик пуст.
     assert step_statuses(without_clues, {})["clues"]["status"] == "empty"
     filled = step_statuses(complete, {})
     assert filled["clues"]["status"] != "empty"
     assert filled["location_contents"]["status"] != "empty"
 
 
-# --- пустота по содержимому раздела (дополнение §3, fix-раунд 1: находка major reviewer B4) ---
+# --- пустота по содержимому раздела ---
 
 
 def test_a_concept_written_by_hand_is_a_draft_until_it_has_the_id_of_the_adventure():
@@ -812,7 +808,7 @@ def test_a_filled_step_whose_problems_belong_to_later_steps_is_ready():
     assert step_statuses(draft, {})["factions"]["status"] == "ready"
 
 
-# --- отчёт проверки (дополнение §8) ---
+# --- отчёт проверки ---
 
 
 def test_the_report_of_an_empty_draft_has_no_errors_of_steps_not_written_yet():
@@ -864,7 +860,7 @@ async def test_a_complete_draft_is_ready_and_an_error_keeps_it_below_one_hundred
     assert ready["estimated_minutes"] > 0
 
 
-# --- финальное покрытие блока 4: находки пустых шагов и округление доли готовности ---
+# --- находки пустых шагов и округление доли готовности ---
 
 
 def test_the_report_drops_findings_owned_by_steps_that_are_still_empty():
@@ -900,7 +896,7 @@ def test_readiness_counts_the_steps_and_not_their_errors_below_99():
     assert report["errors"] and report["readiness_percent"] == 100 // len(REQUIRED_STEPS)
 
 
-# --- разделы блока 5: форма, пределы, замки удалённых (дополнение B5 §1, §4, §5) ---
+# --- разделы карты, NPC, связей и предметов: форма, пределы, замки удалённых ---
 
 
 def graph_only() -> dict:
@@ -952,7 +948,7 @@ def test_the_map_is_written_in_the_shape_of_the_engine_models_with_its_start_and
         ("items", items_data(), Item),
     ],
 )
-def test_a_list_section_of_block_5_is_written_in_the_shape_of_the_engine_models(
+def test_a_list_section_of_the_map_is_written_in_the_shape_of_the_engine_models(
     section, data, model
 ):
     draft = apply_section(AuthoringDraft(), section, data)
@@ -1088,17 +1084,17 @@ def test_relations_inside_an_npc_are_refused_with_a_hint_to_the_relations_step()
         ("items", [item(base_item="я" * 301)], "items.0.base_item"),
     ],
 )
-def test_texts_and_lists_of_block_5_longer_than_a_model_answer_may_be_are_refused(
+def test_texts_and_lists_of_the_map_longer_than_a_model_answer_may_be_are_refused(
     section, data, path
 ):
-    # Дополнение B5 §4: пределы полей схем ответа модели; без аналога — Line 300, списки ≤ 12.
+    # Пределы полей схем ответа модели; без аналога — Line 300, списки ≤ 12.
     found = problems_of(section, data)
 
     assert any(line.startswith(f"{path}: ") for line in found), found
     assert all("ЯЯЯ" not in line and "яяя" not in line for line in found)
 
 
-def test_texts_and_lists_of_block_5_at_the_limits_are_accepted():
+def test_texts_and_lists_of_the_map_at_the_limits_are_accepted():
     harbor = location_at(HARBOR) | {
         "name": "Я" * 100,
         "read_aloud": "Я" * 2000,
@@ -1158,13 +1154,13 @@ def test_repeated_ids_inside_locations_are_accepted_and_left_to_the_check():
         ("npcs", {"npcs": npcs_data()}),  # раздел-список приходит списком
     ],
 )
-def test_extra_fields_and_a_wrong_shape_of_block_5_are_refused(section, data):
+def test_extra_fields_and_a_wrong_shape_of_the_map_are_refused(section, data):
     assert problems_of(section, data)
 
 
 def test_writing_a_section_without_an_entity_drops_its_lock_and_only_its_lock():
-    # Дополнение B5 §5: замок удалённой сущности снимается в той же записи, иначе новая сущность
-    # с тем же id молча оказалась бы закреплённой; шаг и другие замки не трогаются.
+    # Замок удалённой сущности снимается в той же записи, иначе новая сущность с тем же id молча
+    # оказалась бы закреплённой; шаг и другие замки не трогаются.
     draft = apply_section(AuthoringDraft(), "locations", locations_data())
     draft = draft.model_copy(
         update={"locks": frozenset({"location:harbor", "location:lighthouse", "step:locations"})}
@@ -1188,7 +1184,7 @@ def test_writing_one_section_keeps_the_locks_of_the_others():
     assert changed.locks == {"npc:ilsa", "deity:selmara"}
 
 
-# --- статусы шагов блока 5 по содержимому (дополнение B5 §3) ---
+# --- статусы шагов карты, наполнения, NPC и связей по содержимому ---
 
 
 def statuses_of(draft: AuthoringDraft) -> dict[str, str]:
@@ -1305,16 +1301,16 @@ def test_the_report_keeps_findings_of_the_map_and_drops_those_of_an_empty_fillin
     assert all(step != "location_contents" for _, _, step in found), found
 
 
-# --- финальное покрытие блока 5: типичные отказы, словарь связей, шкала отношения ---
+# --- типичные отказы, словарь связей, шкала отношения ---
 
 
 def without_field(entity: dict, field: str) -> dict:
     return {key: value for key, value in entity.items() if key != field}
 
 
-# Типичные отказы ручного ввода разделов блока 5: автор видит их в редакторе карты, наполнения,
-# персонажей и связей.
-B5_TYPICAL_REFUSALS = {
+# Типичные отказы ручного ввода разделов карты, NPC, связей и предметов: автор видит их в редакторе
+# карты, наполнения, персонажей и связей.
+MAP_TYPICAL_REFUSALS = {
     "id локации не латиницей": ("locations", map_with(id="гавань"), "locations.locations.0.id"),
     "нет текста вслух": (
         "locations",
@@ -1345,14 +1341,14 @@ B5_TYPICAL_REFUSALS = {
 }
 
 
-@pytest.mark.parametrize("case", B5_TYPICAL_REFUSALS)
-def test_problems_of_typical_refusals_of_block_5_are_in_russian(case):
-    section, data, path = B5_TYPICAL_REFUSALS[case]
+@pytest.mark.parametrize("case", MAP_TYPICAL_REFUSALS)
+def test_problems_of_typical_refusals_of_the_map_are_in_russian(case):
+    section, data, path = MAP_TYPICAL_REFUSALS[case]
 
     assert_in_russian(problems_of(section, data), path)
 
 
-# Словарь видов связи спеки §8 записан здесь, а не взят из движка: это страж контракта webapp
+# Словарь видов связи записан здесь, а не взят из движка: это страж контракта webapp
 # (`RelationKind` в `services/webapp/src/api/types.ts`).
 RELATION_KINDS = (
     "kin",
@@ -1381,7 +1377,7 @@ def test_every_kind_of_relation_of_the_contract_is_accepted():
 
 
 def test_a_relation_of_kind_other_needs_a_note():
-    # Дополнение B5 §9: путь поля и русский текст вместо сообщения движка «kind other».
+    # Путь поля и русский текст вместо сообщения движка «kind other».
     for note in ("  ", None):
         data = relation(kind="other", note=note)
         if note is None:
@@ -1403,7 +1399,7 @@ def test_an_attitude_of_an_npc_past_the_scale_is_refused(attitude, message):
     assert problems_of("npcs", [npc(attitude=attitude)]) == [f"npcs.0.attitude: {message}"]
 
 
-# --- fix-раунд 1 блока 5: тексты `problems` без значений входа и с путём (дополнение B5 §9) ---
+# --- тексты `problems` без значений входа и с путём ---
 
 
 DC_RULE = "Сл — одна из 5, 10, 15, 20, 25, 30"
@@ -1419,7 +1415,7 @@ DC_RULE = "Сл — одна из 5, 10, 15, 20, 25, 30"
     ],
 )
 def test_a_difficulty_off_the_table_is_named_by_the_rule_and_not_by_the_number(place, path, dc):
-    # Security I1 B5: сообщение движка повторяло введённое число («…получено 1234567»).
+    # Раньше сообщение движка повторяло введённое число («…получено 1234567»).
     check = {"ability": "wis", "skill": "perception", "dc": dc}
     data = {
         "feature": lambda: map_with(features=[feature(check=check)]),
@@ -1467,11 +1463,11 @@ def repeated(build) -> list[dict]:
     ],
 )
 def test_repeated_ids_of_a_section_are_named_with_the_path_of_the_section(section, data, line):
-    # Reviewer nit B5: строка повтора id шла от черновика целиком, без пути раздела.
+    # Раньше строка повтора id шла от черновика целиком, без пути раздела.
     assert problems_of(section, data) == [line]
 
 
-# --- fix-раунд 1 B6 (R5): шаги, чьё время отмечает результат генерации ---
+# --- шаги, чьё время отмечает результат генерации ---
 
 
 @pytest.mark.parametrize(

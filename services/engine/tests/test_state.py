@@ -37,6 +37,7 @@ from dnd_engine.journal import JournalEntry
 from dnd_engine.rest import RestOutcome
 from dnd_engine.rng import ScriptedRng
 from dnd_engine.state import (
+    DAY_PART_STARTS,
     Chronicle,
     GameState,
     GameTime,
@@ -46,6 +47,7 @@ from dnd_engine.state import (
     SceneType,
     Spotlight,
     WorldState,
+    day_part,
 )
 
 EVENT_ADAPTER = TypeAdapter(Event)
@@ -247,18 +249,19 @@ def test_new_state_has_neutral_defaults(make_character):
     assert state.scene == Scene(type=SceneType.EXPLORATION, started_turn=0, inspiration_granted=[])
     assert state.scene.rest is None  # вид привала есть только у сцены `camp`
     assert state.world == WorldState()
-    assert state.time == GameTime(day=1, part="morning")
+    assert state.time == GameTime(day=1, hour=6)
+    assert state.time.part == "morning"
     assert state.combat is None
     assert state.chronicle == Chronicle(summary="", entries=[])
     assert (state.spotlight, state.pc_hooks) == ({}, {})
     assert (state.short_rests_since_long, state.turn, state.version) == (0, 0, 0)
     assert state.rules.base == "srd-5.2"
     assert state.journal == ()
-    assert state.party_round == 0  # раунд игроков: 0 — начало игры и открытие (дополнение §11)
+    assert state.party_round == 0  # раунд игроков: 0 — начало игры и открытие
 
 
 def test_a_state_saved_before_the_journal_is_read_with_an_empty_journal(make_character):
-    # Снимок, записанный кодом без дневника (дополнение B8 §5): полей `journal` и `party_round`
+    # Снимок, записанный кодом без дневника: полей `journal` и `party_round`
     # в нём нет.
     saved = make_state(make_character()).model_dump(mode="json")
     del saved["journal"], saved["party_round"]
@@ -281,7 +284,7 @@ def test_a_game_in_progress_saved_before_the_journal_loses_no_field_after_readin
     make_character,
 ):
     # Старая игра посреди боя (бой, зацепки, привалы, раунд и версия): чтение текстом JSON, как
-    # из базы, не теряет и не меняет ни одного поля, а дневник получает умолчание (дополнение §5).
+    # из базы, не теряет и не меняет ни одного поля, а дневник получает умолчание.
     saved = json.loads(rich_state(make_character()).model_dump_json())
     del saved["journal"], saved["party_round"]
 
@@ -360,8 +363,8 @@ def test_the_kind_of_a_camp_survives_a_json_round_trip(make_character, kind):
 
 
 def test_a_camp_saved_before_the_kind_of_rest_is_read_without_a_kind(make_character):
-    # Снимок DND-1: у сцены `camp` поля `rest` нет; такой привал движок считает долгим
-    # (дополнение B9 §1 п. 2), а чтение не теряет и не меняет ни одного прежнего поля.
+    # Старый снимок, где коротких привалов ещё не было: у сцены `camp` поля `rest` нет; такой
+    # привал движок считает долгим, а чтение не теряет и не меняет ни одного прежнего поля.
     camp = make_state(make_character(), scene=Scene(type=SceneType.CAMP, started_turn=4))
     saved = json.loads(camp.model_dump_json())
     del saved["scene"]["rest"]
@@ -399,6 +402,236 @@ def test_the_kind_of_rest_is_always_in_the_stored_dict_and_reads_back(
         "rest": kind,
     }
     assert GameState.model_validate(stored) == state
+
+
+# --- Время игры: часы и части суток ---
+
+
+@pytest.mark.parametrize(
+    ("hour", "part"),
+    [
+        (0, "night"),
+        (5, "night"),
+        (6, "morning"),
+        (11, "morning"),
+        (12, "day"),
+        (17, "day"),
+        (18, "evening"),
+        (21, "evening"),
+        (22, "night"),
+        (23, "night"),
+    ],
+)
+def test_the_part_of_the_day_follows_the_hour(hour, part):
+    # Ночь идёт через полночь: с 22 до 5 включительно.
+    assert GameTime(day=2, hour=hour).part == part
+
+
+def test_a_new_game_starts_on_the_first_morning_at_its_first_hour():
+    assert (GameTime().day, GameTime().hour, GameTime().part) == (1, 6, "morning")
+
+
+@pytest.mark.parametrize(
+    ("part", "hour"), [("morning", 6), ("day", 12), ("evening", 18), ("night", 22)]
+)
+def test_a_time_saved_without_the_hour_starts_at_the_beginning_of_its_part(
+    make_character, part, hour
+):
+    # Снимок до появления часов хранит только часть суток: вечерняя игра остаётся вечерней.
+    saved = json.loads(make_state(make_character()).model_dump_json())
+    saved["time"] = {"day": 3, "part": part}
+
+    restored = GameState.model_validate_json(json.dumps(saved, ensure_ascii=False))
+
+    assert (restored.time.day, restored.time.hour, restored.time.part) == (3, hour, part)
+    assert json.loads(restored.model_dump_json())["time"] == {"day": 3, "hour": hour, "part": part}
+
+
+def test_the_time_is_stored_with_the_day_the_hour_and_the_part_and_reads_back():
+    time = GameTime(day=4, hour=19)
+
+    dumped = time.model_dump(mode="json")
+
+    assert dumped == {"day": 4, "hour": 19, "part": "evening"}
+    assert list(dumped) == ["day", "hour", "part"]
+    assert GameTime.model_validate(dumped) == time
+    assert GameTime.model_validate_json(time.model_dump_json()) == time
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"hour": 24},
+        {"hour": -1},
+        {"hour": 19, "part": "morning"},  # часть суток не совпадает с часом
+        {"part": "noon"},
+        {"part": ["night"]},  # испорченный снимок: не строка
+    ],
+    ids=["hour-24", "hour-below-zero", "part-against-the-hour", "unknown-part", "part-not-text"],
+)
+def test_an_hour_outside_the_day_or_a_part_against_the_hour_is_rejected(fields):
+    with pytest.raises(ValidationError):
+        GameTime.model_validate({"day": 1, **fields})
+
+
+@pytest.mark.parametrize(
+    ("start", "hours", "expected"),
+    [
+        ((1, 6), 1, (1, 7, "morning")),
+        ((1, 17), 1, (1, 18, "evening")),  # час отдыха меняет часть суток
+        ((1, 23), 1, (2, 0, "night")),  # полночь: наступил следующий день
+        ((2, 22), 3, (3, 1, "night")),
+        ((1, 5), 1, (1, 6, "morning")),
+        ((1, 20), 0, (1, 20, "evening")),
+    ],
+)
+def test_hours_pass_through_midnight_into_the_next_day(start, hours, expected):
+    time = GameTime(day=start[0], hour=start[1])
+
+    later = time.plus_hours(hours)
+
+    assert (later.day, later.hour, later.part) == expected
+    assert (time.day, time.hour) == start  # исходное время не меняется
+
+
+# --- Время игры: все часы суток, долгие сдвиги и сверка части с часом ---
+
+# Часть суток каждого часа выписана руками, а не через `day_part`: таблица проверяет правило,
+# а не повторяет его. Ночь идёт через полночь: 0–5 и 22–23.
+PART_OF_EACH_HOUR = ["night"] * 6 + ["morning"] * 6 + ["day"] * 6 + ["evening"] * 4 + ["night"] * 2
+
+
+def test_every_hour_of_the_day_belongs_to_exactly_its_part():
+    assert len(PART_OF_EACH_HOUR) == 24
+    for hour, part in enumerate(PART_OF_EACH_HOUR):
+        assert day_part(hour) == part, hour
+        assert GameTime(day=1, hour=hour).part == part, hour
+
+
+def test_hour_by_hour_the_part_changes_only_at_its_first_hour_and_the_day_only_at_midnight():
+    # Двое суток по часу: часть суток меняется на границах 5→6, 11→12, 17→18 и 21→22, а день —
+    # только на переходе 23→0.
+    time = GameTime(day=1, hour=0)
+    part_changes, day_changes = [], []
+    for _ in range(48):
+        later = time.plus_hours(1)
+        if later.part != time.part:
+            part_changes.append((time.hour, later.hour, later.part))
+        if later.day != time.day:
+            day_changes.append((time.hour, later.hour, later.day))
+        time = later
+
+    borders = [(5, 6, "morning"), (11, 12, "day"), (17, 18, "evening"), (21, 22, "night")]
+    assert part_changes == borders * 2
+    assert day_changes == [(23, 0, 2), (23, 0, 3)]
+    assert time == GameTime(day=3, hour=0)
+    # Первый час каждой части — ровно её начало из таблицы движка.
+    assert {part: hour for _, hour, part in borders} == DAY_PART_STARTS
+
+
+@pytest.mark.parametrize(
+    ("start", "hours", "expected"),
+    [
+        ((1, 6), 24, (2, 6, "morning")),  # ровно сутки: тот же час следующего дня
+        ((1, 23), 25, (3, 0, "night")),
+        ((1, 6), 48, (3, 6, "morning")),
+        ((3, 10), 71, (6, 9, "morning")),
+        ((1, 18), 100, (5, 22, "night")),
+        ((2, 0), 23, (2, 23, "night")),  # без полуночи день прежний
+    ],
+)
+def test_many_hours_and_whole_days_pass_at_once(start, hours, expected):
+    later = GameTime(day=start[0], hour=start[1]).plus_hours(hours)
+
+    assert (later.day, later.hour, later.part) == expected
+
+
+@pytest.mark.parametrize("hours", [0, 1, 2, 3, 23, 24, 25, 47, 73])
+def test_one_long_step_lands_where_as_many_single_hours_do(hours):
+    start = GameTime(day=2, hour=21)
+    step_by_step = start
+    for _ in range(hours):
+        step_by_step = step_by_step.plus_hours(1)
+
+    assert start.plus_hours(hours) == step_by_step
+
+
+@pytest.mark.parametrize(("part", "hour"), list(DAY_PART_STARTS.items()))
+def test_an_old_time_built_from_its_part_goes_on_from_the_first_hour_of_the_part(part, hour):
+    # Время без часа строится по части суток так же, как читается старый снимок: с её начала.
+    old = GameTime(day=2, part=part)
+
+    assert old == GameTime(day=2, hour=hour)
+    assert old.part == part
+    # Короткий отдых спустя игра идёт в той же части того же дня (ночь — с 22:00 до 23:00).
+    after_a_rest = old.plus_hours(1)
+    assert (after_a_rest.day, after_a_rest.hour, after_a_rest.part) == (2, hour + 1, part)
+
+
+def test_a_saved_part_is_only_checked_against_the_hour_and_never_moves_it():
+    # Снимок с часом и частью: совпадает — час остаётся каким был (не встаёт на начало части);
+    # не совпадает — ошибка данных при любом часе суток, и в ней названы обе стороны.
+    for hour, own_part in enumerate(PART_OF_EACH_HOUR):
+        for part in DAY_PART_STARTS:
+            saved = {"day": 4, "hour": hour, "part": part}
+            if part == own_part:
+                assert GameTime.model_validate(saved) == GameTime(day=4, hour=hour), saved
+            else:
+                with pytest.raises(
+                    ValidationError, match=f"час {hour} — это {own_part}, а не {part}"
+                ):
+                    GameTime.model_validate(saved)
+
+
+@pytest.mark.parametrize("hour", [24, -1, None, "вечер"])
+def test_an_hour_outside_the_day_next_to_a_valid_part_is_a_validation_error(hour):
+    # Час вне суток с частью не сверяется: его отклоняет проверка поля, а не падение валидатора.
+    with pytest.raises(ValidationError):
+        GameTime.model_validate({"day": 1, "hour": hour, "part": "night"})
+
+
+@pytest.mark.parametrize(
+    "saved",
+    ['{"day": 1, "hour": "19", "part": "morning"}', '{"day": 1, "hour": 19.0, "part": "morning"}'],
+    ids=["hour-as-text", "hour-as-a-fraction"],
+)
+def test_a_part_against_an_hour_written_not_as_a_whole_number_is_rejected(saved):
+    # Час строкой или дробью поле приводит к 19, и сверка с частью идёт уже после приведения.
+    with pytest.raises(ValidationError):
+        GameTime.model_validate_json(saved)
+
+
+@pytest.mark.parametrize(
+    "saved",
+    [
+        {"day": 1, "hour": "19", "part": "evening"},
+        {"day": 1, "hour": 19.0, "part": "evening"},
+        '{"day": 1, "hour": "19", "part": "evening"}',
+    ],
+    ids=["text-in-python", "fraction-in-python", "text-in-json"],
+)
+def test_a_part_matching_an_hour_written_not_as_a_whole_number_is_accepted(saved):
+    time = (
+        GameTime.model_validate_json(saved)
+        if isinstance(saved, str)
+        else GameTime.model_validate(saved)
+    )
+
+    assert (time.day, time.hour, time.part) == (1, 19, "evening")
+
+
+def test_a_saved_game_writes_the_time_as_day_hour_and_part_in_this_order(make_character):
+    state = make_state(make_character(), time=GameTime(day=3, hour=19))
+
+    text = state.model_dump_json()
+
+    assert '"time":{"day":3,"hour":19,"part":"evening"}' in text
+    # Хранится час, а часть суток вычисляется из него: задать её мимо часа нельзя.
+    assert set(GameTime.model_fields) == {"day", "hour"}
+    assert set(GameTime.model_computed_fields) == {"part"}
+    with pytest.raises(AttributeError):
+        state.time.part = "night"  # type: ignore[misc]
+    assert GameState.model_validate_json(text).time == GameTime(day=3, hour=19)
 
 
 def test_scene_types_serialize_as_their_text_values():

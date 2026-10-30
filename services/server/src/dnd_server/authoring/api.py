@@ -1,18 +1,17 @@
 """Маршруты конструктора `/api/drafts`, копии приключения каталога `/api/adventures/{id}/draft` и
-справочника монстров `/api/srd/monsters` (планы B4.1, B5.1, B6.1; спека §10.3; дополнения
-dispatcher B4, B5 и B6): тонкая обёртка над `service`, `jobs` и `publish`.
+справочника монстров `/api/srd/monsters`: тонкая обёртка над `service`, `jobs` и `publish`.
 
 Все маршруты — только создателям игр (`require_game_creator`, иначе 403); черновик — только его
 автору (чужой — 404). Ошибки конструктора (`DraftError`) — `{"detail", "code", "problems"?}` с
 кодом по виду отказа (у 404 кода нет). Ошибка формы запроса здесь — тот же отказ, что ошибка
-данных раздела: 422 `invalid_data` со строками `problems` (дополнение §4), поэтому у маршрутов свой
+данных раздела: 422 `invalid_data` со строками `problems`, поэтому у маршрутов свой
 класс (`DraftRoute`) — так ловить ошибку формы запроса предлагает документация FastAPI.
 
 Импорт принимает сырое тело `application/zip` (без multipart и новых пакетов): тип и размер тела
 проверяются до разбора, размер — ещё и по мере чтения, так что большое тело не копится в памяти.
 Перед отказом 413 тело дочитывается и выбрасывается (не больше `DRAIN_LIMIT_BYTES`): ответ, данный
 до конца тела, заставил бы uvicorn закрыть соединение, а прокси (Vite, туннель), который ещё
-передаёт тело, отдал бы клиенту 502 вместо 413 (дополнение B11 §1 п. 9).
+передаёт тело, отдал бы клиенту 502 вместо 413.
 """
 
 from collections.abc import AsyncIterator, Callable, Coroutine
@@ -117,7 +116,7 @@ class GenerateIn(_Body):
 
 
 class PublishIn(_Body):
-    """Тело публикации — `{}`: id приключения задаёт раздел «Замысел» (дополнение B6 §2, §6)."""
+    """Тело публикации — `{}`: id приключения задаёт раздел «Замысел»."""
 
 
 def get_authoring_tasks(connection: HTTPConnection) -> TaskSet:
@@ -258,7 +257,7 @@ async def publish_draft(
     catalog: Annotated[Catalog, Depends(get_catalog)],
     _body: PublishIn | None = None,
 ) -> JSONResponse:
-    # Первая публикация — 201, обновление своей строки — 200 (дополнение B6 §6).
+    # Первая публикация — 201, обновление своей строки — 200.
     created, published = await publish.publish_draft(session, user, draft_id, catalog)
     return JSONResponse(status_code=201 if created else 200, content=published)
 
@@ -282,7 +281,7 @@ async def copy_adventure(
     session: SessionDep,
     catalog: Annotated[Catalog, Depends(get_catalog)],
 ) -> dict[str, Any]:
-    # Создание записи — POST, а не GET спеки §10.3 (дополнение B6 §8).
+    # Копия создаёт запись, поэтому маршрут — POST, а не GET.
     entry = catalog.get(adventure_id)
     if entry is None:
         raise DraftNotFound("Приключение не найдено.")

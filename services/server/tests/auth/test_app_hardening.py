@@ -1,4 +1,4 @@
-"""Защита приложения целиком (план B6.2): проверка Host и закрытая документация в prod.
+"""Защита приложения целиком: проверка Host и закрытая документация в prod.
 
 Сервер слушает только localhost, и наружу его выставляет туннель или VPS. Страница злоумышленника
 может привязать своё имя к 127.0.0.1 (DNS-rebinding) и ходить на сервер как на свой, поэтому
@@ -115,12 +115,12 @@ async def test_a_websocket_handshake_with_a_foreign_host_is_refused():
         "type": "websocket",
         "path": "/ws/games/any",
         "raw_path": b"/ws/games/any",
-        "query_string": b"token=x",
+        "query_string": b"",
         "headers": [(b"host", b"evil.example")],
         "scheme": "ws",
         "server": ("127.0.0.1", 8000),
         "client": ("127.0.0.1", 50000),
-        "subprotocols": [],
+        "subprotocols": ["dnd-game.v1", "x"],
     }
 
     await app(scope, receive, send)

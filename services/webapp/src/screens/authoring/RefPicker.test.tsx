@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { DraftRef } from "../../api/types";
 import { RefPicker } from "./RefPicker";
 
-// Справочник черновика: все виды сразу, как его отдаёт сервер (дополнение B5, §6).
+// Справочник черновика: все виды сразу, как его отдаёт сервер.
 const REFS: DraftRef[] = [
   { ref: "deity:umberlee", kind: "deity", name: "Амберли" },
   { ref: "faction:guild", kind: "faction", name: "Гильдия теней" },

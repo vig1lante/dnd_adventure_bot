@@ -1,4 +1,4 @@
-"""Лобби, персонажи и хаб вместе (план B6.3, B6.4, B6.5): что слышат игроки по сокету.
+"""Лобби, персонажи и хаб вместе: что слышат игроки по сокету.
 
 Сервер настоящий (стенд `flows`), действия делаются запросами REST, а клиенты сокетов подключены
 всё время, как открытые Mini App у компании за столом. Событие `lobby` приходит каждому участнику
@@ -14,7 +14,7 @@ from itertools import pairwise
 from typing import Any
 
 import pytest
-from websockets.asyncio.client import connect
+from game_socket import open_game_socket
 from websockets.exceptions import InvalidStatus
 
 
@@ -22,7 +22,7 @@ async def lobby_events(watchers: dict[str, Any], count: int) -> list[dict[str, A
     """Каждый участник получил ровно `count` событий `lobby`, у всех одни и те же; их сводки игры.
 
     Герой, которого описывает модель (быстрый и случайный), даёт два кадра: при сохранении и после
-    описания — во втором имя героя от модели (дополнение B11 §5 п. 2)."""
+    описания — во втором имя героя от модели."""
     frames = {name: await watcher.drain() for name, watcher in watchers.items()}
     for name, events in frames.items():
         assert [e["type"] for e in events] == ["lobby"] * count, (name, events)
@@ -127,8 +127,8 @@ async def test_a_players_hero_never_reaches_the_frames_of_the_others(stand):
     host, mia = [await stand.dev_player(n) for n in (1, 2)]
     game = await stand.new_game(host)
     await stand.join(mia, game["code"])
-    # Имя героя — не тайна: его видят все в лобби (`hero_name`, решение D3 блока B11), как и в
-    # отряде после старта. Тайна — замысел и предыстория.
+    # Имя героя — не тайна: его видят все в лобби (`hero_name`), как и в отряде после старта.
+    # Тайна — замысел и предыстория.
     secrets = ["ЗАМЫСЕЛ-миры-4242", "ПРЕДЫСТОРИЯ-миры-4242"]
     hero_name = "ИМЯ-героя-4242"
     # Имя героя нарочно совпадает с id другого игрока и словом «все»: это текст, а не адрес.
@@ -163,7 +163,7 @@ async def test_a_players_hero_never_reaches_the_frames_of_the_others(stand):
     assert host_view["character"] is None and host_view["feed"] == []
     heard = json.dumps([host_view, *watchers["host"].seen], ensure_ascii=False)
     assert not any(secret in heard for secret in secrets)
-    # Выбор игрока (R10) отдаёт только `characters/mine` и только самой Мии: ни снимки, ни кадры
+    # Выбор игрока отдаёт только `characters/mine` и только самой Мии: ни снимки, ни кадры
     # сокета (её собственные тоже) его не несут, а хозяину чужого выбора не достать.
     everything = json.dumps([host_view, mia_view, *watchers["host"].seen, *watchers["mia"].seen])
     seen_keys = set(re.findall(r'"(\w+)":', everything))
@@ -212,15 +212,13 @@ async def test_the_tunnel_host_is_served_over_rest_and_the_socket_and_a_foreign_
 
     allowed = await stand.call(host, "GET", "/api/me", headers={"Host": tunnel})
     refused = await stand.call(host, "GET", "/api/me", headers={"Host": "evil.example"})
-    async with connect(
-        f"ws://{tunnel}/ws/games/{gid}?token={host.token}", host="127.0.0.1", port=stand.port
+    async with open_game_socket(
+        f"ws://{tunnel}/ws/games/{gid}", host.token, host="127.0.0.1", port=stand.port
     ) as ws:
         snapshot = json.loads(await asyncio.wait_for(ws.recv(), 5))
     with pytest.raises(InvalidStatus) as foreign:
-        async with connect(
-            f"ws://evil.example/ws/games/{gid}?token={host.token}",
-            host="127.0.0.1",
-            port=stand.port,
+        async with open_game_socket(
+            f"ws://evil.example/ws/games/{gid}", host.token, host="127.0.0.1", port=stand.port
         ):
             pass
 

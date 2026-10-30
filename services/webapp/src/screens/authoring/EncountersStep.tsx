@@ -29,7 +29,7 @@ const newGroup = (): MonsterGroup => ({
   zone: "here",
 });
 
-/** Сколько монстров в группе: от 1 до 20 (дополнение B6, §5). */
+/** Сколько монстров в группе: от 1 до 20. */
 const COUNTS = Array.from({ length: 20 }, (_, index) => ({
   value: String(index + 1),
   label: String(index + 1),

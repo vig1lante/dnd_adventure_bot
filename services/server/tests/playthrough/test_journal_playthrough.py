@@ -1,4 +1,4 @@
-"""Дневник отряда на настоящем сервере весь вечер (финальное покрытие блока B8 DND-2).
+"""Дневник отряда на настоящем сервере весь вечер.
 
 Клиент собирает дневник так же, как хранилище Mini App: начинает с блока `journal` снимка, кадр
 `journal_entry` заменяет запись с тем же `id` на её месте или ставит новую в конец, кадр `journal`
@@ -10,10 +10,10 @@
 Экран игры Mini App подключается к игре заново, когда игра открылась (лобби и игра — разные
 экраны, каждый со своим сокетом), поэтому клиент дневника здесь — сокет, открытый после открытия
 игры (`open_game_screens`). Сокет, открытый ещё в лобби, получил снимок без дневника: после открытия
-игры его догоняет блок `journal` (дополнение контракта B8 §11, п. 7) — это отдельный тест.
+игры его догоняет блок `journal` — это отдельный тест.
 
-«Раунд» записи — номер раунда игроков (`GameState.party_round`, §11 п. 5–6): открытие — раунд 0,
-первый раунд игроков — 1; ходы боя и конец привала номер не меняют.
+«Раунд» записи — номер раунда игроков (`GameState.party_round`): открытие — раунд 0, первый раунд
+игроков — 1; ходы боя и конец привала номер не меняют.
 
 Сценарий мастера — вечер `evening.py`, в первый раунд которого добавлены две записи `journal_add`:
 общая о завсегдатаях и личная Бориса о Фабиане. Остальное в вечере прежнее; во втором раунде отряд
@@ -46,7 +46,6 @@ from evening import (
     round_two,
     tool,
 )
-from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from dnd_server.db.models import TurnKind, TurnPhase, TurnStatus
@@ -352,7 +351,7 @@ async def test_a_player_kicked_from_the_lobby_gets_nothing_of_the_journal(
         everything = str(kicked.frames)
         assert COMMON_NOTE not in everything and BORIS_NOTE not in everything
         # Вернуться к игре он не может: сокет закрыт как «не участник», REST отказывает.
-        async with connect(server.ws_url(gleb.token)) as ws:
+        async with server.socket(gleb.token) as ws:
             with pytest.raises(ConnectionClosed) as closed:
                 await asyncio.wait_for(ws.recv(), TIMEOUT_S)
         assert closed.value.rcvd.code == 4403

@@ -4,10 +4,10 @@ import { SRD_ATTRIBUTION } from "./attribution";
 import { readSource } from "./styles/read-source";
 import { fakeServer } from "./test-setup";
 
-// Спека §2: «В приложении обязательна строка атрибуции» SRD 5.2.1 (лицензия CC BY 4.0), а
-// мета блока B8 уточняет: текст один на README и Mini App, точный текст — со страницы
-// «Legal Information». Тесты закрывают требование: источник текста (`attribution.ts`)
-// совпадает с цитатой README, а строка видна игроку и на экране входа, и на «Мои игры».
+// В приложении обязательна строка атрибуции SRD 5.2.1 (лицензия CC BY 4.0): текст один на
+// README и Mini App, точный текст — со страницы «Legal Information». Тесты закрывают
+// требование: источник текста (`attribution.ts`) совпадает с цитатой README, а строка видна
+// игроку и на экране входа, и на «Мои игры».
 
 const README_FILE = "../../../../README.md";
 const INDEX_HTML = "../../index.html";
@@ -79,7 +79,7 @@ test("источник текста в приложении слово в сло
   expect(SRD_ATTRIBUTION).toBe(await attributionOfReadme());
 });
 
-describe("строка атрибуции SRD 5.2.1 в приложении (спека §2)", () => {
+describe("строка атрибуции SRD 5.2.1 в приложении", () => {
   test("на главном экране после входа есть строка атрибуции", async () => {
     await openMyGames();
 

@@ -8,7 +8,7 @@ from dnd_server.config import Settings, get_settings
 # Корень репозитория: services/server/tests/test_config.py -> три уровня вверх.
 ENV_EXAMPLE = Path(__file__).parents[3] / ".env.example"
 
-# Секреты проекта (спека §12, §14): только эти поля должны быть SecretStr.
+# Секреты проекта: только эти поля должны быть SecretStr.
 SECRET_FIELDS = [
     "session_secret",
     "telegram_bot_token",
@@ -49,10 +49,10 @@ ALL_FIELDS_ENV = {
     "SHORT_REST_SECONDS": "44",
 }
 
-# Модель подписки для `claude_code_cli` (DND-2, спека §11, Р9).
+# Модель подписки для `claude_code_cli`.
 SUBSCRIPTION_VARIABLES = ("CLAUDE_CLI_MODEL", "CLAUDE_CLI_EFFORT", "CLAUDE_CLI_CHEAP_MODEL")
 
-# Намеренные отличия значений по умолчанию в коде от `.env.example` (отчёт B1.3):
+# Намеренные отличия значений по умолчанию в коде от `.env.example`:
 # код по умолчанию закрыт, шаблон для локальной разработки открывает dev-режим.
 INTENTIONAL_DEFAULT_DIFFERENCES = {"app_env", "session_secret"}
 
@@ -102,7 +102,7 @@ def test_defaults_are_closed_by_default():
 
 
 def test_the_subscription_model_settings_are_unset_by_default():
-    # Пусто — модель, усилия и дешёвую модель выбирает сам CLI по подписке (спека §11, Р9).
+    # Пусто — модель, усилия и дешёвую модель выбирает сам CLI по подписке.
     settings = Settings()
 
     assert (
@@ -113,7 +113,7 @@ def test_the_subscription_model_settings_are_unset_by_default():
 
 
 def test_the_template_lists_the_subscription_model_empty_so_the_cli_chooses_it():
-    # План B1.4: три переменные модели подписки есть в шаблоне и пусты, а пусто — «не задано».
+    # Три переменные модели подписки есть в шаблоне и пусты, а пусто — «не задано».
     template = {
         line.partition("=")[0]: line.partition("=")[2]
         for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
@@ -379,7 +379,7 @@ def test_seconds_reject_non_positive_init_value(name):
 
 
 def test_the_short_rest_lasts_two_minutes_and_the_long_one_five_by_default():
-    # Короткий привал по кнопке хоста (DND-2, блок B9): свой срок, долгий берёт срок привала DND-1.
+    # Короткий привал по кнопке хоста: свой срок, долгий берёт срок привала первой версии игры.
     settings = Settings()
 
     assert (settings.short_rest_seconds, settings.camp_seconds) == (120, 300)
@@ -400,7 +400,7 @@ def test_get_settings_reads_environment_until_cache_is_cleared(monkeypatch):
     assert get_settings().app_env == "prod"
 
 
-# --- список создателей игр (решение владельца B6: «Только из списка») ---
+# --- список создателей игр (решение владельца: «Только из списка») ---
 
 
 def test_nobody_creates_games_by_default():

@@ -1,4 +1,4 @@
-"""Вход и сессии (план B6.2): initData Telegram, dev-вход, токен, `/api/me`, `/api/config`.
+"""Вход и сессии: initData Telegram, dev-вход, токен, `/api/me`, `/api/config`.
 
 Подпись initData строит сам тест известным токеном бота по алгоритму Telegram, настоящего Telegram
 нет. Приложение работает на настоящей базе SQLite после миграций (фикстуры `settings`, `db`,
@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import time
 import traceback
 from contextlib import asynccontextmanager
@@ -467,7 +468,7 @@ async def test_unknown_dev_login_is_422_and_makes_no_user(client, db, login):
     response = await dev_login(client, login)
 
     assert response.status_code == 422
-    # Общий контракт блока: `detail` — строка на русском, а не список ошибок FastAPI с эхом ввода.
+    # Общий формат ошибок: `detail` — строка на русском, а не список ошибок FastAPI с эхом ввода.
     detail = response.json()["detail"]
     assert isinstance(detail, str)
     if login:
@@ -657,7 +658,7 @@ async def test_config_needs_no_token_and_shows_no_secret(settings, db):
         assert secret not in response.text
 
 
-# --- вход для WebSocket: токен из query ---
+# --- вход для WebSocket: токен вторым подпротоколом ---
 
 
 async def test_user_for_token_finds_the_user_and_refuses_everything_else(settings, db):
@@ -673,27 +674,63 @@ async def test_user_for_token_finds_the_user_and_refuses_everything_else(setting
         assert await user_for_token(session, SessionSigner("z" * 40), signer.issue(user.id)) is None
 
 
-def websocket_with(app, query: bytes) -> WebSocket:
+def websocket_with(app, subprotocols: list[str], query: bytes = b"") -> WebSocket:
     """Объект WebSocket Starlette без сети: для проверки того, что читают из рукопожатия."""
-    scope = {"type": "websocket", "app": app, "query_string": query, "headers": []}
+    scope = {
+        "type": "websocket",
+        "app": app,
+        "query_string": query,
+        "headers": [],
+        "subprotocols": subprotocols,
+    }
     return WebSocket(scope, receive=None, send=None)  # type: ignore[arg-type]
 
 
-async def test_websocket_user_reads_the_token_from_the_query(settings, db):
+async def test_websocket_user_reads_the_token_from_the_second_subprotocol(settings, db):
     app = create_app(settings)
     async with db() as session:
         user = await find_or_create_user(session, name="Игрок", dev_login="dev-2")
     token = SessionSigner(SESSION_SECRET).issue(user.id)
 
-    found = await websocket_user(websocket_with(app, f"token={token}".encode()))
-    no_token = await websocket_user(websocket_with(app, b""))
-    bad_token = await websocket_user(websocket_with(app, b"token=garbage"))
+    found = await websocket_user(websocket_with(app, ["dnd-game.v1", token]))
+    refused = [
+        await websocket_user(websocket_with(app, subprotocols, query))
+        for subprotocols, query in [
+            ([], b""),  # подпротоколов нет
+            (["dnd-game.v1"], b""),  # имя без токена
+            (["dnd-game.v1", ""], b""),  # пустой токен
+            (["dnd-game.v1", "garbage"], b""),
+            ([token, "dnd-game.v1"], b""),  # токен не на своём месте
+            (["other.v1", token], b""),  # чужое имя подпротокола
+            (["dnd-game.v1", token, "extra"], b""),
+            ([], f"token={token}".encode()),  # прежний способ: токен в адресе
+        ]
+    ]
     # Токен в заголовке Authorization для WS не используется: браузер не может его передать.
     await app.state.engine.dispose()
 
     assert found is not None and found.id == user.id
-    assert no_token is None
-    assert bad_token is None
+    assert refused == [None] * 8
+
+
+# Символы токена (RFC 7230, `token`): только такие браузер пускает в имя подпротокола, а
+# заголовок `Sec-WebSocket-Protocol` режет значения по запятым.
+SUBPROTOCOL_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+
+
+@pytest.mark.parametrize(
+    "user_id",
+    [
+        "6f1c2a4e-1b7d-4c3a-9f0e-2d5b8a7c6e10",  # id пользователя — uuid4
+        "user-with-a-long-id-" + "x" * 200,
+        "Игрок, «с кавычками» и запятыми",
+    ],
+)
+def test_a_session_token_fits_into_a_subprotocol_name(user_id):
+    token = SessionSigner(SESSION_SECRET).issue(user_id)
+
+    assert SUBPROTOCOL_NAME.fullmatch(token)
+    assert "," not in token
 
 
 # --- find_or_create_user ---

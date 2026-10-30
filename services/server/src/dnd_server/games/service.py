@@ -1,4 +1,4 @@
-"""Правила лобби (план B6.3): создание игры, вход по коду, готовность, старт.
+"""Правила лобби: создание игры, вход по коду, готовность, старт.
 
 Слой не знает про HTTP: он принимает сессию базы, пользователя и зависимости, возвращает `GameOut`
 и отказывает исключениями `GameError` (`NotFound`, `Forbidden`, `Conflict`, `Invalid`). Как они
@@ -49,20 +49,20 @@ from dnd_server.llm.claude_code_cli import is_model_name
 from dnd_server.llm.factory import ConfigError
 from dnd_server.llm.internal_api import TurnTokens
 
-# Не больше шести игроков в игре (спека §8): стол и отряд рассчитаны на шестерых.
+# Не больше шести игроков в игре: стол и отряд рассчитаны на шестерых.
 MAX_PLAYERS = 6
 # Код приглашения: 6 символов A-Z0-9, около двух миллиардов вариантов; выбирается через `secrets`.
 CODE_ALPHABET = string.ascii_uppercase + string.digits
 CODE_LENGTH = 6
 # Сколько раз подряд придумывают код, если он уже занят. Занятый код — редкость, а не норма.
 CODE_ATTEMPTS = 5
-# Предел платных вызовов модели из лобби на игрока в игре (решение владельца B6.security).
+# Предел платных вызовов модели из лобби на игрока в игре (решение владельца).
 MAX_MODEL_CALLS = 20
-# Предел неудачных попыток войти по коду на пользователя (решение владельца B6.security): после
+# Предел неудачных попыток войти по коду на пользователя (решение владельца): после
 # десяти отказов за десять минут новые попытки получают 429, пока старые не выйдут из окна.
 MAX_FAILED_JOINS = 10
 FAILED_JOIN_WINDOW_S = 600
-# Псевдонимы моделей CLI Claude Code, которые форма предлагает для `claude_code_cli` (спека §11).
+# Псевдонимы моделей CLI Claude Code, которые форма предлагает для `claude_code_cli`.
 CLAUDE_CLI_ALIASES = ("opus", "sonnet", "haiku")
 
 
@@ -323,7 +323,7 @@ def claude_cli_default_model(settings: Settings) -> str | None:
 
 def claude_cli_models(settings: Settings) -> list[str]:
     """Модели `claude_code_cli` на выбор в форме: псевдонимы CLI и CLAUDE_CLI_MODEL, если он
-    другой и годится (`claude_cli_default_model`, спека §11). Их же отдаёт `GET /api/providers`."""
+    другой и годится (`claude_cli_default_model`). Их же отдаёт `GET /api/providers`."""
     models = list(CLAUDE_CLI_ALIASES)
     default = claude_cli_default_model(settings)
     if default and default not in models:
@@ -434,8 +434,8 @@ async def join_game(
         raise NotFound("Игра с таким кодом не найдена.")
     # Чтение по коду открыло транзакцию и заняло соединение пула, а блокировку игры могут держать
     # долго (ход мастера). Держатель блокировки открывает свою сессию и ждёт соединение из того же
-    # пула, поэтому ждущий запрос соединения держать не должен (дефект D1 блока B7). Коммит без
-    # изменений отпускает его; игра читается заново уже под блокировкой.
+    # пула, поэтому ждущий запрос соединения держать не должен. Коммит без изменений отпускает его;
+    # игра читается заново уже под блокировкой.
     await session.commit()
     async with locks.lock(game_id):
         game = await session.get(Game, game_id)
@@ -509,7 +509,7 @@ async def leave_game(
 ) -> None:
     """Игрок выходит из лобби вместе со своим персонажем и выбором, по которому тот создан.
 
-    Хост выйти не может (решение D2: передача роли хоста вне среза): игра без хоста осталась бы без
+    Хост выйти не может (передать роль хоста нельзя): игра без хоста осталась бы без
     того, кто её запускает."""
     async with locks.lock(game_id):
         game, player = await _membership(session, game_id, user)

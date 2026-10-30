@@ -1,0 +1,719 @@
+{
+  "schema_version": 5,
+  "game_id": "11111111-1111-4111-8111-111111111111",
+  "state": {
+    "game_id": "11111111-1111-4111-8111-111111111111",
+    "adventure_id": "demo-crypt",
+    "rules": {
+      "base": "srd-5.2",
+      "modules": [
+        "bg3_flavor",
+        "campfire"
+      ]
+    },
+    "party": {
+      "pc_00000000000000a1": {
+        "id": "pc_00000000000000a1",
+        "name": "Алиса",
+        "level": 3,
+        "species": "human",
+        "class_id": "fighter",
+        "background": "soldier",
+        "scores": {
+          "str": 17,
+          "dex": 13,
+          "con": 15,
+          "int": 8,
+          "wis": 12,
+          "cha": 10
+        },
+        "skill_proficiencies": [
+          "athletics",
+          "intimidation",
+          "acrobatics",
+          "perception",
+          "animal_handling"
+        ],
+        "expertise": [],
+        "save_proficiencies": [
+          "str",
+          "con"
+        ],
+        "fighting_style": "defense",
+        "hp_max": 28,
+        "hp": 24,
+        "temp_hp": 0,
+        "hit_dice_max": 3,
+        "hit_dice": 3,
+        "spell_slots_max": {},
+        "spell_slots": {},
+        "cantrips": [],
+        "prepared_spells": [],
+        "concentration": null,
+        "inventory": [
+          {
+            "item_id": "chain_mail",
+            "qty": 1,
+            "equipped": true
+          },
+          {
+            "item_id": "greatsword",
+            "qty": 1,
+            "equipped": true
+          },
+          {
+            "item_id": "javelin",
+            "qty": 1,
+            "equipped": false
+          },
+          {
+            "item_id": "spear",
+            "qty": 1,
+            "equipped": false
+          },
+          {
+            "item_id": "shortbow",
+            "qty": 1,
+            "equipped": false
+          },
+          {
+            "item_id": "healers_kit",
+            "qty": 1,
+            "equipped": false
+          }
+        ],
+        "conditions": [
+          {
+            "id": "poisoned",
+            "rounds_left": 3,
+            "source": "goblin_warrior-1",
+            "save": null,
+            "dc": null
+          }
+        ],
+        "buffs": [
+          {
+            "id": "bless",
+            "rounds_left": 5,
+            "source_id": "pc_00000000000000c3",
+            "data": {}
+          }
+        ],
+        "resources": {
+          "second_wind": 2,
+          "action_surge": 1
+        },
+        "inspiration": true,
+        "death_saves": {
+          "successes": 0,
+          "failures": 0,
+          "stable": false
+        },
+        "persona": {
+          "concept": "Бывший стражник",
+          "appearance": "Высокий, со шрамом.",
+          "traits": "Упрям.",
+          "ideals": "Порядок.",
+          "bonds": "Застава.",
+          "flaws": "Долги.",
+          "backstory": "Служил на заставе у перевала."
+        },
+        "player_id": "user-alice"
+      },
+      "pc_00000000000000b2": {
+        "id": "pc_00000000000000b2",
+        "name": "Борис",
+        "level": 3,
+        "species": "elf",
+        "class_id": "rogue",
+        "background": "criminal",
+        "scores": {
+          "str": 8,
+          "dex": 17,
+          "con": 15,
+          "int": 12,
+          "wis": 13,
+          "cha": 10
+        },
+        "skill_proficiencies": [
+          "sleight_of_hand",
+          "stealth",
+          "perception",
+          "acrobatics",
+          "investigation",
+          "deception",
+          "athletics"
+        ],
+        "expertise": [
+          "acrobatics",
+          "investigation"
+        ],
+        "save_proficiencies": [
+          "dex",
+          "int"
+        ],
+        "fighting_style": null,
+        "hp_max": 24,
+        "hp": 24,
+        "temp_hp": 0,
+        "hit_dice_max": 3,
+        "hit_dice": 3,
+        "spell_slots_max": {},
+        "spell_slots": {},
+        "cantrips": [],
+        "prepared_spells": [],
+        "concentration": null,
+        "inventory": [
+          {
+            "item_id": "leather_armor",
+            "qty": 1,
+            "equipped": true
+          },
+          {
+            "item_id": "shortsword",
+            "qty": 1,
+            "equipped": true
+          },
+          {
+            "item_id": "dagger",
+            "qty": 2,
+            "equipped": false
+          },
+          {
+            "item_id": "shortbow",
+            "qty": 1,
+            "equipped": false
+          },
+          {
+            "item_id": "thieves_tools",
+            "qty": 2,
+            "equipped": false
+          }
+        ],
+        "conditions": [],
+        "buffs": [],
+        "resources": {},
+        "inspiration": false,
+        "death_saves": {
+          "successes": 0,
+          "failures": 0,
+          "stable": false
+        },
+        "persona": {
+          "concept": "Бывший стражник",
+          "appearance": "Высокий, со шрамом.",
+          "traits": "Упрям.",
+          "ideals": "Порядок.",
+          "bonds": "Застава.",
+          "flaws": "Долги.",
+          "backstory": "Служил на заставе у перевала."
+        },
+        "player_id": "user-boris"
+      },
+      "pc_00000000000000c3": {
+        "id": "pc_00000000000000c3",
+        "name": "Вера",
+        "level": 3,
+        "species": "dwarf",
+        "class_id": "cleric",
+        "background": "acolyte",
+        "scores": {
+          "str": 13,
+          "dex": 12,
+          "con": 14,
+          "int": 8,
+          "wis": 17,
+          "cha": 11
+        },
+        "skill_proficiencies": [
+          "insight",
+          "religion",
+          "medicine",
+          "persuasion"
+        ],
+        "expertise": [],
+        "save_proficiencies": [
+          "wis",
+          "cha"
+        ],
+        "fighting_style": null,
+        "hp_max": 27,
+        "hp": 27,
+        "temp_hp": 0,
+        "hit_dice_max": 3,
+        "hit_dice": 3,
+        "spell_slots_max": {
+          "1": 4,
+          "2": 2
+        },
+        "spell_slots": {
+          "1": 4,
+          "2": 2
+        },
+        "cantrips": [
+          "sacred_flame",
+          "guidance",
+          "spare_the_dying"
+        ],
+        "prepared_spells": [
+          "bless",
+          "cure_wounds",
+          "healing_word",
+          "guiding_bolt",
+          "aid",
+          "lesser_restoration"
+        ],
+        "concentration": null,
+        "inventory": [
+          {
+            "item_id": "chain_shirt",
+            "qty": 1,
+            "equipped": true
+          },
+          {
+            "item_id": "shield",
+            "qty": 1,
+            "equipped": true
+          },
+          {
+            "item_id": "mace",
+            "qty": 1,
+            "equipped": true
+          },
+          {
+            "item_id": "holy_symbol",
+            "qty": 2,
+            "equipped": false
+          }
+        ],
+        "conditions": [],
+        "buffs": [],
+        "resources": {
+          "channel_divinity": 2
+        },
+        "inspiration": false,
+        "death_saves": {
+          "successes": 0,
+          "failures": 0,
+          "stable": false
+        },
+        "persona": {
+          "concept": "Бывший стражник",
+          "appearance": "Высокий, со шрамом.",
+          "traits": "Упрям.",
+          "ideals": "Порядок.",
+          "bonds": "Застава.",
+          "flaws": "Долги.",
+          "backstory": "Служил на заставе у перевала."
+        },
+        "player_id": "user-vera"
+      }
+    },
+    "location_id": "cemetery",
+    "scene": {
+      "type": "combat",
+      "started_turn": 2,
+      "inspiration_granted": [],
+      "rest": null
+    },
+    "world": {
+      "visited_locations": [],
+      "revealed": [
+        "clue:clue-diary"
+      ],
+      "item_holders": {
+        "chest-key": "character:pc_00000000000000a1"
+      },
+      "npc_attitude": {},
+      "npc_alive": {
+        "fabian": true
+      },
+      "npc_location": {},
+      "flags": {
+        "gate_open": true
+      }
+    },
+    "time": {
+      "day": 2,
+      "hour": 19,
+      "part": "evening"
+    },
+    "combat": {
+      "encounter_id": "risen-bones",
+      "zones": [
+        {
+          "id": "gate",
+          "name": "Ворота"
+        },
+        {
+          "id": "yard",
+          "name": "Двор"
+        }
+      ],
+      "links": [
+        {
+          "a": "gate",
+          "b": "yard",
+          "distance": "near"
+        }
+      ],
+      "combatants": {
+        "pc_00000000000000a1": {
+          "id": "pc_00000000000000a1",
+          "kind": "pc",
+          "side": "party",
+          "ref": "pc_00000000000000a1",
+          "name": "Алиса",
+          "hp": null,
+          "hp_max": null,
+          "ac": null,
+          "initiative": 0,
+          "zone_id": "gate",
+          "engaged_with": [],
+          "conditions": [],
+          "turn_flags": {},
+          "dodging": false,
+          "disengaged": false
+        },
+        "pc_00000000000000b2": {
+          "id": "pc_00000000000000b2",
+          "kind": "pc",
+          "side": "party",
+          "ref": "pc_00000000000000b2",
+          "name": "Борис",
+          "hp": null,
+          "hp_max": null,
+          "ac": null,
+          "initiative": 0,
+          "zone_id": "gate",
+          "engaged_with": [],
+          "conditions": [],
+          "turn_flags": {},
+          "dodging": false,
+          "disengaged": false
+        },
+        "goblin_warrior-1": {
+          "id": "goblin_warrior-1",
+          "kind": "monster",
+          "side": "enemies",
+          "ref": "goblin_warrior",
+          "name": "Гоблин 1",
+          "hp": 7,
+          "hp_max": 7,
+          "ac": 15,
+          "initiative": 0,
+          "zone_id": "yard",
+          "engaged_with": [],
+          "conditions": [],
+          "turn_flags": {},
+          "dodging": false,
+          "disengaged": false
+        },
+        "goblin_warrior-2": {
+          "id": "goblin_warrior-2",
+          "kind": "monster",
+          "side": "enemies",
+          "ref": "goblin_warrior",
+          "name": "Гоблин 2",
+          "hp": 3,
+          "hp_max": 7,
+          "ac": 15,
+          "initiative": 0,
+          "zone_id": "yard",
+          "engaged_with": [],
+          "conditions": [],
+          "turn_flags": {},
+          "dodging": false,
+          "disengaged": false
+        }
+      },
+      "order": [
+        "goblin_warrior-1",
+        "pc_00000000000000b2",
+        "goblin_warrior-2",
+        "pc_00000000000000a1"
+      ],
+      "round": 2,
+      "turn_index": 1
+    },
+    "chronicle": {
+      "summary": "Отряд пришёл в Мшистый Брод.",
+      "entries": [
+        "Нашли дневник."
+      ]
+    },
+    "spotlight": {},
+    "pc_hooks": {
+      "pc_00000000000000a1": {
+        "character_id": "pc_00000000000000a1",
+        "npc_links": [
+          {
+            "npc_id": "marta",
+            "relation": "знакомая",
+            "note": "Должна ей за ночлег."
+          }
+        ],
+        "location_links": [],
+        "party_links": [],
+        "personal_goal": "Найти пропавшего смотрителя (Алиса).",
+        "secret": "Тайна героя Алиса."
+      },
+      "pc_00000000000000b2": {
+        "character_id": "pc_00000000000000b2",
+        "npc_links": [
+          {
+            "npc_id": "marta",
+            "relation": "знакомая",
+            "note": "Должна ей за ночлег."
+          }
+        ],
+        "location_links": [],
+        "party_links": [],
+        "personal_goal": "Найти пропавшего смотрителя (Борис).",
+        "secret": "Тайна героя Борис."
+      },
+      "pc_00000000000000c3": {
+        "character_id": "pc_00000000000000c3",
+        "npc_links": [
+          {
+            "npc_id": "marta",
+            "relation": "знакомая",
+            "note": "Должна ей за ночлег."
+          }
+        ],
+        "location_links": [],
+        "party_links": [],
+        "personal_goal": "Найти пропавшего смотрителя (Вера).",
+        "secret": "Тайна героя Вера."
+      }
+    },
+    "short_rests_since_long": 0,
+    "journal": [
+      {
+        "id": "intro@all",
+        "ref": "intro",
+        "section": "main",
+        "title": "Главное",
+        "text": "Пропал смотритель кладбища Ульрих, а мертвецы на холме перестали лежать смирно. Его сестра Марта, хозяйка трактира «Сонный покойник», просит отряд найти брата.",
+        "audience": "all",
+        "turn": 0,
+        "revision": 1,
+        "visited_turn": null,
+        "updated_turn": null
+      },
+      {
+        "id": "location:cemetery@all",
+        "ref": "location:cemetery",
+        "section": "places",
+        "title": "Кладбище Мшистого Брода",
+        "text": "Деревенское кладбище на холме; здесь пропал смотритель Ульрих.",
+        "audience": "all",
+        "turn": 0,
+        "revision": 2,
+        "visited_turn": 2,
+        "updated_turn": null
+      },
+      {
+        "id": "location:village@all",
+        "ref": "location:village",
+        "section": "places",
+        "title": "Мшистый Брод",
+        "text": "Деревня у болота, где горит окно трактира «Сонный покойник».",
+        "audience": "all",
+        "turn": 0,
+        "revision": 1,
+        "visited_turn": 0,
+        "updated_turn": null
+      },
+      {
+        "id": "npc:marta@all",
+        "ref": "npc:marta",
+        "section": "people",
+        "title": "Марта",
+        "text": "Хозяйка трактира «Сонный покойник», сестра пропавшего смотрителя Ульриха.\n\nМарта обещала отряду ночлег, если брат найдётся.",
+        "audience": "all",
+        "turn": 0,
+        "revision": 2,
+        "visited_turn": null,
+        "updated_turn": 2
+      },
+      {
+        "id": "deity:ossmar@all",
+        "ref": "deity:ossmar",
+        "section": "gods",
+        "title": "Оссмар",
+        "text": "Бог покоя мёртвых; кладбища в краю ставят под его ключ.",
+        "audience": "all",
+        "turn": 0,
+        "revision": 1,
+        "visited_turn": null,
+        "updated_turn": null
+      },
+      {
+        "id": "deity:veyla@all",
+        "ref": "deity:veyla",
+        "section": "gods",
+        "title": "Вейла",
+        "text": "Богиня очага и гостеприимства; ей молятся трактирщики и хозяйки.",
+        "audience": "all",
+        "turn": 0,
+        "revision": 1,
+        "visited_turn": null,
+        "updated_turn": null
+      },
+      {
+        "id": "region:marshland@all",
+        "ref": "region:marshland",
+        "section": "world",
+        "title": "Болотистый край",
+        "text": "Болотистый край, где стоит деревня Мшистый Брод.",
+        "audience": "all",
+        "turn": 0,
+        "revision": 1,
+        "visited_turn": null,
+        "updated_turn": null
+      },
+      {
+        "id": "region:barrow-hill@all",
+        "ref": "region:barrow-hill",
+        "section": "world",
+        "title": "Холм за деревней",
+        "text": "Холм за деревней с кладбищем.",
+        "audience": "all",
+        "turn": 0,
+        "revision": 1,
+        "visited_turn": null,
+        "updated_turn": null
+      },
+      {
+        "id": "rumor:1@all",
+        "ref": "rumor:1",
+        "section": "rumors",
+        "title": "Граф Мортен велел похоронить с собой всё своё золото.",
+        "text": "Граф Мортен велел похоронить с собой всё своё золото.",
+        "audience": "all",
+        "turn": 0,
+        "revision": 1,
+        "visited_turn": null,
+        "updated_turn": null
+      },
+      {
+        "id": "faction:regulars@all",
+        "ref": "faction:regulars",
+        "section": "factions",
+        "title": "Завсегдатаи «Сонного покойника»",
+        "text": "Местные, что каждый вечер собираются в трактире у Марты.\n\nЗавсегдатаи держатся Марты и не любят чужаков.",
+        "audience": "all",
+        "turn": 2,
+        "revision": 1,
+        "visited_turn": null,
+        "updated_turn": null
+      },
+      {
+        "id": "npc:fabian@pc_00000000000000b2",
+        "ref": "npc:fabian",
+        "section": "people",
+        "title": "Фабиан",
+        "text": "Тощий человек в чёрном плаще, называет себя магом и задолжал Марте.\n\nБорис подслушал: Фабиан задолжал половине деревни.",
+        "audience": "pc_00000000000000b2",
+        "turn": 2,
+        "revision": 1,
+        "visited_turn": null,
+        "updated_turn": null
+      }
+    ],
+    "party_round": 2,
+    "turn": 3,
+    "version": 3
+  },
+  "character": {
+    "id": "pc_00000000000000b2",
+    "name": "Борис",
+    "level": 3,
+    "species": "elf",
+    "class_id": "rogue",
+    "background": "criminal",
+    "scores": {
+      "str": 8,
+      "dex": 17,
+      "con": 15,
+      "int": 12,
+      "wis": 13,
+      "cha": 10
+    },
+    "skill_proficiencies": [
+      "sleight_of_hand",
+      "stealth",
+      "perception",
+      "acrobatics",
+      "investigation",
+      "deception",
+      "athletics"
+    ],
+    "expertise": [
+      "acrobatics",
+      "investigation"
+    ],
+    "save_proficiencies": [
+      "dex",
+      "int"
+    ],
+    "fighting_style": null,
+    "hp_max": 24,
+    "hp": 24,
+    "temp_hp": 0,
+    "hit_dice_max": 3,
+    "hit_dice": 3,
+    "spell_slots_max": {},
+    "spell_slots": {},
+    "cantrips": [],
+    "prepared_spells": [],
+    "concentration": null,
+    "inventory": [
+      {
+        "item_id": "leather_armor",
+        "qty": 1,
+        "equipped": true
+      },
+      {
+        "item_id": "shortsword",
+        "qty": 1,
+        "equipped": true
+      },
+      {
+        "item_id": "dagger",
+        "qty": 2,
+        "equipped": false
+      },
+      {
+        "item_id": "shortbow",
+        "qty": 1,
+        "equipped": false
+      },
+      {
+        "item_id": "thieves_tools",
+        "qty": 2,
+        "equipped": false
+      }
+    ],
+    "conditions": [],
+    "buffs": [],
+    "resources": {},
+    "inspiration": false,
+    "death_saves": {
+      "successes": 0,
+      "failures": 0,
+      "stable": false
+    },
+    "persona": {
+      "concept": "Бывший стражник",
+      "appearance": "Высокий, со шрамом.",
+      "traits": "Упрям.",
+      "ideals": "Порядок.",
+      "bonds": "Застава.",
+      "flaws": "Долги.",
+      "backstory": "Служил на заставе у перевала."
+    },
+    "player_id": "user-boris"
+  }
+}

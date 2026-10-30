@@ -1,7 +1,6 @@
-"""Конструктор III на стороне сервера (план B6.1; спека §10.1, §10.3; дополнение dispatcher B6
-§1–§5, §8): разделы боёв, своих статблоков и откровений, шаги `encounters`/`items`/`clues`, id
-приключения ручным автором, пустота и статусы новых шагов, понятные тексты проверки, пределы, копия
-приключения каталога и справочник монстров SRD.
+"""Конструктор на стороне сервера: разделы боёв, своих статблоков и откровений, шаги
+`encounters`/`items`/`clues`, id приключения ручным автором, пустота и статусы новых шагов, понятные
+тексты проверки, пределы, копия приключения каталога и справочник монстров SRD.
 
 Публикация — `test_publish.py`, экспорт и импорт архивом — `test_archive.py`; стенд и данные
 разделов — из `test_drafts_api.py`. Живых моделей нет: ответы шагов проигрывает `FakeProvider`.
@@ -41,7 +40,7 @@ from dnd_server.authoring.draft import AuthoringDraft, from_adventure
 
 # tests/authoring/test_validate_api.py -> authoring -> tests -> server -> services -> корень
 DEMO_DIR = Path(__file__).resolve().parents[4] / "content" / "adventures" / "demo-crypt"
-B6_SECTIONS = ("encounters", "monsters", "revelations")
+FIGHT_AND_CLUE_SECTIONS = ("encounters", "monsters", "revelations")
 
 
 def encounters_data() -> list[dict[str, Any]]:
@@ -49,7 +48,7 @@ def encounters_data() -> list[dict[str, Any]]:
 
 
 def monsters_data() -> list[dict[str, Any]]:
-    """Свои статблоки демо v2 (пепельный жрец), опыт которых соответствует cr (дополнение §4)."""
+    """Свои статблоки демо v2 (пепельный жрец), опыт которых соответствует cr."""
     return as_served(MonsterDef, v2_answers()["generator.encounters"]["monsters"])
 
 
@@ -91,11 +90,11 @@ def clue(n: int) -> dict[str, Any]:
     return {"id": f"clue-{n}", "description": "Пепел на подоконнике.", "where": "npc:bram"}
 
 
-# --- разделы B6: запись и чтение ---
+# --- разделы боёв, своих статблоков и откровений: запись и чтение ---
 
 
-@pytest.mark.parametrize("section", B6_SECTIONS)
-async def test_each_section_of_block_6_is_saved_and_read_back_as_given(stand, section):
+@pytest.mark.parametrize("section", FIGHT_AND_CLUE_SECTIONS)
+async def test_each_section_of_fights_and_clues_is_saved_and_read_back_as_given(stand, section):
     author = await stand.author()
     draft = await stand.new_draft(author)
     data = b6_data(section)
@@ -109,11 +108,11 @@ async def test_each_section_of_block_6_is_saved_and_read_back_as_given(stand, se
     assert again[section] == data
 
 
-@pytest.mark.parametrize("section", B6_SECTIONS)
-async def test_what_the_generator_wrote_into_a_section_of_block_6_is_saved_back_unchanged(
+@pytest.mark.parametrize("section", FIGHT_AND_CLUE_SECTIONS)
+async def test_what_the_generator_wrote_into_a_section_of_fights_and_clues_is_saved_back_unchanged(
     stand, section
 ):
-    # Инвариант B4 §7 и B6 §1: сервер принимает назад всё, что отдаёт.
+    # Инвариант: сервер принимает назад всё, что отдаёт.
     author = await stand.author()
     draft = await complete_draft(stand, author)
 
@@ -162,7 +161,7 @@ def many(build, count: int) -> list[dict[str, Any]]:
         ("monsters", [monster(id="Пепельный жрец")], "monsters.0.id"),
     ],
 )
-async def test_a_section_of_block_6_over_its_limits_is_refused_with_the_path(
+async def test_a_section_of_fights_and_clues_over_its_limits_is_refused_with_the_path(
     stand, section, data, where
 ):
     author = await stand.author()
@@ -184,7 +183,7 @@ async def test_a_section_of_block_6_over_its_limits_is_refused_with_the_path(
         ("revelations", [revelation(), revelation()]),
     ],
 )
-async def test_repeated_ids_in_a_section_of_block_6_are_refused(stand, section, data):
+async def test_repeated_ids_in_a_section_of_fights_and_clues_are_refused(stand, section, data):
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -194,8 +193,8 @@ async def test_repeated_ids_in_a_section_of_block_6_are_refused(stand, section, 
     assert any(line.startswith(f"{section}: id повторяются") for line in body["problems"]), body
 
 
-@pytest.mark.parametrize("section", B6_SECTIONS)
-async def test_an_extra_field_in_a_section_of_block_6_is_refused(stand, section):
+@pytest.mark.parametrize("section", FIGHT_AND_CLUE_SECTIONS)
+async def test_an_extra_field_in_a_section_of_fights_and_clues_is_refused(stand, section):
     author = await stand.author()
     draft = await stand.new_draft(author)
     data = b6_data(section)
@@ -235,7 +234,7 @@ async def test_six_custom_statblocks_are_the_limit_of_a_draft(stand):
     assert len(written["monsters"]) == 6
 
 
-# Ровно на пределах раздела запись проходит (финальное покрытие B6; отказ на шаг дальше — выше).
+# Ровно на пределах раздела запись проходит (отказ на шаг дальше — выше).
 AT_THE_LIMITS = {
     "8 боёв": ("encounters", lambda: many(encounter, 8)),
     "4 группы в бою": (
@@ -267,7 +266,7 @@ AT_THE_LIMITS = {
 
 
 @pytest.mark.parametrize("case", AT_THE_LIMITS)
-async def test_a_section_of_block_6_exactly_at_its_limits_is_saved(stand, case):
+async def test_a_section_of_fights_and_clues_exactly_at_its_limits_is_saved(stand, case):
     section, build = AT_THE_LIMITS[case]
     author = await stand.author()
     draft = await stand.new_draft(author)
@@ -298,7 +297,7 @@ async def test_a_custom_statblock_with_an_infinite_or_negative_cr_is_refused(sta
 
 
 async def test_a_removed_encounter_loses_its_lock_in_the_same_write(stand):
-    # Дополнение B5 §5 действует для всех разделов-списков, в том числе для боёв B6.
+    # Замок удалённой сущности снимается в той же записи во всех разделах-списках, и в боях тоже.
     author = await stand.author()
     draft = await saved(
         stand, author, await stand.new_draft(author), "encounters", encounters_data()
@@ -316,11 +315,11 @@ async def test_a_removed_encounter_loses_its_lock_in_the_same_write(stand):
     assert written["locks"] == ["step:plot"]
 
 
-# --- шаги B6 генерируются ---
+# --- шаги боёв, предметов и улик генерируются ---
 
 
 @pytest.mark.parametrize("step", ["encounters", "items", "clues"])
-async def test_a_wish_for_a_step_of_block_6_is_saved(stand, step):
+async def test_a_wish_for_a_step_of_fights_and_clues_is_saved(stand, step):
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -348,7 +347,7 @@ def without_step(content: AuthoringDraft, step: str) -> AuthoringDraft:
     ("step", "written"),
     [("encounters", "encounters"), ("items", "items"), ("clues", "revelations")],
 )
-async def test_a_step_of_block_6_is_generated_into_its_section(stand, step, written):
+async def test_a_step_of_fights_and_clues_is_generated_into_its_section(stand, step, written):
     author = await stand.author()
     draft = await put_draft(stand, author, without_step(await generated_draft(), step))
 
@@ -376,7 +375,7 @@ async def test_a_single_encounter_is_regenerated_by_its_target(stand):
     assert [e["id"] for e in after["encounters"]] == ["drowned-ambush", "ash-rite"]
 
 
-# --- id приключения ручным автором (дополнение §2) ---
+# --- id приключения ручным автором ---
 
 
 async def test_the_author_sets_the_adventure_id_in_the_settings(stand):
@@ -386,7 +385,7 @@ async def test_the_author_sets_the_adventure_id_in_the_settings(stand):
     written = await saved(stand, author, draft, "settings", settings_data(adventure_id="my-lamp"))
 
     assert written["adventure_id"] == "my-lamp"
-    # Замысел с названием, завязкой и id готов и без генерации (дополнение §2).
+    # Замысел с названием, завязкой и id готов и без генерации.
     assert written["steps"]["concept"]["status"] == "ready"
     summaries = (await stand.call(author, "GET", "/api/drafts")).json()
     assert summaries[0]["adventure_id"] == "my-lamp"
@@ -406,7 +405,7 @@ async def test_an_empty_adventure_id_means_it_is_not_set(stand, value):
 
 
 async def test_settings_without_the_adventure_id_keep_the_one_the_draft_has(stand):
-    # Клиенты B4/B5 шлют настройки без этого поля: id, который дала генерация, не теряется.
+    # Старые клиенты шлют настройки без этого поля: id, который дала генерация, не теряется.
     author = await stand.author()
     draft = await complete_draft(stand, author)
 
@@ -429,12 +428,12 @@ async def test_an_adventure_id_out_of_the_pattern_is_refused_without_the_value(s
     assert value not in response.text
 
 
-# --- пустота и статусы шагов B6 (дополнение §3) ---
+# --- пустота и статусы шагов боёв, предметов и улик ---
 
 
 async def test_a_dangling_encounter_of_a_location_makes_the_encounters_step_visible(stand):
-    # carry_over B5: висящий `encounter_id` в черновике без боёв больше не прячется — шаг боёв не
-    # пуст, и находка видна со ссылкой на него.
+    # Висящий `encounter_id` в черновике без боёв больше не прячется — шаг боёв не пуст, и находка
+    # видна со ссылкой на него.
     author = await stand.author()
     draft = await stand.new_draft(author)
 
@@ -461,13 +460,13 @@ async def test_the_items_step_is_empty_without_items_and_not_empty_with_a_locked
     )
 
     assert empty["steps"]["items"]["status"] == "empty"
-    # Закреплённое — тоже содержимое (дополнение B4 §3).
+    # Закреплённое — тоже содержимое.
     assert locked["steps"]["items"]["status"] == "ready"
 
 
 async def test_a_revelation_without_clues_beside_one_with_clues_is_shown_by_the_check(stand):
     # Находка `too_few_clues` больше не прячется фильтром пустых шагов: шаг улик пуст, только если
-    # ни у одного откровения нет улик (дополнение §3, Q-D).
+    # ни у одного откровения нет улик.
     author = await stand.author()
     draft = await complete_draft(stand, author)
     bare = {"id": "second-truth", "statement": "Брам в долгу.", "clues": []}
@@ -490,7 +489,7 @@ async def test_the_clues_step_with_only_bare_revelations_is_empty(stand):
     assert written["steps"]["clues"]["status"] == "empty"
 
 
-async def test_the_steps_of_block_6_of_a_complete_draft_are_ready(stand):
+async def test_the_steps_of_fights_and_clues_of_a_complete_draft_are_ready(stand):
     author = await stand.author()
     draft = await complete_draft(stand, author)
 
@@ -551,7 +550,7 @@ async def test_a_complete_draft_has_no_error_and_is_fully_ready(stand):
     assert (report["errors"], report["readiness_percent"]) == ([], 100)
 
 
-# --- копия приключения каталога (дополнение §8) ---
+# --- копия приключения каталога ---
 
 
 def demo_catalog(stand) -> None:
@@ -572,7 +571,7 @@ async def test_a_catalog_adventure_is_copied_into_a_new_draft_of_the_caller(stan
     expected = from_adventure(load_adventure(DEMO_DIR)).model_dump(mode="json")
     for section in ("locations", "npcs", "items", "encounters", "revelations", "relations"):
         assert copy[section] == expected[section], section
-    assert copy["settings"]["profanity"] is True  # у приключения флажка нет: умолчание Р1
+    assert copy["settings"]["profanity"] is True  # у приключения флажка нет: значение по умолчанию
     assert copy["wishes"] == {}
     assert await stand.draft(author, copy["id"]) == copy
     foreign = await stand.call(other, "GET", f"/api/drafts/{copy['id']}")
@@ -597,7 +596,7 @@ async def test_a_player_who_may_not_create_games_cannot_copy_an_adventure(stand)
     assert response.status_code == 403, response.text
 
 
-# --- справочник монстров SRD (дополнение §8) ---
+# --- справочник монстров SRD ---
 
 
 async def test_the_srd_monster_list_names_id_name_cr_xp_and_tags_in_the_order_of_the_data(stand):
@@ -620,7 +619,7 @@ async def test_the_srd_monster_list_is_only_for_creators(stand):
     assert response.status_code == 403, response.text
 
 
-# --- fix-раунд 1 B6, дополнение: находки места и улики ---
+# --- находки места и улики ---
 
 
 def reveals(items: int = 0, flags: int = 0, clues: int = 0) -> list[dict[str, Any]]:
@@ -637,8 +636,8 @@ def reveals(items: int = 0, flags: int = 0, clues: int = 0) -> list[dict[str, An
     [reveals(items=2, clues=3), reveals(items=1, flags=1, clues=40), reveals(clues=40)],
 )
 async def test_clue_finds_of_a_place_do_not_count_against_its_two_finds(stand, found):
-    # Дополнение §11: находки-улики дописывает сборка из улик откровений; предел 2 — у предметов и
-    # флагов, а у улик места свой — 5 откровений × 8 улик.
+    # Находки-улики дописывает сборка из улик откровений; предел 2 — у предметов и флагов, а у улик
+    # места свой — 5 откровений × 8 улик.
     author = await stand.author()
     draft = await stand.new_draft(author)
 

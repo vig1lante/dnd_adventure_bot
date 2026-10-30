@@ -1,4 +1,4 @@
-"""Тела запросов и ответы лобби (план B6.3).
+"""Тела запросов и ответы лобби.
 
 Ответы описывают только то, что видит любой участник игры: состав лобби, готовность и настройки.
 В них нет копии приключения, отчёта валидатора и чужих данных; кто в игре не состоит, игру не видит.
@@ -15,7 +15,7 @@ from dnd_server.db.models import GamePhase, TurnPhase
 # случайной опечатке; верхняя — чтобы забытый отсчёт не подвесил игру: хост в любой момент
 # закрывает сбор вручную. Значения по умолчанию из env (120, 60, 300 и 120) лежат внутри. Целое
 # строгое: «120» и 120.0 — не секунды, а ошибка клиента. `CampSeconds` — долгий привал (и привал,
-# который начал мастер), `ShortRestSeconds` — короткий привал по кнопке хоста (блок B9).
+# который начал мастер), `ShortRestSeconds` — короткий привал по кнопке хоста.
 CollectSeconds = Annotated[StrictInt, Field(ge=30, le=600)]
 HurrySeconds = Annotated[StrictInt, Field(ge=15, le=300)]
 CampSeconds = Annotated[StrictInt, Field(ge=30, le=900)]
@@ -40,7 +40,7 @@ class CreateGameIn(_Request):
     hurry_seconds: HurrySeconds | None = None
     camp_seconds: CampSeconds | None = None
     short_rest_seconds: ShortRestSeconds | None = None
-    # «Мат и грубая речь» (решение Р1): по умолчанию включён. Строгий: «false» и 0 — ошибка клиента.
+    # «Мат и грубая речь» (решение владельца): по умолчанию включён; строгий: «false» и 0 — ошибка.
     profanity: StrictBool = True
 
 

@@ -1,4 +1,4 @@
-"""Поток боя (план B7.5, спека §8.4 и §8.5).
+"""Поток боя.
 
 Настоящий движок, демо-приключение `demo-crypt`, временная SQLite после миграций, настоящее
 приложение (`create_app` и его `lifespan`) и `FakeProvider` по сценариям; время отсчётов ведёт
@@ -1374,8 +1374,8 @@ async def test_a_secret_hero_action_in_combat_is_seen_only_by_its_author(fight):
 
 
 async def test_the_initiative_of_a_secret_hero_reaches_everybody_and_his_own_check_only_him(fight):
-    # Общая инициатива (B11.1) на проводе сервера: тайный ход Алисы начинает бой. Карточку её
-    # инициативы видят все — в кадрах и в снимке, а её собственная проверка остаётся только ей.
+    # Общая инициатива на проводе сервера: тайный ход Алисы начинает бой. Карточку её инициативы
+    # видят все — в кадрах и в снимке, а её собственная проверка остаётся только ей.
     scenario = [
         scenario_turn(
             tool(
@@ -1719,7 +1719,7 @@ async def test_when_the_countdown_ends_an_empty_turn_becomes_a_dodge(fight):
         [log] = await table.logs()
         assert f'"text": "{DODGE_TEXT}"' in log.request["context"]
         assert table.scheduler.pending() == {}
-        # «Уклоняется» игрок не писал: «Ход сдан» ему не приходит (дополнение B11 §1 п. 5).
+        # «Уклоняется» игрок не писал: «Ход сдан» ему не приходит.
         assert table.broadcaster.of_type("action_auto_submitted") == []
 
 

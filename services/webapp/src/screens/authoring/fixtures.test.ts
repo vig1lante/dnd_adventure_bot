@@ -21,13 +21,13 @@ import {
 
 // Заглушки отвечают как сервер, только пока их формы совпадают с контрактом: поля сущностей — поля
 // моделей движка (`dnd_engine.adventure.schema`), которые сервер отдаёт `model_dump(mode="json")`
-// целиком, вместе с полями по умолчанию (дополнения dispatcher B4 §1 и B5 §1). Если поле потеряется
-// в заглушке, тесты экранов перестанут ловить его потерю при сохранении.
+// целиком, вместе с полями по умолчанию. Если поле потеряется в заглушке, тесты экранов перестанут
+// ловить его потерю при сохранении.
 const keys = (value: object) => Object.keys(value).sort();
 const JOURNAL = ["public", "known_at_start"];
 
 describe("заглушки совпадают с формами контракта", () => {
-  test("черновик — поля дополнения B4 §1", () => {
+  test("черновик — все поля ответа сервера", () => {
     expect(keys(draftOf())).toEqual(
       [
         "id",
@@ -132,7 +132,7 @@ describe("заглушки совпадают с формами контракт
     expect(itemOf().holder).toBe("location:crypt");
   });
 
-  test("справочник ссылок — {ref, kind, name}: виды по порядку, имя или id (B5 §6)", () => {
+  test("справочник ссылок — {ref, kind, name}: виды по порядку, имя или id", () => {
     const draft = draftOf({
       locations: [locationOf({ id: "crypt", name: "" })],
       npcs: [npcOf()],
@@ -151,8 +151,6 @@ describe("заглушки совпадают с формами контракт
       },
     ]);
   });
-
-  // --- блок 6 (дополнение B6 §1, §3, §6, §8) ---
 
   test("бой — Encounter движка с группами монстров, зоной героев и боссом", () => {
     expect(keys(encounterOf())).toEqual(
@@ -227,7 +225,7 @@ describe("заглушки совпадают с формами контракт
     expect(keys(clueOf())).toEqual(["id", "description", "where"].sort());
   });
 
-  test("справочник SRD — {id, name, cr, xp, tags}: полей size/type нет (B6 §8)", () => {
+  test("справочник SRD — {id, name, cr, xp, tags}: полей size/type нет", () => {
     expect(keys(srdMonsterOf())).toEqual(
       ["id", "name", "cr", "xp", "tags"].sort(),
     );

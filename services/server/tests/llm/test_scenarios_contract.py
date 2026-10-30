@@ -49,9 +49,9 @@ MANUAL_RUN_PLAYERS: dict[str, tuple[int, ...]] = {
     "failing.yaml": tuple(range(1, MAX_PC_NUMBER + 1)),
     "combat.yaml": (3,),
     "weaving.yaml": (3,),
-    # Сквозной тест Playwright (B8.7): шестеро игроков, зацепка у каждого.
+    # Сквозной тест Playwright: шестеро игроков, зацепка у каждого.
     "e2e_full.yaml": (6,),
-    # Сквозной тест Playwright «Привалы» (B9.4): трое игроков, зацепка у каждого.
+    # Сквозной тест Playwright «Привалы»: трое игроков, зацепка у каждого.
     "e2e_rests.yaml": (3,),
 }
 
@@ -188,8 +188,8 @@ async def test_every_turn_calls_tools_the_engine_accepts_and_then_runs_out(path)
 
 @pytest.mark.parametrize("name", ["combat.yaml", "e2e_full.yaml"])
 def test_combat_scenario_engages_the_skeleton_before_each_of_its_strikes(name):
-    # Рукопашная атака бьёт только вовлечённого противника, а после start_combat не вовлечён никто
-    # (B7.manual): без своего вовлечения скелет в ручном прогоне всегда получал отказ движка.
+    # Рукопашная атака бьёт только вовлечённого противника, а после start_combat не вовлечён никто:
+    # без своего вовлечения скелет в ручном прогоне всегда получал отказ движка.
     scenario = load_scenario(SCENARIOS_DIR / name)
     strikes = 0
 
@@ -211,7 +211,7 @@ def test_combat_scenario_engages_the_skeleton_before_each_of_its_strikes(name):
     assert strikes  # в сценарии есть атака скелета, иначе проверка ничего не проверяла
 
 
-# --- сквозной сценарий Playwright «6 игроков» (B8.7) ---
+# --- сквозной сценарий Playwright «6 игроков» ---
 #
 # `e2e_full.yaml` играет настоящий сервер с `FakeProvider` под браузерами шестерых игроков, а кубы и
 # инициатива настоящие (`SystemRng`). Тест Playwright (`services/webapp/e2e/six-players.spec.ts`)
@@ -402,7 +402,7 @@ async def test_two_providers_from_one_scenario_have_independent_json_queues():
         await first.complete_json(request, Number)
 
 
-# --- привалы (блок B9 DND-2) ---
+# --- привалы ---
 
 
 @pytest.mark.parametrize(
@@ -416,7 +416,7 @@ async def test_every_answer_of_the_campfire_host_passes_the_schema_of_the_ideas(
 
     for _answer in answers_of(scenario, "campfire.ideas"):
         out = await provider.complete_json(
-            JsonRequest(system="", prompt="", purpose="campfire.ideas", cheap=True), IdeasOut
+            JsonRequest(system="", prompt="", purpose="campfire.ideas", game_model=True), IdeasOut
         )
         assert out.ideas
         assert {idea.character_id for idea in out.ideas} <= set(PC_IDS)
@@ -427,7 +427,7 @@ async def test_the_rest_scenario_has_an_idea_for_each_of_three_heroes_and_ends_a
     provider = FakeProvider(scenario, pc_ids=PC_IDS[:3])
 
     out = await provider.complete_json(
-        JsonRequest(system="", prompt="", purpose="campfire.ideas", cheap=True), IdeasOut
+        JsonRequest(system="", prompt="", purpose="campfire.ideas", game_model=True), IdeasOut
     )
 
     assert [idea.character_id for idea in out.ideas] == list(PC_IDS[:3])
@@ -436,7 +436,7 @@ async def test_the_rest_scenario_has_an_idea_for_each_of_three_heroes_and_ends_a
     assert turn.repeat and {step.tool for step in tool_steps(turn)} == {"chronicle"}
 
 
-# --- сквозной сценарий Playwright «Привалы» (B9.4) ---
+# --- сквозной сценарий Playwright «Привалы» ---
 #
 # `e2e_rests.yaml` играет сервер под браузерами троих игроков (`services/webapp/e2e/rests.spec.ts`).
 # Привалы начинает хост кнопкой, без хода мастера, поэтому после открытия идут только рассказы
@@ -446,7 +446,7 @@ async def test_the_rest_scenario_has_an_idea_for_each_of_three_heroes_and_ends_a
 
 REST_E2E_SCENARIO = SCENARIOS_DIR / "e2e_rests.yaml"
 REST_E2E_PC_IDS = PC_IDS[:3]
-IDEAS_REQUEST = JsonRequest(system="", prompt="", purpose="campfire.ideas", cheap=True)
+IDEAS_REQUEST = JsonRequest(system="", prompt="", purpose="campfire.ideas", game_model=True)
 
 
 def test_the_scenarios_of_the_rests_are_in_the_folder():

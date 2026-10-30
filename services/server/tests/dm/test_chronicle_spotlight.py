@@ -1,4 +1,4 @@
-"""Внимание и летопись (план B7.7, спека §8.6 и §8.7).
+"""Внимание и летопись.
 
 Настоящий движок, демо-приключение `demo-crypt` (копия лежит в игре, как после создания игры),
 временная SQLite после миграций и заглушка провайдера, которой управляет тест (рассказ мастера и
@@ -613,9 +613,9 @@ def test_a_hero_who_died_for_good_is_not_hinted_at_but_a_fallen_one_still_is(srd
 async def test_a_server_death_save_of_a_fallen_hero_is_not_a_focus_of_that_hero(
     monkeypatch, make_world
 ):
-    # Спасбросок лежащего героя бросает сервер при передаче хода (спека §8.4): игрок ничего не
-    # делал, мастер ничего не решал. Иначе герой без сознания обнулял бы счётчик каждый раунд и
-    # мастер не получал бы подсказки вернуть его в рассказ.
+    # Спасбросок лежащего героя бросает сервер при передаче хода: игрок ничего не делал, мастер
+    # ничего не решал. Иначе герой без сознания обнулял бы счётчик каждый раунд и мастер не получал
+    # бы подсказки вернуть его в рассказ.
     world = await make_world(fight=True, down=["boris"], rng=ScriptedRng([1, 15]))
     brain = Brain(calls=(DASH, SKELETON_STRIKES))
     use_provider(monkeypatch, brain)
@@ -745,7 +745,7 @@ def state_with(entries: int, srd: SrdContent, adventure: Adventure) -> GameState
 
 
 def test_the_squeeze_is_due_from_twenty_entries(srd, adventure):
-    assert CHRONICLE_COMPRESS_AT == 20  # план B7.7
+    assert CHRONICLE_COMPRESS_AT == 20
     assert not compression_due(state_with(CHRONICLE_COMPRESS_AT - 1, srd, adventure))
     assert compression_due(state_with(CHRONICLE_COMPRESS_AT, srd, adventure))
     assert compression_due(state_with(CHRONICLE_COMPRESS_AT + 5, srd, adventure))
@@ -767,7 +767,7 @@ def test_the_request_is_a_cheap_json_call_with_the_texts_only_as_data():
 
 
 def test_the_role_of_the_chronicler_comes_from_its_file_and_the_length_from_the_request():
-    # Промпт роли — файл пакета промптов (спека Р2); предел длины — подстановка кода в запросе.
+    # Промпт роли — файл пакета промптов; предел длины — подстановка кода в запросе.
     request = compression_request(Chronicle(entries=["Запись."]))
 
     assert request.system == load("chronicler")
@@ -978,9 +978,9 @@ async def test_regenerating_the_next_turn_returns_to_the_squeezed_chronicle(monk
 async def test_the_squeeze_after_the_turn_keeps_the_regenerate_flag_of_its_phase_true(
     monkeypatch, world
 ):
-    # Дополнение B11 §1 п. 11: кадр фазы с `can_regenerate` уходит после коммита хода, а сжатие
-    # летописи пишет новую версию состояния уже после него. Признак остаётся правдой: сжатие
-    # переносит начало следующего хода на сжатую версию, и «Перегенерировать» проходит.
+    # Кадр фазы с `can_regenerate` уходит после коммита хода, а сжатие летописи пишет новую версию
+    # состояния уже после него. Признак остаётся правдой: сжатие переносит начало следующего хода на
+    # сжатую версию, и «Перегенерировать» проходит.
     brain = Brain("Сводка.")
     use_provider(monkeypatch, brain)
     await world.run()

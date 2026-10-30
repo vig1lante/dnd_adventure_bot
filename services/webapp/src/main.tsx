@@ -11,7 +11,7 @@ import "./styles/ui.css";
 
 startTheme();
 
-// Превью стиля и макеты экранов (B10.1) есть только в dev: в прод-сборке import.meta.env.DEV
+// Превью стиля и макеты экранов есть только в dev: в прод-сборке import.meta.env.DEV
 // становится false, и ветки вместе с модулями превью вырезаются (проверено по содержимому dist).
 const StylePreview = import.meta.env.DEV
   ? lazy(() => import("./preview/StylePreview"))

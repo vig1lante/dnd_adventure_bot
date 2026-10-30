@@ -55,7 +55,7 @@ const TABS: Record<TabId, { label: string; icon: IconName }> = {
 const LAZY_TABS: ReadonlySet<TabId> = new Set(["journal", "hero", "party"]);
 
 /**
- * Вкладки по состоянию игры в порядке «В» (решение владельца на B10.1.gate): «Бой» и «Привал»
+ * Вкладки по состоянию игры в порядке, выбранном владельцем: «Бой» и «Привал»
  * появляются по фазе сразу за «Рассказом», «Дневник» — последний, читательский.
  */
 function tabsOf(view: GameView): TabId[] {

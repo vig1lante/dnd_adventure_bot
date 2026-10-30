@@ -5,7 +5,7 @@ export function wantsStylePreview(search: string): boolean {
   return new URLSearchParams(search).get("preview") === "style";
 }
 
-/** Просят ли макеты экранов (`/?preview=screens`, B10.1). Как и превью стиля — только в dev. */
+/** Просят ли макеты экранов (`/?preview=screens`). Как и превью стиля — только в dev. */
 export function wantsScreensPreview(search: string): boolean {
   return new URLSearchParams(search).get("preview") === "screens";
 }

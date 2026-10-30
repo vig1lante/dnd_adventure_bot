@@ -1,4 +1,4 @@
-"""Общие договорённости блока B6 на всех маршрутах сразу (план B6.2–B6.5, спека §9, §12).
+"""Общие договорённости на всех маршрутах сразу.
 
 1. Контракт ошибок: каждая ошибка 401, 403, 404, 409, 422 и 503 — `{"detail": "<строка>"}`,
    а у 422 может быть ещё `problems` (отчёт валидатора создателю игры).
@@ -9,7 +9,7 @@
    попадают в ответы игрокам.
 
 Все три проверки делает `Stand.assert_clean` по ответам и журналу, накопленным за сценарий; сценарий
-нарочно проходит все виды отказа. Тесты пунктов проверяют отдельные случаи, здесь они сведены
+нарочно проходит все виды отказа. Остальные тесты проверяют отдельные случаи, здесь они сведены
 в один обход, который не зависит от того, в каком файле и в каком порядке писались маршруты.
 """
 
@@ -22,7 +22,6 @@ from urllib.parse import parse_qsl, urlencode
 
 import httpx
 import pytest
-from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from dnd_server.db.models import DmTurnLog, Message, MessageKind, Turn, TurnKind
@@ -186,11 +185,11 @@ async def test_every_kind_of_refusal_has_one_shape_and_nothing_secret_leaks(serv
         assert mine.json()["mode"] == "detailed"
         await expect(409, creator, "POST", f"/api/games/{gid}/start")
 
-        # Сокеты: токен в query участника, отказы 4401 и 4403 — и ни следа токена потом.
+        # Сокеты: токен участника подпротоколом, отказы 4401 и 4403 — и ни следа токена потом.
         async with AsyncExitStack() as stack:
             await stand.watch(stack, gid, friend)
         for token, code in ((stranger.token, 4403), ("garbage", 4401)):
-            async with connect(stand.ws_url(gid, token)) as ws:
+            async with stand.socket(gid, token) as ws:
                 with pytest.raises(ConnectionClosed) as closed:
                     await ws.recv()
             assert closed.value.rcvd.code == code
@@ -206,7 +205,7 @@ async def test_the_master_log_and_the_secrets_of_other_players_never_reach_a_pla
     game = await stand.new_game(host)
     gid = game["id"]
     await stand.join(friend, game["code"])
-    # Строки, которые в блоке B7 запишет мастер: журнал хода и сообщения игрокам.
+    # Строки, которые пишет мастер: журнал хода и сообщения игрокам.
     async with stand.db() as session:
         turn = Turn(game_id=gid, number=1, kind=TurnKind.ROUND)
         session.add(turn)
@@ -252,7 +251,7 @@ async def test_the_master_log_and_the_secrets_of_other_players_never_reach_a_pla
 
 
 # Тела, которые клиент не должен слать, но может: не объект, битый JSON, чужие типы, огромные и
-# глубокие. Ответ на каждое — ошибка в формате блока, но не 500.
+# глубокие. Ответ на каждое — ошибка в общем формате, но не 500.
 MALFORMED_BODIES = {
     "null": b"null",
     "массив": b"[]",

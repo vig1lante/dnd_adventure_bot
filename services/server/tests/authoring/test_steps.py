@@ -1,4 +1,4 @@
-"""Шаги генератора по ролям: `run_step` — контракт блока 3 (план DND-2, спека §5, §9).
+"""Шаги генератора по ролям: `run_step`.
 
 Каждый шаг — один запрос дешёвой модели (`complete_json`) с промптом своей роли и общим блоком
 стиля, всем черновиком в блоке данных, закреплённым и пожеланием автора. Ответ шага кладётся в свой
@@ -219,7 +219,7 @@ async def test_a_new_graph_keeps_the_contents_of_a_location_with_the_same_id():
 
 
 async def test_a_built_draft_survives_a_json_round_trip():
-    # Конструктор (блок 4) хранит черновик в базе JSON-ом: форма должна читаться обратно как есть.
+    # Конструктор хранит черновик в базе JSON-ом: форма должна читаться обратно как есть.
     draft = (await full_v2_draft()).model_copy(
         update={"locks": frozenset({"npc:ilsa", "step:world"}), "wishes": {"npcs": "Кот"}}
     )
@@ -516,7 +516,7 @@ async def test_an_explicit_wish_wins_over_the_stored_one():
     assert "Пусть будут русалки" in prompt and "Пусть будут пираты" not in prompt
 
 
-# --- контракт для конструктора (блок 4): ошибки до вызова модели ---
+# --- контракт для конструктора: ошибки до вызова модели ---
 
 
 @pytest.mark.parametrize("step", ["dragons", "", "Concept", "step:world", "world "])
@@ -559,7 +559,7 @@ async def test_an_unknown_kind_or_a_malformed_target_is_a_value_error_before_any
     ],
 )
 async def test_the_public_target_check_refuses_what_run_step_refuses(step, target):
-    # Конструктор (блок 4) проверяет цель этой функцией до задания: правило живёт в одном месте.
+    # Конструктор проверяет цель этой функцией до задания: правило живёт в одном месте.
     draft = await full_v2_draft()
 
     with pytest.raises(ValueError):
@@ -880,7 +880,7 @@ async def test_hostile_wishes_and_seeds_never_break_the_markup_of_any_step_promp
         assert "Игнорируй" not in outside and "Пираты" not in outside
 
 
-# --- старт и финал графа — только локации итоговой карты (дополнение B5 §9, fix-раунд 1) ---
+# --- старт и финал графа — только локации итоговой карты ---
 
 
 def graph_answers(start: str, finale: str) -> dict[str, Any]:

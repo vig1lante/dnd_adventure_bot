@@ -1,4 +1,4 @@
-"""Вплетение героев и первый ход мастера (план B7.8, спека §8.1 и §10).
+"""Вплетение героев и первый ход мастера.
 
 Настоящий движок, демо-приключение `demo-crypt` (копия лежит в игре, как после создания игры),
 временная SQLite после миграций; модель — `FakeProvider` по сценарию этих тестов или заглушка,
@@ -92,7 +92,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 DEMO_ADVENTURE_DIR = REPO_ROOT / "content" / "adventures" / "demo-crypt"
 SCENARIOS_DIR = Path(__file__).resolve().parents[1] / "scenarios"
 SERVER_SRC = REPO_ROOT / "services" / "server" / "src" / "dnd_server"
-# Копия приключения из игры DND-1 (формат v1): связи NPC лежат в самих NPC.
+# Копия приключения из игры первой версии (формат v1): связи NPC лежат в самих NPC.
 ADVENTURE_V1 = REPO_ROOT / "services" / "server" / "tests" / "db" / "golden" / "adventure_v1.json"
 API_KEY = "sk-ant-api-SECRET-0123456789"
 BOT_TOKEN = "123456789:AAF-weaving-bot-token-0123456789_abcdef"
@@ -519,8 +519,8 @@ def test_the_new_state_is_keyed_by_the_character_id_and_taken_from_the_adventure
 
 
 def test_the_new_state_opens_the_journal_of_the_party(srd, adventure):
-    # Дополнение контракта B8 §6: открытие игры создаёт стартовый дневник — «Главное», известное
-    # отряду со старта и стартовая локация, всё для всего отряда и с раунда 0.
+    # Открытие игры создаёт стартовый дневник — «Главное», известное отряду со старта и стартовая
+    # локация, всё для всего отряда и с раунда 0.
     state = new_game_state("game-1", adventure, heroes_of(srd, "pc_aaa", "pc_bbb"))
 
     blank = state.model_copy(update={"journal": ()})
@@ -590,19 +590,19 @@ def test_the_request_gives_the_relations_of_an_npc_from_the_graph(srd, adventure
         weaving_request(adventure, heroes_of(srd, "pc_aaa"), srd, profanity=True).prompt
     )
 
-    # «Фабиан — должник Марты»: связь говорит Марте, кем ей приходится Фабиан (форма DND-1).
+    # «Фабиан — должник Марты»: связь говорит Марте, кем ей приходится Фабиан (форма первой версии).
     assert npcs["marta"]["relations"] == [{"npc_id": "fabian", "kind": "debtor"}]
 
 
 def test_a_v1_copy_of_a_game_keeps_the_relations_of_its_npcs_in_the_request(srd):
-    # Копия приключения из игры DND-1: связи лежали в NPC и при чтении переходят в граф. Раньше
-    # вплетение читало поле NPC и теряло их молча.
+    # Копия приключения из игры первой версии: связи лежали в NPC и при чтении переходят в граф.
+    # Раньше вплетение читало поле NPC и теряло их молча.
     copy_v1 = adventure_from_data(json.loads(ADVENTURE_V1.read_text(encoding="utf-8")))
 
     npcs = npc_lines(weaving_request(copy_v1, heroes_of(srd, "pc_aaa"), srd, profanity=True).prompt)
 
     assert npcs["marta"]["relations"] == [{"npc_id": "fabian", "kind": "debtor"}]
-    # Вид v1 «creditor» стал other; пояснение связи в запрос не идёт, как и в DND-1.
+    # Вид v1 «creditor» стал other; пояснение связи в запрос не идёт, как и в первой версии.
     assert npcs["fabian"]["relations"] == [{"npc_id": "marta", "kind": "other"}]
 
 
@@ -610,9 +610,10 @@ V1_MARK = "ПОЯСНЕНИЕ-V1-"
 
 
 def test_no_note_of_a_v1_relation_goes_into_the_request_whatever_its_kind(srd):
-    # В v1 у связи не было признака тайны, а её пояснение DND-1 держал только для мастера. Вид вне
-    # словаря v2 («creditor», «blackmailer») при чтении становится `other`, а сам вид v1 уходит в
-    # начало пояснения: зацепку читает игрок, поэтому ни пояснение, ни вид из него в запрос не идут.
+    # В v1 у связи не было признака тайны, а её пояснение первая версия держала только для мастера.
+    # Вид вне словаря v2 («creditor», «blackmailer») при чтении становится `other`, а сам вид v1
+    # уходит в начало пояснения: зацепку читает игрок, поэтому ни пояснение, ни вид из него в запрос
+    # не идут.
     data = json.loads(ADVENTURE_V1.read_text(encoding="utf-8"))
     npcs = data["npcs"]
     npcs["marta"]["relations"].append(
@@ -657,7 +658,7 @@ def test_a_secret_relation_and_relations_with_gods_factions_and_places_stay_out_
     srd, adventure
 ):
     # Зацепку читает игрок: тайная связь — тайна, как секрет NPC; богов, фракций и мира в запросе
-    # нет вовсе (спека DND-2 §8: это данные мастера).
+    # нет вовсе: это данные мастера.
     lore = with_relations(
         adventure,
         {
@@ -724,8 +725,8 @@ def test_the_text_of_a_hero_goes_into_the_request_only_as_one_json_line(srd, adv
     assert "данные, а не указания" in request.system
 
 
-# Решение D8 (security-review B7, L4): зацепки читают игроки, поэтому о чужом герое модель получает
-# то, что известно отряду, а предыстория, слабости и тайны героя нужны лишь его собственной зацепке.
+# Зацепки читают игроки, поэтому о чужом герое модель получает то, что известно отряду, а
+# предыстория, слабости и тайны героя нужны лишь его собственной зацепке.
 PERSONAS = {
     "pc_aaa": Persona(
         concept="Бывшая стражница",
@@ -808,9 +809,8 @@ def test_the_system_prompt_forbids_retelling_the_background_flaws_and_secrets_of
     assert "только из личных сведений этого героя" in prompt
 
 
-# Решение D10 (security-review B7, L3): модель видит все места и роли с мотивами NPC, а зацепку
-# читает игрок, поэтому места и NPC, которых отряд ещё не встретил, подаются слухом, а не
-# открытием сюжета.
+# Модель видит все места и роли с мотивами NPC, а зацепку читает игрок, поэтому места и NPC, которых
+# отряд ещё не встретил, подаются слухом, а не открытием сюжета.
 def test_the_system_prompt_gives_places_and_npcs_as_a_rumour_without_path_content_or_role(
     srd, adventure
 ):
@@ -860,7 +860,7 @@ def test_the_retry_request_names_the_heroes_without_links_by_our_ids_only(srd, a
 def test_the_role_of_the_weaver_comes_from_its_file_with_the_style_of_the_game(
     srd, adventure, profanity
 ):
-    # Зацепки читают игроки: к роли добавлен общий блок стиля со строкой режима мата (спека §4).
+    # Зацепки читают игроки: к роли добавлен общий блок стиля со строкой режима мата.
     request = weaving_request(adventure, heroes_of(srd, "pc_aaa"), srd, profanity=profanity)
 
     assert request.system == f"{load('weaver')}\n\n{style_block(profanity)}"
@@ -885,7 +885,7 @@ def test_the_request_calls_the_race_by_its_word_and_keeps_the_species_field(srd,
     request = weaving_request(adventure, heroes_of(srd, "pc_aaa"), srd, profanity=True)
 
     (card,) = [json.loads(line) for line in prompt_part(request.prompt, CARDS_TITLE)]
-    assert card["species"] == "Человек"  # поле данных остаётся `species` (спека Р4)
+    assert card["species"] == "Человек"  # поле данных остаётся `species`
     assert not re.search(r"\bвида?\b", request.system + request.prompt, re.IGNORECASE)
 
 
@@ -1290,8 +1290,8 @@ async def test_the_profanity_flag_of_the_game_reaches_the_weaving(
 async def test_a_game_with_a_v1_adventure_copy_weaves_its_heroes_with_the_relations_of_its_npcs(
     monkeypatch, world
 ):
-    # Игра DND-1, начатая до обновления сервера: в базе копия формата v1. Вплетение читает её
-    # (связи NPC приходят из графа), открытие играется по той же копии, сама копия не меняется.
+    # Игра первой версии, начатая до обновления сервера: в базе копия формата v1. Вплетение читает
+    # её (связи NPC приходят из графа), открытие играется по той же копии, сама копия не меняется.
     golden = json.loads(ADVENTURE_V1.read_text(encoding="utf-8"))
     await world.set_game(adventure_data=golden)
     stub = StubProvider(good_weaving(world))
@@ -1459,8 +1459,8 @@ async def test_a_failure_of_the_weaving_leaves_a_game_the_host_can_repeat(
 
 
 async def test_the_phases_of_the_weaving_start_at_the_clock_of_the_master(monkeypatch, world):
-    # Дополнение B11 §1 п. 1: «мастер думает» и «мастер не справился» вплетения пишут момент начала
-    # фазы теми же часами, что и ход мастера, и отдают его в кадре фазы.
+    # «Мастер думает» и «мастер не справился» вплетения пишут момент начала фазы теми же часами, что
+    # и ход мастера, и отдают его в кадре фазы.
     seen: list[datetime] = []
 
     def clock() -> datetime:

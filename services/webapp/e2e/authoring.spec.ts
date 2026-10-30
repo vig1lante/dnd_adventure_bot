@@ -9,28 +9,29 @@ import { pickQuickHero } from "./hero.ts";
 import { expectFitsPhone } from "./layout.ts";
 import { expect, test } from "./server.ts";
 
-// Конструктор приключений на настоящем сервере (финальное покрытие блоков 4 и 5 DND-2 и сквозной
-// тест B6.3). Юнит-тесты редактора идут на заглушках по контракту блока; здесь тот же редактор
-// говорит с `dnd-server` (dev, `FakeProvider` по `e2e_full.yaml`, временная база) через прокси
-// Vite: черновик, разделы с версией, пожелание, задания генерации с опросом и закрепление проходят
-// по настоящему API. Ответы шагов генератора — раздел `json` сценария (`generator.concept` …
-// `generator.clues`): каждое задание собирает свой провайдер и отвечает сценарием с начала,
-// поэтому повторная генерация богов возвращает те же титулы — так видно, что закреплённый бог
-// остался, а ручная правка незакреплённого заменена ответом шага. Второй тест — сценарий «Проверок
-// блока 5»: стык клиента и сервера по разделам карты, предметов, персонажей и связей, справочнику
-// ссылок и перегенерации одной сущности. Третий — весь путь автора (B6.3): двенадцать шагов
-// генерации, «Проверка» без ошибок, «Опубликовать», игра на опубликованном приключении без
-// перезапуска сервера и раунд мастера в ней. Последние четыре — финальное покрытие блока 6 на
-// копии встроенного приключения: ссылка ошибки на шаг и закрытая публикация, занятый id, 201/200 и
-// запрет смены id, архив туда и обратно с отказами импорта, публикация пустого черновика и пределы
-// боя. На ключевых шагах редактор измеряется на ширине телефона (B10.4, `expectFitsPhone`): все
-// шаги видны плашками, бейджи не обрезаны, горизонтальной прокрутки нет.
+// Конструктор приключений на настоящем сервере. Юнит-тесты редактора идут на заглушках по
+// контракту; здесь тот же редактор говорит с `dnd-server` (dev, `FakeProvider` по
+// `e2e_full.yaml`, временная база) через прокси Vite: черновик, разделы с версией, пожелание,
+// задания генерации с опросом и закрепление проходят по настоящему API. Ответы шагов генератора —
+// раздел `json` сценария (`generator.concept` … `generator.clues`): каждое задание собирает свой
+// провайдер и отвечает сценарием с начала, поэтому повторная генерация богов возвращает те же
+// титулы — так видно, что закреплённый бог остался, а ручная правка незакреплённого заменена
+// ответом шага. Второй тест — стык клиента и сервера по разделам карты, предметов, персонажей и
+// связей, справочнику ссылок и перегенерации одной сущности. Третий — весь путь автора: двенадцать
+// шагов генерации, «Проверка» без ошибок, «Опубликовать», игра на опубликованном приключении без
+// перезапуска сервера и раунд мастера в ней. Следующие четыре — на копии встроенного приключения:
+// ссылка ошибки на шаг и закрытая публикация, занятый id, 201/200 и запрет смены id, удаление
+// черновика опубликованной копии (приключение остаётся в каталоге), архив туда и обратно с
+// отказами импорта, публикация пустого черновика и пределы боя. Последние два — вопрос о
+// конфликте версий на узком экране (виден и в фокусе) и удаление черновика с подтверждением. На
+// ключевых шагах редактор измеряется на ширине телефона (`expectFitsPhone`): все шаги видны
+// плашками, бейджи не обрезаны, горизонтальной прокрутки нет.
 
 const LOGIN = "dev-2";
 const STEPS = ["Замысел", "Мир", "Боги", "Фракции", "Сюжет"] as const;
-// Экраны блока 5: «Карта» и «Наполнение» правят один раздел locations, шаги генерации у них свои.
+// «Карта» и «Наполнение» правят один раздел locations, шаги генерации у них свои.
 const MAP_STEPS = ["Карта", "Наполнение", "Персонажи", "Связи"] as const;
-// Экраны блока 6 со статусом шага; «Проверка» и «Публикация» идут после них, без статуса.
+// Экраны со статусом шага; «Проверка» и «Публикация» идут после них, без статуса.
 const FIGHT_STEPS = ["Бои и боссы", "Предметы и награды", "Улики"] as const;
 type StepLabel =
   | (typeof STEPS)[number]
@@ -252,7 +253,7 @@ test("конструктор: новый черновик, пять шагов �
     await adventures.click();
     await expect(adventures).toHaveAttribute("aria-selected", "true");
 
-    // Новый черновик: пустое тело запроса, ответ — черновик контракта блока 4.
+    // Новый черновик: пустое тело запроса, ответ — черновик по контракту.
     const created = draftsResponse(page, "POST", /^$/);
     await button(page, "Новое приключение").click();
     const createdResponse = await created;
@@ -291,7 +292,7 @@ test("конструктор: новый черновик, пять шагов �
     await button(concept, "Сохранить раздел").click();
     const settingsResponse = await settingsSaved;
     expect(settingsResponse.status()).toBe(200);
-    // id приключения в Замысле пуст — клиент шлёт `null`, сервер его не задаёт (дополнение B6, §2).
+    // id приключения в Замысле пуст — клиент шлёт `null`, сервер его не задаёт.
     expect(settingsResponse.request().postDataJSON()).toEqual({
       version: 1,
       data: {
@@ -431,8 +432,8 @@ test("конструктор: новый черновик, пять шагов �
       await expect(stepButton(page, label)).toContainText("готово");
     }
 
-    // B10.4 (manual B4 nit): на 390 и 360 px все шаги видны плашками, бейдж «закреплён» шага,
-    // закреплённого целиком, не обрезан, горизонтальной прокрутки нет.
+    // На 390 и 360 px все шаги видны плашками, бейдж «закреплён» шага, закреплённого целиком,
+    // не обрезан, горизонтальной прокрутки нет.
     await stepButton(page, "Сюжет").click();
     const plotLocked = draftsResponse(page, "PUT", /^\/[0-9a-f]+\/locks$/);
     await button(plot, "Закрепить раздел").click();
@@ -462,7 +463,7 @@ test("конструктор: новый черновик, пять шагов �
   }
 });
 
-// --- блок 5: карта, наполнение, персонажи, связи ---
+// --- карта, наполнение, персонажи, связи ---
 
 const MAP_LOGIN = "dev-3";
 // Тексты ответов шагов из `e2e_full.yaml`, которые тест видит в форме.
@@ -613,7 +614,7 @@ test("конструктор II: карта из трёх локаций, пре
     );
     await expect(stepButton(page, "Карта")).toContainText("готово");
     await expect(stepButton(page, "Наполнение")).toContainText("пусто");
-    // Карта с выходами, замками и выбором «Куда» — на ширине телефона (финальное покрытие B10).
+    // Карта с выходами, замками и выбором «Куда» — на ширине телефона.
     await expectFitsPhone(page, "редактор: «Карта» с выходами");
 
     // Наполнение всех трёх локаций шагом location_contents: по ответу на локацию в порядке карты.
@@ -843,7 +844,7 @@ test("конструктор II: карта из трёх локаций, пре
     await expect(group(graph, "Ильза — поклоняется — Сельмара")).toBeVisible();
 
     // После записи справочник ссылок перечитывается: виды по порядку, внутри вида — порядок
-    // раздела, только ссылка, вид и имя (дополнение B5, §6).
+    // раздела, только ссылка, вид и имя.
     const refsLoaded = draftsResponse(page, "GET", /^\/[0-9a-f]+\/refs$/);
     const graphSaved = await saveSection(page, "Связи", "relations");
     expect(await (await refsLoaded).json()).toEqual([
@@ -892,7 +893,7 @@ test("конструктор II: карта из трёх локаций, пре
     await combobox(graph, "Показать связи").selectOption("deity:selmara");
     await expect(group(graph, "Ильза — поклоняется — Сельмара")).toBeVisible();
     await expect(group(graph, "Брам — соперник — Ильза")).toBeHidden();
-    // Связи с длинными подписями «кто — кем — кому» и фильтром (финальное покрытие B10).
+    // Связи с длинными подписями «кто — кем — кому» и фильтром.
     await expectFitsPhone(page, "редактор: «Связи» с фильтром");
     await combobox(graph, "Показать связи").selectOption("");
 
@@ -927,7 +928,7 @@ test("конструктор II: карта из трёх локаций, пре
   }
 });
 
-// --- блок 6: бои, предметы, улики, проверка, публикация и игра на опубликованном ---
+// --- бои, предметы, улики, проверка, публикация и игра на опубликованном ---
 
 const AUTHOR = "dev-1";
 const ADVENTURE_ID = "crow-lighthouse";
@@ -1067,7 +1068,7 @@ test("конструктор III: двенадцать шагов на загл�
           ],
         }),
       ]);
-      // Опыт своего монстра — опыт монстра SRD того же cr (дополнение B6, §4): иначе публикация
+      // Опыт своего монстра — опыт монстра SRD того же cr: иначе публикация
       // получила бы ошибку `custom_monster_xp`.
       expect(draft.monsters).toEqual([
         expect.objectContaining({ id: "ash-priest", cr: 3, xp: 700 }),
@@ -1134,7 +1135,7 @@ test("конструктор III: двенадцать шагов на загл�
       await expect(
         combobox(group(revelation, "Улика clue-bram"), "Где лежит"),
       ).toHaveValue("npc:bram");
-      // Откровение с вложенными уликами (финальное покрытие B10).
+      // Откровение с вложенными уликами.
       await expectFitsPhone(page, "редактор: «Улики» откровения");
       for (const label of [...STEPS, ...MAP_STEPS, ...FIGHT_STEPS]) {
         await expect(stepButton(page, label)).toContainText("готово");
@@ -1177,7 +1178,7 @@ test("конструктор III: двенадцать шагов на загл�
         review.getByText("в локации нет ни одного интересного места"),
       ).toBeVisible();
       await expectFitsPhone(page, "редактор: «Проверка»");
-      // Ссылка находки ведёт к сущности (ревью B6 R6): «Наполнение» открывает гавань.
+      // Ссылка находки ведёт к сущности: «Наполнение» открывает гавань.
       await button(review, "Перейти к шагу «Наполнение»").click();
       const contents = stepPanel(page, "Наполнение");
       await expect(combobox(contents, "Локация")).toHaveValue("harbor");
@@ -1214,7 +1215,7 @@ test("конструктор III: двенадцать шагов на загл�
     const game =
       await test.step("8. Игра на опубликованном: каталог уже знает его, сервер не перезапускался", async () => {
         await button(page, "К списку приключений").click();
-        // Опубликованный черновик помечен в списке (B11, §2: `published_id` от сервера), отметка
+        // Опубликованный черновик помечен в списке (`published_id` от сервера), отметка
         // описывает и кнопку «Открыть»; строка с отметкой помещается на телефоне.
         const reopen = button(page, `Открыть: ${ADVENTURE_TITLE}`);
         await expect(reopen).toHaveAccessibleDescription(/опубликовано/);
@@ -1350,13 +1351,13 @@ test("конструктор III: двенадцать шагов на загл�
   }
 });
 
-// --- финальное покрытие блока 6: копия каталога, публикация с отказами, архив туда и обратно ---
+// --- копия каталога, публикация с отказами, архив туда и обратно ---
 
 // Встроенное приключение папки контента: его копия — полный черновик без генерации.
 const DEMO_ID = "demo-crypt";
 const DEMO_TITLE = "Склеп должника";
 
-/** Разделы и настройки черновика: то, что переносит архив (дополнение B6, §7). */
+/** Разделы и настройки черновика: то, что переносит архив. */
 const sectionsOf = (draft: DraftJson) => ({
   title: draft.title,
   adventure_id: draft.adventure_id,
@@ -1430,9 +1431,10 @@ async function publishNow(
   };
 }
 
-test("конструктор III: копия каталога — ошибка проверки ведёт на «Карту», занятый id, публикация 201 и 200, id после публикации не меняется", async ({
+test("конструктор III: копия каталога — ошибка проверки ведёт на «Карту», занятый id, публикация 201 и 200, id после публикации не меняется, удалённый черновик оставляет приключение в каталоге", async ({
   browser,
   baseURL,
+  request,
   server,
 }) => {
   if (baseURL === undefined) throw new Error("baseURL не задан");
@@ -1574,6 +1576,37 @@ test("конструктор III: копия каталога — ошибка �
       const catalog = page.getByRole("region", { name: "Готовые приключения" });
       await expect(catalog.getByText(COPY_ID, { exact: true })).toBeVisible();
       await expect(catalog.getByText(DEMO_ID, { exact: true })).toBeVisible();
+    });
+
+    await test.step("7. Черновик опубликованной копии удалён: в черновиках его нет, а приключение осталось в каталоге и на нём создаётся игра", async () => {
+      await button(page, `Открыть: ${DEMO_TITLE}`).click();
+      await expect(stepPanel(page, "Замысел")).toBeVisible();
+      await button(page, "Удалить черновик").click();
+      const question = page.getByRole("alertdialog", {
+        name: "Удалить черновик?",
+      });
+      await expect(question).toBeFocused();
+      const removed = draftsResponse(page, "DELETE", /^\/[0-9a-f]+$/);
+      const catalogRead = page.waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          new URL(response.url()).pathname === "/api/adventures",
+      );
+      await button(question, "Да, удалить").click();
+      expect((await removed).status()).toBe(204);
+      const catalogAfter = (await (await catalogRead).json()) as {
+        id: string;
+      }[];
+      expect(catalogAfter.map((adventure) => adventure.id)).toContain(COPY_ID);
+
+      await expect(button(page, `Открыть: ${DEMO_TITLE}`)).toHaveCount(0);
+      const catalog = page.getByRole("region", { name: "Готовые приключения" });
+      await expect(catalog.getByText(COPY_ID, { exact: true })).toBeVisible();
+      const created = await request.post("/api/games", {
+        headers: await authHeaders(request, "dev-5"),
+        data: { adventure_id: COPY_ID },
+      });
+      expect(created.status(), await created.text()).toBe(201);
     });
   } finally {
     await context.close();
@@ -1717,7 +1750,7 @@ test("конструктор III: пустой черновик с id — «Пр
     const { draft } = await saveSection(page, "Замысел", "settings");
     expect(draft.adventure_id).toBe("empty-draft");
 
-    // Пустые шаги проверка не судит (B4 §8): ошибок нет, готовность — только за «Замысел».
+    // Пустые шаги проверка не судит: ошибок нет, готовность — только за «Замысел».
     const report = await openValidated(page, "Проверка");
     expect(report).toMatchObject({ errors: [], readiness_percent: 14 });
     const review = stepPanel(page, "Проверка");
@@ -1740,7 +1773,7 @@ test("конструктор III: пустой черновик с id — «Пр
       "В приключении есть ошибки: исправьте их, потом публикуйте.",
     );
     await expect(alert.getByRole("listitem")).toHaveCount(problems.length);
-    // Строка отказа «<шаг>: <текст>» — с подписью экрана вместо id шага (manual B6, nit 3).
+    // Строка отказа «<шаг>: <текст>» — с подписью экрана вместо id шага.
     const colon = problems[0].indexOf(": ");
     const step = problems[0].slice(0, colon);
     const first = alert.getByRole("listitem").first();
@@ -1790,7 +1823,7 @@ test("конструктор III: пределы боя на настоящем 
     });
     const alert = page.getByRole("alert");
     await expect(alert).toContainText("Данные раздела не прошли проверку.");
-    // Путь поля — словами формы (manual B4 nit): сообщение сервера как есть, без пути схемы.
+    // Путь поля — словами формы: сообщение сервера как есть, без пути схемы.
     for (const problem of body.problems)
       await expect(alert).toContainText(
         problem.slice(problem.indexOf(": ") + 2),
@@ -1811,7 +1844,7 @@ test("конструктор III: пределы боя на настоящем 
       combobox(first, "Монстр").locator("option[value='skeleton']"),
     ).toHaveCount(1);
 
-    // Фанатик ×20 и скелеты ×2 — 22 монстра в бою (предел 20, B6 §5).
+    // Фанатик ×20 и скелеты ×2 — 22 монстра в бою (предел 20).
     await combobox(first, "Сколько").selectOption("20");
     const total = await saveRefused();
     expect(total).toContainEqual(
@@ -1832,6 +1865,123 @@ test("конструктор III: пределы боя на настоящем 
       expect.stringMatching(/monsters: не больше 4/),
     );
     await expect(group(fight, "Группа 5")).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("конструктор: конфликт версий на узком экране — вопрос «Черновик изменился, обновить?» на экране и в фокусе, «Отмена» возвращает фокус на «Сохранить раздел»", async ({
+  browser,
+  baseURL,
+  request,
+}) => {
+  if (baseURL === undefined) throw new Error("baseURL не задан");
+  const context = await browser.newContext({
+    baseURL,
+    locale: "ru-RU",
+    reducedMotion: "reduce",
+    viewport: { width: 360, height: 740 },
+  });
+  const page = await context.newPage();
+
+  try {
+    await openAdventures(page, "dev-4");
+    const draft = await copyFromCatalog(page, DEMO_TITLE);
+    await stepButton(page, "Предметы и награды").click();
+    const panel = stepPanel(page, "Предметы и награды");
+    // Тот же раздел сохранили в другой вкладке: версия черновика на сервере ушла вперёд.
+    const other = await request.put(`/api/drafts/${draft.id}/sections/items`, {
+      headers: await authHeaders(request, "dev-4"),
+      data: { version: draft.version, data: draft.items },
+    });
+    expect(other.status()).toBe(200);
+
+    // «Сохранить раздел» — внизу длинного шага, а вопрос встроен в начало редактора.
+    const saved = draftsResponse(page, "PUT", /^\/[0-9a-f]+\/sections\/items$/);
+    await button(panel, "Сохранить раздел").click();
+    expect((await saved).status()).toBe(409);
+
+    const dialog = page.getByRole("alertdialog", {
+      name: "Черновик изменился, обновить?",
+    });
+    await expect(dialog).toBeFocused();
+    await expect(dialog).toBeInViewport();
+    // Вопрос с кнопками помещается на телефоне: без выхода за край и мелких кнопок.
+    await expectFitsPhone(page, "вопрос о конфликте версий на «Предметах»");
+    await expect(dialog).toBeFocused();
+
+    // «Отмена» возвращает фокус на «Сохранить раздел», хотя на время записи кнопка была
+    // выключена вместе с формой и фокус теряла.
+    await button(dialog, "Отмена").click();
+    await expect(dialog).toHaveCount(0);
+    await expect(button(panel, "Сохранить раздел")).toBeFocused();
+    await expect(button(panel, "Сохранить раздел")).toBeInViewport();
+
+    // Повторная запись по старой версии — снова вопрос; «Обновить» перечитывает черновик.
+    const again = draftsResponse(page, "PUT", /^\/[0-9a-f]+\/sections\/items$/);
+    await button(panel, "Сохранить раздел").click();
+    expect((await again).status()).toBe(409);
+    await expect(dialog).toBeFocused();
+    const fresh = draftsResponse(page, "GET", /^\/[0-9a-f]+$/);
+    await button(dialog, "Обновить").click();
+    expect((await fresh).status()).toBe(200);
+    await expect(dialog).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test("конструктор: «Удалить черновик» спрашивает подтверждение, удаляет и возвращает к списку без него", async ({
+  browser,
+  baseURL,
+}) => {
+  if (baseURL === undefined) throw new Error("baseURL не задан");
+  const context = await browser.newContext({
+    baseURL,
+    locale: "ru-RU",
+    reducedMotion: "reduce",
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+  const title = "Черновик на удаление";
+
+  try {
+    await openAdventures(page, "dev-4");
+    const created = draftsResponse(page, "POST", /^$/);
+    await button(page, "Новое приключение").click();
+    const draft = (await (await created).json()) as DraftJson;
+    await textbox(stepPanel(page, "Замысел"), "Название").fill(title);
+    await saveSection(page, "Замысел", "settings");
+
+    const question = page.getByRole("alertdialog", {
+      name: "Удалить черновик?",
+    });
+    // «Отмена» убирает вопрос и возвращает фокус на кнопку, которая его задала.
+    await button(page, "Удалить черновик").click();
+    await expect(question).toBeFocused();
+    await button(question, "Отмена").click();
+    await expect(question).toHaveCount(0);
+    await expect(button(page, "Удалить черновик")).toBeFocused();
+
+    await button(page, "Удалить черновик").click();
+    await expect(question).toContainText(
+      "Опубликованное приключение останется в каталоге и играх.",
+    );
+    await expect(question).toBeFocused();
+    await expect(question).toBeInViewport();
+    await expectFitsPhone(page, "вопрос «Удалить черновик?»");
+    const removed = draftsResponse(
+      page,
+      "DELETE",
+      new RegExp(`^/${draft.id}$`),
+    );
+    const listed = draftsResponse(page, "GET", /^$/);
+    await button(question, "Да, удалить").click();
+
+    expect((await removed).status()).toBe(204);
+    expect((await listed).status()).toBe(200);
+    await expect(button(page, "Новое приключение")).toBeVisible();
+    await expect(button(page, `Открыть: ${title}`)).toHaveCount(0);
   } finally {
     await context.close();
   }

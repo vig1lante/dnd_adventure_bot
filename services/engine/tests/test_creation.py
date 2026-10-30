@@ -174,7 +174,7 @@ def test_choices_survive_json_round_trip():
     assert CharacterChoices.model_validate_json(choices.model_dump_json()) == choices
 
 
-# --- random_point_buy: «Распределить случайно» (решение владельца R9) ---
+# --- random_point_buy: «Распределить случайно» (решение владельца) ---
 
 KEY_ABILITIES = 2  # столько первых характеристик приоритета класса считаются ключевыми
 
@@ -205,7 +205,7 @@ def legal_layouts() -> list[tuple[int, ...]]:
 
 
 def test_there_are_62_legal_layouts_with_a_main_ability_of_14_or_more():
-    # Набор раскладок — решение владельца R9: все способы потратить ровно 27 очков, где лучшее
+    # Набор раскладок — решение владельца: все способы потратить ровно 27 очков, где лучшее
     # значение не ниже 14. Исключены только три «ровные» раскладки, где оно не выше 13.
     every = legal_layouts()
     strong = [layout for layout in every if layout[0] >= 14]
@@ -467,7 +467,7 @@ def test_standard_array_rejects_anything_but_permutation(srd, values):
     assert_problem(problems, "стандартный набор", "15, 14, 13, 12, 10, 8")
 
 
-# --- build_character: бросок характеристик убран (решение владельца R9) ---
+# --- build_character: бросок характеристик убран (решение владельца) ---
 
 
 @pytest.mark.parametrize(

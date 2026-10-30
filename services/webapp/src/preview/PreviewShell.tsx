@@ -31,7 +31,7 @@ function SettingsGlyph() {
 
 interface PreviewShellProps {
   api: Api;
-  /** Кнопка «Настройки» в шапке — предложение B10 (настройки открываются с любого экрана). */
+  /** Кнопка «Настройки» в шапке — предложение (настройки открываются с любого экрана). */
   settingsHref?: string;
   className?: string;
   children: ReactNode;

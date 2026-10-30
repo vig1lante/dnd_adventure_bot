@@ -109,7 +109,7 @@ describe("useWaitedSeconds: сколько уже ждём", () => {
   });
 });
 
-// --- серверное начало фазы (контракт B11, §2: `phase.phase_since`) ---
+// --- серверное начало фазы (`phase.phase_since`) ---
 
 const NOW = Date.parse("2026-10-20T12:00:00+00:00");
 /** Время по часам браузера `seconds` секунд назад. */
@@ -124,7 +124,7 @@ describe("phaseStartedAt: начало фазы по часам браузера
     expect(phaseStartedAt(since, 180_000)).toBe(NOW - 180_000);
   });
 
-  test("начала нет (игра шла до B11), сервер до B11 без поля или строка не читается — неизвестно", () => {
+  test("начала нет (игра началась до обновления сервера), старый сервер без поля или строка не читается — неизвестно", () => {
     expect(phaseStartedAt(null, 0)).toBeUndefined();
     expect(phaseStartedAt(undefined, 0)).toBeUndefined();
     expect(phaseStartedAt("вчера", 0)).toBeUndefined();
@@ -195,7 +195,7 @@ describe("useWaitedSeconds: счёт от серверного начала фа
     expect(result.current).toBe(41);
   });
 
-  // Финальное покрытие B11: сдвиг часов оценивается по снимку и может чуть ошибиться.
+  // Сдвиг часов оценивается по снимку и может чуть ошибиться.
   test("начало фазы чуть впереди часов браузера — счётчик стоит на нуле, а не уходит в минус", () => {
     const { result } = renderHook(() =>
       useWaitedSeconds("resolving", NOW + 5_000),
